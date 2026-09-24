@@ -2,6 +2,8 @@ extends CharacterBody3D
 
 const SoftLocoScript = preload("res://scripts/soft_loco.gd")
 ## 第三人称角色控制器：WASD 移动 + SoftLoco 网页 loco 动画驱动 Skeleton3D。
+## Web loco bind: mesh faces +Z; Godot move uses -Z forward → visual Body needs π yaw offset.
+const BODY_YAW_OFFSET := PI
 
 @export var move_speed: float = 4.5
 @export var sprint_speed: float = 7.0
@@ -92,8 +94,11 @@ func reset_camera() -> void:
 
 func set_first_person(enabled: bool) -> void:
 	first_person = enabled
-	# Keep character mesh visible in FP (body-view style); never hide MeshInstance3D.
-	_set_body_meshes_visible(true)
+	_apply_fp_mesh_visibility()
+	if not first_person:
+		var sec := get_secondary()
+		if sec:
+			sec.call("clear_body_look")
 	_apply_camera()
 
 
@@ -105,9 +110,33 @@ func set_mouse_sensitivity(v: float) -> void:
 	mouse_sensitivity = clampf(v, 0.0005, 0.02)
 
 
-func _set_body_meshes_visible(vis: bool) -> void:
+## FP: hide only head / hair / eye / mouth to reduce camera clip; keep torso/arms/legs.
+func _fp_should_hide_mesh(mi: MeshInstance3D) -> bool:
+	var n := mi.name
+	var low := n.to_lower()
+	if "_eye_" in low or low.ends_with("_eye_0"):
+		return true
+	if "_head_" in low or "head_0" in low:
+		return true
+	if "mouth" in low:
+		return true
+	if "hair" in low or "头发" in n:
+		return true
+	# Baked hair mesh is PC0002_01_007_* (garbled unicode name).
+	if "_007_" in n:
+		return true
+	return false
+
+
+func _apply_fp_mesh_visibility() -> void:
 	for mi in _body.find_children("*", "MeshInstance3D", true, false):
-		(mi as MeshInstance3D).visible = vis
+		var mesh_i := mi as MeshInstance3D
+		if mesh_i == null:
+			continue
+		if first_person and _fp_should_hide_mesh(mesh_i):
+			mesh_i.visible = false
+		else:
+			mesh_i.visible = true
 
 
 ## Place capsule so its bottom matches mesh soles (AABB min.y ≈ 0 in character space).
@@ -285,16 +314,30 @@ func _apply_stance_capsule() -> void:
 func _apply_camera() -> void:
 	_pivot.rotation = Vector3(_pitch, _yaw, 0.0)
 	if first_person:
-		# Eye-height pivot + slight forward offset; near plane low enough to see torso when looking down.
-		_pivot.position = Vector3(0.0, fp_eye_height, 0.0)
-		_camera.position = Vector3(0.0, 0.0, -0.12)
-		_camera.near = 0.05
+		_pivot.position = Vector3(0.0, _fp_eye_y(), 0.0)
+		# Slight forward along look (-Z of pivot) so near plane clears hidden head mesh.
+		_camera.position = Vector3(0.0, 0.0, -0.08)
+		_camera.near = 0.03
 		_camera.fov = fp_fov
 	else:
 		_pivot.position = Vector3(0.0, camera_height, 0.0)
 		_camera.position = Vector3(0.0, 0.0, camera_distance)
 		_camera.near = 0.1
 		_camera.fov = tp_fov
+
+
+## Prefer C_Head_a bone height in character space; fallback fp_eye_height.
+func _fp_eye_y() -> float:
+	var skel := _find_skeleton(_body)
+	if skel:
+		var hi := skel.find_bone("C_Head_a")
+		if hi < 0:
+			hi = skel.find_bone("C_Neck_a")
+		if hi >= 0:
+			var gp := skel.get_bone_global_pose(hi)
+			var world_y: float = (_body.global_transform * gp).origin.y
+			return world_y - global_position.y + 0.06
+	return fp_eye_height
 
 
 func _physics_process(delta: float) -> void:
@@ -327,28 +370,54 @@ func _physics_process(delta: float) -> void:
 	if direction != Vector3.ZERO:
 		velocity.x = direction.x * speed
 		velocity.z = direction.z * speed
-		var look := atan2(-direction.x, -direction.z)
-		_body.rotation.y = lerp_angle(_body.rotation.y, look, clampf(12.0 * delta, 0.0, 1.0))
 	else:
 		velocity.x = move_toward(velocity.x, 0.0, speed)
 		velocity.z = move_toward(velocity.z, 0.0, speed)
 
+	# Visual facing: mesh +Z vs Godot -Z → BODY_YAW_OFFSET (π).
+	# FP: lock body yaw to camera yaw every frame; TP: face move dir when walking.
+	var face_yaw: float
+	if first_person:
+		face_yaw = _yaw + BODY_YAW_OFFSET
+	elif direction != Vector3.ZERO:
+		face_yaw = atan2(-direction.x, -direction.z) + BODY_YAW_OFFSET
+	else:
+		face_yaw = _body.rotation.y
+	if first_person or direction != Vector3.ZERO:
+		_body.rotation.y = lerp_angle(
+			_body.rotation.y, face_yaw, clampf(14.0 * delta, 0.0, 1.0)
+		)
+
 	move_and_slide()
 
+	# FP: set body look BEFORE apply_pose so SoftSecondary applies it same frame.
+	if first_person:
+		var sec2 := get_secondary()
+		if sec2:
+			var body_logic_yaw := _body.rotation.y - BODY_YAW_OFFSET
+			var rel_yaw := wrapf(_yaw - body_logic_yaw, -PI, PI)
+			sec2.call("set_body_look", rel_yaw, _pitch)
+
 	if _loco:
-		# Movement relative to body facing: +fwd = character forward (-Z local after yaw).
+		# After π visual offset, mesh forward = Body +Z. Invert prior -Z fwd/side signs.
 		var local_vel := _body.global_transform.basis.inverse() * Vector3(velocity.x, 0.0, velocity.z)
-		var fwd := clampf(-local_vel.z / maxf(speed, 0.01), -1.0, 1.0)
-		var side := clampf(local_vel.x / maxf(speed, 0.01), -1.0, 1.0)
+		var fwd := clampf(local_vel.z / maxf(speed, 0.01), -1.0, 1.0)
+		var side := clampf(-local_vel.x / maxf(speed, 0.01), -1.0, 1.0)
 		var mag := clampf(Vector2(velocity.x, velocity.z).length() / maxf(speed, 0.01), 0.0, 1.0)
 		if input_dir != Vector2.ZERO:
-			# Prefer input axes in body space for clip pick (matches web fwd/side).
-			var local_in := _body.global_transform.basis.inverse() * (basis_yaw * Vector3(input_dir.x, 0.0, input_dir.y))
-			fwd = clampf(-local_in.z, -1.0, 1.0)
-			side = clampf(local_in.x, -1.0, 1.0)
+			var local_in := _body.global_transform.basis.inverse() * (
+				basis_yaw * Vector3(input_dir.x, 0.0, input_dir.y)
+			)
+			fwd = clampf(local_in.z, -1.0, 1.0)
+			side = clampf(-local_in.x, -1.0, 1.0)
 			mag = clampf(input_dir.length(), 0.0, 1.0)
 		var airborne := not on_floor
 		if airborne and str(_loco.get("current_clip")) != "jump":
 			_loco.set("phase", 0.28)
 		_loco.call("set_mode", _stance)
 		_loco.call("apply_pose", fwd, side, mag, airborne, sprinting, delta, speed)
+
+	# FP: refresh eye height from head bone after pose.
+	if first_person:
+		_pivot.rotation = Vector3(_pitch, _yaw, 0.0)
+		_pivot.position = Vector3(0.0, _fp_eye_y(), 0.0)

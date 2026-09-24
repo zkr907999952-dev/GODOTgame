@@ -166,6 +166,24 @@ func _run() -> void:
 		quit(1)
 		return
 
+	# Breath must NOT pitch-lean the spine (web uses tissue inflate, not bone X rotation).
+	var max_spine_pitch := 0.0
+	for _p in 120:
+		loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, 0.016, 1.65)
+		var sp: Dictionary = sec.call("debug_snapshot")
+		var eulers: Dictionary = sp.get("spine_euler_x", {})
+		for sn in eulers.keys():
+			max_spine_pitch = maxf(max_spine_pitch, absf(float(eulers[sn])))
+	print("validate: breath spine |eulerX| max=", snappedf(max_spine_pitch, 0.0001))
+	if max_spine_pitch > 0.08:
+		push_error(
+			"validate: breath applied spine pitch lean (max |X|=%s) — should be scale-only"
+			% max_spine_pitch
+		)
+		quit(1)
+		return
+	print("validate: breath no-pitch OK")
+
 	# Hair pin: after tip motion, HairRoot + Hair_1 must stay at rest (identity soft).
 	var pin_snap: Dictionary = sec.call("debug_snapshot")
 	var pin_max := int(pin_snap.get("hair_pin_max", -1))

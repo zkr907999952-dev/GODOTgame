@@ -64,6 +64,11 @@ var breath_t: float = 0.0
 var breath_in: float = 0.0
 var breath_chest: float = 0.0
 
+## FP setBodyLook (web soft-skeleton): neck/head follow camera pitch + residual yaw.
+var body_look_on: bool = false
+var body_look_yaw: float = 0.0
+var body_look_pitch: float = 0.0
+
 var _rng := RandomNumberGenerator.new()
 
 
@@ -176,6 +181,18 @@ func set_breath_boost(v: float) -> void:
 	breath_boost = clampf(v, 0.0, 1.0)
 
 
+func set_body_look(yaw: float, pitch: float = 0.0) -> void:
+	body_look_on = true
+	body_look_yaw = yaw
+	body_look_pitch = pitch
+
+
+func clear_body_look() -> void:
+	body_look_on = false
+	body_look_yaw = 0.0
+	body_look_pitch = 0.0
+
+
 func blink_now() -> void:
 	debug_blink = -1.0
 	blink_t = 0.0
@@ -194,6 +211,7 @@ func update(delta: float, sprint: bool = false) -> void:
 
 	_update_breath(d)
 	_apply_breath()
+	_apply_body_look()
 
 	_update_blink(d)
 	close_l = clampf(1.0 - eye_open_l * (1.0 - blink_amt), 0.0, 1.0)
@@ -236,18 +254,28 @@ func _breath_amp_now() -> float:
 
 
 func _apply_breath() -> void:
+	# Web stepTissue expands soft vertices (tz inflate) — NOT spine pitch lean.
+	# Bone approx: rest-relative X/Z scale expand on spine (+ optional tiny Y lift).
 	if not breath_enabled and breath_in < 0.001 and breath_chest < 0.001:
+		# Spine scales are reset by SoftLoco; breast bones are not — clear leftover expand.
+		for bn in ["L_Breast_Spo", "R_Breast_Spo"]:
+			if bone_i.has(bn):
+				skeleton.set_bone_pose_scale(bone_i[bn], rest_scale.get(bn, Vector3.ONE))
 		return
 	var amp := _breath_amp_now()
 	var belly_w := amp * (0.12 + 0.88 * breath_in)
 	var chest_w := amp * (0.12 + 0.88 * breath_chest)
-	_nudge_spine("C_Spine_a", belly_w * 1.6, belly_w * 0.55, 0.0)
-	_nudge_spine("C_Spine_b", belly_w * 0.45 + chest_w * 0.35, belly_w * 0.2 + chest_w * 0.15, 0.0)
-	_nudge_spine("C_Spine_c", chest_w * 1.1, chest_w * 0.35, chest_w * 0.08)
-	_nudge_spine("C_Spine_d", chest_w * 0.55, chest_w * 0.18, chest_w * 0.04)
+	# pitch arg always 0 — never rotate spine X for breath.
+	_nudge_spine("C_Spine_a", belly_w * 0.15, 0.0, belly_w * 1.35)
+	_nudge_spine("C_Spine_b", belly_w * 0.06 + chest_w * 0.05, 0.0, belly_w * 0.4 + chest_w * 0.45)
+	_nudge_spine("C_Spine_c", chest_w * 0.08, 0.0, chest_w * 1.15)
+	_nudge_spine("C_Spine_d", chest_w * 0.04, 0.0, chest_w * 0.6)
+	# Soft breast widen on inhale (if bones exist).
+	_nudge_spine("L_Breast_Spo", 0.0, 0.0, chest_w * 0.55)
+	_nudge_spine("R_Breast_Spo", 0.0, 0.0, chest_w * 0.55)
 
 
-func _nudge_spine(name: String, z_off: float, pitch: float, scale_xz: float) -> void:
+func _nudge_spine(name: String, y_off: float, pitch: float, scale_xz: float) -> void:
 	if not bone_i.has(name):
 		return
 	var i: int = bone_i[name]
@@ -256,21 +284,39 @@ func _nudge_spine(name: String, z_off: float, pitch: float, scale_xz: float) -> 
 	var cur_q := skeleton.get_bone_pose_rotation(i)
 	var cur_p := skeleton.get_bone_pose_position(i)
 	var base_s: Vector3 = rest_scale.get(name, Vector3.ONE)
+	# pitch intentionally unused for breath (kept for API); never lean spine.
 	if absf(pitch) > 1e-6:
-		var soft_q := _quat_euler_xyz(pitch, 0.0, 0.0)
-		cur_q = (_soft_delta(name, soft_q) * cur_q).normalized()
-	if absf(z_off) > 1e-7:
-		var parent: String = bone_parent.get(name, "")
-		var rest_w_p := Quaternion.IDENTITY
-		if parent != "" and rest_world_q.has(parent):
-			rest_w_p = rest_world_q[parent]
-		cur_p += rest_w_p.inverse() * Vector3(0.0, 0.0, z_off)
-	var sx := 1.0 + maxf(0.0, scale_xz) * 4.0
-	var sz := 1.0 + maxf(0.0, scale_xz) * 2.5
-	var cur_s := Vector3(base_s.x * sx, base_s.y, base_s.z * sz)
+		pass
+	# Tiny local Y lift only (inflate feel); no Z push that bows the torso.
+	if absf(y_off) > 1e-7:
+		cur_p.y += y_off
+	var sx := 1.0 + maxf(0.0, scale_xz) * 5.5
+	var sz := 1.0 + maxf(0.0, scale_xz) * 3.2
+	var sy := 1.0 + maxf(0.0, scale_xz) * 0.35
+	var cur_s := Vector3(base_s.x * sx, base_s.y * sy, base_s.z * sz)
 	skeleton.set_bone_pose_rotation(i, cur_q)
 	skeleton.set_bone_pose_position(i, cur_p)
 	skeleton.set_bone_pose_scale(i, cur_s)
+
+
+func _apply_body_look() -> void:
+	if not body_look_on or skeleton == null:
+		return
+	# Match web setBodyLook: neck (-pitch*0.5, yaw*0.52), head remainder (-pitch, yaw) YXZ.
+	_nudge_look_bone("C_Neck_a", -body_look_pitch * 0.5, body_look_yaw * 0.52)
+	_nudge_look_bone("C_Head_a", -body_look_pitch * 0.5, body_look_yaw * 0.48)
+
+
+func _nudge_look_bone(name: String, pitch: float, yaw: float) -> void:
+	if not bone_i.has(name):
+		return
+	if absf(pitch) < 1e-6 and absf(yaw) < 1e-6:
+		return
+	var i: int = bone_i[name]
+	var cur_q := skeleton.get_bone_pose_rotation(i)
+	var soft_q := _quat_euler_yxz(pitch, yaw, 0.0)
+	cur_q = (_soft_delta(name, soft_q) * cur_q).normalized()
+	skeleton.set_bone_pose_rotation(i, cur_q)
 
 
 func _update_blink(d: float) -> void:
@@ -551,10 +597,19 @@ func debug_snapshot() -> Dictionary:
 		if hair_p.size() > 0:
 			tip_p = hair_p[hair_p.size() - 1]
 	var spine_scales := {}
+	var spine_euler_x := {}
 	for sn in ["C_Spine_a", "C_Spine_b", "C_Spine_c", "C_Spine_d"]:
 		if bone_i.has(sn):
-			var ss := skeleton.get_bone_pose_scale(bone_i[sn])
+			var bi: int = bone_i[sn]
+			var ss := skeleton.get_bone_pose_scale(bi)
 			spine_scales[sn] = [ss.x, ss.y, ss.z]
+			var pq := skeleton.get_bone_pose_rotation(bi)
+			var rq: Quaternion = rest_local_q[sn]
+			var dq := (rq.inverse() * pq).normalized()
+			# Extract approximate local X (pitch) from delta quat.
+			var sinr := 2.0 * (dq.w * dq.x + dq.y * dq.z)
+			var cosr := 1.0 - 2.0 * (dq.x * dq.x + dq.y * dq.y)
+			spine_euler_x[sn] = atan2(sinr, cosr)
 	var pin_deltas := {}
 	for pk in range(mini(HAIR_PIN_MAX + 1, hair_names.size())):
 		var pn: String = hair_names[pk]
@@ -583,6 +638,7 @@ func debug_snapshot() -> Dictionary:
 		"hair_p_tip": [tip_p.x, tip_p.y, tip_p.z],
 		"hair_pin_deltas": pin_deltas,
 		"spine_scales": spine_scales,
+		"spine_euler_x": spine_euler_x,
 	}
 
 
