@@ -13,10 +13,10 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 | 按键 | 作用 |
 |------|------|
 | W A S D / 方向键 | 移动 |
-| Shift | 冲刺（站立时） |
+| Shift | 冲刺（仅站立；速度 ≈ 走速×2.5，run* 动画） |
 | 空格 | 跳跃（匍匐时改为站起） |
-| Ctrl | 切换下蹲 |
-| C / Z | 切换匍匐 |
+| Ctrl / C | **按住**下蹲（松开关站立；匍匐中无效） |
+| Z | 切换匍匐（Ctrl+Z 亦可） |
 | 1–8 | 预览舞蹈片段 dance1…dance8 |
 | 0 / 9 | 取消舞蹈，回到普通移动动画 |
 | 鼠标 | 环视（自动捕获） |
@@ -35,14 +35,14 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 
 - **设置（左上）**：开关 `SoftSecondary` 的呼吸 / 眨眼 / 头发物理；鼠标灵敏度滑条；面板说明显隐。打开面板时释放鼠标便于点击。
 - **互动（右侧）**：五种模式按钮，写入 HUD 内部状态并显示「当前模式」文案。软体拖拽/打击等尚未接入，仅占位。
-- **摄像机**：重置视角；第一人称 / 第三人称切换（`player_controller`）；灵敏度（与设置共用）。第一人称：身体 yaw 每帧跟随相机；颈/头 `setBodyLook` 跟随俯仰；隐藏头/发/眼/嘴网格防裁切，躯干四肢仍可见；眼高尽量取 `C_Head_a`；近裁剪面 ≈0.03；滚轮调 FOV。
+- **摄像机**：重置视角；第一人称 / 第三人称切换（`player_controller`）；灵敏度（与设置共用）。第一人称：身体 yaw 每帧跟随相机；颈/头 `setBodyLook` 跟随俯仰；隐藏头/发/眼/嘴网格防裁切，躯干四肢仍可见；眼高用网页 `stanceEye`（站 1.52 / 蹲 1.06 / 匍 0.3，+Z 前偏，姿态平滑插值，**无**头骨点头/走路 bob）；近裁剪面 ≈0.06；滚轮调 FOV。
 
 ## 动画（网页 loco-clips）
 
 角色蒙皮骨架由 `SoftLoco`（`scripts/soft_loco.gd`）每帧驱动，**不依赖 Mixamo FBX**：
 
 - 数据：`assets/characters/tifa/loco-clips.json`（与网页 `src/lib/softbody/loco-clips.json` 同源，26 段）
-- 选取逻辑对齐网页 `soft-skeleton.ts` 的 `pickLocoClip` / `applyLocomotion`：站立 idle / 走跑八向、下蹲、匍匐、跳跃；Shift 切 run*
+- 选取逻辑对齐网页 `soft-skeleton.ts` 的 `pickLocoClip` / `applyLocomotion`：站立 idle / 走跑八向、下蹲、匍匐、跳跃；Shift（站立）切 run*；走速 ≈1.65 m/s，冲刺 ×2.5，蹲/匍更慢
 - `standIdle`：`STAND_IDLE_MOTION=0.18`、`idle_slow=2.4`，并调用 `nudgeIdleUpright` + **`nudgeIdleArmsBack`**（上臂略向身后 z-0.22，与网页一致）
 - 碰撞胶囊底与网格脚底对齐（AABB min.y≈0，胶囊 bottom≈0），避免脚陷入地面
 - **朝向**：网页 loco 绑定 mesh 朝 **+Z**，Godot 移动以 **-Z** 为前；`$Body` 施加 **π yaw 偏移**（`BODY_YAW_OFFSET`），使胸部朝向移动/相机前方。偏移后 loco 的 fwd/side 相对 Body **+Z** 取符号（相对旧逻辑取反）
@@ -50,7 +50,7 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 - 次级动画 `SoftSecondary`（`scripts/soft_secondary.gd`，默认全开，对齐网页）：
   - **头发 Verlet**：`group=="hair"` 链（HairRoot…Hair_8）；**k≤1（HairRoot+Hair_1）钉在骨架 FK**，仅下段 Verlet 摆动（对齐网页 `pinned = k <= 1`）
   - **眨眼**：睑骨 `L/R_(U|D)lid_[A-E]`，blinkT/nextBlink/blinkAmt 周期驱动
-  - **呼吸**：web 同款 breathAmp/Speed/Chest 波形；骨级近似为 C_Spine_a..d（及 Breast_Spo）**相对 rest 的 X/Z 缩放膨胀**（吸入变宽/加深），**不再对脊柱做 X 俯仰**（网页是软组织 tz 膨胀而非鞠躬式前倾）；软笼顶点位移仍未移植
+  - **呼吸**：web 同款 breathAmp/Speed/Chest 波形；骨级近似为 C_Spine_a..d（及 Breast_Spo）**相对 rest 的 X/Z 缩放膨胀**（吸入变宽/加深），峰值约 **1–2%**（腹略重于上胸），**不做脊柱 X 俯仰**（网页是软组织 ~1cm tz 膨胀）；软笼顶点位移仍未移植
 
 ## 本地运行
 
@@ -126,7 +126,7 @@ tools/bake_tifa_skinned.py
 
 - 城市首次进入会为大量网格生成 trimesh，加载稍慢；树叶无碰撞。
 - 动画为关键帧程序化驱动；已移植头发 Verlet / 眨眼 / 呼吸。软体脏器、刺刀等互动仍为 HUD 占位。
-- 下蹲/匍匐会缩放胶囊碰撞与相机高度（底边仍贴地）；与网页第一人称胶囊数值近似而非完全一致。
-- 第一人称：眼高优先头骨，隐藏头/发/眼/嘴；身体 yaw 锁相机 + 颈头 look；第三人称仅朝向修正。滚轮：TP 改距离，FP 改 FOV。
+- 下蹲为**按住** Ctrl/C；匍匐为 Z 切换；胶囊近似网页（站 1.64 / 蹲 0.94 / 匍 0.42），底边仍贴地。
+- 第一人称：稳定 `stanceEye`（含前向偏移，姿态插值）；隐藏头/发/眼/嘴；身体 yaw 锁相机 + 颈头 look；第三人称仅朝向修正。滚轮：TP 改距离，FP 改 FOV。
 - 房间部分材质的法线贴图 UV 与基础色不一致时，Godot 会忽略法线 UV（引擎限制，有警告）。
 - 城市 GLB 已从网页版 meshopt 解压；若从网页重新拷贝 `city.glb`，需再跑解压脚本后再导入。

@@ -158,13 +158,15 @@ func _run() -> void:
 		"validate: breath scale after ~10s min=", snappedf(min_scale, 0.0001),
 		" max=", snappedf(max_scale, 0.0001)
 	)
-	if max_scale > 1.35 or min_scale < 0.7:
+	# Quiet breath: peak expand should be ~1–2% (web ~1cm inflate), not ~10%.
+	if max_scale > 1.025 or min_scale < 0.97:
 		push_error(
-			"validate: breath bone scale drifted (min=%s max=%s) — compounding bug?"
+			"validate: breath bone scale too strong/drifted (min=%s max=%s) — want max < ~1.02"
 			% [min_scale, max_scale]
 		)
 		quit(1)
 		return
+	print("validate: breath scale quiet OK (max < 1.025)")
 
 	# Breath must NOT pitch-lean the spine (web uses tissue inflate, not bone X rotation).
 	var max_spine_pitch := 0.0
@@ -261,6 +263,60 @@ func _run() -> void:
 		quit(1)
 		return
 	print("validate: feet/capsule OK")
+
+	# FP stance eye heights (web stanceEye.y + lift 0.06).
+	for stance_name in ["stand", "crouch", "prone"]:
+		var ey: float = float(player.call("debug_fp_eye_y", stance_name))
+		print("validate: FP eye y ", stance_name, "=", snappedf(ey, 0.0001))
+	var ey_stand: float = float(player.call("debug_fp_eye_y", "stand"))
+	var ey_crouch: float = float(player.call("debug_fp_eye_y", "crouch"))
+	var ey_prone: float = float(player.call("debug_fp_eye_y", "prone"))
+	if absf(ey_stand - 1.58) > 0.02:
+		push_error("validate: stand FP eye y expected ~1.58, got %s" % ey_stand)
+		quit(1)
+		return
+	if absf(ey_crouch - 1.12) > 0.02:
+		push_error("validate: crouch FP eye y expected ~1.12, got %s" % ey_crouch)
+		quit(1)
+		return
+	if absf(ey_prone - 0.36) > 0.02:
+		push_error("validate: prone FP eye y expected ~0.36, got %s" % ey_prone)
+		quit(1)
+		return
+	print("validate: FP eye heights OK")
+
+	# Loco pick_clip samples: W/S/A/D + crouch + sprint (fwd=local.z, side=-local.x).
+	var samples: Array = [
+		{"label": "W walk", "mode": "stand", "fwd": 1.0, "side": 0.0, "mag": 1.0, "sprint": false, "want": "walk"},
+		{"label": "S walkBack", "mode": "stand", "fwd": -1.0, "side": 0.0, "mag": 1.0, "sprint": false, "want": "walkBack"},
+		{"label": "A walkLeft", "mode": "stand", "fwd": 0.0, "side": -1.0, "mag": 1.0, "sprint": false, "want": "walkLeft"},
+		{"label": "D walkRight", "mode": "stand", "fwd": 0.0, "side": 1.0, "mag": 1.0, "sprint": false, "want": "walkRight"},
+		{"label": "W sprint", "mode": "stand", "fwd": 1.0, "side": 0.0, "mag": 1.0, "sprint": true, "want": "run"},
+		{"label": "S sprint", "mode": "stand", "fwd": -1.0, "side": 0.0, "mag": 1.0, "sprint": true, "want": "runBack"},
+		{"label": "A sprint", "mode": "stand", "fwd": 0.0, "side": -1.0, "mag": 1.0, "sprint": true, "want": "runLeft"},
+		{"label": "D sprint", "mode": "stand", "fwd": 0.0, "side": 1.0, "mag": 1.0, "sprint": true, "want": "runRight"},
+		{"label": "W crouch", "mode": "crouch", "fwd": 1.0, "side": 0.0, "mag": 1.0, "sprint": false, "want": "crouchWalk"},
+		{"label": "S crouch", "mode": "crouch", "fwd": -1.0, "side": 0.0, "mag": 1.0, "sprint": false, "want": "crouchBack"},
+		{"label": "A crouch", "mode": "crouch", "fwd": 0.0, "side": -1.0, "mag": 1.0, "sprint": false, "want": "crouchLeft"},
+		{"label": "D crouch", "mode": "crouch", "fwd": 0.0, "side": 1.0, "mag": 1.0, "sprint": false, "want": "crouchRight"},
+		{"label": "idle crouch", "mode": "crouch", "fwd": 0.0, "side": 0.0, "mag": 0.0, "sprint": false, "want": "crouchIdle"},
+		{"label": "W prone", "mode": "prone", "fwd": 1.0, "side": 0.0, "mag": 1.0, "sprint": false, "want": "proneWalk"},
+	]
+	for s in samples:
+		loco.call("set_mode", s["mode"])
+		var got: String = str(loco.call("pick_clip", s["fwd"], s["side"], s["mag"], false, s["sprint"]))
+		print(
+			"validate: pick_clip ", s["label"],
+			" mode=", s["mode"],
+			" fwd=", s["fwd"], " side=", s["side"],
+			" sprint=", s["sprint"],
+			" -> ", got
+		)
+		if got != s["want"]:
+			push_error("validate: pick_clip %s expected %s got %s" % [s["label"], s["want"], got])
+			quit(1)
+			return
+	print("validate: pick_clip samples OK")
 
 	print("validate: OK")
 	quit(0)

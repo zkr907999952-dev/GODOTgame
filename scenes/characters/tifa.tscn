@@ -4,8 +4,8 @@
 [ext_resource type="PackedScene" path="res://assets/characters/tifa/Tifa_Web_Skinned.glb" id="2_body"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_player"]
-radius = 0.28
-height = 1.1
+radius = 0.3
+height = 1.64
 
 [node name="Player" type="CharacterBody3D"]
 collision_layer = 2
@@ -15,7 +15,7 @@ floor_max_angle = 0.785398
 script = ExtResource("1_script")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.55, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.82, 0)
 shape = SubResource("CapsuleShape3D_player")
 
 [node name="Body" parent="." instance=ExtResource("2_body")]

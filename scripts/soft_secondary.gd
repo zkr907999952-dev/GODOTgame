@@ -22,7 +22,7 @@ var eye_open_r: float = 1.0
 var debug_blink: float = -1.0
 
 var breath_enabled: bool = true
-var breath_amp: float = 0.4
+var breath_amp: float = 0.28  # quieter; peak scale ~1–2%
 var breath_speed: float = 0.3
 var breath_boost: float = 0.0
 
@@ -266,13 +266,14 @@ func _apply_breath() -> void:
 	var belly_w := amp * (0.12 + 0.88 * breath_in)
 	var chest_w := amp * (0.12 + 0.88 * breath_chest)
 	# pitch arg always 0 — never rotate spine X for breath.
-	_nudge_spine("C_Spine_a", belly_w * 0.15, 0.0, belly_w * 1.35)
-	_nudge_spine("C_Spine_b", belly_w * 0.06 + chest_w * 0.05, 0.0, belly_w * 0.4 + chest_w * 0.45)
-	_nudge_spine("C_Spine_c", chest_w * 0.08, 0.0, chest_w * 1.15)
-	_nudge_spine("C_Spine_d", chest_w * 0.04, 0.0, chest_w * 0.6)
+	# Belly weighted a bit more than upper chest so torso doesn't dominate.
+	_nudge_spine("C_Spine_a", belly_w * 0.12, 0.0, belly_w * 1.55)
+	_nudge_spine("C_Spine_b", belly_w * 0.07 + chest_w * 0.03, 0.0, belly_w * 0.55 + chest_w * 0.28)
+	_nudge_spine("C_Spine_c", chest_w * 0.05, 0.0, chest_w * 0.7)
+	_nudge_spine("C_Spine_d", chest_w * 0.025, 0.0, chest_w * 0.35)
 	# Soft breast widen on inhale (if bones exist).
-	_nudge_spine("L_Breast_Spo", 0.0, 0.0, chest_w * 0.55)
-	_nudge_spine("R_Breast_Spo", 0.0, 0.0, chest_w * 0.55)
+	_nudge_spine("L_Breast_Spo", 0.0, 0.0, chest_w * 0.3)
+	_nudge_spine("R_Breast_Spo", 0.0, 0.0, chest_w * 0.3)
 
 
 func _nudge_spine(name: String, y_off: float, pitch: float, scale_xz: float) -> void:
@@ -290,9 +291,10 @@ func _nudge_spine(name: String, y_off: float, pitch: float, scale_xz: float) -> 
 	# Tiny local Y lift only (inflate feel); no Z push that bows the torso.
 	if absf(y_off) > 1e-7:
 		cur_p.y += y_off
-	var sx := 1.0 + maxf(0.0, scale_xz) * 5.5
-	var sz := 1.0 + maxf(0.0, scale_xz) * 3.2
-	var sy := 1.0 + maxf(0.0, scale_xz) * 0.35
+	# Was *5.5/*3.2 (~10% expand); cut ~6–7× for subtle ~1–2% like web ~1cm inflate.
+	var sx := 1.0 + maxf(0.0, scale_xz) * 0.85
+	var sz := 1.0 + maxf(0.0, scale_xz) * 0.55
+	var sy := 1.0 + maxf(0.0, scale_xz) * 0.06
 	var cur_s := Vector3(base_s.x * sx, base_s.y * sy, base_s.z * sz)
 	skeleton.set_bone_pose_rotation(i, cur_q)
 	skeleton.set_bone_pose_position(i, cur_p)

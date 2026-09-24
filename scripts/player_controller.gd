@@ -5,10 +5,10 @@ const SoftLocoScript = preload("res://scripts/soft_loco.gd")
 ## Web loco bind: mesh faces +Z; Godot move uses -Z forward → visual Body needs π yaw offset.
 const BODY_YAW_OFFSET := PI
 
-@export var move_speed: float = 4.5
-@export var sprint_speed: float = 7.0
-@export var crouch_speed: float = 2.2
-@export var prone_speed: float = 0.9
+@export var move_speed: float = 1.65
+@export var sprint_speed: float = 4.125  # 1.65 * 2.5 like web
+@export var crouch_speed: float = 0.7425  # 1.65 * 0.45
+@export var prone_speed: float = 0.462  # 1.65 * 0.28
 @export var jump_velocity: float = 4.2
 @export var mouse_sensitivity: float = 0.0025
 @export var min_pitch: float = -1.2
@@ -16,7 +16,7 @@ const BODY_YAW_OFFSET := PI
 @export var camera_distance: float = 2.8
 @export var camera_height: float = 1.4
 @export var first_person: bool = false
-@export var fp_eye_height: float = 1.55
+@export var fp_eye_height: float = 1.52  # web stand stanceEye.y
 @export var fp_fov: float = 62.0
 @export var tp_fov: float = 55.0
 @export var camera_distance_min: float = 1.2
@@ -41,6 +41,16 @@ var _capsule_stand_y: float = 0.55
 var _air_time: float = 0.0
 ## When true, HUD has a panel open — do not auto-capture mouse on click / ignore wheel zoom.
 var ui_blocks_capture: bool = false
+## Web stanceEye (body-local +Z forward). Stable — no head-nod / walk bob.
+const FP_EYE_STAND := Vector3(0.0, 1.52, 0.2)
+const FP_EYE_CROUCH := Vector3(0.0, 1.06, 0.5)
+const FP_EYE_PRONE := Vector3(0.0, 0.3, 0.74)
+## Extra lift if mesh still clips the near plane.
+const FP_EYE_LIFT := 0.06
+var _fp_eye_from: Vector3 = FP_EYE_STAND
+var _fp_eye_to: Vector3 = FP_EYE_STAND
+var _fp_eye_blend: float = 1.0  # 0..1 smoothstep like web stanceU
+var _fp_eye_cur: Vector3 = FP_EYE_STAND
 
 @onready var _pivot: Node3D = $CameraPivot
 @onready var _camera: Camera3D = $CameraPivot/Camera3D
@@ -249,9 +259,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 				elif not ui_blocks_capture:
 					Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-			KEY_CTRL:
-				_toggle_crouch()
-			KEY_C, KEY_Z:
+			KEY_Z:
+				# Prone toggle (Z or Ctrl+Z). Crouch is hold Ctrl/C — handled in physics.
 				_toggle_prone()
 			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8:
 				if _loco:
@@ -264,15 +273,16 @@ func _unhandled_input(event: InputEvent) -> void:
 					print("player: dance cleared")
 
 
-func _toggle_crouch() -> void:
+## Crouch is hold (Ctrl and/or C), like web KeyC hold — not toggle.
+func _update_crouch_hold() -> void:
 	if _stance == "prone":
-		_stance = "stand"
-	elif _stance == "crouch":
-		_stance = "stand"
-	else:
-		_stance = "crouch"
-	_apply_stance_capsule()
-	print("player: stance=", _stance)
+		return
+	var held := Input.is_action_pressed("crouch")
+	var want := "crouch" if held else "stand"
+	if want != _stance:
+		_stance = want
+		_apply_stance_capsule()
+		print("player: stance=", _stance)
 
 
 func _toggle_prone() -> void:
@@ -284,40 +294,57 @@ func _toggle_prone() -> void:
 	print("player: stance=", _stance)
 
 
+func _stance_eye_target(stance: String) -> Vector3:
+	match stance:
+		"crouch":
+			return FP_EYE_CROUCH
+		"prone":
+			return FP_EYE_PRONE
+		_:
+			return FP_EYE_STAND
+
+
+func _begin_fp_eye_blend(new_stance: String) -> void:
+	_fp_eye_from = _fp_eye_cur
+	_fp_eye_to = _stance_eye_target(new_stance)
+	_fp_eye_blend = 0.0
+
+
 func _apply_stance_capsule() -> void:
 	if not (_col.shape is CapsuleShape3D):
 		return
 	var cap := _col.shape as CapsuleShape3D
+	# Web FP capsule approx: stand 1.64/0.3, crouch 0.94/0.26, prone 0.42/0.22.
 	# Keep capsule bottom ≈ 0 so feet stay on floor across stances.
+	_begin_fp_eye_blend(_stance)
 	match _stance:
 		"crouch":
-			cap.height = 0.64
+			cap.height = 0.94
 			cap.radius = 0.26
 			_col.position.y = cap.height * 0.5
-			camera_height = 0.85
-			fp_eye_height = 0.95
+			camera_height = 0.95
+			fp_eye_height = FP_EYE_CROUCH.y + FP_EYE_LIFT
 		"prone":
-			cap.height = 0.28
+			cap.height = 0.42
 			cap.radius = 0.22
 			_col.position.y = cap.height * 0.5
-			camera_height = 0.45
-			fp_eye_height = 0.35
+			camera_height = 0.4
+			fp_eye_height = FP_EYE_PRONE.y + FP_EYE_LIFT
 		_:
 			cap.height = _capsule_stand_h
-			cap.radius = 0.28
+			cap.radius = 0.3
 			_col.position.y = _capsule_stand_y
 			camera_height = _default_cam_height
-			fp_eye_height = 1.55
+			fp_eye_height = FP_EYE_STAND.y + FP_EYE_LIFT
 	_apply_camera()
 
 
 func _apply_camera() -> void:
 	_pivot.rotation = Vector3(_pitch, _yaw, 0.0)
 	if first_person:
-		_pivot.position = Vector3(0.0, _fp_eye_y(), 0.0)
-		# Slight forward along look (-Z of pivot) so near plane clears hidden head mesh.
-		_camera.position = Vector3(0.0, 0.0, -0.08)
-		_camera.near = 0.03
+		_pivot.position = _fp_eye_pivot_pos()
+		_camera.position = Vector3.ZERO
+		_camera.near = 0.06
 		_camera.fov = fp_fov
 	else:
 		_pivot.position = Vector3(0.0, camera_height, 0.0)
@@ -326,21 +353,33 @@ func _apply_camera() -> void:
 		_camera.fov = tp_fov
 
 
-## Prefer C_Head_a bone height in character space; fallback fp_eye_height.
-func _fp_eye_y() -> float:
-	var skel := _find_skeleton(_body)
-	if skel:
-		var hi := skel.find_bone("C_Head_a")
-		if hi < 0:
-			hi = skel.find_bone("C_Neck_a")
-		if hi >= 0:
-			var gp := skel.get_bone_global_pose(hi)
-			var world_y: float = (_body.global_transform * gp).origin.y
-			return world_y - global_position.y + 0.06
-	return fp_eye_height
+## Smooth lerp between stance eyes (web stanceU smoothstep).
+func _update_fp_eye_blend(delta: float) -> void:
+	if _fp_eye_blend < 1.0:
+		_fp_eye_blend = minf(1.0, _fp_eye_blend + delta * 6.0)
+	var t := _fp_eye_blend
+	var u := t * t * (3.0 - 2.0 * t)
+	_fp_eye_cur = _fp_eye_from.lerp(_fp_eye_to, u)
+
+
+## Body-local stance eye → CharacterBody local (Body has π yaw offset; +Z = facing).
+func _fp_eye_pivot_pos() -> Vector3:
+	var eye := _fp_eye_cur + Vector3(0.0, FP_EYE_LIFT, 0.0)
+	# Body is child at origin with yaw = face + BODY_YAW_OFFSET; map body-local to player space.
+	return _body.transform * eye
+
+
+## Debug / validate: current FP eye Y in player space for a stance (instant target).
+func debug_fp_eye_y(stance: String = "") -> float:
+	var s := stance if stance != "" else _stance
+	var eye := _stance_eye_target(s) + Vector3(0.0, FP_EYE_LIFT, 0.0)
+	return eye.y
 
 
 func _physics_process(delta: float) -> void:
+	_update_crouch_hold()
+	_update_fp_eye_blend(delta)
+
 	var on_floor := is_on_floor()
 	if not on_floor:
 		velocity.y -= _gravity * delta
@@ -417,7 +456,7 @@ func _physics_process(delta: float) -> void:
 		_loco.call("set_mode", _stance)
 		_loco.call("apply_pose", fwd, side, mag, airborne, sprinting, delta, speed)
 
-	# FP: refresh eye height from head bone after pose.
+	# FP: stable stance eye (no head-bone bob); refresh after body yaw catch-up.
 	if first_person:
 		_pivot.rotation = Vector3(_pitch, _yaw, 0.0)
-		_pivot.position = Vector3(0.0, _fp_eye_y(), 0.0)
+		_pivot.position = _fp_eye_pivot_pos()
