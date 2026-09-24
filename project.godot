@@ -1,4 +1,11 @@
 ; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
 config_version=5
 
 [application]
@@ -53,7 +60,3 @@ sprint={
 
 3d_physics/layer_1="world"
 3d_physics/layer_2="character"
-
-[physics]
-
-3d/default_gravity=9.8
