@@ -1,7 +1,7 @@
 extends Node3D
-## 房间空墙镜子：SubViewport + 镜像 Camera3D → QuadMesh ViewportTexture（对齐网页 WallMirror）。
+## 房间空墙镜子：对齐网页 three/examples Reflector（反射相机 lookAt + 投影纹理矩阵）。
 ## 世界坐标与网页一致：pos (0, 1.12, 0.948)，yaw=π，尺寸 2.42×2.18。
-## 每帧从当前活动 Camera3D 反射位姿（展示 TP / 控制 FP 均正确）。
+## 每帧从当前活动 Camera3D 更新（展示 TP / 控制 FP）。
 
 @export var resolution: int = 768
 @export var mirror_width: float = 2.42
@@ -11,6 +11,32 @@ var _viewport: SubViewport
 var _mirror_cam: Camera3D
 var _mesh: MeshInstance3D
 var _frame: Node3D
+var _mat: ShaderMaterial
+
+const _SHADER := """
+shader_type spatial;
+render_mode unshaded, cull_disabled, depth_draw_opaque, specular_disabled;
+
+uniform sampler2D mirror_tex : source_color, filter_linear, repeat_disable;
+uniform mat4 tex_matrix;
+uniform vec3 tint_color = vec3(0.902, 0.925, 0.941);
+
+varying vec4 mirror_uv;
+
+void vertex() {
+	// Reflector: vUv = textureMatrix * vec4(position, 1.0) with local position.
+	mirror_uv = tex_matrix * vec4(VERTEX, 1.0);
+}
+
+void fragment() {
+	if (mirror_uv.w <= 0.0001) {
+		discard;
+	}
+	vec2 uv = mirror_uv.xy / mirror_uv.w;
+	vec3 base = texture(mirror_tex, uv).rgb;
+	ALBEDO = mix(base, tint_color, 0.06);
+}
+"""
 
 
 func _ready() -> void:
@@ -29,7 +55,6 @@ func _build() -> void:
 	_viewport.transparent_bg = false
 	_viewport.own_world_3d = false
 	add_child(_viewport)
-	# Share main World3D so the mirror sees the same scene (defer if root not ready).
 	_sync_world()
 
 	_mirror_cam = Camera3D.new()
@@ -45,15 +70,14 @@ func _build() -> void:
 	var quad := QuadMesh.new()
 	quad.size = Vector2(mirror_width, mirror_height)
 	_mesh.mesh = quad
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_texture = _viewport.get_texture()
-	# ViewportTexture is mirrored via camera placement; flip U so text reads correctly.
-	mat.uv1_scale = Vector3(-1.0, 1.0, 1.0)
-	mat.uv1_offset = Vector3(1.0, 0.0, 0.0)
-	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_mesh.material_override = mat
+
+	var sh := Shader.new()
+	sh.code = _SHADER
+	_mat = ShaderMaterial.new()
+	_mat.shader = sh
+	_mat.set_shader_parameter("mirror_tex", _viewport.get_texture())
+	_mat.set_shader_parameter("tint_color", Vector3(0.902, 0.925, 0.941))
+	_mesh.material_override = _mat
 	add_child(_mesh)
 
 	_frame = Node3D.new()
@@ -101,37 +125,87 @@ func _process(_delta: float) -> void:
 	var main_cam := get_viewport().get_camera_3d()
 	if main_cam == null or main_cam == _mirror_cam:
 		return
-	# Always track the active camera (Display TP orbit and Control FP).
 	_update_mirror_camera(main_cam)
 
 
+func _reflect_point(p: Vector3, origin: Vector3, n: Vector3) -> Vector3:
+	return p - 2.0 * (p - origin).dot(n) * n
+
+
+func _reflect_dir(v: Vector3, n: Vector3) -> Vector3:
+	return v - 2.0 * v.dot(n) * n
+
+
 func _update_mirror_camera(main_cam: Camera3D) -> void:
-	# Reflect main camera across this node's local XY plane (local +Z = face normal).
-	# room_mirror.tscn: yaw=π at (0, 1.12, 0.948) → face toward room center (-Z).
+	# Three.js Reflector: local plane normal = +Z, reflect eye + lookAt target + up.
 	var n := global_transform.basis.z.normalized()
 	var origin := global_position
-	var cam_xf := main_cam.global_transform
-	var cam_pos := cam_xf.origin
+	var cam_pos := main_cam.global_position
 	var dist := (cam_pos - origin).dot(n)
-	# Skip if camera is behind / inside the glass.
+	# Facing away / behind glass (Reflector: view.dot(normal) > 0 skip).
 	if dist < 0.05:
 		return
 
-	var mirrored_pos := cam_pos - 2.0 * dist * n
+	var mirrored_pos := _reflect_point(cam_pos, origin, n)
+	# Point main camera looks at (Godot / Three both look down -Z).
+	var look_at_pos := cam_pos - main_cam.global_transform.basis.z
+	var mirrored_look := _reflect_point(look_at_pos, origin, n)
+	var mirrored_up := _reflect_dir(main_cam.global_transform.basis.y, n).normalized()
+	if mirrored_up.length_squared() < 1e-8:
+		mirrored_up = Vector3.UP
 
-	# Reflect basis; reflection flips handedness → flip X to keep a valid view,
-	# matching the material UV U-flip so the image reads as a mirror.
-	var bx := cam_xf.basis.x
-	var by := cam_xf.basis.y
-	var bz := cam_xf.basis.z
-	bx = bx - 2.0 * bx.dot(n) * n
-	by = by - 2.0 * by.dot(n) * n
-	bz = bz - 2.0 * bz.dot(n) * n
-	bx = -bx
-	var basis := Basis(bx, by, bz).orthonormalized()
-	_mirror_cam.global_transform = Transform3D(basis, mirrored_pos)
+	_mirror_cam.global_position = mirrored_pos
+	_mirror_cam.look_at(mirrored_look, mirrored_up)
+
 	_mirror_cam.fov = main_cam.fov
-	_mirror_cam.near = maxf(0.05, main_cam.near)
+	# Approximate clip at the glass (Godot 4.7 has no oblique projection override).
+	_mirror_cam.near = clampf(dist - 0.02, 0.05, maxf(0.08, dist))
 	_mirror_cam.far = main_cam.far
+	_mirror_cam.keep_aspect = main_cam.keep_aspect
+
+	# Match RT aspect to active camera viewport (Reflector copies projectionMatrix).
+	var root_vp := get_viewport()
+	if root_vp != null:
+		var sz := root_vp.get_visible_rect().size
+		if sz.y > 1.0 and sz.x > 1.0:
+			var aspect := sz.x / sz.y
+			var h := resolution
+			var w := int(round(float(resolution) * aspect))
+			w = clampi(w, 256, 2048)
+			if _viewport.size.x != w or _viewport.size.y != h:
+				_viewport.size = Vector2i(w, h)
+
 	if not _mirror_cam.current:
 		_mirror_cam.current = true
+
+	_update_texture_matrix()
+
+
+func _update_texture_matrix() -> void:
+	if _mat == null or _mirror_cam == null:
+		return
+	# Reflector bias * projection * viewInverse * mirror.matrixWorld
+	# Columns match Three.js Matrix4.set(0.5,0,0,0.5, 0,0.5,0,0.5, 0,0,0.5,0.5, 0,0,0,1)
+	var bias := Projection()
+	bias.x = Vector4(0.5, 0.0, 0.0, 0.0)
+	bias.y = Vector4(0.0, 0.5, 0.0, 0.0)
+	bias.z = Vector4(0.0, 0.0, 0.5, 0.0)
+	bias.w = Vector4(0.5, 0.5, 0.5, 1.0)
+	var proj := _mirror_cam.get_camera_projection()
+	var view := Projection(_mirror_cam.global_transform.affine_inverse())
+	var model := Projection(global_transform)
+	var tex: Projection = bias * proj * view * model
+	_mat.set_shader_parameter("tex_matrix", tex)
+
+
+## Headless check: reflect an eye across the glass (same formula as Reflector).
+func debug_reflect_eye(cam_pos: Vector3) -> Dictionary:
+	var n := global_transform.basis.z.normalized()
+	var origin := global_position
+	var dist := (cam_pos - origin).dot(n)
+	return {
+		"normal": n,
+		"origin": origin,
+		"dist": dist,
+		"mirrored": _reflect_point(cam_pos, origin, n),
+	}

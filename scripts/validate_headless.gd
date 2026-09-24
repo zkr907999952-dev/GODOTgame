@@ -385,6 +385,72 @@ func _run() -> void:
 		return
 	print("validate: RoomMirror OK")
 
+	# Loco → idle 0.5s blend (no snap from mid-walk arms).
+	var stopb: Dictionary = loco.call("debug_sample_stop_blend")
+	print(
+		"validate: stop blend ok=", stopb.get("ok"),
+		" first=", snappedf(float(stopb.get("first_ang_from_walk", -1.0)), 0.0001),
+		" end=", snappedf(float(stopb.get("end_ang_from_walk", -1.0)), 0.0001),
+		" settle=", stopb.get("settle"),
+		" dur=", stopb.get("dur")
+	)
+	if not bool(stopb.get("ok", false)):
+		push_error("validate: stop blend sample failed")
+		quit(1)
+		return
+	var first_ang := float(stopb.get("first_ang_from_walk", 99.0))
+	var end_ang := float(stopb.get("end_ang_from_walk", 0.0))
+	if first_ang > 0.22:
+		push_error("validate: loco→idle snapped (first_ang=%s)" % first_ang)
+		quit(1)
+		return
+	if end_ang < first_ang + 0.08:
+		push_error("validate: loco→idle did not blend toward idle (end=%s first=%s)" % [end_ang, first_ang])
+		quit(1)
+		return
+	print("validate: loco stop blend OK")
+
+	# Body yaw: moving snaps to camera; idle keeps ±60° deadzone.
+	var y_move: float = player.call("debug_next_body_yaw", 1.0, 0.0, true)
+	var y_idle: float = player.call("debug_next_body_yaw", 0.4, 0.0, false)
+	var y_catch: float = player.call("debug_next_body_yaw", 1.2, 0.0, false)
+	print(
+		"validate: body yaw move=", snappedf(y_move, 0.0001),
+		" idle=", snappedf(y_idle, 0.0001),
+		" catch=", snappedf(y_catch, 0.0001)
+	)
+	if absf(y_move - 1.0) > 0.001:
+		push_error("validate: moving body yaw should equal camera yaw")
+		quit(1)
+		return
+	if absf(y_idle) > 0.001:
+		push_error("validate: idle look inside deadzone should not turn body")
+		quit(1)
+		return
+	var expect_catch := 1.2 - PI / 3.0
+	if absf(y_catch - expect_catch) > 0.01:
+		push_error("validate: idle look past deadzone should clamp to ±60° (got %s want %s)" % [y_catch, expect_catch])
+		quit(1)
+		return
+	print("validate: body yaw rules OK")
+
+	# Mirror optics: reflect eye across wall plane (n = local +Z after yaw=π → world -Z).
+	if mirror.has_method("debug_reflect_eye"):
+		var eye := Vector3(0.0, 1.12, 0.0)
+		var refl: Dictionary = mirror.call("debug_reflect_eye", eye)
+		var n: Vector3 = refl.get("normal", Vector3.ZERO)
+		var mir: Vector3 = refl.get("mirrored", Vector3.ZERO)
+		print("validate: mirror n=", n, " mirrored=", mir, " dist=", refl.get("dist"))
+		if n.dot(Vector3(0.0, 0.0, -1.0)) < 0.98:
+			push_error("validate: mirror normal should face room (-Z)")
+			quit(1)
+			return
+		if mir.distance_to(Vector3(0.0, 1.12, 1.896)) > 0.05:
+			push_error("validate: reflected eye mismatch %s" % mir)
+			quit(1)
+			return
+		print("validate: mirror reflect math OK")
+
 	# Gaze stability: head is NOT a loco bone — look must not accumulate/spin.
 	sec.call("clear_body_look")
 	var cam_pos: Vector3 = player.global_position + Vector3(0.0, 1.4, 2.8)

@@ -12,6 +12,9 @@ const LOCO_BONES: PackedStringArray = [
 
 const STAND_IDLE_MOTION := 0.18
 const CROUCH_ARM_MOTION := 0.3
+## User-requested 0.5s recover from last evaluated pose (web LOCO_STOP_DUR is 0.7).
+const LOCO_STOP_DUR := 0.5
+const CLIP_BLEND_DUR := 0.5
 
 var skeleton: Skeleton3D
 var clips: Dictionary = {} # name -> {dur,n,hipY,bones,stride,fmt}
@@ -33,6 +36,15 @@ var breath_chest: float = 0.0
 var breath_enabled: bool = false  # SoftSecondary owns breath now
 
 var secondary: RefCounted = null  # SoftSecondary
+
+var loco_was_moving: bool = false
+var loco_settle: float = 1.0
+var clip_blend: float = 1.0
+var hold_q: Dictionary = {}
+var hold_hip_y: float = 0.0
+var last_soft_q: Dictionary = {}
+var last_hip_y: float = 0.0
+var last_clip_name: String = ""
 
 var _qa := Quaternion.IDENTITY
 var _qb := Quaternion.IDENTITY
@@ -317,9 +329,21 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 	if skeleton == null or clips.is_empty():
 		return
 	var clip_name := pick_clip(fwd, side, mag, airborne, sprint)
-	current_clip = clip_name
 	var clip: Dictionary = clips.get(clip_name, {})
 	var dance := dance_override != "" and clip_name.begins_with("dance")
+	var active := dance or airborne or mag > 0.07
+	var clip_changed := last_clip_name != "" and clip_name != last_clip_name
+	var stopped := loco_was_moving and not active
+	if (stopped or clip_changed) and not last_soft_q.is_empty():
+		_capture_loco_hold()
+		if stopped:
+			loco_settle = 0.0
+			clip_blend = 1.0
+		else:
+			clip_blend = 0.0
+	if active:
+		loco_settle = 1.0
+	current_clip = clip_name
 
 	# Phase advance (mirrors soft-skeleton tickLocomotion).
 	if dance:
@@ -341,7 +365,7 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 				stride = float(clip.get("stride", 0.72))
 			var dist := maxf(0.08, speed_mps) * mag * delta
 			phase += dist / maxf(0.28, stride)
-		else:
+		elif loco_settle >= 1.0:
 			var idle_slow := 2.4 if clip_name == "standIdle" else 1.0
 			phase += delta / maxf(0.8, float(clip.get("dur", 4.0)) * idle_slow)
 	was_air = airborne
@@ -415,6 +439,17 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 	if airborne or clip_name == "jump":
 		hip_y *= 0.18
 
+	# Crossfade last evaluated pose → target (loco→idle 0.5s; other clip changes 0.5s).
+	var blend_u := 1.0
+	if clip_blend < 1.0:
+		clip_blend = minf(1.0, clip_blend + delta / CLIP_BLEND_DUR)
+		blend_u = clip_blend * clip_blend * (3.0 - 2.0 * clip_blend)
+	elif not active and loco_settle < 1.0:
+		loco_settle = minf(1.0, loco_settle + delta / LOCO_STOP_DUR)
+		blend_u = loco_settle * loco_settle * (3.0 - 2.0 * loco_settle)
+	if blend_u < 1.0 and not hold_q.is_empty():
+		hip_y = _apply_loco_settle(final_q, hip_y, blend_u)
+
 	# Reset loco bones to rest (incl. scale), then apply — prevents dirty scale from breath.
 	for name in bone_idx.keys():
 		var i: int = bone_idx[name]
@@ -435,9 +470,45 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 		# hipY is character-space Y offset (same as web poseOff.y)
 		skeleton.set_bone_pose_position(hip_i, o + Vector3(0.0, hip_y, 0.0))
 
+	last_soft_q.clear()
+	for name in final_q.keys():
+		last_soft_q[name] = final_q[name]
+	last_hip_y = hip_y
+	last_clip_name = clip_name
+	loco_was_moving = active
+
 	# Secondary: hair Verlet + blink + full breath (after loco pose)
 	if secondary != null:
 		secondary.update(delta, sprint)
+
+
+func _capture_loco_hold() -> void:
+	hold_q.clear()
+	for name in last_soft_q.keys():
+		hold_q[name] = last_soft_q[name]
+	hold_hip_y = last_hip_y
+
+
+func _apply_loco_settle(pose_q: Dictionary, hip_y: float, u: float) -> float:
+	for name in pose_q.keys():
+		if not hold_q.has(name):
+			continue
+		var a: Quaternion = hold_q[name]
+		var b: Quaternion = pose_q[name]
+		if a.dot(b) < 0.0:
+			b = Quaternion(-b.x, -b.y, -b.z, -b.w)
+		pose_q[name] = a.slerp(b, u)
+	return lerpf(hold_hip_y, hip_y, u)
+
+
+func _reset_blend_for_debug() -> void:
+	loco_was_moving = false
+	loco_settle = 1.0
+	clip_blend = 1.0
+	hold_q.clear()
+	last_soft_q.clear()
+	last_hip_y = 0.0
+	last_clip_name = ""
 
 
 func _update_breath(delta: float, sprint: bool) -> void:
@@ -472,6 +543,7 @@ func debug_sample_idle_arms() -> Dictionary:
 	phase = 0.0
 	mode = "stand"
 	dance_override = ""
+	_reset_blend_for_debug()
 	apply_pose(0.0, 0.0, 0.0, false, false, 0.016, 1.65)
 	var out := {"ok": true, "clip": current_clip, "arms": {}}
 	for name in ["L_UpperArm_a", "R_UpperArm_a", "L_Forearm_a", "R_Forearm_a"]:
@@ -516,6 +588,7 @@ func debug_sample_walk() -> Dictionary:
 	phase = 0.25
 	mode = "stand"
 	dance_override = ""
+	_reset_blend_for_debug()
 	apply_pose(1.0, 0.0, 1.0, false, false, 0.016, 1.65)
 	var out := {"ok": true, "clip": current_clip, "bones": {}}
 	for name in ["C_Hip_a", "L_UpperLeg_a", "R_UpperLeg_a", "L_Foreleg_a", "C_Spine_c"]:
@@ -532,3 +605,35 @@ func debug_sample_walk() -> Dictionary:
 	if secondary != null:
 		out["secondary"] = secondary.debug_snapshot()
 	return out
+
+
+## Walk mid-swing then release: first idle frame stays near walk; 0.5s later near idle.
+func debug_sample_stop_blend() -> Dictionary:
+	if not clips.has("walk") or not bone_idx.has("L_UpperArm_a"):
+		return {"ok": false}
+	_reset_blend_for_debug()
+	phase = 0.25
+	mode = "stand"
+	dance_override = ""
+	apply_pose(1.0, 0.0, 1.0, false, false, 0.016, 1.65)
+	var arm_i: int = bone_idx["L_UpperArm_a"]
+	var walk_q := skeleton.get_bone_pose_rotation(arm_i)
+	apply_pose(0.0, 0.0, 0.0, false, false, 0.016, 1.65)
+	var first_q := skeleton.get_bone_pose_rotation(arm_i)
+	var first_from_walk := walk_q.inverse() * first_q
+	var first_ang := 2.0 * acos(clampf(absf(first_from_walk.w), 0.0, 1.0))
+	var tsec := 0.016
+	while tsec < LOCO_STOP_DUR + 0.02:
+		apply_pose(0.0, 0.0, 0.0, false, false, 0.016, 1.65)
+		tsec += 0.016
+	var end_q := skeleton.get_bone_pose_rotation(arm_i)
+	var end_from_walk := walk_q.inverse() * end_q
+	var end_ang := 2.0 * acos(clampf(absf(end_from_walk.w), 0.0, 1.0))
+	return {
+		"ok": true,
+		"clip": current_clip,
+		"first_ang_from_walk": first_ang,
+		"end_ang_from_walk": end_ang,
+		"settle": loco_settle,
+		"dur": LOCO_STOP_DUR,
+	}

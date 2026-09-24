@@ -465,6 +465,16 @@ func debug_fp_eye_y(stance: String = "") -> float:
 	return eye.y
 
 
+## Moving: snap to camera yaw. Idle: keep ±BODY_LOOK_DEAD (π/3) free-look, then catch up.
+func debug_next_body_yaw(look_yaw: float, body_yaw: float, moving: bool) -> float:
+	var ang_delta := wrapf(look_yaw - body_yaw, -PI, PI)
+	if moving:
+		return wrapf(look_yaw, -PI, PI)
+	if absf(ang_delta) > BODY_LOOK_DEAD:
+		return wrapf(look_yaw - signf(ang_delta) * BODY_LOOK_DEAD, -PI, PI)
+	return wrapf(body_yaw, -PI, PI)
+
+
 func _physics_process(delta: float) -> void:
 	var display := play_mode == GameMode.DISPLAY
 	if not display:
@@ -515,24 +525,12 @@ func _physics_process(delta: float) -> void:
 		velocity.z = move_toward(velocity.z, 0.0, speed)
 
 	# Visual facing: mesh +Z vs Godot -Z → BODY_YAW_OFFSET (π).
-	# CONTROL/FP: body lags look by BODY_LOOK_DEAD while idle; faces move dir when walking.
-	# DISPLAY: keep current facing (gaze handles head).
+	# CONTROL/FP: while moving, body faces camera yaw immediately (no deadzone lag).
+	# Idle free-look keeps ±60° / ~120° deadzone; DISPLAY keeps current facing.
 	if first_person:
 		var look_yaw := _yaw
-		var body_yaw := _body_logic_yaw
-		var ang_delta := wrapf(look_yaw - body_yaw, -PI, PI)
 		var moving := direction != Vector3.ZERO or not on_floor
-		if moving and direction != Vector3.ZERO:
-			# Face movement direction (WASD wish), smooth.
-			var move_yaw := atan2(-direction.x, -direction.z)
-			body_yaw = lerp_angle(body_yaw, move_yaw, 1.0 - exp(-10.0 * delta))
-		elif moving:
-			# Airborne / coasting: ease body toward look.
-			body_yaw = lerp_angle(body_yaw, look_yaw, 1.0 - exp(-10.0 * delta))
-		elif absf(ang_delta) > BODY_LOOK_DEAD:
-			# Idle free-look: keep ±60° deadzone (≈120° total), then body follows.
-			body_yaw = look_yaw - signf(ang_delta) * BODY_LOOK_DEAD
-		_body_logic_yaw = wrapf(body_yaw, -PI, PI)
+		_body_logic_yaw = debug_next_body_yaw(look_yaw, _body_logic_yaw, moving)
 		_body.rotation.y = _body_logic_yaw + BODY_YAW_OFFSET
 	elif direction != Vector3.ZERO:
 		var face_yaw := atan2(-direction.x, -direction.z) + BODY_YAW_OFFSET
