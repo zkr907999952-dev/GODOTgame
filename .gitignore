@@ -1,0 +1,29 @@
+# Godot 4
+.godot/
+.import/
+*.translation
+export.cfg
+export_presets.cfg
+
+# Exports / local builds
+build/
+*.apk
+*.aab
+*.exe
+*.console.exe
+*.pck
+*.zip
+*.wasm
+*.html
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*~
+*.swp
+.vscode/
+.idea/
+
+# Do not commit Godot-extracted glTF sidecar textures
+assets/characters/**/*_Image_*.png
+assets/characters/**/*_Image_*.png.import
