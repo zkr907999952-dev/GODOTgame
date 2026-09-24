@@ -140,5 +140,31 @@ func _run() -> void:
 		quit(1)
 		return
 
+	# CRITICAL: breath scale must stay near rest (~1) after many seconds — no exponential growth.
+	# Drive through SoftLoco.apply_pose so loco resets scale each frame, then secondary applies breath.
+	var max_scale := 0.0
+	var min_scale := 999.0
+	for _s in 600:  # ~9.6s at 60fps
+		loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, 0.016, 1.65)
+		var ss: Dictionary = sec.call("debug_snapshot")
+		var scales: Dictionary = ss.get("spine_scales", {})
+		for sn in scales.keys():
+			var arr: Array = scales[sn]
+			for v in arr:
+				var fv := float(v)
+				max_scale = maxf(max_scale, fv)
+				min_scale = minf(min_scale, fv)
+	print(
+		"validate: breath scale after ~10s min=", snappedf(min_scale, 0.0001),
+		" max=", snappedf(max_scale, 0.0001)
+	)
+	if max_scale > 1.35 or min_scale < 0.7:
+		push_error(
+			"validate: breath bone scale drifted (min=%s max=%s) — compounding bug?"
+			% [min_scale, max_scale]
+		)
+		quit(1)
+		return
+
 	print("validate: OK")
 	quit(0)

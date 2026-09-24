@@ -13,15 +13,23 @@ const SoftLocoScript = preload("res://scripts/soft_loco.gd")
 @export var max_pitch: float = 0.4
 @export var camera_distance: float = 2.8
 @export var camera_height: float = 1.4
+@export var first_person: bool = false
+@export var fp_eye_height: float = 1.55
 
 var _yaw: float = 0.0
 var _pitch: float = -0.15
+var _default_yaw: float = 0.0
+var _default_pitch: float = -0.15
+var _default_cam_dist: float = 2.8
+var _default_cam_height: float = 1.4
 var _gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
 var _loco: Node
 var _stance: String = "stand" # stand | crouch | prone
 var _capsule_stand_h: float = 1.1
 var _capsule_stand_y: float = 0.83
 var _air_time: float = 0.0
+## When true, HUD has a panel open — do not auto-capture mouse on click.
+var ui_blocks_capture: bool = false
 
 @onready var _pivot: Node3D = $CameraPivot
 @onready var _camera: Camera3D = $CameraPivot/Camera3D
@@ -30,6 +38,10 @@ var _air_time: float = 0.0
 
 
 func _ready() -> void:
+	_default_yaw = _yaw
+	_default_pitch = _pitch
+	_default_cam_dist = camera_distance
+	_default_cam_height = camera_height
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_apply_camera()
 	_print_body_info()
@@ -43,6 +55,38 @@ func _ready() -> void:
 	if _col.shape is CapsuleShape3D:
 		_capsule_stand_h = (_col.shape as CapsuleShape3D).height
 		_capsule_stand_y = _col.position.y
+
+
+func get_loco() -> Node:
+	return _loco
+
+
+func get_secondary() -> RefCounted:
+	if _loco == null:
+		return null
+	return _loco.get("secondary")
+
+
+func reset_camera() -> void:
+	_yaw = _default_yaw
+	_pitch = _default_pitch
+	camera_distance = _default_cam_dist
+	if _stance == "stand":
+		camera_height = _default_cam_height
+	_apply_camera()
+
+
+func set_first_person(enabled: bool) -> void:
+	first_person = enabled
+	_apply_camera()
+
+
+func toggle_first_person() -> void:
+	set_first_person(not first_person)
+
+
+func set_mouse_sensitivity(v: float) -> void:
+	mouse_sensitivity = clampf(v, 0.0005, 0.02)
 
 
 func _print_body_info() -> void:
@@ -91,9 +135,11 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_ESCAPE:
+				# HUD handles Esc first via its own _unhandled_input (higher priority when panel open).
+				# Fallback: release / re-capture mouse when no UI consuming Esc.
 				if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-				else:
+				elif not ui_blocks_capture:
 					Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 			KEY_CTRL:
 				_toggle_crouch()
@@ -109,7 +155,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					_loco.call("clear_dance")
 					print("player: dance cleared")
 	elif event is InputEventMouseButton and event.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		if not ui_blocks_capture:
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
 func _toggle_crouch() -> void:
@@ -143,22 +190,28 @@ func _apply_stance_capsule() -> void:
 			cap.radius = 0.26
 			_col.position.y = 0.52
 			camera_height = 0.85
+			fp_eye_height = 0.95
 		"prone":
 			cap.height = 0.28
 			cap.radius = 0.22
 			_col.position.y = 0.28
 			camera_height = 0.45
+			fp_eye_height = 0.35
 		_:
 			cap.height = _capsule_stand_h
 			cap.radius = 0.28
 			_col.position.y = _capsule_stand_y
-			camera_height = 1.4
+			camera_height = _default_cam_height
+			fp_eye_height = 1.55
 	_apply_camera()
 
 
 func _apply_camera() -> void:
 	_pivot.rotation = Vector3(_pitch, _yaw, 0.0)
-	_camera.position = Vector3(0.0, camera_height * 0.15, camera_distance)
+	if first_person:
+		_camera.position = Vector3(0.0, fp_eye_height, 0.08)
+	else:
+		_camera.position = Vector3(0.0, camera_height * 0.15, camera_distance)
 
 
 func _physics_process(delta: float) -> void:

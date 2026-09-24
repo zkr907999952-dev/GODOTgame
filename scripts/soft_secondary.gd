@@ -31,6 +31,7 @@ var rest_pos: Dictionary = {}
 var rest_world_q: Dictionary = {}
 var rest_local_q: Dictionary = {}
 var rest_origin: Dictionary = {}
+var rest_scale: Dictionary = {}
 var bone_parent: Dictionary = {}
 
 var hair_names: PackedStringArray = []
@@ -74,6 +75,7 @@ func setup(skel: Skeleton3D) -> bool:
 	rest_world_q.clear()
 	rest_local_q.clear()
 	rest_origin.clear()
+	rest_scale.clear()
 	bone_parent.clear()
 
 	var n := skeleton.get_bone_count()
@@ -85,6 +87,7 @@ func setup(skel: Skeleton3D) -> bool:
 		bone_i[nm] = i
 		rest_local_q[nm] = rest.basis.get_rotation_quaternion()
 		rest_origin[nm] = rest.origin
+		rest_scale[nm] = rest.basis.get_scale()
 		var p := skeleton.get_bone_parent(i)
 		if p < 0:
 			world_xf[i] = rest
@@ -246,9 +249,11 @@ func _nudge_spine(name: String, z_off: float, pitch: float, scale_xz: float) -> 
 	if not bone_i.has(name):
 		return
 	var i: int = bone_i[name]
+	# Start from post-loco pose (SoftLoco resets loco bones each frame).
+	# Scale MUST be relative to rest — never multiply accumulated pose scale.
 	var cur_q := skeleton.get_bone_pose_rotation(i)
 	var cur_p := skeleton.get_bone_pose_position(i)
-	var cur_s := skeleton.get_bone_pose_scale(i)
+	var base_s: Vector3 = rest_scale.get(name, Vector3.ONE)
 	if absf(pitch) > 1e-6:
 		var soft_q := _quat_euler_xyz(pitch, 0.0, 0.0)
 		cur_q = (_soft_delta(name, soft_q) * cur_q).normalized()
@@ -258,9 +263,9 @@ func _nudge_spine(name: String, z_off: float, pitch: float, scale_xz: float) -> 
 		if parent != "" and rest_world_q.has(parent):
 			rest_w_p = rest_world_q[parent]
 		cur_p += rest_w_p.inverse() * Vector3(0.0, 0.0, z_off)
-	if scale_xz > 1e-7:
-		cur_s.x *= 1.0 + scale_xz * 4.0
-		cur_s.z *= 1.0 + scale_xz * 2.5
+	var sx := 1.0 + maxf(0.0, scale_xz) * 4.0
+	var sz := 1.0 + maxf(0.0, scale_xz) * 2.5
+	var cur_s := Vector3(base_s.x * sx, base_s.y, base_s.z * sz)
 	skeleton.set_bone_pose_rotation(i, cur_q)
 	skeleton.set_bone_pose_position(i, cur_p)
 	skeleton.set_bone_pose_scale(i, cur_s)
@@ -537,6 +542,11 @@ func debug_snapshot() -> Dictionary:
 			tip = skeleton.get_bone_global_pose(bone_i[tn]).origin
 		if hair_p.size() > 0:
 			tip_p = hair_p[hair_p.size() - 1]
+	var spine_scales := {}
+	for sn in ["C_Spine_a", "C_Spine_b", "C_Spine_c", "C_Spine_d"]:
+		if bone_i.has(sn):
+			var ss := skeleton.get_bone_pose_scale(bone_i[sn])
+			spine_scales[sn] = [ss.x, ss.y, ss.z]
 	return {
 		"blink_amt": blink_amt,
 		"blink_t": blink_t,
@@ -550,6 +560,7 @@ func debug_snapshot() -> Dictionary:
 		"hair_tip": [tip.x, tip.y, tip.z],
 		"hair_tip_rest": [tip_rest.x, tip_rest.y, tip_rest.z],
 		"hair_p_tip": [tip_p.x, tip_p.y, tip_p.z],
+		"spine_scales": spine_scales,
 	}
 
 
