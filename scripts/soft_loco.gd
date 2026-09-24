@@ -28,10 +28,14 @@ var dance_override: String = "" # dance1..dance8 while set
 var breath_t: float = 0.0
 var breath_in: float = 0.0
 var breath_chest: float = 0.0
-var breath_enabled: bool = true
+var breath_enabled: bool = false  # SoftSecondary owns breath now
+
+var secondary: RefCounted = null  # SoftSecondary
 
 var _qa := Quaternion.IDENTITY
 var _qb := Quaternion.IDENTITY
+
+const SoftSecondaryScript = preload("res://scripts/soft_secondary.gd")
 
 
 func setup(skel: Skeleton3D) -> bool:
@@ -73,6 +77,12 @@ func setup(skel: Skeleton3D) -> bool:
 		if i >= 0:
 			bone_idx[name] = i
 	print("SoftLoco: loaded %d clips, mapped %d/%d loco bones" % [clips.size(), bone_idx.size(), LOCO_BONES.size()])
+	secondary = SoftSecondaryScript.new()
+	if secondary.setup(skeleton):
+		print("SoftLoco: SoftSecondary attached")
+	else:
+		push_warning("SoftLoco: SoftSecondary.setup failed")
+		secondary = null
 	return true
 
 
@@ -340,9 +350,6 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 	if airborne or clip_name == "jump":
 		hip_y *= 0.18
 
-	# Breath (bone-level subtle chest/spine), skipped during dance/prone crawl extremes.
-	_update_breath(delta, sprint)
-
 	# Reset loco bones to rest, then apply.
 	for name in bone_idx.keys():
 		var i: int = bone_idx[name]
@@ -353,10 +360,6 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 		if not bone_idx.has(name):
 			continue
 		var soft_q: Quaternion = final_q[name]
-		# Optional tiny breath on spine/chest bones
-		if breath_enabled and (name == "C_Spine_b" or name == "C_Spine_c"):
-			var amp := 0.012 * breath_chest if name == "C_Spine_c" else 0.008 * breath_in
-			soft_q = _quat_from_euler_xyz(amp, 0.0, 0.0) * soft_q
 		var pose_q := _soft_to_godot_pose(name, soft_q)
 		skeleton.set_bone_pose_rotation(bone_idx[name], pose_q)
 
@@ -365,6 +368,10 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 		var o: Vector3 = rest_origin["C_Hip_a"]
 		# hipY is character-space Y offset (same as web poseOff.y)
 		skeleton.set_bone_pose_position(hip_i, o + Vector3(0.0, hip_y, 0.0))
+
+	# Secondary: hair Verlet + blink + full breath (after loco pose)
+	if secondary != null:
+		secondary.update(delta, sprint)
 
 
 func _update_breath(delta: float, sprint: bool) -> void:
@@ -412,4 +419,6 @@ func debug_sample_walk() -> Dictionary:
 			"pose": [q.x, q.y, q.z, q.w],
 			"delta_angle": 2.0 * acos(clampf(absf(delta_q.w), 0.0, 1.0)),
 		}
+	if secondary != null:
+		out["secondary"] = secondary.debug_snapshot()
 	return out

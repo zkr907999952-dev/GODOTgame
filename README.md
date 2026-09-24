@@ -32,7 +32,10 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 - 数据：`assets/characters/tifa/loco-clips.json`（与网页 `src/lib/softbody/loco-clips.json` 同源，26 段）
 - 选取逻辑对齐网页 `soft-skeleton.ts` 的 `pickLocoClip` / `applyLocomotion`：站立 idle / 走跑八向、下蹲、匍匐、跳跃；Shift 切 run*
 - 采样：欧拉 XYZ（loco）或四元数 slerp（dance）；姿态为角色空间 child-from-parent，经 rest 共轭后写入 `Skeleton3D.set_bone_pose_rotation` / `position`（含 hipY）
-- 附加：轻量骨骼级呼吸（胸/脊微调）。头发 Verlet、眨眼睑、软体内脏等**尚未**移植
+- 次级动画 `SoftSecondary`（`scripts/soft_secondary.gd`，默认全开，对齐网页）：
+  - **头发 Verlet**：`group=="hair"` 链（HairRoot…Hair_8），阻尼/惯性/长度约束，根随头骨刚体变换
+  - **眨眼**：睑骨 `L/R_(U|D)lid_[A-E]`，blinkT/nextBlink/blinkAmt 周期驱动
+  - **呼吸**：web 同款 breathAmp/Speed/Chest 波形，作用于 C_Spine_a..d（腹/胸骨位移+俯仰+轻缩放）；软笼顶点位移未移植
 
 ## 本地运行
 
@@ -89,6 +92,7 @@ scenes/maps/room.tscn
 scenes/maps/city.tscn
 scripts/player_controller.gd
 scripts/soft_loco.gd
+scripts/soft_secondary.gd
 scripts/map_collision.gd
 scripts/game_root.gd
 scripts/validate_headless.gd
