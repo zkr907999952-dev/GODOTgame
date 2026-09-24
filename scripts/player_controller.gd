@@ -15,6 +15,12 @@ const SoftLocoScript = preload("res://scripts/soft_loco.gd")
 @export var camera_height: float = 1.4
 @export var first_person: bool = false
 @export var fp_eye_height: float = 1.55
+@export var fp_fov: float = 62.0
+@export var tp_fov: float = 55.0
+@export var camera_distance_min: float = 1.2
+@export var camera_distance_max: float = 6.0
+@export var fp_fov_min: float = 50.0
+@export var fp_fov_max: float = 90.0
 
 var _yaw: float = 0.0
 var _pitch: float = -0.15
@@ -22,13 +28,16 @@ var _default_yaw: float = 0.0
 var _default_pitch: float = -0.15
 var _default_cam_dist: float = 2.8
 var _default_cam_height: float = 1.4
+var _default_fp_fov: float = 62.0
+var _default_tp_fov: float = 55.0
 var _gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
 var _loco: Node
 var _stance: String = "stand" # stand | crouch | prone
+## Capsule bottom ≈ 0 so soles (mesh AABB min.y ≈ 0) sit on the floor.
 var _capsule_stand_h: float = 1.1
-var _capsule_stand_y: float = 0.83
+var _capsule_stand_y: float = 0.55
 var _air_time: float = 0.0
-## When true, HUD has a panel open — do not auto-capture mouse on click.
+## When true, HUD has a panel open — do not auto-capture mouse on click / ignore wheel zoom.
 var ui_blocks_capture: bool = false
 
 @onready var _pivot: Node3D = $CameraPivot
@@ -42,7 +51,10 @@ func _ready() -> void:
 	_default_pitch = _pitch
 	_default_cam_dist = camera_distance
 	_default_cam_height = camera_height
+	_default_fp_fov = fp_fov
+	_default_tp_fov = tp_fov
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_align_capsule_to_feet()
 	_apply_camera()
 	_print_body_info()
 	_loco = SoftLocoScript.new()
@@ -71,6 +83,8 @@ func reset_camera() -> void:
 	_yaw = _default_yaw
 	_pitch = _default_pitch
 	camera_distance = _default_cam_dist
+	fp_fov = _default_fp_fov
+	tp_fov = _default_tp_fov
 	if _stance == "stand":
 		camera_height = _default_cam_height
 	_apply_camera()
@@ -78,6 +92,8 @@ func reset_camera() -> void:
 
 func set_first_person(enabled: bool) -> void:
 	first_person = enabled
+	# Keep character mesh visible in FP (body-view style); never hide MeshInstance3D.
+	_set_body_meshes_visible(true)
 	_apply_camera()
 
 
@@ -89,12 +105,40 @@ func set_mouse_sensitivity(v: float) -> void:
 	mouse_sensitivity = clampf(v, 0.0005, 0.02)
 
 
+func _set_body_meshes_visible(vis: bool) -> void:
+	for mi in _body.find_children("*", "MeshInstance3D", true, false):
+		(mi as MeshInstance3D).visible = vis
+
+
+## Place capsule so its bottom matches mesh soles (AABB min.y ≈ 0 in character space).
+func _align_capsule_to_feet() -> void:
+	if not (_col.shape is CapsuleShape3D):
+		return
+	var cap := _col.shape as CapsuleShape3D
+	# Mesh feet are at y≈0 (skinned GLB fitStanding). Old capsule bottom was ~0.28 → feet sank.
+	_col.position.y = cap.height * 0.5
+	_capsule_stand_h = cap.height
+	_capsule_stand_y = _col.position.y
+	print(
+		"player: capsule aligned bottom≈0 (h=%.3f y=%.3f)"
+		% [cap.height, _col.position.y]
+	)
+
+
 func _print_body_info() -> void:
 	var skel := _find_skeleton(_body)
 	if skel:
 		print("player: skeleton bones=", skel.get_bone_count())
 	var aabb := _calc_aabb(_body)
-	print("player: body AABB ", aabb, " feet≈", aabb.position.y, " height≈", aabb.size.y)
+	var cap_bottom := 0.0
+	if _col.shape is CapsuleShape3D:
+		cap_bottom = _col.position.y - (_col.shape as CapsuleShape3D).height * 0.5
+	print(
+		"player: body AABB ", aabb,
+		" feet≈", aabb.position.y,
+		" height≈", aabb.size.y,
+		" capsule_bottom≈", cap_bottom
+	)
 
 
 func _find_skeleton(n: Node) -> Skeleton3D:
@@ -116,12 +160,27 @@ func _calc_aabb(n: Node) -> AABB:
 			continue
 		var local := mesh_i.mesh.get_aabb()
 		var xf := mesh_i.global_transform
-		var world := AABB(xf * local.position, xf.basis * local.size)
+		var merged := AABB()
+		var init := true
+		for i in 8:
+			var corner := local.position + Vector3(
+				local.size.x if (i & 1) else 0.0,
+				local.size.y if (i & 2) else 0.0,
+				local.size.z if (i & 4) else 0.0
+			)
+			var w := xf * corner
+			if init:
+				merged = AABB(w, Vector3.ZERO)
+				init = false
+			else:
+				merged = merged.expand(w)
+		# Express relative to this CharacterBody3D origin.
+		merged.position -= global_position
 		if first:
-			result = world
+			result = merged
 			first = false
 		else:
-			result = result.merge(world)
+			result = result.merge(merged)
 	return result
 
 
@@ -132,6 +191,26 @@ func _unhandled_input(event: InputEvent) -> void:
 		_pitch -= mm.relative.y * mouse_sensitivity
 		_pitch = clampf(_pitch, min_pitch, max_pitch)
 		_apply_camera()
+	elif event is InputEventMouseButton and event.pressed:
+		var mb := event as InputEventMouseButton
+		if (
+			mb.button_index == MOUSE_BUTTON_WHEEL_UP
+			or mb.button_index == MOUSE_BUTTON_WHEEL_DOWN
+		):
+			if ui_blocks_capture:
+				return
+			var dir := 1.0 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0
+			if first_person:
+				# Wheel up = zoom in = narrower FOV.
+				fp_fov = clampf(fp_fov - dir * 3.0, fp_fov_min, fp_fov_max)
+			else:
+				camera_distance = clampf(
+					camera_distance - dir * 0.25, camera_distance_min, camera_distance_max
+				)
+			_apply_camera()
+		elif Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+			if not ui_blocks_capture:
+				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_ESCAPE:
@@ -154,9 +233,6 @@ func _unhandled_input(event: InputEvent) -> void:
 				if _loco:
 					_loco.call("clear_dance")
 					print("player: dance cleared")
-	elif event is InputEventMouseButton and event.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
-		if not ui_blocks_capture:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
 func _toggle_crouch() -> void:
@@ -183,18 +259,18 @@ func _apply_stance_capsule() -> void:
 	if not (_col.shape is CapsuleShape3D):
 		return
 	var cap := _col.shape as CapsuleShape3D
-	# Match web approx: stand h≈1.64 r0.3 → our stand 1.1; crouch 0.94; prone 0.42
+	# Keep capsule bottom ≈ 0 so feet stay on floor across stances.
 	match _stance:
 		"crouch":
 			cap.height = 0.64
 			cap.radius = 0.26
-			_col.position.y = 0.52
+			_col.position.y = cap.height * 0.5
 			camera_height = 0.85
 			fp_eye_height = 0.95
 		"prone":
 			cap.height = 0.28
 			cap.radius = 0.22
-			_col.position.y = 0.28
+			_col.position.y = cap.height * 0.5
 			camera_height = 0.45
 			fp_eye_height = 0.35
 		_:
@@ -209,9 +285,16 @@ func _apply_stance_capsule() -> void:
 func _apply_camera() -> void:
 	_pivot.rotation = Vector3(_pitch, _yaw, 0.0)
 	if first_person:
-		_camera.position = Vector3(0.0, fp_eye_height, 0.08)
+		# Eye-height pivot + slight forward offset; near plane low enough to see torso when looking down.
+		_pivot.position = Vector3(0.0, fp_eye_height, 0.0)
+		_camera.position = Vector3(0.0, 0.0, -0.12)
+		_camera.near = 0.05
+		_camera.fov = fp_fov
 	else:
-		_camera.position = Vector3(0.0, camera_height * 0.15, camera_distance)
+		_pivot.position = Vector3(0.0, camera_height, 0.0)
+		_camera.position = Vector3(0.0, 0.0, camera_distance)
+		_camera.near = 0.1
+		_camera.fov = tp_fov
 
 
 func _physics_process(delta: float) -> void:

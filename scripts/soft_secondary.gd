@@ -5,6 +5,8 @@ class_name SoftSecondary
 
 const RIG_PATH := "res://assets/characters/tifa/soft_rig_bones.json"
 const LID_RE := "^(L|R)_(U|D)lid_([A-E])$"
+## Web stepHair: indices 0..HAIR_PIN_MAX (HairRoot + next) stay rigid to FK; Verlet only for k > pin.
+const HAIR_PIN_MAX := 1
 
 var hair_enabled: bool = true
 var hair_damp: float = 0.01
@@ -371,6 +373,10 @@ func _soft_pose(name: String) -> Array:
 	return [soft_pos, soft_rot]
 
 
+func _hair_pinned(k: int) -> bool:
+	return k <= HAIR_PIN_MAX
+
+
 func _step_hair(d: float) -> void:
 	var n := hair_names.size()
 	var root_name: String = hair_names[0]
@@ -423,7 +429,7 @@ func _step_hair(d: float) -> void:
 	var max_step := 0.02 + hi * 0.04
 
 	for k3 in range(1, n):
-		if k3 <= 1:
+		if _hair_pinned(k3):
 			var gp2: Array = _soft_pose(hair_names[k3])
 			hair_p[k3] = gp2[0]
 			hair_prev[k3] = gp2[0]
@@ -466,7 +472,7 @@ func _step_hair(d: float) -> void:
 	for _iter in 3:
 		hair_p[0] = rp
 		for k4 in range(1, n):
-			if k4 <= 1:
+			if _hair_pinned(k4):
 				hair_p[k4] = _soft_pose(hair_names[k4])[0]
 				continue
 			var a: Vector3 = hair_p[k4 - 1]
@@ -479,14 +485,16 @@ func _step_hair(d: float) -> void:
 	for k5 in n:
 		var nm: String = hair_names[k5]
 		var bi: int = bone_i[nm]
-		if k5 <= 1:
+		if _hair_pinned(k5):
+			# Match web: q=identity, off=0 → Godot rest local (rigid follow head FK).
 			skeleton.set_bone_pose_rotation(bi, rest_local_q[nm])
 			skeleton.set_bone_pose_position(bi, rest_origin[nm])
+			skeleton.set_bone_pose_scale(bi, rest_scale.get(nm, Vector3.ONE))
 			continue
 
 		var soft_off := Vector3.ZERO
 		var par_name: String = bone_parent.get(nm, "")
-		if k5 > 0 and (k5 - 1) <= 1 and par_name != "":
+		if k5 > 0 and _hair_pinned(k5 - 1) and par_name != "":
 			var par_pose: Array = _soft_pose(par_name)
 			var rest_delta: Vector3 = rest_pos[nm] - rest_pos[par_name]
 			var to2: Vector3 = (par_pose[1] as Quaternion).inverse() * (
@@ -547,6 +555,18 @@ func debug_snapshot() -> Dictionary:
 		if bone_i.has(sn):
 			var ss := skeleton.get_bone_pose_scale(bone_i[sn])
 			spine_scales[sn] = [ss.x, ss.y, ss.z]
+	var pin_deltas := {}
+	for pk in range(mini(HAIR_PIN_MAX + 1, hair_names.size())):
+		var pn: String = hair_names[pk]
+		if not bone_i.has(pn):
+			continue
+		var pi: int = bone_i[pn]
+		var pq := skeleton.get_bone_pose_rotation(pi)
+		var rq: Quaternion = rest_local_q[pn]
+		var dq := rq.inverse() * pq
+		var dang := 2.0 * acos(clampf(absf(dq.w), 0.0, 1.0))
+		var dpos := (skeleton.get_bone_pose_position(pi) - (rest_origin[pn] as Vector3)).length()
+		pin_deltas[pn] = {"angle": dang, "pos": dpos}
 	return {
 		"blink_amt": blink_amt,
 		"blink_t": blink_t,
@@ -556,10 +576,12 @@ func debug_snapshot() -> Dictionary:
 		"breath_in": breath_in,
 		"breath_chest": breath_chest,
 		"hair_count": hair_names.size(),
+		"hair_pin_max": HAIR_PIN_MAX,
 		"lid_count": lid_names.size(),
 		"hair_tip": [tip.x, tip.y, tip.z],
 		"hair_tip_rest": [tip_rest.x, tip_rest.y, tip_rest.z],
 		"hair_p_tip": [tip_p.x, tip_p.y, tip_p.z],
+		"hair_pin_deltas": pin_deltas,
 		"spine_scales": spine_scales,
 	}
 

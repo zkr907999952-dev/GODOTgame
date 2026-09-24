@@ -20,6 +20,7 @@ var rest_local_q: Dictionary = {} # name -> Quaternion
 var rest_world_q: Dictionary = {} # name -> Quaternion (bind)
 var rest_origin: Dictionary = {} # name -> Vector3
 var rest_scale: Dictionary = {} # name -> Vector3
+var rest_pos: Dictionary = {} # name -> Vector3 (bind world origin, soft-rig space)
 
 var mode: String = "stand" # stand | crouch | prone
 var phase: float = 0.0
@@ -59,10 +60,13 @@ func setup(skel: Skeleton3D) -> bool:
 	rest_world_q.clear()
 	rest_origin.clear()
 	rest_scale.clear()
+	rest_pos.clear()
 	# Cache rest local + rest-world for every bone (parents of loco bones may be non-loco).
 	var n := skeleton.get_bone_count()
 	var world_by_idx: Array = []
 	world_by_idx.resize(n)
+	var world_xf: Array = []
+	world_xf.resize(n)
 	for i in n:
 		var rest := skeleton.get_bone_rest(i)
 		var pname := skeleton.get_bone_name(i)
@@ -72,9 +76,12 @@ func setup(skel: Skeleton3D) -> bool:
 		var parent := skeleton.get_bone_parent(i)
 		if parent < 0:
 			world_by_idx[i] = rest.basis.get_rotation_quaternion()
+			world_xf[i] = rest
 		else:
 			world_by_idx[i] = world_by_idx[parent] * rest.basis.get_rotation_quaternion()
+			world_xf[i] = world_xf[parent] * rest
 		rest_world_q[pname] = world_by_idx[i]
+		rest_pos[pname] = (world_xf[i] as Transform3D).origin
 	for name in LOCO_BONES:
 		var i := skeleton.find_bone(name)
 		if i >= 0:
@@ -221,6 +228,60 @@ func _nudge_idle_upright(pose_q: Dictionary) -> void:
 		pose_q[name] = _quat_from_euler_xyz(e.x, e.y, e.z)
 
 
+## Hang idle arms at sides, slightly behind torso (web nudgeIdleArmsBack, z pull -0.22).
+func _nudge_idle_arms_back(pose_q: Dictionary) -> void:
+	_pull_arm_back(pose_q, "L_UpperArm_a", "L_Forearm_a")
+	_pull_arm_back(pose_q, "R_UpperArm_a", "R_Forearm_a")
+
+
+func _pull_arm_back(pose_q: Dictionary, arm: String, child: String) -> void:
+	if not pose_q.has(arm):
+		return
+	if not rest_pos.has(arm) or not rest_pos.has(child):
+		return
+	var from: Vector3 = (rest_pos[child] as Vector3) - (rest_pos[arm] as Vector3)
+	if from.length_squared() < 1e-8:
+		return
+	from = from.normalized()
+	var q: Quaternion = pose_q[arm]
+	var to := q * from
+	var v := Vector3(to.x, to.y, minf(to.z - 0.22, 0.04))
+	if v.length_squared() < 1e-8:
+		return
+	v = v.normalized()
+	var dq := _quat_from_unit_vectors(to, v)
+	pose_q[arm] = (dq * q).normalized()
+
+
+func _quat_from_unit_vectors(from: Vector3, to: Vector3) -> Quaternion:
+	var v_from := from.normalized()
+	var v_to := to.normalized()
+	var r := v_from.dot(v_to) + 1.0
+	var qx: float
+	var qy: float
+	var qz: float
+	var qw: float
+	if r < 1e-6:
+		r = 0.0
+		if absf(v_from.x) > absf(v_from.z):
+			qx = -v_from.y
+			qy = v_from.x
+			qz = 0.0
+			qw = r
+		else:
+			qx = 0.0
+			qy = -v_from.z
+			qz = v_from.y
+			qw = r
+	else:
+		var c := v_from.cross(v_to)
+		qx = c.x
+		qy = c.y
+		qz = c.z
+		qw = r
+	return Quaternion(qx, qy, qz, qw).normalized()
+
+
 func _quat_to_euler_xyz(q: Quaternion) -> Vector3:
 	# THREE.js Quaternion → Euler XYZ
 	var sinr_cosp := 2.0 * (q.w * q.x + q.y * q.z)
@@ -344,6 +405,7 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 
 	if clip_name == "standIdle":
 		_nudge_idle_upright(final_q)
+		_nudge_idle_arms_back(final_q)
 
 	var hip_y0: float = float(rest_s["hipY"]) if rest_s != null else 0.0
 	var hip_y1: float = float(move["hipY"]) if move != null else hip_y0
@@ -401,6 +463,50 @@ func _breath_wave(t: float) -> float:
 		return 1.0
 	var u2 := (p - 0.44) / 0.56
 	return 1.0 - u2 * u2 * (3.0 - 2.0 * u2)
+
+
+## Sample standIdle after upright+arms-back nudges; returns soft quats for arm bones.
+func debug_sample_idle_arms() -> Dictionary:
+	if not clips.has("standIdle"):
+		return {"ok": false}
+	phase = 0.0
+	mode = "stand"
+	dance_override = ""
+	apply_pose(0.0, 0.0, 0.0, false, false, 0.016, 1.65)
+	var out := {"ok": true, "clip": current_clip, "arms": {}}
+	for name in ["L_UpperArm_a", "R_UpperArm_a", "L_Forearm_a", "R_Forearm_a"]:
+		if not bone_idx.has(name):
+			continue
+		var i: int = bone_idx[name]
+		var q := skeleton.get_bone_pose_rotation(i)
+		var rest_q: Quaternion = rest_local_q[name]
+		var delta_q := rest_q.inverse() * q
+		out["arms"][name] = {
+			"pose": [q.x, q.y, q.z, q.w],
+			"delta_angle": 2.0 * acos(clampf(absf(delta_q.w), 0.0, 1.0)),
+		}
+	# Also report soft-space upper-arm z pull via rest child direction
+	for arm_child in [["L_UpperArm_a", "L_Forearm_a"], ["R_UpperArm_a", "R_Forearm_a"]]:
+		var arm: String = arm_child[0]
+		var child: String = arm_child[1]
+		if not rest_pos.has(arm) or not rest_pos.has(child) or not bone_idx.has(arm):
+			continue
+		var from: Vector3 = (rest_pos[child] as Vector3) - (rest_pos[arm] as Vector3)
+		if from.length_squared() < 1e-8:
+			continue
+		from = from.normalized()
+		# Reconstruct soft_q from godot pose: soft = R_wp * pose * rest^{-1} * R_wp^{-1}
+		var pose_q := skeleton.get_bone_pose_rotation(bone_idx[arm])
+		var rest_q2: Quaternion = rest_local_q[arm]
+		var i2: int = bone_idx[arm]
+		var parent := skeleton.get_bone_parent(i2)
+		var rest_w_p := Quaternion.IDENTITY
+		if parent >= 0:
+			rest_w_p = rest_world_q.get(skeleton.get_bone_name(parent), Quaternion.IDENTITY)
+		var soft_q := rest_w_p * pose_q * rest_q2.inverse() * rest_w_p.inverse()
+		var to := soft_q * from
+		out["arms"][arm]["child_dir_z"] = to.z
+	return out
 
 
 ## Apply one walk frame for headless validation; returns diagnostic dict.

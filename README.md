@@ -19,7 +19,8 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 | C / Z | 切换匍匐 |
 | 1–8 | 预览舞蹈片段 dance1…dance8 |
 | 0 / 9 | 取消舞蹈，回到普通移动动画 |
-| 鼠标 | 第三人称环视（自动捕获） |
+| 鼠标 | 环视（自动捕获） |
+| 滚轮 | 第三人称：拉近/推远距离（1.2–6）；第一人称：FOV（50–90）；HUD 面板打开时忽略 |
 | Esc | 关闭 HUD 面板，或释放 / 重新捕获鼠标 |
 | M | 房间 ↔ 城市 切换 |
 | HUD「设置」 | 左上角：呼吸 / 眨眼 / 头发物理、鼠标灵敏度 |
@@ -34,7 +35,7 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 
 - **设置（左上）**：开关 `SoftSecondary` 的呼吸 / 眨眼 / 头发物理；鼠标灵敏度滑条；面板说明显隐。打开面板时释放鼠标便于点击。
 - **互动（右侧）**：五种模式按钮，写入 HUD 内部状态并显示「当前模式」文案。软体拖拽/打击等尚未接入，仅占位。
-- **摄像机**：重置视角；第一人称 / 第三人称切换（`player_controller`）；灵敏度（与设置共用）。
+- **摄像机**：重置视角；第一人称 / 第三人称切换（`player_controller`）；灵敏度（与设置共用）。第一人称保持身体网格可见（近裁剪面 ≈0.05，眼高相机），滚轮调 FOV。
 
 ## 动画（网页 loco-clips）
 
@@ -42,9 +43,11 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 
 - 数据：`assets/characters/tifa/loco-clips.json`（与网页 `src/lib/softbody/loco-clips.json` 同源，26 段）
 - 选取逻辑对齐网页 `soft-skeleton.ts` 的 `pickLocoClip` / `applyLocomotion`：站立 idle / 走跑八向、下蹲、匍匐、跳跃；Shift 切 run*
+- `standIdle`：`STAND_IDLE_MOTION=0.18`、`idle_slow=2.4`，并调用 `nudgeIdleUpright` + **`nudgeIdleArmsBack`**（上臂略向身后 z-0.22，与网页一致）
+- 碰撞胶囊底与网格脚底对齐（AABB min.y≈0，胶囊 bottom≈0），避免脚陷入地面
 - 采样：欧拉 XYZ（loco）或四元数 slerp（dance）；姿态为角色空间 child-from-parent，经 rest 共轭后写入 `Skeleton3D.set_bone_pose_rotation` / `position`（含 hipY）
 - 次级动画 `SoftSecondary`（`scripts/soft_secondary.gd`，默认全开，对齐网页）：
-  - **头发 Verlet**：`group=="hair"` 链（HairRoot…Hair_8），阻尼/惯性/长度约束，根随头骨刚体变换
+  - **头发 Verlet**：`group=="hair"` 链（HairRoot…Hair_8）；**k≤1（HairRoot+Hair_1）钉在骨架 FK**，仅下段 Verlet 摆动（对齐网页 `pinned = k <= 1`）
   - **眨眼**：睑骨 `L/R_(U|D)lid_[A-E]`，blinkT/nextBlink/blinkAmt 周期驱动
   - **呼吸**：web 同款 breathAmp/Speed/Chest 波形，作用于 C_Spine_a..d（腹/胸骨位移+俯仰+轻缩放）；缩放相对 **rest** 每帧写入（SoftLoco 同步重置 loco 骨 scale），避免指数膨胀；软笼顶点位移未移植
 
@@ -122,6 +125,7 @@ tools/bake_tifa_skinned.py
 
 - 城市首次进入会为大量网格生成 trimesh，加载稍慢；树叶无碰撞。
 - 动画为关键帧程序化驱动；已移植头发 Verlet / 眨眼 / 呼吸。软体脏器、刺刀等互动仍为 HUD 占位。
-- 下蹲/匍匐会缩放胶囊碰撞与相机高度；与网页第一人称胶囊数值近似而非完全一致。
+- 下蹲/匍匐会缩放胶囊碰撞与相机高度（底边仍贴地）；与网页第一人称胶囊数值近似而非完全一致。
+- 第一人称相机放在眼高，身体网格不隐藏；第三人称滚轮改 `camera_distance`，第一人称滚轮改 FOV。
 - 房间部分材质的法线贴图 UV 与基础色不一致时，Godot 会忽略法线 UV（引擎限制，有警告）。
 - 城市 GLB 已从网页版 meshopt 解压；若从网页重新拷贝 `city.glb`，需再跑解压脚本后再导入。

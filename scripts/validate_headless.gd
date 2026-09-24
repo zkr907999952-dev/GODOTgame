@@ -166,5 +166,83 @@ func _run() -> void:
 		quit(1)
 		return
 
+	# Hair pin: after tip motion, HairRoot + Hair_1 must stay at rest (identity soft).
+	var pin_snap: Dictionary = sec.call("debug_snapshot")
+	var pin_max := int(pin_snap.get("hair_pin_max", -1))
+	var pin_deltas: Dictionary = pin_snap.get("hair_pin_deltas", {})
+	print("validate: hair_pin_max=", pin_max, " deltas=", pin_deltas)
+	if pin_max != 1:
+		push_error("validate: expected hair_pin_max=1, got %s" % pin_max)
+		quit(1)
+		return
+	for pn in pin_deltas.keys():
+		var info: Dictionary = pin_deltas[pn]
+		if float(info.get("angle", 99.0)) > 0.02 or float(info.get("pos", 99.0)) > 0.002:
+			push_error("validate: pinned hair bone %s drifted %s" % [pn, info])
+			quit(1)
+			return
+	print("validate: hair pins OK (k<=1 rest-follow)")
+
+	# Idle arms-back: upper arms should differ from rest after standIdle nudge.
+	var idle: Dictionary = loco.call("debug_sample_idle_arms")
+	print("validate: idle arms ok=", idle.get("ok"), " clip=", idle.get("clip"))
+	var arms: Dictionary = idle.get("arms", {})
+	var arm_moved := 0
+	for aname in ["L_UpperArm_a", "R_UpperArm_a"]:
+		if not arms.has(aname):
+			continue
+		var ainfo: Dictionary = arms[aname]
+		var ang: float = float(ainfo.get("delta_angle", 0.0))
+		var cz = ainfo.get("child_dir_z", null)
+		print(
+			"validate: idle ", aname,
+			" delta_angle=", snappedf(ang, 0.0001),
+			" child_dir_z=", cz
+		)
+		if ang > 0.02:
+			arm_moved += 1
+	if arm_moved < 2:
+		push_error("validate: expected both upper arms nudged back, moved=%d" % arm_moved)
+		quit(1)
+		return
+	print("validate: idle arms-back OK")
+
+	# Feet / capsule: mesh AABB min.y ≈ 0 and capsule bottom ≈ 0.
+	var aabb_min_y := 999.0
+	var aabb_max_y := -999.0
+	for mi in player.find_children("*", "MeshInstance3D", true, false):
+		var mesh_i := mi as MeshInstance3D
+		if mesh_i == null or mesh_i.mesh == null:
+			continue
+		var local := mesh_i.mesh.get_aabb()
+		var xf := mesh_i.global_transform
+		for i in 8:
+			var corner := local.position + Vector3(
+				local.size.x if (i & 1) else 0.0,
+				local.size.y if (i & 2) else 0.0,
+				local.size.z if (i & 4) else 0.0
+			)
+			var wy: float = (xf * corner).y - player.global_position.y
+			aabb_min_y = minf(aabb_min_y, wy)
+			aabb_max_y = maxf(aabb_max_y, wy)
+	var col: CollisionShape3D = player.get_node("CollisionShape3D")
+	var cap_bottom := 0.0
+	if col.shape is CapsuleShape3D:
+		cap_bottom = col.position.y - (col.shape as CapsuleShape3D).height * 0.5
+	print(
+		"validate: feet AABB min.y=", snappedf(aabb_min_y, 0.0001),
+		" max.y=", snappedf(aabb_max_y, 0.0001),
+		" capsule_bottom=", snappedf(cap_bottom, 0.0001)
+	)
+	if absf(cap_bottom) > 0.05:
+		push_error("validate: capsule bottom should be ≈0, got %s" % cap_bottom)
+		quit(1)
+		return
+	if aabb_min_y < -0.08 or aabb_min_y > 0.08:
+		push_error("validate: mesh feet should be ≈0, got min.y=%s" % aabb_min_y)
+		quit(1)
+		return
+	print("validate: feet/capsule OK")
+
 	print("validate: OK")
 	quit(0)
