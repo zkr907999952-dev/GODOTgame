@@ -20,10 +20,21 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 | 1–8 | 预览舞蹈片段 dance1…dance8 |
 | 0 / 9 | 取消舞蹈，回到普通移动动画 |
 | 鼠标 | 第三人称环视（自动捕获） |
-| Esc | 释放 / 重新捕获鼠标 |
+| Esc | 关闭 HUD 面板，或释放 / 重新捕获鼠标 |
 | M | 房间 ↔ 城市 切换 |
+| HUD「设置」 | 左上角：呼吸 / 眨眼 / 头发物理、鼠标灵敏度 |
+| HUD「互动」 | 右侧：拖拽 / 打击 / 拳头 / 刺刀 / 肚脐（模式占位） |
+| HUD「摄像机」 | 重置视角、第一/三人称、灵敏度 |
 
 默认出生在**房间**；按 `M` 传送到城市出生点附近。
+
+## 界面（HUD）
+
+`scenes/ui/hud.tscn` + `scripts/hud.gd`，挂在主场景 CanvasLayer：
+
+- **设置（左上）**：开关 `SoftSecondary` 的呼吸 / 眨眼 / 头发物理；鼠标灵敏度滑条；面板说明显隐。打开面板时释放鼠标便于点击。
+- **互动（右侧）**：五种模式按钮，写入 HUD 内部状态并显示「当前模式」文案。软体拖拽/打击等尚未接入，仅占位。
+- **摄像机**：重置视角；第一人称 / 第三人称切换（`player_controller`）；灵敏度（与设置共用）。
 
 ## 动画（网页 loco-clips）
 
@@ -35,7 +46,7 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 - 次级动画 `SoftSecondary`（`scripts/soft_secondary.gd`，默认全开，对齐网页）：
   - **头发 Verlet**：`group=="hair"` 链（HairRoot…Hair_8），阻尼/惯性/长度约束，根随头骨刚体变换
   - **眨眼**：睑骨 `L/R_(U|D)lid_[A-E]`，blinkT/nextBlink/blinkAmt 周期驱动
-  - **呼吸**：web 同款 breathAmp/Speed/Chest 波形，作用于 C_Spine_a..d（腹/胸骨位移+俯仰+轻缩放）；软笼顶点位移未移植
+  - **呼吸**：web 同款 breathAmp/Speed/Chest 波形，作用于 C_Spine_a..d（腹/胸骨位移+俯仰+轻缩放）；缩放相对 **rest** 每帧写入（SoftLoco 同步重置 loco 骨 scale），避免指数膨胀；软笼顶点位移未移植
 
 ## 本地运行
 
@@ -95,7 +106,9 @@ scripts/soft_loco.gd
 scripts/soft_secondary.gd
 scripts/map_collision.gd
 scripts/game_root.gd
+scripts/hud.gd
 scripts/validate_headless.gd
+scenes/ui/hud.tscn
 assets/characters/tifa/Tifa_Web_Skinned.glb
 assets/characters/tifa/loco-clips.json
 assets/maps/room.glb
@@ -108,7 +121,7 @@ tools/bake_tifa_skinned.py
 ## 已知限制
 
 - 城市首次进入会为大量网格生成 trimesh，加载稍慢；树叶无碰撞。
-- 动画为关键帧程序化驱动；未移植网页头发 Verlet、眨眼、软体脏器、刺刀等。
+- 动画为关键帧程序化驱动；已移植头发 Verlet / 眨眼 / 呼吸。软体脏器、刺刀等互动仍为 HUD 占位。
 - 下蹲/匍匐会缩放胶囊碰撞与相机高度；与网页第一人称胶囊数值近似而非完全一致。
 - 房间部分材质的法线贴图 UV 与基础色不一致时，Godot 会忽略法线 UV（引擎限制，有警告）。
 - 城市 GLB 已从网页版 meshopt 解压；若从网页重新拷贝 `city.glb`，需再跑解压脚本后再导入。

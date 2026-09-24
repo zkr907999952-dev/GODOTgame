@@ -19,6 +19,7 @@ var bone_idx: Dictionary = {} # name -> int
 var rest_local_q: Dictionary = {} # name -> Quaternion
 var rest_world_q: Dictionary = {} # name -> Quaternion (bind)
 var rest_origin: Dictionary = {} # name -> Vector3
+var rest_scale: Dictionary = {} # name -> Vector3
 
 var mode: String = "stand" # stand | crouch | prone
 var phase: float = 0.0
@@ -57,6 +58,7 @@ func setup(skel: Skeleton3D) -> bool:
 	rest_local_q.clear()
 	rest_world_q.clear()
 	rest_origin.clear()
+	rest_scale.clear()
 	# Cache rest local + rest-world for every bone (parents of loco bones may be non-loco).
 	var n := skeleton.get_bone_count()
 	var world_by_idx: Array = []
@@ -66,6 +68,7 @@ func setup(skel: Skeleton3D) -> bool:
 		var pname := skeleton.get_bone_name(i)
 		rest_local_q[pname] = rest.basis.get_rotation_quaternion()
 		rest_origin[pname] = rest.origin
+		rest_scale[pname] = rest.basis.get_scale()
 		var parent := skeleton.get_bone_parent(i)
 		if parent < 0:
 			world_by_idx[i] = rest.basis.get_rotation_quaternion()
@@ -350,11 +353,12 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 	if airborne or clip_name == "jump":
 		hip_y *= 0.18
 
-	# Reset loco bones to rest, then apply.
+	# Reset loco bones to rest (incl. scale), then apply — prevents dirty scale from breath.
 	for name in bone_idx.keys():
 		var i: int = bone_idx[name]
 		skeleton.set_bone_pose_rotation(i, rest_local_q[name])
 		skeleton.set_bone_pose_position(i, rest_origin[name])
+		skeleton.set_bone_pose_scale(i, rest_scale.get(name, Vector3.ONE))
 
 	for name in final_q.keys():
 		if not bone_idx.has(name):

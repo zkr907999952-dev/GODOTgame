@@ -1,9 +1,10 @@
-[gd_scene load_steps=5 format=3 uid="uid://cmainscene001"]
+[gd_scene load_steps=6 format=3 uid="uid://cmainscene001"]
 
 [ext_resource type="Script" path="res://scripts/game_root.gd" id="1_root"]
 [ext_resource type="PackedScene" path="res://scenes/characters/tifa.tscn" id="2_player"]
 [ext_resource type="PackedScene" path="res://scenes/maps/room.tscn" id="3_room"]
 [ext_resource type="PackedScene" path="res://scenes/maps/city.tscn" id="4_city"]
+[ext_resource type="PackedScene" path="res://scenes/ui/hud.tscn" id="5_hud"]
 
 [node name="Main" type="Node3D"]
 script = ExtResource("1_root")
@@ -18,7 +19,6 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.5, 2.2, 1.2)
 light_energy = 0.55
 omni_range = 8.0
 
-
 [node name="Room" parent="." instance=ExtResource("3_room")]
 
 [node name="City" parent="." instance=ExtResource("4_city")]
@@ -26,3 +26,5 @@ visible = false
 
 [node name="Player" parent="." instance=ExtResource("2_player")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.2, 0.1, 0.3)
+
+[node name="HUD" parent="." instance=ExtResource("5_hud")]

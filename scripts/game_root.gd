@@ -1,9 +1,10 @@
 extends Node3D
-## 主场景：默认在房间，按 M 切换城市。
+## 主场景：默认在房间，按 M 切换城市。挂载中文 HUD。
 
 @onready var _room: Node3D = $Room
 @onready var _city: Node3D = $City
 @onready var _player: CharacterBody3D = $Player
+@onready var _hud: CanvasLayer = $HUD
 
 const ROOM_SPAWN := Vector3(-0.2, 0.1, 0.3)
 const CITY_SPAWN := Vector3(42.5, 2.0, 40.2)
@@ -13,7 +14,9 @@ var _in_city: bool = false
 
 func _ready() -> void:
 	_show_home()
-	print("game_root: ready — WASD+Shift+Space, Ctrl crouch, C/Z prone, 1-8 dance, M map")
+	if _hud and _hud.has_method("setup"):
+		_hud.call("setup", _player)
+	print("game_root: ready — WASD+Shift+Space, Ctrl crouch, C/Z prone, 1-8 dance, M map, HUD 设置/互动/摄像机")
 
 
 func _unhandled_input(event: InputEvent) -> void:
