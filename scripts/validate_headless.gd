@@ -1,12 +1,13 @@
 extends SceneTree
-## 无头自检：导入主场景，打印角色 AABB / 骨骼数，然后退出。
+## 无头自检：导入主场景，采样 walk 姿态，打印非单位骨骼旋转。
+
+const SoftLocoScript = preload("res://scripts/soft_loco.gd")
 
 func _initialize() -> void:
 	call_deferred("_run")
 
 
 func _run() -> void:
-	var err := OK
 	print("validate: loading main...")
 	var packed := load("res://scenes/main.tscn")
 	if packed == null:
@@ -15,6 +16,7 @@ func _run() -> void:
 		return
 	var main: Node = packed.instantiate()
 	root.add_child(main)
+	await process_frame
 	await process_frame
 	await process_frame
 
@@ -28,42 +30,36 @@ func _run() -> void:
 	for n in player.find_children("*", "Skeleton3D", true, false):
 		skel = n
 		break
-	if skel:
-		print("validate: bones=", skel.get_bone_count())
-		if skel.get_bone_count() > 0:
-			var tip := skel.get_bone_global_pose(0).origin
-			print("validate: bone0 tip=", tip)
-	else:
-		print("validate: WARNING no Skeleton3D")
+	if skel == null:
+		push_error("validate: no Skeleton3D")
+		quit(1)
+		return
+	print("validate: bones=", skel.get_bone_count())
 
-	var mesh_count := 0
-	var merged := AABB()
-	var first := true
-	for mi in player.find_children("*", "MeshInstance3D", true, false):
-		var m := mi as MeshInstance3D
-		if m.mesh == null:
-			continue
-		mesh_count += 1
-		var a := m.mesh.get_aabb()
-		var xf := m.global_transform
-		var corners: Array[Vector3] = []
-		for i in 8:
-			corners.append(xf * a.get_endpoint(i))
-		var mn := corners[0]
-		var mx := corners[0]
-		for c in corners:
-			mn = mn.min(c)
-			mx = mx.max(c)
-		var world := AABB(mn, mx - mn)
-		if first:
-			merged = world
-			first = false
-		else:
-			merged = merged.merge(world)
-	print("validate: meshes=", mesh_count, " AABB=", merged)
-	print("validate: feet_y≈", merged.position.y, " height≈", merged.size.y)
+	var loco: Node = null
+	for c in player.get_children():
+		if c.get_script() == SoftLocoScript:
+			loco = c
+			break
+	if loco == null:
+		push_error("validate: SoftLoco missing on Player")
+		quit(1)
+		return
 
-	var room := main.get_node_or_null("Room")
-	var city := main.get_node_or_null("City")
-	print("validate: room=", room != null, " city=", city != null)
+	var diag: Dictionary = loco.call("debug_sample_walk")
+	print("validate: walk sample ok=", diag.get("ok"), " clip=", diag.get("clip"))
+	var bones: Dictionary = diag.get("bones", {})
+	var non_id := 0
+	for name in bones.keys():
+		var info: Dictionary = bones[name]
+		var ang: float = float(info.get("delta_angle", 0.0))
+		print("validate: bone ", name, " delta_angle=", snappedf(ang, 0.0001), " rad")
+		if ang > 0.02:
+			non_id += 1
+	if non_id < 2:
+		push_error("validate: expected several non-identity loco bone deltas, got %d" % non_id)
+		quit(1)
+		return
+	print("validate: non-identity loco bones=", non_id)
+	print("validate: OK")
 	quit(0)

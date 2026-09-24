@@ -13,7 +13,7 @@ var _in_city: bool = false
 
 func _ready() -> void:
 	_show_home()
-	print("game_root: ready — WASD move, mouse look, M toggle map, Esc release mouse")
+	print("game_root: ready — WASD+Shift+Space, Ctrl crouch, C/Z prone, 1-8 dance, M map")
 
 
 func _unhandled_input(event: InputEvent) -> void:
