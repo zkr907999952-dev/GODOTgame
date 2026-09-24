@@ -1,10 +1,11 @@
-[gd_scene load_steps=6 format=3 uid="uid://cmainscene001"]
+[gd_scene load_steps=7 format=3 uid="uid://cmainscene001"]
 
 [ext_resource type="Script" path="res://scripts/game_root.gd" id="1_root"]
 [ext_resource type="PackedScene" path="res://scenes/characters/tifa.tscn" id="2_player"]
 [ext_resource type="PackedScene" path="res://scenes/maps/room.tscn" id="3_room"]
 [ext_resource type="PackedScene" path="res://scenes/maps/city.tscn" id="4_city"]
 [ext_resource type="PackedScene" path="res://scenes/ui/hud.tscn" id="5_hud"]
+[ext_resource type="PackedScene" path="res://scenes/maps/room_mirror.tscn" id="6_mirror"]
 
 [node name="Main" type="Node3D"]
 script = ExtResource("1_root")
@@ -20,6 +21,8 @@ light_energy = 0.55
 omni_range = 8.0
 
 [node name="Room" parent="." instance=ExtResource("3_room")]
+
+[node name="RoomMirror" parent="." instance=ExtResource("6_mirror")]
 
 [node name="City" parent="." instance=ExtResource("4_city")]
 visible = false

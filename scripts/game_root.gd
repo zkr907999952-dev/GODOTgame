@@ -2,6 +2,7 @@ extends Node3D
 ## 主场景：默认在房间，按 M 切换城市。挂载中文 HUD。
 
 @onready var _room: Node3D = $Room
+@onready var _room_mirror: Node3D = $RoomMirror
 @onready var _city: Node3D = $City
 @onready var _player: CharacterBody3D = $Player
 @onready var _hud: CanvasLayer = $HUD
@@ -16,7 +17,7 @@ func _ready() -> void:
 	_show_home()
 	if _hud and _hud.has_method("setup"):
 		_hud.call("setup", _player)
-	print("game_root: ready — WASD+Shift+Space, hold Ctrl/C crouch, Z prone, 1-8 dance, M map, HUD 设置/互动/摄像机")
+	print("game_root: ready — Tab 模式, WASD+Shift+Space, hold Ctrl/C crouch, Z prone, 1-8 dance, M map, HUD 设置/互动/摄像机")
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -31,6 +32,8 @@ func _unhandled_input(event: InputEvent) -> void:
 func _show_home() -> void:
 	_in_city = false
 	_room.visible = true
+	if _room_mirror:
+		_room_mirror.visible = true
 	_city.visible = false
 	_set_colliders_enabled(_city, false)
 	_set_colliders_enabled(_room, true)
@@ -42,6 +45,8 @@ func _show_home() -> void:
 func _show_city() -> void:
 	_in_city = true
 	_room.visible = false
+	if _room_mirror:
+		_room_mirror.visible = false
 	_city.visible = true
 	if _city.has_method("ensure_collisions"):
 		_city.ensure_collisions()

@@ -30,6 +30,7 @@ var _chk_hair: CheckButton
 var _sens_slider: HSlider
 var _cam_sens_slider: HSlider
 var _btn_fp: Button
+var _btn_play_mode: Button
 var _interact_status: Label
 var _mode_buttons: Dictionary = {}  # id -> Button
 
@@ -90,7 +91,7 @@ func _build_ui() -> void:
 	right_bar.add_child(_btn_interact)
 
 	_status = Label.new()
-	_status.text = "Esc 释放鼠标 · 打开面板时显示光标"
+	_status.text = "Tab 切换模式 · Esc 释放鼠标 · 打开面板时显示光标"
 	_status.add_theme_font_size_override("font_size", 13)
 	_status.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92, 0.85))
 	_status.position = Vector2(16, 56)
@@ -303,11 +304,27 @@ func _build_camera_panel() -> PanelContainer:
 	reset_b.pressed.connect(_on_reset_camera)
 	v.add_child(reset_b)
 
+	_btn_play_mode = Button.new()
+	_btn_play_mode.text = "展示互动模式"
+	_btn_play_mode.custom_minimum_size = Vector2(200, 32)
+	_style_button(_btn_play_mode, true)
+	_btn_play_mode.pressed.connect(_on_toggle_play_mode)
+	v.add_child(_btn_play_mode)
+
+	var mode_hint := Label.new()
+	mode_hint.text = "Tab 切换 · 展示=第三人称注视 / 控制=第一人称移动"
+	mode_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	mode_hint.custom_minimum_size = Vector2(200, 0)
+	mode_hint.add_theme_font_size_override("font_size", 11)
+	mode_hint.add_theme_color_override("font_color", Color(0.7, 0.74, 0.8))
+	v.add_child(mode_hint)
+
 	_btn_fp = Button.new()
 	_btn_fp.text = "第三人称"
 	_btn_fp.custom_minimum_size = Vector2(200, 32)
 	_style_button(_btn_fp, false)
 	_btn_fp.pressed.connect(_on_toggle_fp)
+	_btn_fp.visible = false  # superseded by play mode; keep for sync safety
 	v.add_child(_btn_fp)
 
 	var sens_l := Label.new()
@@ -359,11 +376,15 @@ func _set_mouse_for_ui(open: bool) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
-		if _open != PanelId.NONE:
-			_close_all_panels()
-			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-			get_viewport().set_input_as_handled()
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_ESCAPE:
+			if _open != PanelId.NONE:
+				_close_all_panels()
+				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+				get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_TAB:
+			# Player also toggles; refresh chrome labels.
+			call_deferred("_sync_from_systems")
 
 
 func _sync_from_systems() -> void:
@@ -378,6 +399,16 @@ func _sync_from_systems() -> void:
 	if "first_person" in _player and _btn_fp:
 		_btn_fp.text = "第一人称" if bool(_player.first_person) else "第三人称"
 		_style_button(_btn_fp, bool(_player.first_person))
+	if _btn_play_mode and _player.has_method("is_display_mode"):
+		var disp: bool = bool(_player.call("is_display_mode"))
+		_btn_play_mode.text = "展示互动模式" if disp else "角色控制模式"
+		_style_button(_btn_play_mode, disp)
+		if _status:
+			_status.text = (
+				("展示互动 · 第三人称注视 · 不可移动 · Tab 切换")
+				if disp
+				else ("角色控制 · 第一人称可移动 · Tab 切换")
+			)
 	var sec: RefCounted = null
 	if _player.has_method("get_secondary"):
 		sec = _player.call("get_secondary")
@@ -448,8 +479,17 @@ func _on_reset_camera() -> void:
 
 
 func _on_toggle_fp() -> void:
-	if _player and _player.has_method("toggle_first_person"):
+	if _player and _player.has_method("toggle_play_mode"):
+		_player.call("toggle_play_mode")
+		_sync_from_systems()
+	elif _player and _player.has_method("toggle_first_person"):
 		_player.call("toggle_first_person")
+		_sync_from_systems()
+
+
+func _on_toggle_play_mode() -> void:
+	if _player and _player.has_method("toggle_play_mode"):
+		_player.call("toggle_play_mode")
 		_sync_from_systems()
 
 

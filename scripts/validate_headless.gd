@@ -318,5 +318,72 @@ func _run() -> void:
 			return
 	print("validate: pick_clip samples OK")
 
+	# Play modes: start DISPLAY; toggle to CONTROL (FP+move); back recentres TP.
+	if not player.has_method("set_play_mode"):
+		push_error("validate: set_play_mode missing")
+		quit(1)
+		return
+	# Enum order: DISPLAY=0, CONTROL=1
+	player.call("set_play_mode", 0)
+	await process_frame
+	if bool(player.first_person) or not bool(player.call("is_display_mode")):
+		push_error("validate: expected DISPLAY (TP, not FP) on start path")
+		quit(1)
+		return
+	# Head meshes should be visible in DISPLAY.
+	var head_hidden := 0
+	var head_total := 0
+	for mi in player.find_children("*", "MeshInstance3D", true, false):
+		var mesh_i := mi as MeshInstance3D
+		if mesh_i == null:
+			continue
+		var low := mesh_i.name.to_lower()
+		var is_head := ("_head_" in low or "hair" in low or "_eye_" in low or "_007_" in mesh_i.name)
+		if not is_head:
+			continue
+		head_total += 1
+		if not mesh_i.visible:
+			head_hidden += 1
+	print("validate: DISPLAY head meshes total=", head_total, " hidden=", head_hidden)
+	if head_total > 0 and head_hidden > 0:
+		push_error("validate: DISPLAY should show head/hair/eyes, hidden=%d" % head_hidden)
+		quit(1)
+		return
+	player.call("set_play_mode", 1)  # CONTROL
+	await process_frame
+	if not bool(player.first_person) or bool(player.call("is_display_mode")):
+		push_error("validate: CONTROL should be first_person")
+		quit(1)
+		return
+	var pos_before: Vector3 = player.global_position
+	player.global_position = pos_before + Vector3(0.4, 0.0, -0.3)
+	player.call("set_play_mode", 0)  # back to DISPLAY — orbit pivot follows character
+	await process_frame
+	var pivot: Node3D = player.get_node("CameraPivot")
+	var pivot_world: Vector3 = pivot.global_position
+	var dist_xz := Vector2(pivot_world.x - player.global_position.x, pivot_world.z - player.global_position.z).length()
+	print(
+		"validate: DISPLAY recenter pivot_xz_dist=", snappedf(dist_xz, 0.0001),
+		" player=", player.global_position
+	)
+	if dist_xz > 0.05:
+		push_error("validate: TP pivot should be on character after switch to DISPLAY")
+		quit(1)
+		return
+	print("validate: play modes OK")
+
+	# Room mirror present on main.
+	var mirror := main.get_node_or_null("RoomMirror")
+	if mirror == null:
+		push_error("validate: RoomMirror missing from main")
+		quit(1)
+		return
+	print("validate: RoomMirror at ", mirror.global_position)
+	if mirror.global_position.distance_to(Vector3(0.0, 1.12, 0.948)) > 0.05:
+		push_error("validate: RoomMirror position mismatch")
+		quit(1)
+		return
+	print("validate: RoomMirror OK")
+
 	print("validate: OK")
 	quit(0)

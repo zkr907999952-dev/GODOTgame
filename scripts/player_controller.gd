@@ -1,9 +1,11 @@
 extends CharacterBody3D
 
 const SoftLocoScript = preload("res://scripts/soft_loco.gd")
-## 第三人称角色控制器：WASD 移动 + SoftLoco 网页 loco 动画驱动 Skeleton3D。
+## 角色控制器：展示互动 / 角色控制 双模式 + SoftLoco 网页 loco 动画驱动 Skeleton3D。
 ## Web loco bind: mesh faces +Z; Godot move uses -Z forward → visual Body needs π yaw offset.
 const BODY_YAW_OFFSET := PI
+
+enum GameMode { DISPLAY, CONTROL }
 
 @export var move_speed: float = 1.65
 @export var sprint_speed: float = 4.125  # 1.65 * 2.5 like web
@@ -16,6 +18,8 @@ const BODY_YAW_OFFSET := PI
 @export var camera_distance: float = 2.8
 @export var camera_height: float = 1.4
 @export var first_person: bool = false
+## 默认展示互动：第三人称、锁移动、注视相机。Tab / HUD 切换到角色控制（第一人称可移动）。
+@export var play_mode: GameMode = GameMode.DISPLAY
 @export var fp_eye_height: float = 1.52  # web stand stanceEye.y
 @export var fp_fov: float = 62.0
 @export var tp_fov: float = 55.0
@@ -67,7 +71,6 @@ func _ready() -> void:
 	_default_tp_fov = tp_fov
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_align_capsule_to_feet()
-	_apply_camera()
 	_print_body_info()
 	_loco = SoftLocoScript.new()
 	add_child(_loco)
@@ -79,6 +82,8 @@ func _ready() -> void:
 	if _col.shape is CapsuleShape3D:
 		_capsule_stand_h = (_col.shape as CapsuleShape3D).height
 		_capsule_stand_y = _col.position.y
+	# Start in Display/Interact (TP, no move, gaze→camera).
+	set_play_mode(GameMode.DISPLAY)
 
 
 func get_loco() -> Node:
@@ -103,17 +108,50 @@ func reset_camera() -> void:
 
 
 func set_first_person(enabled: bool) -> void:
-	first_person = enabled
-	_apply_fp_mesh_visibility()
-	if not first_person:
-		var sec := get_secondary()
-		if sec:
-			sec.call("clear_body_look")
-	_apply_camera()
+	# Prefer set_play_mode; kept for HUD backward-compat → maps to CONTROL/DISPLAY.
+	set_play_mode(GameMode.CONTROL if enabled else GameMode.DISPLAY)
 
 
 func toggle_first_person() -> void:
-	set_first_person(not first_person)
+	toggle_play_mode()
+
+
+func get_play_mode() -> GameMode:
+	return play_mode
+
+
+func is_display_mode() -> bool:
+	return play_mode == GameMode.DISPLAY
+
+
+func set_play_mode(mode: GameMode) -> void:
+	var prev := play_mode
+	play_mode = mode
+	first_person = mode == GameMode.CONTROL
+	if mode == GameMode.DISPLAY:
+		# Recentre TP orbit on character (CameraPivot is child — already follows).
+		# Keep current yaw/pitch/distance so the view does not jump wildly from FP.
+		_pivot.position = Vector3(0.0, camera_height, 0.0)
+		var sec := get_secondary()
+		if sec:
+			sec.call("clear_body_look")
+	else:
+		var sec2 := get_secondary()
+		if sec2:
+			sec2.call("clear_gaze")
+	_apply_fp_mesh_visibility()
+	_apply_camera()
+	if prev != mode:
+		print(
+			"player: play_mode=",
+			"DISPLAY" if mode == GameMode.DISPLAY else "CONTROL"
+		)
+
+
+func toggle_play_mode() -> void:
+	set_play_mode(
+		GameMode.CONTROL if play_mode == GameMode.DISPLAY else GameMode.DISPLAY
+	)
 
 
 func set_mouse_sensitivity(v: float) -> void:
@@ -252,6 +290,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
+			KEY_TAB:
+				toggle_play_mode()
 			KEY_ESCAPE:
 				# HUD handles Esc first via its own _unhandled_input (higher priority when panel open).
 				# Fallback: release / re-capture mouse when no UI consuming Esc.
@@ -377,7 +417,9 @@ func debug_fp_eye_y(stance: String = "") -> float:
 
 
 func _physics_process(delta: float) -> void:
-	_update_crouch_hold()
+	var display := play_mode == GameMode.DISPLAY
+	if not display:
+		_update_crouch_hold()
 	_update_fp_eye_blend(delta)
 
 	var on_floor := is_on_floor()
@@ -386,17 +428,19 @@ func _physics_process(delta: float) -> void:
 		_air_time += delta
 	else:
 		_air_time = 0.0
-		if Input.is_action_just_pressed("jump"):
+		if not display and Input.is_action_just_pressed("jump"):
 			if _stance == "prone":
 				_stance = "stand"
 				_apply_stance_capsule()
 			else:
 				velocity.y = jump_velocity
 
-	var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+	var input_dir := Vector2.ZERO
+	if not display:
+		input_dir = Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 	var basis_yaw := Basis(Vector3.UP, _yaw)
 	var direction := (basis_yaw * Vector3(input_dir.x, 0.0, input_dir.y)).normalized()
-	var sprinting := Input.is_action_pressed("sprint") and _stance == "stand"
+	var sprinting := (not display) and Input.is_action_pressed("sprint") and _stance == "stand"
 	var speed := move_speed
 	match _stance:
 		"crouch":
@@ -406,7 +450,14 @@ func _physics_process(delta: float) -> void:
 		_:
 			speed = sprint_speed if sprinting else move_speed
 
-	if direction != Vector3.ZERO:
+	if display:
+		# Lock locomotion — stand in place for display / tool interaction.
+		velocity.x = 0.0
+		velocity.z = 0.0
+		direction = Vector3.ZERO
+		input_dir = Vector2.ZERO
+		sprinting = false
+	elif direction != Vector3.ZERO:
 		velocity.x = direction.x * speed
 		velocity.z = direction.z * speed
 	else:
@@ -414,7 +465,8 @@ func _physics_process(delta: float) -> void:
 		velocity.z = move_toward(velocity.z, 0.0, speed)
 
 	# Visual facing: mesh +Z vs Godot -Z → BODY_YAW_OFFSET (π).
-	# FP: lock body yaw to camera yaw every frame; TP: face move dir when walking.
+	# CONTROL/FP: lock body yaw to camera; DISPLAY: keep current facing (gaze handles head).
+	# TP walk: face move dir when walking.
 	var face_yaw: float
 	if first_person:
 		face_yaw = _yaw + BODY_YAW_OFFSET
@@ -429,13 +481,17 @@ func _physics_process(delta: float) -> void:
 
 	move_and_slide()
 
-	# FP: set body look BEFORE apply_pose so SoftSecondary applies it same frame.
+	# CONTROL/FP: body look BEFORE apply_pose. DISPLAY: gaze at active camera.
+	var sec2 := get_secondary()
 	if first_person:
-		var sec2 := get_secondary()
 		if sec2:
 			var body_logic_yaw := _body.rotation.y - BODY_YAW_OFFSET
 			var rel_yaw := wrapf(_yaw - body_logic_yaw, -PI, PI)
 			sec2.call("set_body_look", rel_yaw, _pitch)
+			sec2.call("clear_gaze")
+	elif display and sec2:
+		sec2.call("clear_body_look")
+		sec2.call("set_gaze_target", _camera.global_position)
 
 	if _loco:
 		# After π visual offset, mesh forward = Body +Z. Invert prior -Z fwd/side signs.

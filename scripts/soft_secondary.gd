@@ -69,6 +69,19 @@ var body_look_on: bool = false
 var body_look_yaw: float = 0.0
 var body_look_pitch: float = 0.0
 
+## Display-mode gaze: head + eyes look at a world-space point (usually the active Camera3D).
+var gaze_want: bool = false
+var gaze_target: Vector3 = Vector3.ZERO
+var gaze_blend: float = 0.0
+var gaze_eye_blend: float = 0.0
+var gaze_neck_blend: float = 0.0
+var gaze_neck_yaw: float = 0.0
+var gaze_neck_pitch: float = 0.0
+var gaze_head_yaw: float = 0.0
+var gaze_head_pitch: float = 0.0
+var gaze_eye_yaw: float = 0.0
+var gaze_eye_pitch: float = 0.0
+
 var _rng := RandomNumberGenerator.new()
 
 
@@ -193,6 +206,18 @@ func clear_body_look() -> void:
 	body_look_pitch = 0.0
 
 
+func set_gaze_target(point: Vector3) -> void:
+	gaze_want = true
+	gaze_target = point
+
+
+func clear_gaze() -> void:
+	gaze_want = false
+	gaze_blend = 0.0
+	gaze_eye_blend = 0.0
+	gaze_neck_blend = 0.0
+
+
 func blink_now() -> void:
 	debug_blink = -1.0
 	blink_t = 0.0
@@ -211,7 +236,12 @@ func update(delta: float, sprint: bool = false) -> void:
 
 	_update_breath(d)
 	_apply_breath()
-	_apply_body_look()
+	_update_gaze(d)
+	# FP body-look takes priority over display gaze.
+	if body_look_on:
+		_apply_body_look()
+	elif gaze_blend > 0.01 or gaze_eye_blend > 0.01 or gaze_neck_blend > 0.01:
+		_apply_gaze()
 
 	_update_blink(d)
 	close_l = clampf(1.0 - eye_open_l * (1.0 - blink_amt), 0.0, 1.0)
@@ -299,6 +329,74 @@ func _nudge_spine(name: String, y_off: float, pitch: float, scale_xz: float) -> 
 	skeleton.set_bone_pose_rotation(i, cur_q)
 	skeleton.set_bone_pose_position(i, cur_p)
 	skeleton.set_bone_pose_scale(i, cur_s)
+
+
+func _bone_world_xform(bone_name: String) -> Transform3D:
+	if skeleton == null or not bone_i.has(bone_name):
+		return Transform3D.IDENTITY
+	var i: int = bone_i[bone_name]
+	return skeleton.global_transform * skeleton.get_bone_global_pose(i)
+
+
+func _update_gaze(d: float) -> void:
+	if skeleton == null or not bone_i.has("C_Head_a") or not bone_i.has("C_Spine_c"):
+		gaze_blend += (0.0 - gaze_blend) * (1.0 - exp(-8.0 * d))
+		gaze_eye_blend += (0.0 - gaze_eye_blend) * (1.0 - exp(-8.0 * d))
+		gaze_neck_blend += (0.0 - gaze_neck_blend) * (1.0 - exp(-8.0 * d))
+		return
+	var head_xf := _bone_world_xform("C_Head_a")
+	var spine_xf := _bone_world_xform("C_Spine_c")
+	var to := gaze_target - head_xf.origin
+	var dist := to.length()
+	if dist < 0.02 or not gaze_want:
+		gaze_blend += (0.0 - gaze_blend) * (1.0 - exp(-8.0 * d))
+		gaze_eye_blend += (0.0 - gaze_eye_blend) * (1.0 - exp(-8.0 * d))
+		gaze_neck_blend += (0.0 - gaze_neck_blend) * (1.0 - exp(-8.0 * d))
+		return
+	to /= dist
+	# Soft skeleton: +Z forward, +X right, +Y up (matches web wrot).
+	var fwd := spine_xf.basis.z.normalized()
+	var right := spine_xf.basis.x.normalized()
+	var up := spine_xf.basis.y.normalized()
+	var yaw := atan2(to.dot(right), to.dot(fwd))
+	var pitch := -atan2(to.dot(up), maxf(1e-6, Vector2(to.dot(right), to.dot(fwd)).length()))
+	var in_range := absf(yaw) < 1.78 and pitch > -1.32 and pitch < 1.12
+	var want := 1.0 if (gaze_want and in_range) else 0.0
+	gaze_blend += (want - gaze_blend) * (1.0 - exp(-6.5 * d))
+	gaze_eye_blend += (want - gaze_eye_blend) * (1.0 - exp(-16.0 * d))
+	gaze_neck_blend += (want - gaze_neck_blend) * (1.0 - exp(-3.4 * d))
+	if gaze_blend < 0.002:
+		gaze_blend = 0.0
+	if gaze_eye_blend < 0.002:
+		gaze_eye_blend = 0.0
+	if gaze_neck_blend < 0.002:
+		gaze_neck_blend = 0.0
+	var neck_yaw := clampf(yaw * 0.64, -1.22, 1.22)
+	var rest_yaw := yaw - neck_yaw
+	var head_yaw := clampf(rest_yaw * 0.55, -0.55, 0.55)
+	var eye_yaw := clampf(rest_yaw - head_yaw, -0.52, 0.52)
+	var neck_pitch := clampf(pitch * 0.72, -0.88, 1.18)
+	var rest_pitch := pitch - neck_pitch
+	var head_pitch := clampf(rest_pitch * 0.55, -0.45, 0.55)
+	var eye_pitch := clampf(rest_pitch - head_pitch, -0.42, 0.48)
+	gaze_neck_yaw = neck_yaw
+	gaze_neck_pitch = neck_pitch
+	gaze_head_yaw = head_yaw
+	gaze_head_pitch = head_pitch
+	gaze_eye_yaw = eye_yaw
+	gaze_eye_pitch = eye_pitch
+
+
+func _apply_gaze() -> void:
+	if skeleton == null:
+		return
+	if gaze_neck_blend > 0.01:
+		_nudge_look_bone("C_Neck_a", gaze_neck_pitch * gaze_neck_blend, gaze_neck_yaw * gaze_neck_blend)
+	if gaze_blend > 0.01:
+		_nudge_look_bone("C_Head_a", gaze_head_pitch * gaze_blend, gaze_head_yaw * gaze_blend)
+	if gaze_eye_blend > 0.01:
+		_nudge_look_bone(eye_l, gaze_eye_pitch * gaze_eye_blend, gaze_eye_yaw * gaze_eye_blend)
+		_nudge_look_bone(eye_r, gaze_eye_pitch * gaze_eye_blend, gaze_eye_yaw * gaze_eye_blend)
 
 
 func _apply_body_look() -> void:
