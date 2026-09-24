@@ -1,6 +1,7 @@
 extends Node3D
 ## 房间空墙镜子：SubViewport + 镜像 Camera3D → QuadMesh ViewportTexture（对齐网页 WallMirror）。
 ## 世界坐标与网页一致：pos (0, 1.12, 0.948)，yaw=π，尺寸 2.42×2.18。
+## 每帧从当前活动 Camera3D 反射位姿（展示 TP / 控制 FP 均正确）。
 
 @export var resolution: int = 768
 @export var mirror_width: float = 2.42
@@ -17,6 +18,7 @@ func _ready() -> void:
 	# Layer 2 = mirror surface; mirror cam excludes it to avoid recursion.
 	_mesh.layers = 2
 	_mirror_cam.cull_mask = 0xFFFFF - 2
+	_mirror_cam.current = true
 
 
 func _build() -> void:
@@ -25,12 +27,14 @@ func _build() -> void:
 	_viewport.size = Vector2i(resolution, resolution)
 	_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	_viewport.transparent_bg = false
-	_viewport.world_3d = get_viewport().world_3d
+	_viewport.own_world_3d = false
 	add_child(_viewport)
+	# Share main World3D so the mirror sees the same scene (defer if root not ready).
+	_sync_world()
 
 	_mirror_cam = Camera3D.new()
 	_mirror_cam.name = "MirrorCamera"
-	_mirror_cam.current = false
+	_mirror_cam.current = true
 	_mirror_cam.fov = 55.0
 	_mirror_cam.near = 0.08
 	_mirror_cam.far = 80.0
@@ -44,7 +48,7 @@ func _build() -> void:
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.albedo_texture = _viewport.get_texture()
-	# ViewportTexture is already mirrored via camera placement; flip U so text reads correctly.
+	# ViewportTexture is mirrored via camera placement; flip U so text reads correctly.
 	mat.uv1_scale = Vector3(-1.0, 1.0, 1.0)
 	mat.uv1_offset = Vector3(1.0, 0.0, 0.0)
 	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR
@@ -79,47 +83,55 @@ func _add_bar(w: float, h: float, depth: float, x: float, y: float, mat: Materia
 	_frame.add_child(mi)
 
 
+func _sync_world() -> void:
+	if _viewport == null:
+		return
+	var root_vp := get_viewport()
+	if root_vp == null:
+		return
+	var w := root_vp.world_3d
+	if w != null and _viewport.world_3d != w:
+		_viewport.world_3d = w
+
+
 func _process(_delta: float) -> void:
 	if not visible or _mirror_cam == null:
 		return
+	_sync_world()
 	var main_cam := get_viewport().get_camera_3d()
-	if main_cam == null:
+	if main_cam == null or main_cam == _mirror_cam:
 		return
-	# Only update when the player roughly faces the mirror (web: fwd.z > 0.08 after rot).
-	var to_mirror := global_position - main_cam.global_position
-	if to_mirror.dot(main_cam.global_transform.basis.z) > 0.15:
-		# Camera looking away (Godot cam looks down -Z of its basis).
-		pass
+	# Always track the active camera (Display TP orbit and Control FP).
 	_update_mirror_camera(main_cam)
 
 
 func _update_mirror_camera(main_cam: Camera3D) -> void:
-	# Reflect main camera across this node's XY plane (local +Z = face normal).
+	# Reflect main camera across this node's local XY plane (local +Z = face normal).
+	# room_mirror.tscn: yaw=π at (0, 1.12, 0.948) → face toward room center (-Z).
 	var n := global_transform.basis.z.normalized()
 	var origin := global_position
-	var cam_pos := main_cam.global_position
+	var cam_xf := main_cam.global_transform
+	var cam_pos := cam_xf.origin
 	var dist := (cam_pos - origin).dot(n)
-	# Skip if camera is behind the mirror glass.
-	if dist < 0.02:
+	# Skip if camera is behind / inside the glass.
+	if dist < 0.05:
 		return
+
 	var mirrored_pos := cam_pos - 2.0 * dist * n
 
-	# Reflect look target (a point in front of main cam) across the plane.
-	var look_at_pt := cam_pos - main_cam.global_transform.basis.z  # Godot looks down -Z
-	var look_dist := (look_at_pt - origin).dot(n)
-	var mirrored_look := look_at_pt - 2.0 * look_dist * n
-
-	# Reflect up vector.
-	var up := main_cam.global_transform.basis.y
-	var up_mir := up - 2.0 * up.dot(n) * n
-	if up_mir.length_squared() < 1e-6:
-		up_mir = Vector3.UP
-
-	_mirror_cam.global_position = mirrored_pos
-	# look_at needs a non-parallel up; fall back if reflected up collapses.
-	if absf(up_mir.normalized().dot((mirrored_look - mirrored_pos).normalized())) > 0.98:
-		up_mir = Vector3.UP
-	_mirror_cam.look_at(mirrored_look, up_mir)
+	# Reflect basis; reflection flips handedness → flip X to keep a valid view,
+	# matching the material UV U-flip so the image reads as a mirror.
+	var bx := cam_xf.basis.x
+	var by := cam_xf.basis.y
+	var bz := cam_xf.basis.z
+	bx = bx - 2.0 * bx.dot(n) * n
+	by = by - 2.0 * by.dot(n) * n
+	bz = bz - 2.0 * bz.dot(n) * n
+	bx = -bx
+	var basis := Basis(bx, by, bz).orthonormalized()
+	_mirror_cam.global_transform = Transform3D(basis, mirrored_pos)
 	_mirror_cam.fov = main_cam.fov
 	_mirror_cam.near = maxf(0.05, main_cam.near)
 	_mirror_cam.far = main_cam.far
+	if not _mirror_cam.current:
+		_mirror_cam.current = true

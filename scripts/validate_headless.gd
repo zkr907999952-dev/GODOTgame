@@ -385,5 +385,46 @@ func _run() -> void:
 		return
 	print("validate: RoomMirror OK")
 
+	# Gaze stability: head is NOT a loco bone — look must not accumulate/spin.
+	sec.call("clear_body_look")
+	var cam_pos: Vector3 = player.global_position + Vector3(0.0, 1.4, 2.8)
+	sec.call("set_gaze_target", cam_pos)
+	var head_i := skel.find_bone("C_Head_a")
+	if head_i < 0:
+		push_error("validate: C_Head_a missing")
+		quit(1)
+		return
+	var max_head_delta := 0.0
+	var prev_q := skel.get_bone_pose_rotation(head_i)
+	for _g in 90:
+		loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, 0.016, 1.65)
+		# Re-assert gaze each frame like DISPLAY mode.
+		sec.call("set_gaze_target", cam_pos)
+		var q := skel.get_bone_pose_rotation(head_i)
+		var dq := prev_q.inverse() * q
+		var dang := 2.0 * acos(clampf(absf(dq.w), 0.0, 1.0))
+		max_head_delta = maxf(max_head_delta, dang)
+		prev_q = q
+	# Absolute look from rest should stay within ~1.2 rad of identity, and
+	# frame-to-frame delta should settle (not keep growing).
+	var final_q := skel.get_bone_pose_rotation(head_i)
+	var rest_q := skel.get_bone_rest(head_i).basis.get_rotation_quaternion()
+	var from_rest := rest_q.inverse() * final_q
+	var from_rest_ang := 2.0 * acos(clampf(absf(from_rest.w), 0.0, 1.0))
+	print(
+		"validate: gaze head from_rest_ang=", snappedf(from_rest_ang, 0.0001),
+		" max_frame_delta=", snappedf(max_head_delta, 0.0001)
+	)
+	if from_rest_ang > 1.6:
+		push_error("validate: gaze head spun away from rest (ang=%s)" % from_rest_ang)
+		quit(1)
+		return
+	if max_head_delta > 0.85:
+		push_error("validate: gaze head frame delta too large (spin?) delta=%s" % max_head_delta)
+		quit(1)
+		return
+	sec.call("clear_gaze")
+	print("validate: gaze stability OK")
+
 	print("validate: OK")
 	quit(0)

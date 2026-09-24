@@ -216,6 +216,13 @@ func clear_gaze() -> void:
 	gaze_blend = 0.0
 	gaze_eye_blend = 0.0
 	gaze_neck_blend = 0.0
+	gaze_neck_yaw = 0.0
+	gaze_neck_pitch = 0.0
+	gaze_head_yaw = 0.0
+	gaze_head_pitch = 0.0
+	gaze_eye_yaw = 0.0
+	gaze_eye_pitch = 0.0
+	_reset_look_bones_to_rest()
 
 
 func blink_now() -> void:
@@ -331,6 +338,21 @@ func _nudge_spine(name: String, y_off: float, pitch: float, scale_xz: float) -> 
 	skeleton.set_bone_pose_scale(i, cur_s)
 
 
+
+func _reset_look_bones_to_rest() -> void:
+	if skeleton == null:
+		return
+	for nm in ["C_Head_a", eye_l, eye_r]:
+		if not bone_i.has(nm):
+			continue
+		var i: int = bone_i[nm]
+		skeleton.set_bone_pose_rotation(i, rest_local_q.get(nm, Quaternion.IDENTITY))
+		if rest_origin.has(nm):
+			skeleton.set_bone_pose_position(i, rest_origin[nm])
+		if rest_scale.has(nm):
+			skeleton.set_bone_pose_scale(i, rest_scale[nm])
+
+
 func _bone_world_xform(bone_name: String) -> Transform3D:
 	if skeleton == null or not bone_i.has(bone_name):
 		return Transform3D.IDENTITY
@@ -344,9 +366,16 @@ func _update_gaze(d: float) -> void:
 		gaze_eye_blend += (0.0 - gaze_eye_blend) * (1.0 - exp(-8.0 * d))
 		gaze_neck_blend += (0.0 - gaze_neck_blend) * (1.0 - exp(-8.0 * d))
 		return
+	# Use spine for facing; head tip only for origin. Prefer neck/spine rest so prior
+	# gaze on C_Head_a (not a loco bone) cannot feed back into the look vector.
 	var head_xf := _bone_world_xform("C_Head_a")
 	var spine_xf := _bone_world_xform("C_Spine_c")
-	var to := gaze_target - head_xf.origin
+	var look_origin := head_xf.origin
+	if bone_i.has("C_Neck_a"):
+		var neck_xf := _bone_world_xform("C_Neck_a")
+		# Slightly above neck toward head — stable even if head pose was wrong last frame.
+		look_origin = neck_xf.origin + spine_xf.basis.y.normalized() * 0.12
+	var to := gaze_target - look_origin
 	var dist := to.length()
 	if dist < 0.02 or not gaze_want:
 		gaze_blend += (0.0 - gaze_blend) * (1.0 - exp(-8.0 * d))
@@ -354,12 +383,17 @@ func _update_gaze(d: float) -> void:
 		gaze_neck_blend += (0.0 - gaze_neck_blend) * (1.0 - exp(-8.0 * d))
 		return
 	to /= dist
-	# Soft skeleton: +Z forward, +X right, +Y up (matches web wrot).
-	var fwd := spine_xf.basis.z.normalized()
-	var right := spine_xf.basis.x.normalized()
-	var up := spine_xf.basis.y.normalized()
+	# Soft skeleton: +Z forward, +X right, +Y up (matches web wrot). Orthonormalize
+	# in case breath scale dirtied the spine basis.
+	var basis := spine_xf.basis.orthonormalized()
+	var fwd := basis.z
+	var right := basis.x
+	var up := basis.y
 	var yaw := atan2(to.dot(right), to.dot(fwd))
 	var pitch := -atan2(to.dot(up), maxf(1e-6, Vector2(to.dot(right), to.dot(fwd)).length()))
+	# Clamp raw look so a behind-camera sample cannot whip the head.
+	yaw = clampf(yaw, -1.78, 1.78)
+	pitch = clampf(pitch, -1.32, 1.12)
 	var in_range := absf(yaw) < 1.78 and pitch > -1.32 and pitch < 1.12
 	var want := 1.0 if (gaze_want and in_range) else 0.0
 	gaze_blend += (want - gaze_blend) * (1.0 - exp(-6.5 * d))
@@ -379,12 +413,14 @@ func _update_gaze(d: float) -> void:
 	var rest_pitch := pitch - neck_pitch
 	var head_pitch := clampf(rest_pitch * 0.55, -0.45, 0.55)
 	var eye_pitch := clampf(rest_pitch - head_pitch, -0.42, 0.48)
-	gaze_neck_yaw = neck_yaw
-	gaze_neck_pitch = neck_pitch
-	gaze_head_yaw = head_yaw
-	gaze_head_pitch = head_pitch
-	gaze_eye_yaw = eye_yaw
-	gaze_eye_pitch = eye_pitch
+	# Smooth absolute targets (web slerps bone q toward target; we blend Euler).
+	var follow := 1.0 - exp(-14.0 * d)
+	gaze_neck_yaw = lerpf(gaze_neck_yaw, neck_yaw, follow)
+	gaze_neck_pitch = lerpf(gaze_neck_pitch, neck_pitch, follow)
+	gaze_head_yaw = lerpf(gaze_head_yaw, head_yaw, follow)
+	gaze_head_pitch = lerpf(gaze_head_pitch, head_pitch, follow)
+	gaze_eye_yaw = lerpf(gaze_eye_yaw, eye_yaw, follow)
+	gaze_eye_pitch = lerpf(gaze_eye_pitch, eye_pitch, follow)
 
 
 func _apply_gaze() -> void:
@@ -407,16 +443,27 @@ func _apply_body_look() -> void:
 	_nudge_look_bone("C_Head_a", -body_look_pitch * 0.5, body_look_yaw * 0.48)
 
 
-func _nudge_look_bone(name: String, pitch: float, yaw: float) -> void:
+func _nudge_look_bone(name: String, pitch: float, yaw: float, from_rest: bool = false) -> void:
 	if not bone_i.has(name):
 		return
 	if absf(pitch) < 1e-6 and absf(yaw) < 1e-6:
 		return
 	var i: int = bone_i[name]
-	var cur_q := skeleton.get_bone_pose_rotation(i)
+	# C_Head_a / eyes are NOT SoftLoco bones — multiplying onto last frame's pose
+	# accumulates and the head spins. Always apply look as an absolute delta from
+	# rest (or from this frame's loco pose for neck, which SoftLoco resets).
+	var base_q: Quaternion
+	if (
+		from_rest
+		or name == "C_Head_a"
+		or name == eye_l
+		or name == eye_r
+	):
+		base_q = rest_local_q.get(name, Quaternion.IDENTITY)
+	else:
+		base_q = skeleton.get_bone_pose_rotation(i)
 	var soft_q := _quat_euler_yxz(pitch, yaw, 0.0)
-	cur_q = (_soft_delta(name, soft_q) * cur_q).normalized()
-	skeleton.set_bone_pose_rotation(i, cur_q)
+	skeleton.set_bone_pose_rotation(i, (_soft_delta(name, soft_q) * base_q).normalized())
 
 
 func _update_blink(d: float) -> void:

@@ -13,8 +13,8 @@ enum GameMode { DISPLAY, CONTROL }
 @export var prone_speed: float = 0.462  # 1.65 * 0.28
 @export var jump_velocity: float = 4.2
 @export var mouse_sensitivity: float = 0.0025
-@export var min_pitch: float = -1.2
-@export var max_pitch: float = 0.4
+@export var min_pitch: float = -1.55  # ≈ ±89° like web FP_PITCH_LIM
+@export var max_pitch: float = 1.55
 @export var camera_distance: float = 2.8
 @export var camera_height: float = 1.4
 @export var first_person: bool = false
@@ -51,10 +51,26 @@ const FP_EYE_CROUCH := Vector3(0.0, 1.06, 0.5)
 const FP_EYE_PRONE := Vector3(0.0, 0.3, 0.74)
 ## Extra lift if mesh still clips the near plane.
 const FP_EYE_LIFT := 0.06
+## Web BODY_LOOK_DEAD = π/3: body stays until look diverges ~60° (≈120° total free look), then catches up.
+const BODY_LOOK_DEAD := PI / 3.0
+## Stand↔crouch (and stance eye/capsule) blend duration — web STANCE_BLEND_DUR.
+const STANCE_BLEND_DUR := 0.7
 var _fp_eye_from: Vector3 = FP_EYE_STAND
 var _fp_eye_to: Vector3 = FP_EYE_STAND
 var _fp_eye_blend: float = 1.0  # 0..1 smoothstep like web stanceU
 var _fp_eye_cur: Vector3 = FP_EYE_STAND
+## FP body yaw in camera/logic space (without BODY_YAW_OFFSET). Lag behind look when idle.
+var _body_logic_yaw: float = 0.0
+## Capsule / TP camera height stance blend.
+var _stance_blend: float = 1.0
+var _cap_h_from: float = 1.1
+var _cap_h_to: float = 1.1
+var _cap_r_from: float = 0.3
+var _cap_r_to: float = 0.3
+var _cap_y_from: float = 0.55
+var _cap_y_to: float = 0.55
+var _cam_h_from: float = 1.4
+var _cam_h_to: float = 1.4
 
 @onready var _pivot: Node3D = $CameraPivot
 @onready var _camera: Camera3D = $CameraPivot/Camera3D
@@ -82,6 +98,15 @@ func _ready() -> void:
 	if _col.shape is CapsuleShape3D:
 		_capsule_stand_h = (_col.shape as CapsuleShape3D).height
 		_capsule_stand_y = _col.position.y
+		_cap_h_from = _capsule_stand_h
+		_cap_h_to = _capsule_stand_h
+		_cap_r_from = (_col.shape as CapsuleShape3D).radius
+		_cap_r_to = _cap_r_from
+		_cap_y_from = _capsule_stand_y
+		_cap_y_to = _capsule_stand_y
+		_cam_h_from = camera_height
+		_cam_h_to = camera_height
+	_body_logic_yaw = _yaw
 	# Start in Display/Interact (TP, no move, gaze→camera).
 	set_play_mode(GameMode.DISPLAY)
 
@@ -139,6 +164,8 @@ func set_play_mode(mode: GameMode) -> void:
 		var sec2 := get_secondary()
 		if sec2:
 			sec2.call("clear_gaze")
+		# Sync body lag yaw to current look so FP does not snap-spin on mode switch.
+		_body_logic_yaw = _yaw
 	_apply_fp_mesh_visibility()
 	_apply_camera()
 	if prev != mode:
@@ -300,7 +327,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				elif not ui_blocks_capture:
 					Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 			KEY_Z:
-				# Prone toggle (Z or Ctrl+Z). Crouch is hold Ctrl/C — handled in physics.
+				# Prone toggle (Z). Crouch is toggle Ctrl/C — handled in physics.
 				_toggle_prone()
 			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8:
 				if _loco:
@@ -313,16 +340,19 @@ func _unhandled_input(event: InputEvent) -> void:
 					print("player: dance cleared")
 
 
-## Crouch is hold (Ctrl and/or C), like web KeyC hold — not toggle.
-func _update_crouch_hold() -> void:
-	if _stance == "prone":
+## Crouch is toggle (Ctrl / C press). Release must NOT force stand. Prone stays Z toggle.
+func _update_crouch_toggle() -> void:
+	if not Input.is_action_just_pressed("crouch"):
 		return
-	var held := Input.is_action_pressed("crouch")
-	var want := "crouch" if held else "stand"
-	if want != _stance:
-		_stance = want
-		_apply_stance_capsule()
-		print("player: stance=", _stance)
+	if _stance == "prone":
+		# Tap crouch while prone → stand (web tap exits prone then toggles crouch).
+		_stance = "stand"
+	elif _stance == "crouch":
+		_stance = "stand"
+	else:
+		_stance = "crouch"
+	_apply_stance_capsule()
+	print("player: stance=", _stance)
 
 
 func _toggle_prone() -> void:
@@ -355,27 +385,32 @@ func _apply_stance_capsule() -> void:
 		return
 	var cap := _col.shape as CapsuleShape3D
 	# Web FP capsule approx: stand 1.64/0.3, crouch 0.94/0.26, prone 0.42/0.22.
-	# Keep capsule bottom ≈ 0 so feet stay on floor across stances.
+	# Blend height/radius/eye over STANCE_BLEND_DUR (0.7s). Bottom stays ≈ 0.
 	_begin_fp_eye_blend(_stance)
+	_cap_h_from = cap.height
+	_cap_r_from = cap.radius
+	_cap_y_from = _col.position.y
+	_cam_h_from = camera_height
 	match _stance:
 		"crouch":
-			cap.height = 0.94
-			cap.radius = 0.26
-			_col.position.y = cap.height * 0.5
-			camera_height = 0.95
+			_cap_h_to = 0.94
+			_cap_r_to = 0.26
+			_cap_y_to = 0.94 * 0.5
+			_cam_h_to = 0.95
 			fp_eye_height = FP_EYE_CROUCH.y + FP_EYE_LIFT
 		"prone":
-			cap.height = 0.42
-			cap.radius = 0.22
-			_col.position.y = cap.height * 0.5
-			camera_height = 0.4
+			_cap_h_to = 0.42
+			_cap_r_to = 0.22
+			_cap_y_to = 0.42 * 0.5
+			_cam_h_to = 0.4
 			fp_eye_height = FP_EYE_PRONE.y + FP_EYE_LIFT
 		_:
-			cap.height = _capsule_stand_h
-			cap.radius = 0.3
-			_col.position.y = _capsule_stand_y
-			camera_height = _default_cam_height
+			_cap_h_to = _capsule_stand_h
+			_cap_r_to = 0.3
+			_cap_y_to = _capsule_stand_y
+			_cam_h_to = _default_cam_height
 			fp_eye_height = FP_EYE_STAND.y + FP_EYE_LIFT
+	_stance_blend = 0.0
 	_apply_camera()
 
 
@@ -393,13 +428,27 @@ func _apply_camera() -> void:
 		_camera.fov = tp_fov
 
 
-## Smooth lerp between stance eyes (web stanceU smoothstep).
+## Smooth lerp between stance eyes (web stanceU smoothstep over STANCE_BLEND_DUR).
 func _update_fp_eye_blend(delta: float) -> void:
 	if _fp_eye_blend < 1.0:
-		_fp_eye_blend = minf(1.0, _fp_eye_blend + delta * 6.0)
+		_fp_eye_blend = minf(1.0, _fp_eye_blend + delta / STANCE_BLEND_DUR)
 	var t := _fp_eye_blend
 	var u := t * t * (3.0 - 2.0 * t)
 	_fp_eye_cur = _fp_eye_from.lerp(_fp_eye_to, u)
+
+
+func _update_stance_capsule_blend(delta: float) -> void:
+	if not (_col.shape is CapsuleShape3D):
+		return
+	if _stance_blend < 1.0:
+		_stance_blend = minf(1.0, _stance_blend + delta / STANCE_BLEND_DUR)
+	var t := _stance_blend
+	var u := t * t * (3.0 - 2.0 * t)
+	var cap := _col.shape as CapsuleShape3D
+	cap.height = lerpf(_cap_h_from, _cap_h_to, u)
+	cap.radius = lerpf(_cap_r_from, _cap_r_to, u)
+	_col.position.y = lerpf(_cap_y_from, _cap_y_to, u)
+	camera_height = lerpf(_cam_h_from, _cam_h_to, u)
 
 
 ## Body-local stance eye → CharacterBody local (Body has π yaw offset; +Z = facing).
@@ -419,8 +468,9 @@ func debug_fp_eye_y(stance: String = "") -> float:
 func _physics_process(delta: float) -> void:
 	var display := play_mode == GameMode.DISPLAY
 	if not display:
-		_update_crouch_hold()
+		_update_crouch_toggle()
 	_update_fp_eye_blend(delta)
+	_update_stance_capsule_blend(delta)
 
 	var on_floor := is_on_floor()
 	if not on_floor:
@@ -465,16 +515,27 @@ func _physics_process(delta: float) -> void:
 		velocity.z = move_toward(velocity.z, 0.0, speed)
 
 	# Visual facing: mesh +Z vs Godot -Z → BODY_YAW_OFFSET (π).
-	# CONTROL/FP: lock body yaw to camera; DISPLAY: keep current facing (gaze handles head).
-	# TP walk: face move dir when walking.
-	var face_yaw: float
+	# CONTROL/FP: body lags look by BODY_LOOK_DEAD while idle; faces move dir when walking.
+	# DISPLAY: keep current facing (gaze handles head).
 	if first_person:
-		face_yaw = _yaw + BODY_YAW_OFFSET
+		var look_yaw := _yaw
+		var body_yaw := _body_logic_yaw
+		var ang_delta := wrapf(look_yaw - body_yaw, -PI, PI)
+		var moving := direction != Vector3.ZERO or not on_floor
+		if moving and direction != Vector3.ZERO:
+			# Face movement direction (WASD wish), smooth.
+			var move_yaw := atan2(-direction.x, -direction.z)
+			body_yaw = lerp_angle(body_yaw, move_yaw, 1.0 - exp(-10.0 * delta))
+		elif moving:
+			# Airborne / coasting: ease body toward look.
+			body_yaw = lerp_angle(body_yaw, look_yaw, 1.0 - exp(-10.0 * delta))
+		elif absf(ang_delta) > BODY_LOOK_DEAD:
+			# Idle free-look: keep ±60° deadzone (≈120° total), then body follows.
+			body_yaw = look_yaw - signf(ang_delta) * BODY_LOOK_DEAD
+		_body_logic_yaw = wrapf(body_yaw, -PI, PI)
+		_body.rotation.y = _body_logic_yaw + BODY_YAW_OFFSET
 	elif direction != Vector3.ZERO:
-		face_yaw = atan2(-direction.x, -direction.z) + BODY_YAW_OFFSET
-	else:
-		face_yaw = _body.rotation.y
-	if first_person or direction != Vector3.ZERO:
+		var face_yaw := atan2(-direction.x, -direction.z) + BODY_YAW_OFFSET
 		_body.rotation.y = lerp_angle(
 			_body.rotation.y, face_yaw, clampf(14.0 * delta, 0.0, 1.0)
 		)
@@ -485,8 +546,7 @@ func _physics_process(delta: float) -> void:
 	var sec2 := get_secondary()
 	if first_person:
 		if sec2:
-			var body_logic_yaw := _body.rotation.y - BODY_YAW_OFFSET
-			var rel_yaw := wrapf(_yaw - body_logic_yaw, -PI, PI)
+			var rel_yaw := wrapf(_yaw - _body_logic_yaw, -PI, PI)
 			sec2.call("set_body_look", rel_yaw, _pitch)
 			sec2.call("clear_gaze")
 	elif display and sec2:
