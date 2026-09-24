@@ -1,0 +1,11 @@
+[gd_scene load_steps=3 format=3 uid="uid://croommap0001"]
+
+[ext_resource type="PackedScene" path="res://assets/maps/room.glb" id="1_room"]
+[ext_resource type="Script" path="res://scripts/map_collision.gd" id="2_col"]
+
+[node name="Room" type="Node3D"]
+transform = Transform3D(-0.7, 0, 0, 0, 0.7, 0, 0, 0, -0.7, 0, 0.0112, -1.063)
+script = ExtResource("2_col")
+skip_foliage = false
+
+[node name="Model" parent="." instance=ExtResource("1_room")]

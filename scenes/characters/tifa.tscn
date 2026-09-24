@@ -1,9 +1,29 @@
-[gd_scene load_steps=3 format=3 uid="uid://ctifacharacter01"]
+[gd_scene load_steps=4 format=3 uid="uid://ctifacharacter01"]
 
-[ext_resource type="Script" path="res://scripts/tifa_character.gd" id="1_script"]
+[ext_resource type="Script" path="res://scripts/player_controller.gd" id="1_script"]
 [ext_resource type="PackedScene" path="res://assets/characters/tifa/Tifa_Web_Skinned.glb" id="2_body"]
 
-[node name="Tifa" type="Node3D"]
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_player"]
+radius = 0.28
+height = 1.1
+
+[node name="Player" type="CharacterBody3D"]
+collision_layer = 2
+collision_mask = 1
+floor_stop_on_slope = true
+floor_max_angle = 0.785398
 script = ExtResource("1_script")
 
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.83, 0)
+shape = SubResource("CapsuleShape3D_player")
+
 [node name="Body" parent="." instance=ExtResource("2_body")]
+
+[node name="CameraPivot" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2, 0)
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.2, 2.8)
+current = true
+fov = 55.0

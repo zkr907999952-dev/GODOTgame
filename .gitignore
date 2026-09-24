@@ -27,3 +27,9 @@ Thumbs.db
 # Do not commit Godot-extracted glTF sidecar textures
 assets/characters/**/*_Image_*.png
 assets/characters/**/*_Image_*.png.import
+
+# Godot-extracted glTF sidecar textures (regenerated on import)
+assets/maps/*_*.png
+assets/maps/*_*.png.import
+assets/maps/*_*.webp
+assets/maps/*_*.webp.import

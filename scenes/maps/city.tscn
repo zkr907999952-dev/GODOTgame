@@ -1,0 +1,11 @@
+[gd_scene load_steps=3 format=3 uid="uid://ccitymap0001"]
+
+[ext_resource type="PackedScene" path="res://assets/maps/city.glb" id="1_city"]
+[ext_resource type="Script" path="res://scripts/map_collision.gd" id="2_col"]
+
+[node name="City" type="Node3D"]
+script = ExtResource("2_col")
+skip_foliage = true
+build_on_ready = false
+
+[node name="Model" parent="." instance=ExtResource("1_city")]

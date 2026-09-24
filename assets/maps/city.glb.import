@@ -3,13 +3,13 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://b3rngfd84vakv"
-path="res://.godot/imported/Tifa_Web_Skinned.glb-316beaaddaae6a3d58586225f7b13ea5.scn"
+uid="uid://rnfrasv2rcvx"
+path="res://.godot/imported/city.glb-167c8c4a73564c45aa7d2e7c2407458c.scn"
 
 [deps]
 
-source_file="res://assets/characters/tifa/Tifa_Web_Skinned.glb"
-dest_files=["res://.godot/imported/Tifa_Web_Skinned.glb-316beaaddaae6a3d58586225f7b13ea5.scn"]
+source_file="res://assets/maps/city.glb"
+dest_files=["res://.godot/imported/city.glb-167c8c4a73564c45aa7d2e7c2407458c.scn"]
 
 [params]
 

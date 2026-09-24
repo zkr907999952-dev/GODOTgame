@@ -1,18 +1,28 @@
-[gd_scene load_steps=2 format=3 uid="uid://bqemptyrestart01"]
+[gd_scene load_steps=5 format=3 uid="uid://cmainscene001"]
 
-[ext_resource type="PackedScene" uid="uid://ctifacharacter01" path="res://scenes/characters/tifa.tscn" id="1_tifa"]
+[ext_resource type="Script" path="res://scripts/game_root.gd" id="1_root"]
+[ext_resource type="PackedScene" path="res://scenes/characters/tifa.tscn" id="2_player"]
+[ext_resource type="PackedScene" path="res://scenes/maps/room.tscn" id="3_room"]
+[ext_resource type="PackedScene" path="res://scenes/maps/city.tscn" id="4_city"]
 
 [node name="Main" type="Node3D"]
+script = ExtResource("1_root")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
-transform = Transform3D(0.866025, -0.353553, 0.353553, 0, 0.707107, 0.707107, -0.5, -0.612372, 0.612372, 2, 6, 4)
+transform = Transform3D(0.866025, -0.353553, 0.353553, 0, 0.707107, 0.707107, -0.5, -0.612372, 0.612372, 4, 10, 6)
 shadow_enabled = true
-light_energy = 1.2
+light_energy = 1.35
 
-[node name="Camera3D" type="Camera3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 0.965926, 0.258819, 0, -0.258819, 0.965926, 0, 1.5, 3.2)
-current = true
-fov = 50.0
+[node name="FillLight" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.5, 2.2, 1.2)
+light_energy = 0.55
+omni_range = 8.0
 
-[node name="Tifa" parent="." instance=ExtResource("1_tifa")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+
+[node name="Room" parent="." instance=ExtResource("3_room")]
+
+[node name="City" parent="." instance=ExtResource("4_city")]
+visible = false
+
+[node name="Player" parent="." instance=ExtResource("2_player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.2, 0.1, 0.3)
