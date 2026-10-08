@@ -185,7 +185,7 @@ func set_mouse_sensitivity(v: float) -> void:
 	mouse_sensitivity = clampf(v, 0.0005, 0.02)
 
 
-## FP: hide only head / hair / eye / mouth to reduce camera clip; keep torso/arms/legs.
+## FP: hide only head / hair / eye / mouth (layer-culled) to reduce camera clip; keep torso/arms/legs.
 func _fp_should_hide_mesh(mi: MeshInstance3D) -> bool:
 	var n := mi.name
 	var low := n.to_lower()
@@ -203,15 +203,23 @@ func _fp_should_hide_mesh(mi: MeshInstance3D) -> bool:
 	return false
 
 
+## Render layer 19: head/hair/eyes. FP main camera culls it; the room mirror camera still
+## renders it, so the full face shows in the mirror in first person.
+const FP_HEAD_LAYER := 1 << 18
+
+
 func _apply_fp_mesh_visibility() -> void:
 	for mi in _body.find_children("*", "MeshInstance3D", true, false):
 		var mesh_i := mi as MeshInstance3D
 		if mesh_i == null:
 			continue
-		if first_person and _fp_should_hide_mesh(mesh_i):
-			mesh_i.visible = false
-		else:
-			mesh_i.visible = true
+		mesh_i.visible = true
+		if _fp_should_hide_mesh(mesh_i):
+			mesh_i.layers = FP_HEAD_LAYER
+	if first_person:
+		_camera.cull_mask &= ~FP_HEAD_LAYER
+	else:
+		_camera.cull_mask |= FP_HEAD_LAYER
 
 
 ## Place capsule so its bottom matches mesh soles (AABB min.y ≈ 0 in character space).

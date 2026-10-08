@@ -71,3 +71,5 @@ prone={
 
 3d_physics/layer_1="world"
 3d_physics/layer_2="character"
+3d_render/layer_19="fp_head"
+3d_render/layer_20="mirror"

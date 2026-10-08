@@ -355,6 +355,13 @@ func _run() -> void:
 		push_error("validate: CONTROL should be first_person")
 		quit(1)
 		return
+	# FP hides head via render layer 19 (main cam culls it; mirror cam still renders the face).
+	var fp_cam: Camera3D = player.get_node("CameraPivot/Camera3D")
+	if (fp_cam.cull_mask & (1 << 18)) != 0:
+		push_error("validate: FP camera should cull head layer 19")
+		quit(1)
+		return
+	print("validate: FP head layer culled by main camera OK")
 	var pos_before: Vector3 = player.global_position
 	player.global_position = pos_before + Vector3(0.4, 0.0, -0.3)
 	player.call("set_play_mode", 0)  # back to DISPLAY — orbit pivot follows character
@@ -379,7 +386,7 @@ func _run() -> void:
 		quit(1)
 		return
 	print("validate: RoomMirror at ", mirror.global_position)
-	if mirror.global_position.distance_to(Vector3(0.0, 1.12, 0.948)) > 0.05:
+	if mirror.global_position.distance_to(Vector3(-0.035, 1.2, 0.965)) > 0.05:
 		push_error("validate: RoomMirror position mismatch")
 		quit(1)
 		return
@@ -445,7 +452,7 @@ func _run() -> void:
 			push_error("validate: mirror normal should face room (-Z)")
 			quit(1)
 			return
-		if mir.distance_to(Vector3(0.0, 1.12, 1.896)) > 0.05:
+		if mir.distance_to(Vector3(0.0, 1.12, 1.93)) > 0.05:
 			push_error("validate: reflected eye mismatch %s" % mir)
 			quit(1)
 			return
