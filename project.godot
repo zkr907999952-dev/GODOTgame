@@ -10,10 +10,10 @@ config_version=5
 
 [application]
 
-config/name="肉场模拟器"
+config/name="蒂法的玉腹沙盒"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7", "Forward Plus")
-config/icon="res://icon.svg"
+config/icon="res://assets/branding/icon_192.png"
 
 [display]
 

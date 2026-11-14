@@ -81,6 +81,9 @@ func _ready() -> void:
 	settings = GameSettingsScript.new()
 	settings.name = "GameSettings"
 	add_child(settings)
+	if _player and _player.has_method("apply_saved_look_settings"):
+		_player.call("apply_saved_look_settings")
+		_player.call("apply_screen_orientation")
 	bullet_cam = BulletCamScript.new()
 	bullet_cam.name = "BulletCam"
 	add_child(bullet_cam)

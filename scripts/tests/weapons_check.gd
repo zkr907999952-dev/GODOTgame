@@ -106,12 +106,13 @@ func _run() -> void:
 	ws.connect("fired", func(_id): shots += 1)
 	ws.connect("shot_fired", func(_o, _d, _id): shot_sig += 1)
 
-	# ---- 观察模式下隐藏 / 不响应
+	# ---- 观察模式：持枪姿势保持，不自动收枪
 	player.call("set_play_mode", 0)
 	await _frames(3)
 	ws.call("select", "rifle")
+	ws.call("debug_finish_state")
 	await _frames(5)
-	_ok(not ws.get("view").visible, "view hidden in display mode")
+	_ok(bool(ws.get("view").visible) and bool(ws.call("is_armed")), "armed pose kept in display mode")
 	ws.call("holster")
 	ws.call("debug_finish_state")
 	await _frames(3)
@@ -246,7 +247,7 @@ func _run() -> void:
 	await _frames(3)
 	var tc: Control = hud.call("get_touch_controls")
 	var bs: Dictionary = tc.call("buttons")
-	_ok(bs.has("weapon") and bs.has("fire") and bs.has("reload"), "touch: 武器 / 开火 / 换弹 buttons when armed")
+	_ok(bs.has("weapon") and bs.has("fire") and bs.has("reload") and bs.has("ads"), "touch: 武器 / 开火 / 换弹 / 瞄准 buttons when armed")
 	var wb: Vector2 = (bs["weapon"][0] as Rect2).get_center()
 	await _touch(3, wb, true)
 	_ok(bool(hud.call("is_wheel_open")), "touch: 武器 button opens wheel")
@@ -288,7 +289,7 @@ func _run() -> void:
 	await _ready_up()
 	player.call("set_play_mode", 0)
 	await _frames(5)
-	_ok(not ws.get("view").visible and not ws.get("hidden_by_mode") == false, "hidden in display mode")
+	_ok(bool(ws.get("view").visible) and bool(ws.call("is_armed")), "rifle stays in hands in display mode")
 	player.call("set_play_mode", 1)
 	await _frames(5)
 

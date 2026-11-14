@@ -181,7 +181,7 @@ func build_ammo_hud(root: Control) -> void:
 	h.add_theme_constant_override("separation", 10)
 	ammo_box.add_child(h)
 	_ammo_icon = TextureRect.new()
-	_ammo_icon.custom_minimum_size = Vector2(96, 44)
+	_ammo_icon.custom_minimum_size = Vector2(72, 32)
 	_ammo_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	_ammo_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	h.add_child(_ammo_icon)
@@ -209,8 +209,35 @@ func build_ammo_hud(root: Control) -> void:
 func layout_ammo(safe: Vector4, touch: bool) -> void:
 	if ammo_box == null:
 		return
-	ammo_box.offset_right = -(safe.z + 16.0 + (2.0 * (64.0 + 12.0) if touch else 0.0))
-	ammo_box.offset_bottom = -(safe.w + 16.0 + (3.0 * (64.0 + 12.0) + 20.0 if touch else 0.0))
+	if touch:
+		# 缩小后放到屏幕下边缘正中央，避开右侧动作键。
+		ammo_box.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+		ammo_box.grow_horizontal = Control.GROW_DIRECTION_BOTH
+		ammo_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
+		if _ammo_icon:
+			_ammo_icon.custom_minimum_size = Vector2(52, 24)
+		if _ammo_num:
+			_ammo_num.add_theme_font_size_override("font_size", 18)
+		if _ammo_name:
+			_ammo_name.add_theme_font_size_override("font_size", 10)
+		if _ammo_mode:
+			_ammo_mode.add_theme_font_size_override("font_size", 9)
+		ammo_box.offset_left = -86.0
+		ammo_box.offset_right = 86.0
+		ammo_box.offset_top = -(safe.w + 6.0 + 44.0)
+		ammo_box.offset_bottom = -(safe.w + 6.0)
+	else:
+		ammo_box.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+		ammo_box.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+		ammo_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
+		if _ammo_icon:
+			_ammo_icon.custom_minimum_size = Vector2(72, 32)
+		if _ammo_num:
+			_ammo_num.add_theme_font_size_override("font_size", 22)
+		ammo_box.offset_left = 0.0
+		ammo_box.offset_top = 0.0
+		ammo_box.offset_right = -(safe.z + 16.0)
+		ammo_box.offset_bottom = -(safe.w + 16.0)
 
 
 func _refresh_ammo_hud() -> void:

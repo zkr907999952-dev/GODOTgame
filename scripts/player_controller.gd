@@ -18,6 +18,11 @@ enum GameMode { DISPLAY, CONTROL }
 @export var jump_velocity: float = 6.0
 @export var gravity: float = 20.0
 @export var mouse_sensitivity: float = 0.0025
+@export var touch_look_sensitivity: float = 0.009
+## 举枪瞄准：true=切换，false=长按。手机默认切换；PC 右键同样遵守。
+var ads_toggle: bool = true
+## 最近一次请求的屏幕方向（测试 / 调试）
+var screen_orientation_request: String = "sensor"
 @export var min_pitch: float = -1.55  # ≈ ±89° like web FP_PITCH_LIM
 @export var max_pitch: float = 1.55
 @export var camera_distance: float = 2.8
@@ -727,6 +732,7 @@ func set_play_mode(mode: GameMode) -> void:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_apply_fp_mesh_visibility()
 	_apply_camera()
+	apply_screen_orientation()
 	if prev != mode:
 		print(
 			"player: play_mode=",
@@ -742,6 +748,64 @@ func toggle_play_mode() -> void:
 
 func set_mouse_sensitivity(v: float) -> void:
 	mouse_sensitivity = clampf(v, 0.0005, 0.02)
+	var s := _game_settings()
+	if s and s.has_method("set_mouse_sensitivity"):
+		s.call("set_mouse_sensitivity", mouse_sensitivity)
+
+
+func set_touch_look_sensitivity(v: float) -> void:
+	touch_look_sensitivity = clampf(v, 0.001, 0.04)
+	var s := _game_settings()
+	if s and s.has_method("set_touch_look_sensitivity"):
+		s.call("set_touch_look_sensitivity", touch_look_sensitivity)
+
+
+func set_ads_toggle(on: bool) -> void:
+	ads_toggle = on
+	var s := _game_settings()
+	if s and s.has_method("set_ads_toggle"):
+		s.call("set_ads_toggle", ads_toggle)
+
+
+func _game_settings() -> Node:
+	var n: Node = get_parent()
+	while n:
+		var s := n.get_node_or_null("GameSettings")
+		if s:
+			return s
+		n = n.get_parent()
+	return null
+
+
+func apply_saved_look_settings() -> void:
+	var s := _game_settings()
+	if s == null:
+		return
+	mouse_sensitivity = clampf(float(s.get("mouse_sensitivity")), 0.0005, 0.02)
+	touch_look_sensitivity = clampf(float(s.get("touch_look_sensitivity")), 0.001, 0.04)
+	ads_toggle = bool(s.get("ads_toggle"))
+
+
+func apply_screen_orientation() -> void:
+	# 手机：角色控制（第一人称）强制横屏；观察模式允许竖屏或横屏。
+	if first_person:
+		screen_orientation_request = "landscape"
+		DisplayServer.screen_set_orientation(DisplayServer.SCREEN_SENSOR_LANDSCAPE)
+	else:
+		screen_orientation_request = "sensor"
+		DisplayServer.screen_set_orientation(DisplayServer.SCREEN_SENSOR)
+
+
+func eye_aim_transform() -> Transform3D:
+	## 角色持枪空间：眼位为原点，朝向角色正面（网格 +Z）。观察模式用它放置视模型，使第三人称仍保持持枪姿势。
+	var origin := global_transform * (_body.transform * (_fp_eye_cur + Vector3(0.0, 0.06, 0.0)))
+	var fwd: Vector3 = _body.global_transform.basis.z
+	fwd.y = 0.0
+	if fwd.length_squared() < 1e-6:
+		fwd = -global_transform.basis.z
+	fwd = fwd.normalized()
+	# 相机约定看向 -Z，所以 -Z 应对准角色正面。
+	return Transform3D(Basis.looking_at(fwd, Vector3.UP), origin)
 
 
 ## FP: hide only head / hair / eye / mouth (layer-culled) to reduce camera clip; keep torso/arms/legs.
@@ -921,12 +985,12 @@ var touch_move: Vector2 = Vector2.ZERO  # 虚拟摇杆（x 右，y 下 = 后退�
 var touch_sprint: bool = false
 var touch_jump_req: bool = false
 var _touch_interact: bool = false
-## 网页 FP_TOUCH_SENS 0.00305 rad/px × fpLookSpeed 0.9（随灵敏度设置等比例缩放）
-const FP_TOUCH_SENS := 0.00305 * 0.9
+## 手机划屏使用独立的 touch_look_sensitivity，不再跟随鼠标灵敏度。
+const FP_TOUCH_SENS_LEGACY := 0.00305 * 0.9
 
 
 func touch_look(rel: Vector2) -> void:
-	var k := FP_TOUCH_SENS * (mouse_sensitivity / 0.0025)
+	var k := touch_look_sensitivity
 	_yaw -= rel.x * k
 	_pitch = clampf(_pitch - rel.y * k, min_pitch, max_pitch)
 	_apply_camera()
@@ -1002,7 +1066,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		var wb := event as InputEventMouseButton
 		if wb.button_index == MOUSE_BUTTON_LEFT and not wb.pressed:
 			_weapons.call("set_trigger", false)
-		if wb.button_index == MOUSE_BUTTON_RIGHT and not wb.pressed:
+		if wb.button_index == MOUSE_BUTTON_RIGHT and not wb.pressed and not ads_toggle:
 			_weapons.call("set_ads", false)
 		if weapon_armed() and (Input.mouse_mode == Input.MOUSE_MODE_CAPTURED or touch_active):
 			if wb.button_index == MOUSE_BUTTON_LEFT:
@@ -1010,7 +1074,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 				return
 			if wb.button_index == MOUSE_BUTTON_RIGHT:
-				_weapons.call("set_ads", wb.pressed)
+				if ads_toggle:
+					if wb.pressed:
+						_weapons.call("set_ads", not bool(_weapons.get("ads")))
+				else:
+					_weapons.call("set_ads", wb.pressed)
 				get_viewport().set_input_as_handled()
 				return
 			if wb.pressed and (wb.button_index == MOUSE_BUTTON_WHEEL_UP or wb.button_index == MOUSE_BUTTON_WHEEL_DOWN):

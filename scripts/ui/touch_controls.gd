@@ -1,17 +1,16 @@
 extends Control
 ## 触屏操作（移植网页 scene.tsx 触摸手势 + overlay.tsx 第一人称虚拟摇杆 / 按钮 + fp-control.ts CrouchHold）。
 ##
-## 观察（展示互动）模式 —— 与网页一致：
-##   · 单指按在角色身上 = 当前互动工具（拖拽 / 打击 / 拳交 / 刺刀 / 肚脐，和鼠标左键同一套）
-##   · 双击后按住拖动 = 环绕（网页 TAP_MS 340 / TAP_PX 38 / HOLD_MS 280）；
-##     额外：单指从空白处（没点到任何角色）拖动也环绕（网页此时什么都不做）
-##   · 双指 = 平移（中点移动）+ 捏合缩放（间距变化 > 10px 才缩放），第二根手指落下会取消当前工具
-## 角色控制（第一人称）模式 —— 网页 FP 触屏：
+## 观察（展示互动）模式：
+##   · 单指点/按在角色身上 = 当前互动工具（和鼠标左键同一套）
+##   · 双击后按住拖动 = 环绕。单指拖动（包括点在空白处）不再环绕。
+##   · 双指 = 平移 + 捏合缩放，第二根手指落下会取消当前工具
+## 角色控制（第一人称）模式：
 ##   · 左下虚拟摇杆（128px，外圈 ≥ 0.72 = 奔跑，径向死区 0.15）
-##   · 右下按钮：互动（屏幕中心射线使用工具，按住时转动视角 = 拖动工具）/ 下蹲（点按蹲下·起身，长按 0.5s 匍匐）/ 跳跃
-##   · 左侧竖条 = 第一人称缩放（FOV，网页 FpZoomBar）
-##   · 其余区域拖动 = 转视角（0.00305 rad/px × 0.9）；第一人称下点画面不会触发工具（网页同样忽略）
-##   · 两种模式都有「切换」按钮（= Tab）
+##   · 右下：跳跃 / 下蹲已对调；开火下移；武器键靠下向中间；新增瞄准键（默认切换）
+##   · 左侧 FOV 竖条只在打开「摄像机」面板时显示
+##   · 其余区域拖动 = 转视角（独立的触屏灵敏度）；第一人称下点画面不会触发工具
+##   · 两种模式都有「切换」按钮（= Tab），贴在屏幕上边缘（安全区下方）
 ## 每根手指按 index 单独跟踪角色（摇杆 / 视角 / 按钮 / 工具 / 环绕 / 双指），互不干扰。
 ## 落在 HUD 面板 / 按钮上的手指交给 GUI（触摸模拟鼠标），这里不处理。
 
@@ -105,21 +104,24 @@ func buttons() -> Dictionary:
 	var x := v.x - safe.z - EDGE_X - BTN
 	var y := v.y - safe.w - EDGE_B - BTN
 	var mode_txt := "观察" if _fp() else "控制"
-	var top := safe.y + 64.0
-	if hud and hud.has_method("touch_top_y"):
-		top = maxf(top, float(hud.call("touch_top_y")))
-	out["mode"] = [Rect2(Vector2(v.x * 0.5 - 48.0, top), Vector2(96, 44)), "切换·" + mode_txt]
+	# 贴上边缘（状态栏 / 安全区下方），不再落在屏幕中部。
+	var top := safe.y + 6.0
+	out["mode"] = [Rect2(Vector2(v.x * 0.5 - 56.0, top), Vector2(112, 44)), "切换·" + mode_txt]
 	if _fp():
-		out["jump"] = [Rect2(Vector2(x, y), Vector2(BTN, BTN)), "跳跃"]
+		# 下蹲与跳跃对调：跳跃占用原来的下蹲位（上），下蹲占用原来的跳跃位（右下）。
 		var crouch_txt := "匍匐" if str(player.call("get_stance")) == "prone" else "下蹲"
-		out["crouch"] = [Rect2(Vector2(x, y - BTN - GAP), Vector2(BTN, BTN)), crouch_txt]
+		out["crouch"] = [Rect2(Vector2(x, y), Vector2(BTN, BTN)), crouch_txt]
+		out["jump"] = [Rect2(Vector2(x, y - BTN - GAP), Vector2(BTN, BTN)), "跳跃"]
 		out["interact"] = [Rect2(Vector2(x, y - 2.0 * (BTN + GAP)), Vector2(BTN, BTN)), "互动"]
-		# 武器列（第二列）：武器（按住拖动 = 轮盘选枪）/ 开火（按住；拖动同时转视角）/ 换弹
 		var x2 := x - BTN - GAP
-		out["weapon"] = [Rect2(Vector2(x2, y), Vector2(BTN, BTN)), "武器"]
+		# 武器键靠下并向中间收一点，避开右边缘和开火。
+		out["weapon"] = [Rect2(Vector2(x2 - 36.0, y), Vector2(BTN, BTN)), "武器"]
 		if _armed():
-			out["fire"] = [Rect2(Vector2(x2 - 10.0, y - BTN - GAP - 20.0), Vector2(BTN + 20.0, BTN + 20.0)), "开火"]
-			out["reload"] = [Rect2(Vector2(x2, y - 2.0 * (BTN + GAP) - 20.0), Vector2(BTN, BTN)), "换弹"]
+			# 开火下移，但与下方武器键留出间隙；瞄准在开火左侧。
+			var fire := Rect2(Vector2(x2 - 8.0, y - (BTN + 16.0) - 12.0), Vector2(BTN + 16.0, BTN + 16.0))
+			out["fire"] = [fire, "开火"]
+			out["ads"] = [Rect2(Vector2(fire.position.x - BTN - GAP - 10.0, fire.position.y + 8.0), Vector2(BTN, BTN)), "瞄准"]
+			out["reload"] = [Rect2(Vector2(x2, y - 2.0 * (BTN + GAP) - 8.0), Vector2(BTN, BTN)), "换弹"]
 	return out
 
 
@@ -132,7 +134,13 @@ func _armed() -> bool:
 	return w != null and bool(w.call("is_armed"))
 
 
+func zoom_visible() -> bool:
+	return _fp() and hud != null and hud.has_method("camera_panel_open") and bool(hud.call("camera_panel_open"))
+
+
 func zoom_rect() -> Rect2:
+	if not zoom_visible():
+		return Rect2()
 	var v := vp()
 	var top := v.y * 0.18
 	if hud and hud.has_method("touch_top_y"):
@@ -183,7 +191,7 @@ func _on_down(idx: int, p: Vector2) -> void:
 		if p.distance_to(stick_center()) <= STICK_SIZE * 0.5 + 8.0 and not _has_role("stick"):
 			f["role"] = "stick"
 			_stick_to(p)
-		elif zoom_rect().grow(8.0).has_point(p):
+		elif zoom_visible() and zoom_rect().grow(8.0).has_point(p):
 			f["role"] = "zoom"
 			_zoom_to(p)
 		else:
@@ -210,7 +218,8 @@ func _on_down(idx: int, p: Vector2) -> void:
 	elif bool(player.call("touch_tool_begin", p)):
 		f["role"] = "tool"
 	else:
-		f["role"] = "orbit"
+		# 单指点空白或拖动不再环绕；环绕只走双击后拖动。
+		f["role"] = "none"
 	get_viewport().set_input_as_handled()
 
 
@@ -398,6 +407,15 @@ func _button(id: String, down: bool) -> void:
 			var w2 := _weapons()
 			if w2 and down:
 				w2.call("reload")
+		"ads":
+			var w3 := _weapons()
+			if w3 == null:
+				pass
+			elif player and bool(player.get("ads_toggle")):
+				if down:
+					w3.call("set_ads", not bool(w3.get("ads")))
+			else:
+				w3.call("set_ads", down)
 		"crouch":
 			# 网页 CrouchHold：点按 = 蹲下 / 起身；长按 0.5s = 匍匐（切换）
 			if down:
@@ -441,6 +459,9 @@ func _draw() -> void:
 	for id in b.keys():
 		var r: Rect2 = b[id][0]
 		var on: bool = _pressed_btn.has(id) or (id == "crouch" and str(player.call("get_stance")) != "stand")
+		if id == "ads":
+			var wads := _weapons()
+			on = on or (wads != null and bool(wads.get("ads")))
 		if id == "mode":
 			draw_style_box(_box(Color(0.12, 0.13, 0.16, 0.6), line, 22.0), r)
 		else:
@@ -455,15 +476,16 @@ func _draw() -> void:
 		draw_arc(c, STICK_SIZE * 0.23, 0.0, TAU, 32, Color(1, 1, 1, 0.25), 1.0, true)
 		draw_circle(c + stick_vec * STICK_MAX, KNOB * 0.5, accent)
 		_text_center("奔跑" if sprint else "外圈奔跑", c + Vector2(0, STICK_SIZE * 0.5 + 12.0), 11, Color(0.8, 0.82, 0.86, 0.8))
-		# 缩放竖条
+		# 缩放竖条：只在摄像机面板打开时显示
 		var zr := zoom_rect()
-		draw_style_box(_box(surf, line, 18.0), zr)
-		var lo: float = player.get("fp_fov_min")
-		var hi: float = player.get("fp_fov_max")
-		var t := clampf((hi - float(player.get("fp_fov"))) / maxf(1.0, hi - lo), 0.0, 1.0)
-		var ty := zr.position.y + zr.size.y * (1.0 - t)
-		draw_circle(Vector2(zr.get_center().x, clampf(ty, zr.position.y + 10.0, zr.end.y - 10.0)), 10.0, fg)
-		_text_center("%d°" % int(round(float(player.get("fp_fov")))), Vector2(zr.get_center().x, zr.end.y + 12.0), 11, Color(0.8, 0.82, 0.86, 0.8))
+		if zr.size.y > 1.0:
+			draw_style_box(_box(surf, line, 18.0), zr)
+			var lo: float = player.get("fp_fov_min")
+			var hi: float = player.get("fp_fov_max")
+			var t := clampf((hi - float(player.get("fp_fov"))) / maxf(1.0, hi - lo), 0.0, 1.0)
+			var ty := zr.position.y + zr.size.y * (1.0 - t)
+			draw_circle(Vector2(zr.get_center().x, clampf(ty, zr.position.y + 10.0, zr.end.y - 10.0)), 10.0, fg)
+			_text_center("%d°" % int(round(float(player.get("fp_fov")))), Vector2(zr.get_center().x, zr.end.y + 12.0), 11, Color(0.8, 0.82, 0.86, 0.8))
 		# 准星（网页 FP 十字）
 		var cc := vp() * 0.5
 		draw_line(cc - Vector2(8, 0), cc + Vector2(8, 0), Color(1, 1, 1, 0.7), 1.0)

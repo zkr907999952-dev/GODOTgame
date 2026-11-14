@@ -85,12 +85,10 @@ void fragment() {
 	if (!FRONT_FACING) c *= 0.55;
 	ALBEDO = c;
 	METALLIC = 0.0;
-	ROUGHNESS = roughness;
+	// Mobile 渲染器没有清漆层和皮下散射：写了那些内置输出会导致整段 shader 在真机上编译失败，
+	// 内脏回退成原来的不透明材质，透视窗口里什么也看不见。用粗糙度 + 微弱自发光近似湿润感。
+	ROUGHNESS = clamp(roughness * (1.0 - wet * 0.28), 0.18, 0.95);
 	SPECULAR = 0.55;
-	CLEARCOAT = wet;
-	CLEARCOAT_ROUGHNESS = 0.18;
-	SSS_STRENGTH = 0.35;
-	// 轻微边缘透光（湿润浆膜感）
 	float fres = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 3.0);
-	EMISSION = c * fres * 0.06;
+	EMISSION = c * (fres * 0.06 + wet * 0.035);
 }

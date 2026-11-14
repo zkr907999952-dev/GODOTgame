@@ -93,6 +93,36 @@ func eject(kind: String, xf: Transform3D, category: String = "rifle", body_vel: 
 	return b
 
 
+func register_mesh(kind: String, mesh: Mesh) -> void:
+	if mesh:
+		_meshes[kind] = mesh
+
+
+## 换弹抛出的空弹匣：更重、向下向外掉落，同样 10 秒回收 / 对象池 / 数量上限。
+func eject_mag(kind: String, xf: Transform3D, body_vel: Vector3 = Vector3.ZERO) -> RigidBody3D:
+	var mesh: Mesh = _meshes.get(kind)
+	if mesh == null:
+		return null
+	while _live.size() >= cap:
+		_despawn(_live[0])
+	var b := _take(kind, mesh)
+	b.mass = 0.22
+	(_phys_mat as PhysicsMaterial).bounce = 0.22
+	b.physics_material_override = _phys_mat
+	b.global_transform = Transform3D(xf.basis.orthonormalized(), xf.origin)
+	var right := xf.basis.z.normalized()
+	var up := xf.basis.y.normalized()
+	var fwd := xf.basis.x.normalized()
+	var vel := right * randf_range(0.6, 1.3) + up * randf_range(0.4, 1.2) - fwd * randf_range(0.2, 0.7) + Vector3(0, -0.8, 0)
+	b.linear_velocity = vel + body_vel
+	b.angular_velocity = xf.basis * Vector3(randf_range(-8.0, 8.0), randf_range(4.0, 14.0), randf_range(-6.0, 6.0))
+	b.set_meta("kind", kind)
+	b.set_meta("age", 0.0)
+	b.set_meta("category", "mag")
+	_live.append(b)
+	return b
+
+
 func _physics_process(dt: float) -> void:
 	var i := 0
 	while i < _live.size():

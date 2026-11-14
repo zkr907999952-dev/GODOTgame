@@ -29,7 +29,7 @@ const IK_FADE := 7.0
 ## 手臂 IK：手肘朝下 + 向外（相机空间）
 const POLE_R := Vector3(0.75, -1.0, 0.15)
 const POLE_L := Vector3(-0.75, -1.0, 0.15)
-const ARM_STRETCH_MAX := 1.18
+const ARM_STRETCH_MAX := 1.28
 var finger_gain := 1.0
 const SHOULDER_MAX := 0.5
 
@@ -65,6 +65,12 @@ var _reload_empty: bool = false
 var _shell_phase: String = ""
 var _fire_t: float = 99.0
 var hidden_by_mode: bool = false
+## 换弹时是否已抛出弹匣（每轮一次）
+var _mag_ejected: bool = false
+var _mag_meshes: Dictionary = {}  # id -> Mesh
+var _bob_t: float = 0.0
+var _bob_pos: Vector3 = Vector3.ZERO
+var _bob_ang: Vector3 = Vector3.ZERO
 
 var view: Node3D
 var gun: Node3D
@@ -260,6 +266,8 @@ func reload() -> bool:
 	state = "reloading"
 	state_t = 0.0
 	ads = false
+	_mag_ejected = false
+	_try_eject_mag(w)
 	reload_started.emit(current, _reload_empty)
 	sfx.emit("reload", current)
 	if w.sfx_reload:
@@ -351,6 +359,14 @@ func _load_weapon(id: String) -> void:
 	_audio.position = w.muzzle
 	if id == "pistol" and ammo_of(id).x == 0:
 		_gun_anim("empty", 0.0, true)
+	var mag_n := gun.find_child("Magazine", true, false)
+	if mag_n is MeshInstance3D and (mag_n as MeshInstance3D).mesh:
+		_mag_meshes[id] = (mag_n as MeshInstance3D).mesh
+	elif mag_n:
+		for c in mag_n.find_children("*", "MeshInstance3D", true, false):
+			if (c as MeshInstance3D).mesh:
+				_mag_meshes[id] = (c as MeshInstance3D).mesh
+				break
 
 
 func _unload_weapon() -> void:
@@ -572,6 +588,153 @@ func _idle_clip() -> String:
 	return "idle"
 
 
+func _hip_offset(w: WeaponDef) -> Vector3:
+	# 相机看向 -Z：Z 更负 = 更远离镜头，Y 更负 = 更低。在原偏移上整体下移、推远，贴近主流 FPS 持枪。
+	return Vector3(w.view_offset.x + 0.024, w.view_offset.y - 0.078, w.view_offset.z - 0.13)
+
+
+func _ads_offset(w: WeaponDef) -> Vector3:
+	# 开镜仍保持准星对齐，但枪身不得穿进近裁面。
+	return Vector3(w.view_offset.x, w.view_offset.y - 0.016, w.view_offset.z - 0.11)
+
+
+func _loco_bob_xf(delta: float) -> Transform3D:
+	var sp := 0.0
+	if player:
+		sp = Vector2(player.velocity.x, player.velocity.z).length()
+	var sprint := _sprinting()
+	var moving := sp > 0.4
+	if not moving or _ads_k > 0.65:
+		_bob_t = 0.0
+		var k := 1.0 - exp(-8.0 * delta)
+		_bob_pos = _bob_pos.lerp(Vector3.ZERO, k)
+		_bob_ang = _bob_ang.lerp(Vector3.ZERO, k)
+	else:
+		var freq := 10.0 if sprint else 7.0
+		_bob_t += delta * freq
+		var a := 0.022 if sprint else 0.011
+		var want_p := Vector3(sin(_bob_t) * a, absf(cos(_bob_t)) * a * 0.6, 0.0)
+		if sprint:
+			want_p += Vector3(0.008, -0.04, 0.015) * (1.0 - _ads_k)
+		var want_a := Vector3((0.14 if sprint else 0.045) * sin(_bob_t * 0.5), 0.0, sin(_bob_t) * (0.07 if sprint else 0.03))
+		var k2 := 1.0 - exp(-10.0 * delta)
+		_bob_pos = _bob_pos.lerp(want_p, k2)
+		_bob_ang = _bob_ang.lerp(want_a, k2)
+	var rot := Basis(Vector3.RIGHT, _bob_ang.x) * Basis(Vector3.FORWARD, _bob_ang.z)
+	return Transform3D(rot, _bob_pos)
+
+
+func _view_local(w: WeaponDef) -> Transform3D:
+	var off: Vector3 = _hip_offset(w).lerp(_ads_offset(w), _ads_k) if w else Vector3.ZERO
+	var sc: float = w.view_scale if w else 0.8
+	return Transform3D(Basis().scaled(Vector3.ONE * sc), off)
+
+
+func _apply_view_xf(local_xf: Transform3D) -> void:
+	var fp := bool(player.get("first_person")) if player else true
+	if fp:
+		view.top_level = false
+		if view.get_parent() != camera and camera:
+			view.reparent(camera, false)
+		view.transform = local_xf
+	else:
+		# 观察模式：枪留在角色手里（相对角色朝向的持枪空间），不跟环绕相机走。
+		view.top_level = true
+		var hold: Transform3D = player.call("eye_aim_transform") if player and player.has_method("eye_aim_transform") else camera.global_transform
+		view.global_transform = hold * local_xf
+
+
+func _try_eject_mag(w: WeaponDef) -> void:
+	if _mag_ejected or w == null or w.shell_reload or casings == null:
+		return
+	var mesh: Mesh = _mag_meshes.get(w.id)
+	var xf := gun.global_transform if gun else (view.global_transform if view else Transform3D())
+	if gun:
+		var mag_n := gun.find_child("Magazine", true, false)
+		if mag_n is Node3D:
+			xf = (mag_n as Node3D).global_transform
+			if mesh == null and mag_n is MeshInstance3D:
+				mesh = (mag_n as MeshInstance3D).mesh
+	if mesh == null:
+		return
+	var kind := "mag_" + w.id
+	casings.call("register_mesh", kind, mesh)
+	var body_vel: Vector3 = player.get("velocity") if player else Vector3.ZERO
+	casings.call("eject_mag", kind, xf, body_vel)
+	_mag_ejected = true
+
+
+func debug_muzzle_ahead() -> float:
+	## 枪口在相机前方的距离（米）。相机看向 -Z。
+	if gun == null or camera == null:
+		return 0.0
+	var w: WeaponDef = cur_def()
+	if w == null:
+		return 0.0
+	var world: Vector3 = gun.global_transform * w.muzzle
+	var local: Vector3 = camera.global_transform.affine_inverse() * world
+	return -local.z - camera.near
+
+
+func debug_center_hits_viewmodel() -> bool:
+	## 髋射时屏幕中心射线是否打到视模型（不应挡住准星）。
+	if gun == null or camera == null:
+		return false
+	var from := camera.global_position
+	var to := from + (-camera.global_transform.basis.z) * 1.2
+	var space := camera.get_world_3d().direct_space_state
+	# 视模型通常没有碰撞体：用网格 AABB 与中心射线做近似检测。
+	var meshes := gun.find_children("*", "MeshInstance3D", true, false)
+	if gun is MeshInstance3D:
+		meshes.append(gun)
+	var n := 12
+	for i in n:
+		var t := 0.04 + 0.7 * float(i) / float(n)
+		var p := from.lerp(to, t)
+		for mi in meshes:
+			var m := mi as MeshInstance3D
+			if m.mesh == null or not m.visible:
+				continue
+			var aabb := m.mesh.get_aabb()
+			var lp := m.global_transform.affine_inverse() * p
+			if aabb.grow(0.005).has_point(lp):
+				return true
+	return false
+
+
+func debug_hand_to_gun() -> Dictionary:
+	## 手腕到枪网格 AABB 的距离（在枪上则为 0）。用于判断走跑时手是否离枪。
+	var out := {"R": 99.0, "L": 99.0}
+	if gun == null or skeleton == null or _arm.is_empty():
+		return out
+	var meshes: Array = gun.find_children("*", "MeshInstance3D", true, false)
+	if gun is MeshInstance3D:
+		meshes.append(gun)
+	for s in ["R", "L"]:
+		if not _arm.has(s):
+			continue
+		var hand: Vector3 = skeleton.global_transform * skeleton.get_bone_global_pose(int(_arm[s]["ha"])).origin
+		var best := 99.0
+		for mi in meshes:
+			var m := mi as MeshInstance3D
+			if m.mesh == null:
+				continue
+			var xf := m.global_transform
+			var aabb := m.mesh.get_aabb().grow(0.03)
+			var lp := xf.affine_inverse() * hand
+			if aabb.has_point(lp):
+				best = 0.0
+				break
+			# 到扩大盒的距离（局部轴对齐）
+			var c := aabb.get_center()
+			var h := aabb.size * 0.5
+			var d := (lp - c).abs() - h
+			var outside := Vector3(maxf(d.x, 0.0), maxf(d.y, 0.0), maxf(d.z, 0.0))
+			best = minf(best, (xf.basis * outside).length())
+		out[s] = best
+	return out
+
+
 func _update_clip(delta: float) -> Dictionary:
 	if _clips == null:
 		return {}
@@ -594,26 +757,12 @@ func _update_clip(delta: float) -> Dictionary:
 func _process(delta: float) -> void:
 	if player == null or view == null:
 		return
-	var active := bool(player.get("first_person")) and not bool(player.get("input_locked"))
-	hidden_by_mode = not active
-	if not active:
-		trigger = false
-		ads = false
-		if view.visible:
-			view.visible = false
-		_ik_w = maxf(0.0, _ik_w - delta * IK_FADE * 2.0)
-		if camera.rotation != Vector3.ZERO:
-			camera.rotation = Vector3.ZERO
-		_restore_fov()
-		_step_shells(delta)
-		_step_ejects(delta)
-		if _ik_dirty:
-			if _ik_w > 0.0 and not _last_pose.is_empty():
-				_apply_ik(_last_pose, _ik_w)
-			else:
-				_restore_loco()
-		return
-	# ---- 状态机
+	# 射击 / 开镜 / 后坐只在第一人称。持枪切到观察模式时仍保持持枪姿势（不自动收枪）。
+	# 观察模式：点角色身体仍走互动工具；开火键隐藏，扳机在此模式无效。
+	var fp := bool(player.get("first_person")) and not bool(player.get("input_locked"))
+	var show := is_armed()
+	hidden_by_mode = not show
+	# ---- 状态机（观察模式也走完换弹 / 拔枪，这样切回去姿势连续）
 	state_t += delta
 	match state:
 		"drawing":
@@ -624,17 +773,21 @@ func _process(delta: float) -> void:
 				_finish_holster()
 		"reloading":
 			_step_reload()
-	_try_fire(delta)
+	if fp:
+		_try_fire(delta)
+	else:
+		trigger = false
+		if ads:
+			ads = false
 	_fire_t += delta
 	var w: WeaponDef = cur_def()
-	# ---- 后坐力 / 散布 / 开镜
 	var rr: float = w.recoil_recover if w else 9.0
 	recoil = recoil * exp(-rr * delta)
 	if recoil.length() < 1e-5:
 		recoil = Vector2.ZERO
 	_kick *= exp(-18.0 * delta)
 	spread_extra = maxf(0.0, spread_extra - (w.spread_recover if w else 8.0) * delta)
-	var want_ads := ads and state == "ready" and not _sprinting()
+	var want_ads := fp and ads and state == "ready" and not _sprinting()
 	_ads_k = move_toward(_ads_k, 1.0 if want_ads else 0.0, delta * 6.0)
 	_step_shells(delta)
 	_step_ejects(delta)
@@ -646,35 +799,50 @@ func _process(delta: float) -> void:
 		elif _flash_t <= 0.0:
 			flash.visible = false
 			flash_light.visible = false
-	if current == "" or state == "holstered":
-		view.visible = false
+	if not show:
+		if view.visible:
+			view.visible = false
 		_ik_w = maxf(0.0, _ik_w - delta * IK_FADE)
-		camera.rotation = Vector3(recoil.x, recoil.y, 0.0)
+		if fp and camera:
+			camera.rotation = Vector3(recoil.x, recoil.y, 0.0)
+		elif camera and camera.rotation != Vector3.ZERO:
+			camera.rotation = Vector3.ZERO
 		_restore_fov()
-		if _ik_w > 0.0:
+		if _ik_w > 0.0 and not _last_pose.is_empty():
 			_apply_ik(_last_pose, _ik_w)
 		elif _ik_dirty:
 			_restore_loco()
 		return
 	view.visible = true
 	_ik_w = minf(1.0, _ik_w + delta * IK_FADE)
-	camera.rotation = Vector3(recoil.x, recoil.y, 0.0)
-	if _fov_base < 0.0:
-		_fov_base = camera.fov
-	camera.fov = lerpf(float(player.get("fp_fov")), w.ads_fov, _ads_k)
-	# ---- 视模型：偏移 + 后坐 + 晃动
-	var cb := camera.global_transform.basis
-	if _prev_cam_basis != Basis():
-		var dq := (_prev_cam_basis.inverse() * cb).get_euler()
-		_sway = _sway.lerp(Vector2(clampf(dq.y, -0.08, 0.08), clampf(dq.x, -0.08, 0.08)) * 0.8, 1.0 - exp(-10.0 * delta))
-	_prev_cam_basis = cb
+	if fp and camera:
+		camera.rotation = Vector3(recoil.x, recoil.y, 0.0)
+		if _fov_base < 0.0:
+			_fov_base = camera.fov
+		if w:
+			camera.fov = lerpf(float(player.get("fp_fov")), w.ads_fov, _ads_k)
+	else:
+		if camera and camera.rotation != Vector3.ZERO:
+			camera.rotation = Vector3.ZERO
+		_restore_fov()
+	# ---- 视模型：髋射下移推远 + 后坐 + 转视晃动 + 走跑摆动（同一变换驱动枪和 IK 手，避免不同步）
+	if fp and camera:
+		var cb := camera.global_transform.basis
+		if _prev_cam_basis != Basis():
+			var dq := (_prev_cam_basis.inverse() * cb).get_euler()
+			_sway = _sway.lerp(Vector2(clampf(dq.y, -0.08, 0.08), clampf(dq.x, -0.08, 0.08)) * 0.8, 1.0 - exp(-10.0 * delta))
+		_prev_cam_basis = cb
 	_sway = _sway * exp(-6.0 * delta)
-	var kick_t := Transform3D(Basis(Vector3.RIGHT, deg_to_rad(w.kick_rot) * _kick) * Basis(Vector3.UP, _sway.x) * Basis(Vector3.RIGHT, _sway.y), Vector3(0.0, 0.0, w.kick_back * _kick))
-	view.transform = Transform3D(Basis().scaled(Vector3.ONE * w.view_scale), w.view_offset) * kick_t
+	var kick_t := Transform3D()
+	if w:
+		kick_t = Transform3D(Basis(Vector3.RIGHT, deg_to_rad(w.kick_rot) * _kick) * Basis(Vector3.UP, _sway.x) * Basis(Vector3.RIGHT, _sway.y), Vector3(0.0, 0.0, w.kick_back * _kick))
+	var local_xf := _view_local(w) * kick_t * _loco_bob_xf(delta)
+	_apply_view_xf(local_xf)
 	var pose := _update_clip(delta)
 	if pose.is_empty():
 		return
-	gun.transform = pose["gun"]
+	if gun:
+		gun.transform = pose["gun"]
 	_apply_ik(pose, _ik_w)
 
 
@@ -796,6 +964,10 @@ func _physics_process(_dt: float) -> void:
 		return
 	for bi in _ik_bones:
 		_loco_cache[bi] = skeleton.get_bone_pose_rotation(bi)
+	# 走跑时 SoftLoco 在物理帧写手臂。必须在同一物理帧把 IK 写回去，
+	# 否则插值看到的是摆臂姿势，手会离开枪。
+	if _ik_w > 0.0 and not _last_pose.is_empty():
+		_apply_ik(_last_pose, _ik_w)
 
 
 ## 我们手指在 rest 姿势下的几何弯曲角（与烘焙数据同一度量）
@@ -901,7 +1073,7 @@ func _solve_arm(a: Dictionary, P: Vector3, pole: Vector3, hand_basis: Basis, sli
 		var bd := d.dot(b)
 		var disc := bd * bd - (d.length_squared() - reach * reach)
 		var sl := bd - sqrt(disc) if disc >= 0.0 else bd
-		sl = clampf(sl, 0.0, 0.3)
+		sl = clampf(sl, 0.0, 0.42)
 		P -= b * sl
 		d = P - A
 	var stretch := clampf(d.length() / reach, 1.0, ARM_STRETCH_MAX)

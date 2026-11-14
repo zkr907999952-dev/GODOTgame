@@ -143,13 +143,13 @@ func _check_display() -> void:
 	_ok(float(organs.call("drag_offset_length")) > 0.005, "touch drag deforms belly (%.3f)" % float(organs.call("drag_offset_length")))
 	await _touch(0, belly_s + Vector2(40, -20), false)
 	_ok(not bool(organs.call("is_dragging")), "touch-up releases drag")
-	# 单指在空白处拖动 = 环绕
+	# 单指在空白处拖动不再环绕（环绕只走双击后拖动）
 	var yaw0: float = player.get("_tp_yaw_goal")
 	var corner := Vector2(_vp().x * 0.85, _vp().y * 0.75)
 	await _touch(0, corner, true)
 	await _drag(0, corner, corner + Vector2(-120, 0))
 	await _touch(0, corner + Vector2(-120, 0), false)
-	_ok(absf(float(player.get("_tp_yaw_goal")) - yaw0) > 0.2, "one-finger drag off body orbits")
+	_ok(absf(float(player.get("_tp_yaw_goal")) - yaw0) < 0.05, "one-finger drag off body does not orbit")
 	# 双击后拖动（在身体上）= 环绕，不拖身体
 	await _frames(70)
 	organs.call("reset_interaction")
@@ -246,12 +246,19 @@ func _check_fp() -> void:
 		await physics_frame
 		ymax = maxf(ymax, player.global_position.y)
 	_ok(ymax > y0 + 0.05, "jump button jumps (Δy=%.2f)" % (ymax - y0))
-	# 缩放竖条
+	# 缩放竖条：平时隐藏，打开摄像机面板后可用
+	_ok((tc.call("zoom_rect") as Rect2).size.y < 1.0, "FOV bar hidden until camera panel")
+	hud.call("_toggle_panel", 3)  # PanelId.CAMERA
+	await _frames(2)
 	var fov0: float = player.get("fp_fov")
 	var zr: Rect2 = tc.call("zoom_rect")
+	_ok(zr.size.y > 80.0, "FOV bar shown with camera panel")
 	await _touch(2, zr.position + Vector2(18, 4), true)
 	await _touch(2, zr.position + Vector2(18, 4), false)
 	_ok(float(player.get("fp_fov")) < fov0 - 5.0, "FP zoom bar narrows FOV")
+	hud.call("_close_all_panels")
+	await _frames(1)
+	_ok((tc.call("zoom_rect") as Rect2).size.y < 1.0, "FOV bar hides when camera panel closes")
 	btns = tc.call("buttons")
 	mp = (btns["mode"][0] as Rect2).get_center()
 	await _touch(3, mp, true)

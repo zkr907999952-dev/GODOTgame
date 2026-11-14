@@ -29,6 +29,8 @@ var _chk_breath: CheckButton
 var _chk_blink: CheckButton
 var _chk_hair: CheckButton
 var _sens_slider: HSlider
+var _touch_sens_slider: HSlider
+var _chk_ads_toggle: CheckButton
 var _cam_sens_slider: HSlider
 var _btn_fp: Button
 var _btn_play_mode: Button
@@ -586,6 +588,28 @@ func _build_settings_panel() -> PanelContainer:
 	_sens_slider.value_changed.connect(_on_sens_changed)
 	v.add_child(_sens_slider)
 
+	var ts_row := HBoxContainer.new()
+	var ts_l := Label.new()
+	ts_l.text = "触屏划屏灵敏度"
+	ts_l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ts_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	ts_row.add_child(ts_l)
+	v.add_child(ts_row)
+	_touch_sens_slider = HSlider.new()
+	_touch_sens_slider.min_value = 0.002
+	_touch_sens_slider.max_value = 0.02
+	_touch_sens_slider.step = 0.0005
+	_touch_sens_slider.value = 0.009
+	_touch_sens_slider.custom_minimum_size = Vector2(220, 18)
+	_touch_sens_slider.value_changed.connect(_on_touch_sens_changed)
+	v.add_child(_touch_sens_slider)
+
+	_chk_ads_toggle = CheckButton.new()
+	_chk_ads_toggle.text = "举枪瞄准：切换（关=长按）"
+	_chk_ads_toggle.button_pressed = true
+	_chk_ads_toggle.toggled.connect(_on_ads_toggle_changed)
+	v.add_child(_chk_ads_toggle)
+
 	_chk_bullet_cam = CheckButton.new()
 	_chk_bullet_cam.text = "弹道特写"
 	_chk_bullet_cam.button_pressed = true
@@ -619,7 +643,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标灵敏度，以及弹道特写（默认开，肠道/子宫被命中时按概率慢动作跟随）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），以及弹道特写（默认开，肠道/子宫被命中时按概率慢动作跟随）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)
@@ -1161,6 +1185,12 @@ func _sync_from_systems() -> void:
 			_sens_slider.value = s
 		if _cam_sens_slider:
 			_cam_sens_slider.value = s
+	if "touch_look_sensitivity" in _player and _touch_sens_slider:
+		_touch_sens_slider.value = float(_player.touch_look_sensitivity)
+	if "ads_toggle" in _player and _chk_ads_toggle:
+		var tog: bool = bool(_player.ads_toggle)
+		_chk_ads_toggle.set_pressed_no_signal(tog)
+		_chk_ads_toggle.text = "举枪瞄准：切换（关=长按）" if tog else "举枪瞄准：长按（开=切换）"
 	if "first_person" in _player and _btn_fp:
 		_btn_fp.text = "第一人称" if bool(_player.first_person) else "第三人称"
 		_style_button(_btn_fp, bool(_player.first_person))
@@ -1175,7 +1205,7 @@ func _sync_from_systems() -> void:
 				else ("角色控制 · 第一人称 · WASD 移动 · Shift 奔跑 · 空格跳 · Ctrl/C 蹲 · Z 匍匐 · Esc 释放鼠标 · M 地图 · Tab 切换")
 			)
 			if touch_ui:
-				_status.text = "触屏观察：单指点身体=互动 · 双击后拖=环绕 · 双指=平移/缩放" if disp else "触屏控制：左下摇杆（外圈奔跑）· 右侧拖动转视角 · 右下 互动/下蹲(长按匍匐)/跳跃"
+				_status.text = "触屏观察：单指点身体=互动 · 双击后拖=环绕 · 双指=平移/缩放" if disp else "触屏控制：左下摇杆（外圈奔跑）· 右侧拖动转视角 · 右下 互动/跳跃/下蹲 · 瞄准/开火/武器"
 		if _tp_box:
 			_tp_box.visible = disp
 		if disp and _player.has_method("get_tp_distance"):
@@ -1364,6 +1394,22 @@ func _on_sens_changed(v: float) -> void:
 		_sens_slider.value = v
 	if _cam_sens_slider and absf(_cam_sens_slider.value - v) > 1e-9:
 		_cam_sens_slider.value = v
+
+
+func _on_touch_sens_changed(v: float) -> void:
+	if _player and _player.has_method("set_touch_look_sensitivity"):
+		_player.call("set_touch_look_sensitivity", v)
+
+
+func _on_ads_toggle_changed(on: bool) -> void:
+	if _player and _player.has_method("set_ads_toggle"):
+		_player.call("set_ads_toggle", on)
+	if _chk_ads_toggle:
+		_chk_ads_toggle.text = "举枪瞄准：切换（关=长按）" if on else "举枪瞄准：长按（开=切换）"
+
+
+func camera_panel_open() -> bool:
+	return _panel_camera != null and _panel_camera.visible
 
 
 func _on_help_toggled(on: bool) -> void:
