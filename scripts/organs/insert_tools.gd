@@ -12,6 +12,10 @@ extends RefCounted
 const FIST_MIN_PITCH := 0.3
 const FIST_MAX_PITCH := 1.22
 const ARM_LEN := 0.38
+## 预备后的手臂网格实测：拳头半径 ≈ 3.46cm，前臂更粗。网页 deformColon 用 0.018 作底，
+## 但比真实拳头细，肠管看起来不会被撑开；物理半径取 max(网页公式, 手臂净空)。
+const ARM_FIST_R := 0.036
+const ARM_SHAFT_R := 0.044
 
 # ---------------------------------------------------------------- 刺刀（BayonetPlay）
 const SHORT_TOTAL := 0.248
@@ -263,11 +267,30 @@ func fist_bulge_params() -> Array:
 	return [Vector4(fist_tip.x, fist_tip.y, fist_wall_over(), 1.0), Vector2(fist_dir.x - fist_entry.x, fist_dir.z - fist_entry.z)]
 
 
-## 肠道「杆」：[anchor, dir, reach, radius, mix, s_min]（网页 deformColon）
+## 网页 deformColon 半径（测试对照）：0.018·(0.55+gut·0.7)
+func fist_rod_web_radius() -> float:
+	return 0.018 * (0.55 + fist_gut * 0.7)
+
+
+func fist_rod_mix() -> float:
+	return 0.9 * clampf(fist_gut, 0.0, 2.0)
+
+
+## 物理撑开半径：x = 拳头（杆尖），y = 入口/前臂（杆根）。随「肠道撑开」放大。
+func fist_physical_radii() -> Vector2:
+	var web := fist_rod_web_radius()
+	var g := clampf(fist_gut, 0.0, 2.0)
+	var tip := maxf(web, ARM_FIST_R * (0.92 + 0.18 * g))
+	var shaft := maxf(tip, ARM_SHAFT_R * (0.92 + 0.18 * g))
+	return Vector2(tip, shaft)
+
+
+## 肠道「杆」：[anchor, dir, reach, tip_radius, mix, s_min, shaft_radius]
 func fist_rod() -> Array:
 	if not fist_enabled or fist_depth < 0.02:
 		return []
-	return [anus, fist_dir, fist_depth, 0.018 * (0.55 + fist_gut * 0.7), 0.9 * clampf(fist_gut, 0.0, 2.0), 0.0]
+	var r := fist_physical_radii()
+	return [anus, fist_dir, fist_depth, r.x, fist_rod_mix(), 0.0, r.y]
 
 
 ## 手臂网格：前端（拳头）在 anus + dir·depth，手臂沿 -dir 伸出体外。

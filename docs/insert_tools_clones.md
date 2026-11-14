@@ -15,7 +15,8 @@
 | `dragTo`（往里推=加深，横向=转向 ×0.28）、`clampPitch` 0.3–1.22、`clampLateral` 腰部截面 | `insert_tools.gd` `fist_drag_to` / `_clamp_pitch` / `_clamp_lateral`（截面用 organs_meta profile） |
 | thrust / stir 自动抽插 / 搅动、arousal → 呼吸 | `fist_step`；arousal 写 SoftSecondary.breath_boost |
 | `wallOver` → soft-skeleton 腹部鼓包（smoother 0.16·spread、front 遮罩、lean x/z、bulge/rise/lever） | `skin_common.gdshaderinc` `fist_offset`（GPU 顶点） |
-| `deformColon` 杆（半径 0.018·(0.55+gut·0.7)，混合 0.9·gut） | `organ_common.gdshaderinc` `rod_offset`（rod 0，只作用于肠） |
+| `deformColon` 杆（半径 0.018·(0.55+gut·0.7)，混合 0.9·gut） | `rod_offset`（杆 0）：保留网页硬撑开公式；物理半径取 `max(网页, 手臂净空)`（拳头 3.6cm / 前臂 4.4cm，随「肠道撑开」放大），并加软衰减把附近肠袢推开。杆参数弹簧跟随拳头（抽插 / 搅动有滞后） |
+| 网页无独立子宫软体；拳头路径会穿过子宫 AABB | `OrganRig._step_fist_soft`：接触/压迫时整体位移、沿接触轴压缩、绕宫颈附近倾斜，弹簧-阻尼回弹；`organ.gdshader` `uter_offset`（`is_uterus`）。分身各自一份 |
 | prepareArm（拳端顶部 8% → 原点，残端 −Y，0.38m，#c9947a） | `prop_meshes.gd` `arm_mesh` |
 | 参数：鼓包 1.4 / 范围 1 / 肠道 1 / 杠杆 1 / 最大深度 1 / 抬升 0.7 / 速度… | HUD「拳交参数」 |
 
@@ -41,5 +42,7 @@
 - 镜子：分身在第 1 层，镜面相机自动反射。
 
 ## 自检
+`scripts/tests/fist_organs_check.gd`（headless）：深度 0 / 中 / 满时肠道半径与子宫位移对照网页公式并递增，抽插 / 搅动跟随拳头，分身独立生效。`SHOT_DIR` 时保存透视插入图。
+
 `scripts/tests/tools_clones_check.gd`（headless）：三种工具插入 / 刺破 / 伤口 / 复位、抬头时发梢与胸部间距、
 3 个分身 + 第一人称点击分身 #2（只有 #2 受影响）、清除后无孤儿节点。设置 `SHOT_DIR` 并用 Forward+ 渲染时保存 2 张图。

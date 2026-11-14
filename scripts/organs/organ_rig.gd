@@ -64,6 +64,24 @@ var _ball_ch: Array = []
 const BALL_MAX := 4
 var _gut_aabb: AABB = AABB()
 var _uterus_aabb: AABB = AABB()
+
+# 拳交脏器软体（弹簧）：杆参数与子宫位移滞后于拳头
+var _rod_reach_s: float = 0.0
+var _rod_dir_s: Vector3 = Vector3(0, 1, 0)
+var _rod_tip_s: float = 0.0
+var _rod_shaft_s: float = 0.0
+var _rod_mix_s: float = 0.0
+var _uter_off: Vector3 = Vector3.ZERO
+var _uter_off_v: Vector3 = Vector3.ZERO
+var _uter_tilt: float = 0.0
+var _uter_tilt_v: float = 0.0
+var _uter_tilt_ax: Vector3 = Vector3.RIGHT
+var _uter_sq: float = 0.0
+var _uter_sq_v: float = 0.0
+var _uter_sq_ax: Vector3 = Vector3.FORWARD
+var _uter_press: float = 0.0
+var _fist_depth_prev: float = 0.0
+var _fist_depth_vel: float = 0.0
 var last_ballistic: Dictionary = {}
 var _drag_active: bool = false
 var _drag_grab: Vector3 = Vector3.ZERO
@@ -633,6 +651,7 @@ func reset_interaction() -> void:
 	tools.clear_marks()
 	_ball_ch.clear()
 	last_ballistic = {}
+	_reset_fist_soft(true)
 	gut_health = 0.0
 	navel_insert = 0.0
 	navel_live = 0.0
@@ -748,6 +767,8 @@ func debug_snapshot() -> Dictionary:
 		"navel_insert": navel_insert,
 		"navel_live": navel_live,
 		"navel_plane_z": _navel_plane_z,
+		"fist_colon_open": _rod_tip_s + (0.01 if _rod_reach_s > 0.02 else 0.0),
+		"fist_uterus_off": _uter_off.length(),
 	}
 
 
@@ -818,6 +839,7 @@ func _step_tools(dt: float) -> void:
 	tools.fist_step(dt)
 	var gut := clampf(tools.fist_gut, 0.0, 2.0)
 	tools.blade_step(dt, _tool_grab, gut)
+	_step_fist_soft(dt)
 	if tools.puncture_event:
 		tools.puncture_event = false
 		# 网页 puncture：一次无圆环的冲击 + 肠道兴奋
@@ -858,6 +880,161 @@ func _step_drag(dt: float) -> void:
 	if not _drag_active and _drag_off.length() < 1e-5 and _drag_vel.length() < 1e-4:
 		_drag_off = Vector3.ZERO
 		_drag_vel = Vector3.ZERO
+
+
+
+func _reset_fist_soft(snap: bool = true) -> void:
+	_rod_reach_s = 0.0
+	_rod_tip_s = 0.0
+	_rod_shaft_s = 0.0
+	_rod_mix_s = 0.0
+	_uter_off = Vector3.ZERO
+	_uter_off_v = Vector3.ZERO
+	_uter_tilt = 0.0
+	_uter_tilt_v = 0.0
+	_uter_sq = 0.0
+	_uter_sq_v = 0.0
+	_uter_press = 0.0
+	_fist_depth_vel = 0.0
+	_fist_depth_prev = tools.fist_depth if tools else 0.0
+	if snap:
+		pass
+
+
+func _fist_rod_smoothed() -> Array:
+	if _rod_reach_s <= 0.02:
+		return []
+	var d := _rod_dir_s
+	if d.length_squared() < 1e-8:
+		d = tools.fist_dir
+	return [tools.anus, d.normalized(), _rod_reach_s, _rod_tip_s, _rod_mix_s, 0.0, _rod_shaft_s]
+
+
+func _ellip_r(he: Vector3, n: Vector3) -> float:
+	var q := Vector3(n.x / maxf(he.x, 1e-4), n.y / maxf(he.y, 1e-4), n.z / maxf(he.z, 1e-4))
+	return 1.0 / maxf(q.length(), 1e-4)
+
+
+func _step_fist_soft(dt: float) -> void:
+	var dnow := tools.fist_depth if tools.fist_enabled else 0.0
+	var raw_v := (dnow - _fist_depth_prev) / maxf(dt, 1e-4)
+	_fist_depth_vel += (raw_v - _fist_depth_vel) * (1.0 - exp(-18.0 * dt))
+	_fist_depth_prev = dnow
+	var tgt_reach := 0.0
+	var tgt_dir := _rod_dir_s if _rod_dir_s.length_squared() > 1e-8 else tools.fist_dir
+	var tgt_tip := 0.0
+	var tgt_shaft := 0.0
+	var tgt_mix := 0.0
+	var rod: Array = tools.fist_rod()
+	if not rod.is_empty():
+		tgt_dir = (rod[1] as Vector3).normalized()
+		tgt_reach = float(rod[2])
+		tgt_tip = float(rod[3])
+		tgt_mix = float(rod[4])
+		tgt_shaft = float(rod[6]) if rod.size() > 6 else tgt_tip
+	var k := 70.0
+	var fade := 1.0 - exp(-k * dt)
+	_rod_reach_s = lerpf(_rod_reach_s, tgt_reach, fade)
+	_rod_tip_s = lerpf(_rod_tip_s, tgt_tip, fade)
+	_rod_shaft_s = lerpf(_rod_shaft_s, tgt_shaft, fade)
+	_rod_mix_s = lerpf(_rod_mix_s, tgt_mix, fade)
+	if tgt_dir.length_squared() > 1e-8:
+		var nd := _rod_dir_s.lerp(tgt_dir, fade * 0.85)
+		if nd.length_squared() > 1e-8:
+			_rod_dir_s = nd.normalized()
+	var tgt_off := Vector3.ZERO
+	var tgt_tilt := 0.0
+	var tgt_tilt_ax := _uter_tilt_ax
+	var tgt_sq := 0.0
+	var tgt_sq_ax := _uter_sq_ax
+	_uter_press = 0.0
+	if tools.fist_enabled and tgt_reach > 0.02 and _uterus_aabb.size.length() > 1e-4:
+		var a: Vector3 = tools.anus
+		var d: Vector3 = tgt_dir
+		var uc := _uterus_aabb.get_center()
+		var he := _uterus_aabb.size * 0.5
+		var s := clampf((uc - a).dot(d), 0.0, tgt_reach + 0.02)
+		var c := a + d * s
+		var delta := uc - c
+		var ln := delta.length()
+		var n := delta / maxf(ln, 1e-6)
+		var r_org := _ellip_r(he, n)
+		var tt := clampf(s / maxf(tgt_reach, 1e-4), 0.0, 1.0)
+		var rad := lerpf(tgt_shaft, tgt_tip, tt)
+		var clearance := ln - r_org - rad
+		if clearance < 0.02:
+			var press := 0.02 - clearance
+			var past := clampf((tgt_reach - s) / 0.18, 0.0, 1.0)
+			press *= 0.75 + 0.45 * past
+			press *= 1.0 + clampf(absf(_fist_depth_vel) * 1.2, 0.0, 0.4)
+			var gut := clampf(tools.fist_gut, 0.0, 2.0)
+			tgt_off = n * press * (0.62 + 0.28 * gut)
+			if tgt_off.length() > 0.05:
+				tgt_off = tgt_off.normalized() * 0.05
+			var tax := d.cross(n)
+			if tax.length_squared() < 1e-8:
+				tax = Vector3.RIGHT
+			tgt_tilt_ax = tax.normalized()
+			tgt_tilt = clampf(press * 8.5, 0.0, 0.42)
+			tgt_sq_ax = n
+			tgt_sq = clampf(press / maxf(0.035, he.length()), 0.0, 0.38)
+			_uter_press = press
+	var uk := 55.0
+	var uz := 0.82
+	var cd := 2.0 * sqrt(uk) * uz
+	var nsub := 3
+	var h := dt / float(nsub)
+	for _i in nsub:
+		var acc := (tgt_off - _uter_off) * uk - _uter_off_v * cd
+		_uter_off_v += acc * h
+		_uter_off += _uter_off_v * h
+		_uter_tilt_v += ((tgt_tilt - _uter_tilt) * uk - _uter_tilt_v * cd) * h
+		_uter_tilt += _uter_tilt_v * h
+		_uter_sq_v += ((tgt_sq - _uter_sq) * uk - _uter_sq_v * cd) * h
+		_uter_sq += _uter_sq_v * h
+	var uf := 1.0 - exp(-uk * 0.4 * dt)
+	if tgt_tilt_ax.length_squared() > 1e-8:
+		var ax := _uter_tilt_ax.lerp(tgt_tilt_ax, uf)
+		if ax.length_squared() > 1e-8:
+			_uter_tilt_ax = ax.normalized()
+	if tgt_sq_ax.length_squared() > 1e-8:
+		var sax := _uter_sq_ax.lerp(tgt_sq_ax, uf)
+		if sax.length_squared() > 1e-8:
+			_uter_sq_ax = sax.normalized()
+	if tgt_reach <= 0.02 and _uter_off.length() < 2e-4 and absf(_uter_tilt) < 1e-4:
+		_uter_off = Vector3.ZERO
+		_uter_off_v = Vector3.ZERO
+		_uter_tilt = 0.0
+		_uter_tilt_v = 0.0
+		_uter_sq = 0.0
+		_uter_sq_v = 0.0
+
+
+## 自检 / 对照网页公式：当前杆半径、通道长度、子宫位移。
+func fist_deform_debug() -> Dictionary:
+	var web := float(tools.call("fist_rod_web_radius"))
+	var phys: Vector2 = tools.call("fist_physical_radii")
+	var rod: Array = tools.fist_rod()
+	return {
+		"enabled": tools.fist_enabled,
+		"depth": tools.fist_depth,
+		"gut": tools.fist_gut,
+		"web_rad": web,
+		"web_mix": float(tools.call("fist_rod_mix")),
+		"tip_rad": phys.x,
+		"shaft_rad": phys.y,
+		"reach": float(rod[2]) if not rod.is_empty() else 0.0,
+		"rod_reach_s": _rod_reach_s,
+		"rod_tip_s": _rod_tip_s,
+		"colon_open": (_rod_tip_s + 0.01) if _rod_reach_s > 0.02 else 0.0,
+		"uterus_off": _uter_off.length(),
+		"uterus_off_vec": _uter_off,
+		"uterus_press": _uter_press,
+		"uterus_tilt": _uter_tilt,
+		"uterus_sq": _uter_sq,
+		"fist_speed": _fist_depth_vel,
+		"dir": _rod_dir_s,
+	}
 
 
 func _update_frame() -> void:
@@ -945,7 +1122,7 @@ func _push_uniforms() -> void:
 	var ra: Array = []
 	var rd: Array = []
 	var rm: Array = []
-	for r in [tools.fist_rod(), tools.blade_rod(clampf(tools.fist_gut, 0.0, 2.0))]:
+	for r in [_fist_rod_smoothed(), tools.blade_rod(clampf(tools.fist_gut, 0.0, 2.0))]:
 		if r.is_empty():
 			ra.append(Vector4(0, 0, 0, -1))
 			rd.append(Vector4(0, 0, 1, 0))
@@ -953,9 +1130,10 @@ func _push_uniforms() -> void:
 		else:
 			var a: Vector3 = r[0]
 			var d: Vector3 = r[1]
+			var shaft := float(r[6]) if r.size() > 6 else 0.0
 			ra.append(Vector4(a.x, a.y, a.z, float(r[2])))
 			rd.append(Vector4(d.x, d.y, d.z, float(r[3])))
-			rm.append(Vector4(float(r[4]), float(r[5]), 0, 0))
+			rm.append(Vector4(float(r[4]), float(r[5]), shaft, 0))
 	var dm: Array = []
 	for i in 12:
 		dm.append(tools.damage[i] if i < tools.damage.size() else Vector4.ZERO)
@@ -969,6 +1147,10 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("rod_d", rd)
 		m.set_shader_parameter("rod_m", rm)
 		m.set_shader_parameter("dmg", dm)
+		m.set_shader_parameter("uter_pivot", _uterus_aabb.get_center() + Vector3(0, -_uterus_aabb.size.y * 0.28, 0))
+		m.set_shader_parameter("uter_off", _uter_off)
+		m.set_shader_parameter("uter_rot", Vector4(_uter_tilt_ax.x, _uter_tilt_ax.y, _uter_tilt_ax.z, _uter_tilt))
+		m.set_shader_parameter("uter_sq", Vector4(_uter_sq_ax.x, _uter_sq_ax.y, _uter_sq_ax.z, _uter_sq))
 	if _light:
 		_light.global_position = _frame.origin - b.z * 0.04
 		_light.light_energy = (0.05 + xr * 0.06) * 8.0 if (show_organs and xr > 0.08) else 0.0
@@ -1281,6 +1463,18 @@ func _build_organs() -> bool:
 			mat.set_shader_parameter("base_color", c)
 			mat.set_shader_parameter("roughness", 0.42)
 		mat.set_shader_parameter("strike_k", 1.0 if is_gut else 0.4)
+		var is_uter := false
+		if not is_gut and _uterus_aabb.size.length() > 1e-4:
+			var va0: PackedVector3Array = e["mesh"].surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+			var mn := Vector3(INF, INF, INF)
+			var mx := Vector3(-INF, -INF, -INF)
+			for p in va0:
+				var l: Vector3 = p - _navel_rest
+				mn = mn.min(l)
+				mx = mx.max(l)
+			var ov := AABB(mn, mx - mn).intersection(_uterus_aabb)
+			is_uter = ov.has_volume() and ov.get_volume() > 8.0e-5
+		mat.set_shader_parameter("is_uterus", is_uter)
 		_organ_mats.append(mat)
 		_all_mats.append(mat)
 
@@ -1294,6 +1488,7 @@ func _build_organs() -> bool:
 		mi.extra_cull_margin = 0.2
 		mi.set_meta("organ_group", "gut" if is_gut else "pelvis")
 		mi.set_meta("organ_material", matname)
+		mi.set_meta("is_uterus", bool(mat.get_shader_parameter("is_uterus")))
 		_skel.add_child(mi)
 		mi.skeleton = mi.get_path_to(_skel)
 		organ_meshes.append(mi)

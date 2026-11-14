@@ -13,6 +13,7 @@ uniform float roughness = 0.48;
 uniform float normal_scale = 0.9;
 uniform float wet = 0.45;
 uniform bool is_gut = false;
+uniform bool is_uterus = false;
 uniform float organ_soft = 0.82;
 uniform float strike_k = 1.0;
 uniform float peri_amp = 0.3;
@@ -58,6 +59,10 @@ void vertex() {
 	v_l0 = l;
 	vec3 off = strike_offset(l) * strike_k + drag_offset(l) * organ_soft + dent_offset(l) * organ_soft + ball_tear(l);
 	if (is_gut) off += rod_offset(l + off);
+	if (is_uterus) {
+		off += uter_offset(l);
+		off += rod_offset(l + off) * 0.55;
+	}
 	wp += ab_dir_to_world(off);
 	VERTEX = (inverse(MODEL_MATRIX) * vec4(wp, 1.0)).xyz;
 }

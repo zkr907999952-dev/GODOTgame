@@ -73,6 +73,7 @@ uniform vec4 rod_a[2];
 uniform vec4 rod_d[2];
 uniform vec4 rod_m[2];
 
+// rod_m: x=混合, y=s_min, z=入口半径（0 则与杆头半径相同，用于手臂由粗到细）
 vec3 rod_offset(vec3 p) {
 	vec3 q = p;
 	for (int i = 0; i < 2; i++) {
@@ -80,20 +81,63 @@ vec3 rod_offset(vec3 p) {
 		if (reach <= 0.0) continue;
 		vec3 a = rod_a[i].xyz;
 		vec3 d = rod_d[i].xyz;
-		float rad = rod_d[i].w;
 		vec3 v = q - a;
-		float s = clamp(dot(v, d), rod_m[i].y, reach);
+		float smin = rod_m[i].y;
+		float s = clamp(dot(v, d), smin, reach);
 		float w = 1.0 - smoothstep(reach - 0.01, reach + 0.05, s);
 		if (w < 0.02) continue;
+		float tip_r = rod_d[i].w;
+		float base_r = rod_m[i].z;
+		if (base_r < 1e-5) base_r = tip_r;
+		float t = clamp((s - smin) / max(reach - smin, 1e-4), 0.0, 1.0);
+		float rad = mix(base_r, tip_r, t);
 		vec3 c = a + d * s;
 		vec3 o = q - c;
 		float len = length(o);
 		float want = rad + 0.01 * w;
-		if (len >= want) continue;
-		vec3 o2 = len > 1e-5 ? o * (want / len) : vec3(want, 0.0, 0.0);
-		q += (c + o2 - q) * w * rod_m[i].x;
+		float mixv = rod_m[i].x;
+		// 网页 deformColon / deformGuts：杆内顶点撑到半径外
+		if (len < want) {
+			vec3 o2 = len > 1e-5 ? o * (want / len) : vec3(want, 0.0, 0.0);
+			q += (c + o2 - q) * w * mixv;
+			o = q - c;
+			len = length(o);
+		}
+		// 附近肠袢被推开（软衰减），让通道随拳头移动时更明显
+		float infl = rad * 2.55 + 0.016;
+		if (len < infl) {
+			float aw = 1.0 - smoothstep(want * 0.85, infl, len);
+			aw = aw * aw * w;
+			vec3 nrm = len > 1e-5 ? o / len : vec3(1.0, 0.0, 0.0);
+			q += nrm * max(0.0, infl - len) * 0.38 * mixv * aw;
+		}
 	}
 	return q - p;
+}
+
+// 子宫被拳头顶到时的整体位移 / 压缩 / 倾斜（脚本里弹簧积分后写入）
+uniform vec3 uter_pivot = vec3(0.0);
+uniform vec3 uter_off = vec3(0.0);
+uniform vec4 uter_rot = vec4(0.0, 1.0, 0.0, 0.0); // xyz 轴, w 弧度
+uniform vec4 uter_sq = vec4(0.0, 1.0, 0.0, 0.0);  // xyz 压缩轴, w 压缩量 0..1
+
+vec3 uter_offset(vec3 p) {
+	vec3 q = p - uter_pivot;
+	vec3 sax = uter_sq.xyz;
+	float ca = uter_sq.w;
+	if (ca > 1e-5 && dot(sax, sax) > 0.25) {
+		sax = normalize(sax);
+		q -= sax * dot(q, sax) * ca;
+	}
+	float ang = uter_rot.w;
+	vec3 rax = uter_rot.xyz;
+	if (abs(ang) > 1e-5 && dot(rax, rax) > 0.25) {
+		rax = normalize(rax);
+		float c = cos(ang);
+		float s = sin(ang);
+		q = q * c + cross(rax, q) * s + rax * dot(rax, q) * (1.0 - c);
+	}
+	return (uter_pivot + q + uter_off) - p;
 }
 
 // 刺入前的压陷（网页 squeezeTarget → setTissueDrag 小半径）：xyz = 中心，w = 半径；dent_off = 位移
