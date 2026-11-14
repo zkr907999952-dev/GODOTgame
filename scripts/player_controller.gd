@@ -384,6 +384,8 @@ func _try_begin_interact(screen: Vector2) -> bool:
 		if rig == null:
 			continue
 		var mode := str(_organs.get("interact_mode"))
+		if mode == "" or mode == "none":
+			mode = "drag"
 		if mode == "fist" or mode == "bayonet" or mode == "navel":
 			if rig.get("interact_mode") != mode:
 				rig.call("copy_settings_from", _organs)
@@ -408,10 +410,83 @@ func _try_begin_interact(screen: Vector2) -> bool:
 			_interact_screen = screen
 		_ptr_mode = i if _ptr_mode < 0 else _ptr_mode
 		return true
-	return false
+	# 精确射线都未命中：用肚脐的屏幕投影做近距兜底，避免坐标空间再换算一次就打空。
+	return _try_begin_interact_near(screen, variants)
 
 
 ## 拖拽中：鼠标射线与「过抓取点、法线=相机前向」平面求交（网页 grab plane）
+
+func _pointer_to_navel_dist(p: Vector2, navel: Vector3) -> float:
+	var sp: Vector2 = _camera.unproject_position(navel)
+	var vp := get_viewport()
+	var backing := Vector2(vp.size) if vp else Vector2(1280, 720)
+	var vis := vp.get_visible_rect().size if vp else backing
+	var sp_log := Vector2(sp.x * vis.x / backing.x, sp.y * vis.y / backing.y) if backing.x > 1.0 and backing.y > 1.0 else sp
+	return minf(p.distance_to(sp), p.distance_to(sp_log))
+
+
+func _tap_near_limit() -> float:
+	var vp := get_viewport()
+	var backing := Vector2(vp.size) if vp else Vector2(1280, 720)
+	var vis := vp.get_visible_rect().size if vp else backing
+	return maxf(96.0, minf(minf(backing.x, backing.y), minf(vis.x, vis.y)) * 0.18)
+
+
+func _try_begin_interact_near(screen: Vector2, variants: Array[Vector2]) -> bool:
+	if _camera == null or not _organs_live():
+		return false
+	var lim := _tap_near_limit()
+	var best_rig: Node = null
+	var best_d := INF
+	var best_p := Vector2.ZERO
+	for r in get_tree().get_nodes_in_group("organ_rigs"):
+		if not bool(r.get("ready_ok")):
+			continue
+		var navel: Vector3 = (r.call("abdomen_frame") as Transform3D).origin
+		if _camera.is_position_behind(navel):
+			continue
+		for p in variants:
+			var d := _pointer_to_navel_dist(p, navel)
+			if d < best_d:
+				best_d = d
+				best_rig = r
+				best_p = p
+	if best_rig == null or best_d > lim:
+		return false
+	var origin: Vector3 = _camera.project_ray_origin(best_p)
+	var navel: Vector3 = (best_rig.call("abdomen_frame") as Transform3D).origin
+	var dir: Vector3 = (navel - origin)
+	if dir.length_squared() < 1e-8:
+		dir = _camera.project_ray_normal(best_p)
+	else:
+		dir = dir.normalized()
+	var mode := str(_organs.get("interact_mode"))
+	if mode == "" or mode == "none":
+		mode = "drag"
+	if mode == "fist" or mode == "bayonet" or mode == "navel":
+		if best_rig.get("interact_mode") != mode:
+			best_rig.call("copy_settings_from", _organs)
+		var cam_fwd := -_camera.global_transform.basis.z
+		if not bool(best_rig.call("tool_begin", origin, dir, cam_fwd)):
+			return false
+		_interact_target = best_rig
+		_interact_held = true
+		_interact_screen = screen
+		return true
+	var hit: Variant = best_rig.call("ray_hit_belly", origin, dir)
+	if hit == null:
+		hit = navel
+	_interact_target = best_rig
+	if mode == "strike":
+		best_rig.call("strike_at", hit)
+	else:
+		# 默认拖拽：无需先打开互动面板选工具
+		best_rig.call("begin_drag", hit)
+		_interact_held = true
+		_interact_screen = screen
+	return true
+
+
 func _update_interact_drag(screen: Vector2) -> void:
 	var rig := _interact_target if is_instance_valid(_interact_target) else _organs
 	var ray := _screen_ray(screen)

@@ -39,6 +39,9 @@ uniform int prof_n = 0;
 uniform sampler2D prof_tex : hint_default_black, filter_nearest, repeat_disable;
 uniform vec4 prof_bias = vec4(0.0);
 uniform vec4 prof_scale = vec4(1.0);
+// 无纹理兜底：肚脐空间椭球窗口。真机若 sampler / include / 解码失败，仍能挖出腹窗。
+uniform vec3 hole_center = vec3(0.0, -0.02, 0.03);
+uniform vec3 hole_radius = vec3(0.10, 0.16, 0.09);
 
 vec4 prof_at(int i) {
 	vec4 t = texture(prof_tex, vec2((float(i) + 0.5) / 24.0, 0.5));
@@ -61,18 +64,34 @@ vec3 torso_profile(float y) {
 	return a.gba;
 }
 
-float xray_hole(vec3 l) {
+float xray_hole_analytic(vec3 l) {
+	// 纯 float 椭球，不采样、不依赖 int / 剖面纹理。
+	vec3 q = (l - hole_center) / max(hole_radius, vec3(0.02));
+	float ell = 1.0 - smoothstep(0.72, 1.05, length(q));
+	float band = smoothstep(xray_y0, xray_y0 + 0.08, l.y) * (1.0 - smoothstep(xray_y1 - 0.04, xray_y1, l.y));
+	float front = smoothstep(xray_zfront - 0.16, xray_zfront + 0.04, l.z);
+	float mid = 1.0 - smoothstep(0.11, 0.16, abs(l.x));
+	return clamp(ell * band * front * mid, 0.0, 1.0);
+}
+
+float xray_hole_profile(vec3 l) {
+	if (prof_n <= 0) return 0.0;
 	float band = smoothstep(xray_y0, xray_y0 + 0.08, l.y) * (1.0 - smoothstep(xray_y1 - 0.04, xray_y1, l.y));
 	vec3 pr = torso_profile(l.y);
-	// 外缘留在轮廓内 1.5cm（侧壁不挖），内缘再往里 4.5cm 渐隐
+	// 剖面若没解码出来（全 0），不要把窗口掐死
+	if (pr.x < 0.02) return 0.0;
 	float w_out = min(xray_xmax + 0.1, pr.x - 0.015);
 	float w_in = min(xray_xmax * 0.65, w_out - 0.045);
 	float torso = 1.0 - smoothstep(w_in, w_out, abs(l.x));
 	float front = smoothstep(xray_zfront - 0.16, xray_zfront + 0.04, l.z);
-	// 只挖截面前半（后壁 / 侧后壁保留）
 	float zmid = 0.5 * (pr.y + pr.z);
 	front *= smoothstep(zmid, zmid + 0.035, l.z);
-	return clamp(band * torso * front * xray, 0.0, 1.0);
+	return clamp(band * torso * front, 0.0, 1.0);
+}
+
+float xray_hole(vec3 l) {
+	// 剖面与椭球取较大值：纹理可用时窗口更贴合体型，失败时椭球仍保证开孔。
+	return clamp(max(xray_hole_profile(l), xray_hole_analytic(l)) * xray, 0.0, 1.0);
 }
 
 float belly_mask(vec3 l) {

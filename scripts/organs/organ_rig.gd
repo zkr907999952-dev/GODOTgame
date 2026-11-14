@@ -91,6 +91,9 @@ var _drag_off: Vector3 = Vector3.ZERO
 var _drag_vel: Vector3 = Vector3.ZERO
 var _frame: Transform3D = Transform3D.IDENTITY  # ab-local → world (orthonormal)
 var _ellipsoid_c: Vector3 = Vector3(0.0, -0.03, -0.1)
+## 透视窗口椭球（腹前壁，肚脐空间）。与拖拽碰撞体分开，保证开孔在看得见的腹部。
+var _hole_c: Vector3 = Vector3(0.0, -0.02, 0.03)
+var _hole_r: Vector3 = Vector3(0.10, 0.16, 0.10)
 var _ellipsoid_r: Vector3 = Vector3(0.13, 0.19, 0.1)
 var _ring: MeshInstance3D
 var _poke: MeshInstance3D
@@ -1117,6 +1120,8 @@ func _push_uniforms() -> void:
 	var fpar := Vector4(tools.fist_bulge, tools.fist_spread, tools.fist_rise, tools.fist_lever)
 	for m in _skin_mats:
 		m.set_shader_parameter("xray", xr)
+		m.set_shader_parameter("hole_center", _hole_c)
+		m.set_shader_parameter("hole_radius", _hole_r)
 		m.set_shader_parameter("fist_bulge", fb[0])
 		m.set_shader_parameter("fist_lean", fb[1])
 		m.set_shader_parameter("fist_par", fpar)
@@ -1265,6 +1270,8 @@ func _set_profile_params(m: ShaderMaterial) -> void:
 	m.set_shader_parameter("prof_tex", _prof_tex)
 	m.set_shader_parameter("prof_bias", Vector4(bias.x, bias.y, bias.z, bias.w))
 	m.set_shader_parameter("prof_scale", Vector4(scale.x, scale.y, scale.z, scale.w))
+	m.set_shader_parameter("hole_center", _hole_c)
+	m.set_shader_parameter("hole_radius", _hole_r)
 
 
 ## 校验：透视窗口中心（肚脐附近前腹壁）投影应落在腹部网格上，而不是旁边。
@@ -1311,12 +1318,42 @@ func debug_window_on_belly(cam: Camera3D) -> Dictionary:
 
 func debug_xray_hole(l: Vector3, xr: float = -1.0) -> float:
 	var x := effective_xray() if xr < 0.0 else xr
+	return clampf(maxf(_debug_hole_profile(l), _debug_hole_analytic(l)) * x, 0.0, 1.0)
+
+
+func debug_xray_hole_analytic_only(l: Vector3, xr: float = -1.0) -> float:
+	var x := effective_xray() if xr < 0.0 else xr
+	return clampf(_debug_hole_analytic(l) * x, 0.0, 1.0)
+
+
+func _debug_hole_analytic(l: Vector3) -> float:
+	var c := _hole_c
+	var r := _hole_r
+	var q := Vector3(
+		(l.x - c.x) / maxf(0.02, r.x),
+		(l.y - c.y) / maxf(0.02, r.y),
+		(l.z - c.z) / maxf(0.02, r.z)
+	)
+	var ell := 1.0 - smoothstep(0.72, 1.05, q.length())
+	var xd: Dictionary = meta.get("xray", {})
+	var y0 := float(xd.get("y0", -0.2))
+	var y1 := float(xd.get("y1", 0.145))
+	var zf0 := float(xd.get("z_front", -0.01))
+	var band := smoothstep(y0, y0 + 0.08, l.y) * (1.0 - smoothstep(y1 - 0.04, y1, l.y))
+	var front := smoothstep(zf0 - 0.16, zf0 + 0.04, l.z)
+	var mid := 1.0 - smoothstep(0.11, 0.16, absf(l.x))
+	return clampf(ell * band * front * mid, 0.0, 1.0)
+
+
+func _debug_hole_profile(l: Vector3) -> float:
 	var xd: Dictionary = meta.get("xray", {})
 	var y0 := float(xd.get("y0", -0.2))
 	var y1 := float(xd.get("y1", 0.145))
 	var xmax := float(xd.get("x_max", 0.12))
 	var zf0 := float(xd.get("z_front", -0.01))
 	var pr := _profile_at(l.y)
+	if pr.x < 0.02:
+		return 0.0
 	var band := smoothstep(y0, y0 + 0.08, l.y) * (1.0 - smoothstep(y1 - 0.04, y1, l.y))
 	var w_out := minf(xmax + 0.1, pr.x - 0.015)
 	var w_in := minf(xmax * 0.65, w_out - 0.045)
@@ -1324,7 +1361,7 @@ func debug_xray_hole(l: Vector3, xr: float = -1.0) -> float:
 	var front := smoothstep(zf0 - 0.16, zf0 + 0.04, l.z)
 	var zmid := 0.5 * (pr.y + pr.z)
 	front *= smoothstep(zmid, zmid + 0.035, l.z)
-	return clampf(band * torso * front * x, 0.0, 1.0)
+	return clampf(band * torso * front, 0.0, 1.0)
 
 
 ## 截面轮廓（相对肚脐）：x = 半宽，y = 前表面 z，z = 后表面 z

@@ -69,6 +69,10 @@ var hidden_by_mode: bool = false
 var _mag_ejected: bool = false
 ## 手枪空仓挂机：弹匣打空后锁在后方，换弹结束必须关闭。不依赖 empty 动画（该片段 0 轨道）。
 var _slide_locked: bool = false
+## 机瞄光学点缓存（照门孔 / 准星尖，不是骨骼原点）
+var _sight_cache_id: int = -1
+var _sight_cache: PackedVector3Array = PackedVector3Array()
+var _torso_bones: Array[int] = []
 const PISTOL_SLIDE_CLOSED := Vector3(0.003878, 0.119461, 0.0)
 const PISTOL_SLIDE_OPEN := Vector3(-0.036122, 0.119461, 0.0)
 var _mag_meshes: Dictionary = {}  # id -> Mesh
@@ -349,6 +353,8 @@ func _finish_holster() -> void:
 
 func _load_weapon(id: String) -> void:
 	_unload_weapon()
+	_sight_cache_id = -1
+	_sight_cache = PackedVector3Array()
 	var w: WeaponDef = get_def(id)
 	gun = w.scene.instantiate()
 	view.add_child(gun)
@@ -780,57 +786,201 @@ func debug_slide_open() -> bool:
 	return sk.get_bone_pose_position(i).x < (PISTOL_SLIDE_CLOSED.x - 0.015)
 
 
+func _bone_in_gun(sk: Skeleton3D, bone: String) -> Vector3:
+	var i := sk.find_bone(bone)
+	if i < 0:
+		return Vector3.INF
+	return gun.global_transform.affine_inverse() * (sk.global_transform * sk.get_bone_global_pose(i).origin)
+
+
+func _mesh_verts_in_gun(mi: MeshInstance3D) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	if mi == null or mi.mesh == null or mi.mesh.get_surface_count() < 1:
+		return out
+	var arr := mi.mesh.surface_get_arrays(0)
+	if arr.is_empty() or arr[Mesh.ARRAY_VERTEX] == null:
+		return out
+	var vs: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	# 用节点变换（含 Armature 的 -90°X）。瞄具网格不随骨骼摆动。
+	for v in vs:
+		out.append(gun.to_local(mi.to_global(v)) if mi.is_inside_tree() and gun.is_inside_tree() else mi.transform * v)
+	return out
+
+
+func _rear_aperture_from_verts(verts: PackedVector3Array, bone: Vector3) -> Vector3:
+	# 在照门 X 附近的 YZ 平面找被围住的空腔中心（机瞄孔 / 提把窗口），不要用骨骼原点（通常在窗沿或壳顶）。
+	if verts.is_empty():
+		return Vector3.INF
+	var near: Array[Vector3] = []
+	var x0 := bone.x
+	for p in verts:
+		if absf(p.x - x0) <= 0.03 and p.y > bone.y - 0.04:
+			near.append(p)
+	if near.size() < 8:
+		return Vector3.INF
+	var y0 := 1e9
+	var y1 := -1e9
+	var z0 := 1e9
+	var z1 := -1e9
+	for p in near:
+		y0 = minf(y0, p.y)
+		y1 = maxf(y1, p.y)
+		z0 = minf(z0, p.z)
+		z1 = maxf(z1, p.z)
+	var step := 0.002
+	var ny := int(ceil((y1 - y0) / step)) + 3
+	var nz := int(ceil((z1 - z0) / step)) + 3
+	if ny < 6 or nz < 6 or ny * nz > 20000:
+		return Vector3.INF
+	var occ := PackedByteArray()
+	occ.resize(ny * nz)
+	for p in near:
+		var iy := int(round((p.y - y0) / step)) + 1
+		var iz := int(round((p.z - z0) / step)) + 1
+		if iy >= 0 and iy < ny and iz >= 0 and iz < nz:
+			occ[iy * nz + iz] = 1
+	# 从边界灌水，剩下的空格即孔洞
+	var seen := PackedByteArray()
+	seen.resize(ny * nz)
+	var q: Array[int] = []
+	for iy in ny:
+		for iz in nz:
+			if iy == 0 or iy == ny - 1 or iz == 0 or iz == nz - 1:
+				var id := iy * nz + iz
+				if occ[id] == 0 and seen[id] == 0:
+					seen[id] = 1
+					q.append(id)
+	var qi := 0
+	while qi < q.size():
+		var id: int = q[qi]
+		qi += 1
+		var iy := int(id / nz)
+		var iz := id - iy * nz
+		var dirs: Array[Vector2i] = [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]
+		for d in dirs:
+			var ay: int = iy + d.x
+			var az: int = iz + d.y
+			if ay < 0 or ay >= ny or az < 0 or az >= nz:
+				continue
+			var nid: int = ay * nz + az
+			if occ[nid] == 0 and seen[nid] == 0:
+				seen[nid] = 1
+				q.append(nid)
+	var sy := 0.0
+	var sz := 0.0
+	var n := 0
+	for iy in range(1, ny - 1):
+		for iz in range(1, nz - 1):
+			var id := iy * nz + iz
+			if occ[id] != 0 or seen[id] != 0:
+				continue
+			var y := y0 + float(iy - 1) * step
+			var z := z0 + float(iz - 1) * step
+			if absf(z) > 0.016:
+				continue
+			sy += y
+			sz += z
+			n += 1
+	if n < 4:
+		return Vector3.INF
+	return Vector3(x0, sy / float(n), sz / float(n))
+
+
+func _front_post_from_verts(verts: PackedVector3Array, bone: Vector3) -> Vector3:
+	# 准星尖：前准星附近最高且靠近中线的顶点平均，不要偏到塔座侧面。
+	var ymax := -1e9
+	for p in verts:
+		if absf(p.x - bone.x) <= 0.035 and absf(p.z) <= 0.008:
+			ymax = maxf(ymax, p.y)
+	if ymax < -1e8:
+		return Vector3.INF
+	var s := Vector3.ZERO
+	var n := 0
+	for p in verts:
+		if absf(p.x - bone.x) <= 0.035 and absf(p.z) <= 0.008 and p.y >= ymax - 0.004:
+			s += p
+			n += 1
+	if n <= 0:
+		return Vector3.INF
+	var tip: Vector3 = s / float(n)
+	tip.z = 0.0
+	return tip
+
+
 func _sight_locals(w: WeaponDef) -> PackedVector3Array:
-	# 照门 / 准星在枪局部空间。优先用骨骼，避免把枪管轴线（muzzle）当成准星——
-	# AR-15 机瞄比枪管高约 4cm，对准枪管会让照门明显高过准星。
+	# 光学轴线 = 机瞄孔中心 → 准星尖。骨骼原点在提把/准星座上，比真实瞄准孔高/低几厘米。
 	var rear := Vector3(w.muzzle.x * 0.15, w.muzzle.y, 0.0) if w else Vector3.ZERO
 	var front := w.muzzle if w else Vector3.RIGHT
-	if gun:
-		var sk: Skeleton3D = gun.find_child("Skeleton3D", true, false)
-		if sk:
-			var ir := sk.find_bone("RearSight")
-			var ifr := sk.find_bone("FrontSight")
-			var sk_to_gun := gun.global_transform.affine_inverse() * sk.global_transform
-			if ir >= 0:
-				rear = sk_to_gun * sk.get_bone_global_pose(ir).origin
-			if ifr >= 0:
-				front = sk_to_gun * sk.get_bone_global_pose(ifr).origin
-	return PackedVector3Array([rear, front])
+	if gun == null:
+		return PackedVector3Array([rear, front])
+	var gid := gun.get_instance_id()
+	if gid == _sight_cache_id and _sight_cache.size() == 2:
+		return _sight_cache
+	var sk: Skeleton3D = gun.find_child("Skeleton3D", true, false)
+	if sk:
+		var br := _bone_in_gun(sk, "RearSight")
+		var bf := _bone_in_gun(sk, "FrontSight")
+		if br != Vector3.INF:
+			rear = br
+		if bf != Vector3.INF:
+			front = bf
+	var sights: MeshInstance3D = gun.find_child("Sights_Mesh", true, false)
+	var verts := _mesh_verts_in_gun(sights) if sights else PackedVector3Array()
+	if verts.is_empty():
+		# 没有独立瞄具网格时，扫所有网格
+		for mi in gun.find_children("*", "MeshInstance3D", true, false):
+			verts.append_array(_mesh_verts_in_gun(mi))
+	if verts.size() > 0:
+		var hole := _rear_aperture_from_verts(verts, rear)
+		var post := _front_post_from_verts(verts, front)
+		if hole != Vector3.INF:
+			rear = hole
+		elif sk and sk.find_bone("RearSight") >= 0:
+			# AR-15 提把窗口中心大约比 RearSight 骨骼高 1.6cm
+			rear.y += 0.016
+		if post != Vector3.INF:
+			front = post
+		elif sk and sk.find_bone("FrontSight") >= 0:
+			front.y += 0.034
+	_sight_cache_id = gid
+	_sight_cache = PackedVector3Array([rear, front])
+	return _sight_cache
 
 
 func _align_iron_sights(w: WeaponDef) -> void:
-	# 开镜：照门与准星三点一线，落在屏幕中心的 + 上。必须在写入 gun.transform 之后调用。
+	# 开镜：机瞄孔与准星尖三点一线，落在屏幕中心的 + 上。必须在写入 gun.transform 之后调用。
+	# 旋转要绕照门孔，不能绕 view 原点，否则校正准星会把孔又带离准星。
 	if w == null or gun == null or camera == null or _ads_k < 0.05:
 		return
 	if view.get_parent() != camera:
 		return
 	var pts := _sight_locals(w)
-	var rear_w: Vector3 = gun.to_global(pts[0])
-	var front_w: Vector3 = gun.to_global(pts[1])
-	var cam_inv := camera.global_transform.affine_inverse()
-	var r: Vector3 = cam_inv * rear_w
-	var f: Vector3 = cam_inv * front_w
 	var k := _ads_k
-	# 先把照门平移到相机 -Z 轴（x=y=0）
+	var cam_inv := camera.global_transform.affine_inverse()
+	var r: Vector3 = cam_inv * gun.to_global(pts[0])
 	view.position.x -= r.x * k
 	view.position.y -= r.y * k
-	# 再绕相机微调，让准星也落到同一轴线（俯仰 / 偏航）
-	var axis: Vector3 = (f - r)
-	if axis.length_squared() > 1e-8:
-		axis = axis.normalized()
-		# 目标是 (0,0,-1)
-		var want := Vector3(0, 0, -1)
-		var pitch := atan2(axis.y, -axis.z)  # 正值 = 准星偏上，需要低头
-		var yaw := atan2(axis.x, -axis.z)
-		view.rotate_object_local(Vector3.RIGHT, -pitch * k)
-		view.rotate_object_local(Vector3.UP, -yaw * k)
-	# 再校正一次平移（旋转后照门可能离轴）
-	rear_w = gun.to_global(pts[0])
-	r = camera.global_transform.affine_inverse() * rear_w
+	cam_inv = camera.global_transform.affine_inverse()
+	var rear_c: Vector3 = cam_inv * gun.to_global(pts[0])
+	var front_c: Vector3 = cam_inv * gun.to_global(pts[1])
+	var have: Vector3 = front_c - rear_c
+	if have.length_squared() > 1e-8:
+		var q := Quaternion(have.normalized(), Vector3(0, 0, -1))
+		if k < 0.999:
+			q = Quaternion.IDENTITY.slerp(q, k)
+		var R := Basis(q)
+		var t := view.transform
+		var new_t := Transform3D(R * t.basis, R * (t.origin - rear_c) + rear_c)
+		view.transform = new_t
+	cam_inv = camera.global_transform.affine_inverse()
+	r = cam_inv * gun.to_global(pts[0])
 	view.position.x -= r.x * k
 	view.position.y -= r.y * k
 	if r.z > -0.18:
 		view.position.z -= (r.z + 0.26) * k
+		r = camera.global_transform.affine_inverse() * gun.to_global(pts[0])
+		view.position.x -= r.x * k
+		view.position.y -= r.y * k
 
 
 func debug_muzzle_ahead() -> float:
@@ -1017,6 +1167,9 @@ func _process(delta: float) -> void:
 	# 空仓挂机：每帧写回滑套，避免射击动画结束把滑套带回关闭位
 	if _slide_locked and state == "ready":
 		_set_pistol_slide_open(true)
+	_sync_skel_interp()
+	_apply_aim_torso()
+	_pull_gun_into_reach(pose)
 	_apply_ik(pose, _ik_w)
 
 
@@ -1125,6 +1278,11 @@ func _setup_arms() -> void:
 		}
 		for k in ["sh", "ua", "fa", "ha"]:
 			_ik_bones.append(int(_arm[s][k]))
+	_torso_bones.clear()
+	for nm in ["C_Spine_a", "C_Spine_b", "C_Spine_c", "R_Shoulder_a", "L_Shoulder_a"]:
+		var ti := skeleton.find_bone(nm)
+		if ti >= 0 and not _torso_bones.has(ti):
+			_torso_bones.append(ti)
 
 
 ## 物理帧：loco 刚写完姿势 → 记下手臂 / 手指的 loco 姿势，作为 IK 混合的底
@@ -1136,9 +1294,13 @@ func _physics_process(_dt: float) -> void:
 		return
 	for bi in _ik_bones:
 		_loco_cache[bi] = skeleton.get_bone_pose_rotation(bi)
+	for bi in _torso_bones:
+		_loco_cache[bi] = skeleton.get_bone_pose_rotation(bi)
 	# 走跑时 SoftLoco 在物理帧写手臂。必须在同一物理帧把 IK 写回去，
 	# 否则插值看到的是摆臂姿势，手会离开枪。
 	if _ik_w > 0.0 and not _last_pose.is_empty():
+		_apply_aim_torso()
+		_pull_gun_into_reach(_last_pose)
 		_apply_ik(_last_pose, _ik_w)
 
 
@@ -1177,11 +1339,90 @@ func _set_rot(bi: int, q: Quaternion, w: float) -> void:
 	skeleton.set_bone_pose_rotation(bi, _base_rot(bi).slerp(q, w) if w < 0.999 else q)
 
 
+func _sync_skel_interp() -> void:
+	# 持枪第一人称：关闭骨架物理插值，让 _process 里写的 IK 立刻画出来，
+	# 与挂在「插值关闭」的镜头上的枪同步。观察模式 / 收枪后恢复继承。
+	if skeleton == null:
+		return
+	var fp := bool(player.get("first_person")) if player else false
+	var want_off := fp and is_armed() and _ik_w > 0.05
+	var mode := Node.PHYSICS_INTERPOLATION_MODE_OFF if want_off else Node.PHYSICS_INTERPOLATION_MODE_INHERIT
+	if skeleton.physics_interpolation_mode != mode:
+		skeleton.physics_interpolation_mode = mode
+
+
+func _apply_aim_torso() -> void:
+	# 镜头俯仰时胸部/肩随动（有限角度），否则手臂够不到挂在相机上的枪。
+	# 观察模式不跟环绕相机俯仰，避免破坏抵肩姿势。
+	if skeleton == null or _torso_bones.is_empty():
+		return
+	var fp := bool(player.get("first_person")) if player else false
+	if not fp or not is_armed() or _ik_w <= 0.0:
+		for bi in _torso_bones:
+			if _loco_cache.has(bi):
+				skeleton.set_bone_pose_rotation(bi, _loco_cache[bi])
+		return
+	var pitch := float(player.get("_pitch"))
+	# 与 body_look 相同：镜头 _pitch 前倾为正，骨骼要用相反符号。
+	# 镜头低头（_pitch>0，Godot 相机惯例）时胸向前折，肩跟上，左手才够得到护木。
+	var p := clampf(pitch, -1.0, 1.0)
+	# 低头比抬头更需要身体跟上（枪被带到脚下，手臂原本够不着）。
+	var down := 1.0 if p >= 0.0 else 0.75
+	var amounts := {
+		"C_Spine_a": p * 0.16 * down,
+		"C_Spine_b": p * 0.32 * down,
+		"C_Spine_c": p * 0.55 * down,
+		"R_Shoulder_a": p * 0.20 * down,
+		"L_Shoulder_a": p * 0.20 * down,
+	}
+	for nm in amounts.keys():
+		var i := skeleton.find_bone(nm)
+		if i < 0:
+			continue
+		var base: Quaternion = _loco_cache.get(i, skeleton.get_bone_pose_rotation(i))
+		var dq := Quaternion(Vector3.RIGHT, float(amounts[nm]))
+		skeleton.set_bone_pose_rotation(i, (base * dq).normalized())
+
+
+func _pull_gun_into_reach(pose: Dictionary) -> void:
+	# 若护木/握把超出手臂长度，把视模型往肩方向拉回，避免俯仰时手离开枪。
+	if not (player and bool(player.get("first_person"))) or skeleton == null or view == null or pose.is_empty() or _arm.is_empty():
+		return
+	if view.get_parent() != camera:
+		return
+	var skx := skeleton.global_transform
+	for _pass in 2:
+		var shift := Vector3.ZERO
+		var worst := 0.0
+		for s in ["R", "L"]:
+			if not _arm.has(s) or not pose.has(s):
+				continue
+			var a: Dictionary = _arm[s]
+			var h: Dictionary = pose[s]
+			var sem_cam := Basis(h["q"] as Quaternion)
+			var wrist_cam: Vector3 = (h["wrist"] as Vector3) + sem_cam.x * (float(h["flen"]) - float(a["flen"]))
+			var want: Vector3 = view.global_transform * wrist_cam
+			var sh: Vector3 = skx * skeleton.get_bone_global_pose(int(a["sh"])).origin
+			var reach: float = (float(a["l1"]) + float(a["l2"])) * 0.88
+			var d := want.distance_to(sh)
+			var extra := d - reach
+			if extra > worst:
+				worst = extra
+				shift = (want - sh).normalized() * extra
+		if worst <= 0.001:
+			break
+		view.global_position -= shift
+	if _ads_k > 0.05:
+		_align_iron_sights(cur_def())
+
+
 func _apply_ik(pose: Dictionary, w: float) -> void:
 	if pose.is_empty() or skeleton == null or _arm.is_empty() or w <= 0.0:
 		return
 	_ik_dirty = true
-	var sk_xf := skeleton.get_global_transform_interpolated()
+	# 视模型挂在插值关闭的相机上；必须用当前（非插值）骨架变换，
+	# 否则俯仰时枪已经跟上镜头，手还留在上一物理帧的插值姿势上。
+	var sk_xf := skeleton.global_transform
 	var to_sk := sk_xf.affine_inverse()
 	var vx := view.global_transform
 	var barrel := (to_sk.basis * (vx.basis * (pose["gun"] as Transform3D).basis * Vector3.RIGHT)).normalized()
@@ -1256,23 +1497,34 @@ func _aim_bone_chain_to(prefix: String, world_dir: Vector3, w: float) -> void:
 		_set_rot(bi, now.slerp(now * Quaternion(axis, ang), 1.0), w)
 
 
-func debug_ads_error() -> float:
-	## 开镜时照门与准星投影到屏幕中心的最大像素偏差。
+func debug_ads_parts() -> Dictionary:
+	var out := {"rear": 999.0, "front": 999.0, "rear_pt": Vector3.ZERO, "front_pt": Vector3.ZERO}
 	if gun == null or camera == null:
-		return 999.0
+		return out
 	var w: WeaponDef = cur_def()
 	if w == null:
-		return 999.0
+		return out
 	var pts := _sight_locals(w)
+	out["rear_pt"] = pts[0]
+	out["front_pt"] = pts[1]
 	var vp := camera.get_viewport()
 	var c: Vector2 = Vector2(vp.get_visible_rect().size) * 0.5 if vp else Vector2.ZERO
-	var err := 0.0
 	for i in 2:
 		var world: Vector3 = gun.to_global(pts[i])
 		if camera.is_position_behind(world):
-			return 999.0
-		err = maxf(err, camera.unproject_position(world).distance_to(c))
-	return err
+			return out
+		var e := camera.unproject_position(world).distance_to(c)
+		if i == 0:
+			out["rear"] = e
+		else:
+			out["front"] = e
+	return out
+
+
+func debug_ads_error() -> float:
+	## 开镜时机瞄孔与准星尖投影到屏幕中心的最大像素偏差。
+	var d := debug_ads_parts()
+	return maxf(float(d.get("rear", 999.0)), float(d.get("front", 999.0)))
 
 
 func debug_stock_vs_head() -> Dictionary:

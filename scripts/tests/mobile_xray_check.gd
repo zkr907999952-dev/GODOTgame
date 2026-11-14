@@ -31,6 +31,7 @@ func _run() -> void:
 	_ok(skin_c.find("prof_tex") >= 0, "profile uses texture")
 	_ok(skin_c.find("uniform float prof_y[24]") < 0, "no float[24] profile arrays")
 	_ok(skin_c.find("prof_bias") >= 0 and skin_c.find("prof_scale") >= 0, "RGBA8 bias/scale decode")
+	_ok(skin_c.find("xray_hole_analytic") >= 0 and skin_c.find("hole_center") >= 0, "analytic texture-free hole")
 
 	# 编译材质：挂到场景里让渲染器实际 set_code
 	var world := Node3D.new()
