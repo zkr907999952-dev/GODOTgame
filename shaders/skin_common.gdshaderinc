@@ -94,8 +94,10 @@ void skin_surface(vec2 uv, bool front, inout vec3 albedo, inout float metal, ino
 	vec4 orm = has_orm ? texture(orm_tex, uv) : vec4(1.0);
 	albedo = a.rgb;
 	metal = metallic * orm.b;
-	rough = roughness * orm.g;
-	spec = specular;
+	// 躯干贴图 G≈0.49 × 0.578 → 粗糙度只有 ≈0.28，像抹了油：朝上的胸口/锁骨/肩带在高位主光
+	// 和吸顶灯下镜面高光连成一片发白。皮肤下限 0.45、镜面强度上限 0.36。
+	rough = max(roughness * orm.g, 0.45);
+	spec = min(specular, 0.36);
 	// glTF metallicRoughness 贴图的 R 通道不是 AO（此模型无 occlusionTexture；躯干贴图 R≈0.17），
 	// 之前当 AO 用 → 一旦有环境光，躯干明显发灰发脏。
 	ao = 1.0;

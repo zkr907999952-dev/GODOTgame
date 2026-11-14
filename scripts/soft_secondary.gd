@@ -71,6 +71,7 @@ var breath_chest: float = 0.0
 var body_look_on: bool = false
 var body_look_yaw: float = 0.0
 var body_look_pitch: float = 0.0
+var body_look_solved: Vector2 = Vector2.ZERO
 
 ## Display-mode gaze: head + eyes look at a world-space point (usually the active Camera3D).
 var gaze_want: bool = false
@@ -447,9 +448,28 @@ func _apply_gaze() -> void:
 func _apply_body_look() -> void:
 	if not body_look_on or skeleton == null:
 		return
-	# Match web setBodyLook: neck (-pitch*0.5, yaw*0.52), head remainder (-pitch, yaw) YXZ.
-	_nudge_look_bone("C_Neck_a", -body_look_pitch * 0.5, body_look_yaw * 0.52)
-	_nudge_look_bone("C_Head_a", -body_look_pitch * 0.5, body_look_yaw * 0.48)
+	# Web setBodyLook splits (-pitch, yaw) between neck/head as local deltas. That
+	# only matches the camera while the neck chain is at its standing rest; crouch /
+	# prone poses lean the spine + bend the neck, so a fixed delta looked at the floor.
+	# Re-express the wanted view dir in the neck's *current* posed frame (relative to
+	# its rest frame) and split that look instead.
+	var yaw := body_look_yaw
+	var pitch := body_look_pitch
+	if bone_i.has("C_Neck_a"):
+		var ni: int = bone_i["C_Neck_a"]
+		var now_b := skeleton.get_bone_global_pose(ni).basis.orthonormalized()
+		var rest_b := skeleton.get_bone_global_rest(ni).basis.orthonormalized()
+		var corr := now_b * rest_b.inverse()
+		var cp := cos(pitch)
+		var d := Vector3(sin(yaw) * cp, sin(pitch), cos(yaw) * cp)
+		var db := corr.inverse() * d
+		yaw = atan2(db.x, db.z)
+		pitch = atan2(db.y, Vector2(db.x, db.z).length())
+	yaw = clampf(yaw, -1.6, 1.6)
+	pitch = clampf(pitch, -1.25, 1.65)
+	body_look_solved = Vector2(yaw, pitch)
+	_nudge_look_bone("C_Neck_a", -pitch * 0.5, yaw * 0.52)
+	_nudge_look_bone("C_Head_a", -pitch * 0.5, yaw * 0.48)
 
 
 func _nudge_look_bone(name: String, pitch: float, yaw: float, from_rest: bool = false) -> void:

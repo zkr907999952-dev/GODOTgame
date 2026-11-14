@@ -117,6 +117,8 @@ const FP_EYE_LIFT := 0.06
 const BODY_LOOK_DEAD := PI / 3.0
 ## Stand↔crouch (and stance eye/capsule) blend duration — web STANCE_BLEND_DUR.
 const STANCE_BLEND_DUR := 0.7
+## 第一人称眼位过渡（比身体姿态快，避免下蹲/起身时视点落进脖子）。
+const FP_EYE_BLEND_DUR := 0.3
 var _fp_eye_from: Vector3 = FP_EYE_STAND
 var _fp_eye_to: Vector3 = FP_EYE_STAND
 var _fp_eye_blend: float = 1.0  # 0..1 smoothstep like web stanceU
@@ -168,7 +170,9 @@ func _ready() -> void:
 	_fill_light.name = "CameraFill"
 	_fill_light.light_color = Color("#e6d4c6")
 	_fill_light.omni_range = 2.6
-	_fill_light.omni_attenuation = 2.0
+	# 衰减 0.6（原 2.0 ≈ 平方反比）：光源就在眼睛处，离胸口/肩/手只有 0.15–0.4m，平方反比会把
+	# 近处皮肤打成一片白（第一人称低头、蹲下时最明显）。
+	_fill_light.omni_attenuation = 0.6
 	_fill_light.shadow_enabled = false
 	_fill_light.light_specular = 0.0
 	_fill_light.light_cull_mask = CHAR_LIGHT_LAYER
@@ -574,14 +578,14 @@ func _process(delta: float) -> void:
 		_sync_pivot()
 		_camera.near = 0.1 if camera_bounds.size == Vector3.ZERO else 0.04
 	if _organs and _organs.has_method("set_fp_clip"):
-		_organs.call("set_fp_clip", _camera.global_position, FP_CLIP_RADIUS if first_person else 0.0)
+		_organs.call("set_fp_clip", _camera.global_position, (FP_CLIP_RADIUS_BLEND if is_stance_blending() else FP_CLIP_RADIUS) if first_person else 0.0)
 	if _fill_light:
 		# 网页：观察模式关闭；第一人称 房间 0.18 / 城市 0.06，移动时 ×0.45。
 		var city := camera_bounds.size == Vector3.ZERO
 		var moving := Vector2(velocity.x, velocity.z).length() > 0.2
 		var base := (0.06 if city else 0.18) * (0.45 if moving else 1.0)
 		_fill_light.visible = first_person
-		_fill_light.light_energy = base * 2.0
+		_fill_light.light_energy = base * 1.2
 
 
 ## 观察模式：相机环绕角速度 → 乳摇（网页 pushViewSpin）。第一人称不推（身体转动本身已驱动）。
@@ -707,7 +711,7 @@ const CHAR_LIGHT_LAYER := 1 << 17
 func _apply_fp_mesh_visibility() -> void:
 	for mi in _body.find_children("*", "MeshInstance3D", true, false):
 		var mesh_i := mi as MeshInstance3D
-		if mesh_i == null:
+		if mesh_i == null or mesh_i.name.ends_with("_ShadowProxy"):
 			continue
 		mesh_i.visible = true
 		if _fp_should_hide_mesh(mesh_i):
@@ -718,6 +722,59 @@ func _apply_fp_mesh_visibility() -> void:
 		_camera.cull_mask &= ~FP_HEAD_LAYER
 	else:
 		_camera.cull_mask |= FP_HEAD_LAYER
+	_sync_fp_shadow_proxies()
+
+
+## 第一人称时头/发/眼在主相机被图层剔除，Godot 的平行光阴影也随相机可见层一起剔除，
+## 影子里就没了头。给每个隐藏网格挂一个「只投影」副本（同网格/同蒙皮/同骨架，图层 1，
+## SHADOWS_ONLY）：主相机看不见它本体，但它进入阴影图。只在第一人称打开。
+var _fp_shadow_proxies: Array[MeshInstance3D] = []
+
+
+func _sync_fp_shadow_proxies() -> void:
+	if _fp_shadow_proxies.is_empty() and first_person:
+		for mi in _body.find_children("*", "MeshInstance3D", true, false):
+			var src := mi as MeshInstance3D
+			if src == null or not _fp_should_hide_mesh(src) or src.name.ends_with("_ShadowProxy"):
+				continue
+			if src.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_OFF:
+				continue
+			var px := MeshInstance3D.new()
+			px.name = String(src.name) + "_ShadowProxy"
+			px.mesh = src.mesh
+			px.skin = src.skin
+			px.transform = src.transform
+			for si in src.get_surface_override_material_count():
+				px.set_surface_override_material(si, src.get_active_material(si))
+			px.material_override = src.material_override
+			px.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+			px.layers = 1
+			src.get_parent().add_child(px)
+			px.skeleton = px.get_path_to(src.get_node(src.skeleton)) if src.skeleton != NodePath() else NodePath()
+			_fp_shadow_proxies.append(px)
+	for px in _fp_shadow_proxies:
+		if is_instance_valid(px):
+			px.visible = first_person
+
+
+## 自检：头部（含只投影副本）在当前模式下是否投影。
+func debug_head_shadow_state() -> Dictionary:
+	var heads := 0
+	var casting := 0
+	for mi in _body.find_children("*", "MeshInstance3D", true, false):
+		var m := mi as MeshInstance3D
+		if m == null or not _fp_should_hide_mesh(m) or m.name.ends_with("_ShadowProxy"):
+			continue
+		heads += 1
+		var ok := m.visible and m.cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF and (m.layers & _camera.cull_mask) != 0
+		if not ok:
+			for px in _fp_shadow_proxies:
+				if is_instance_valid(px) and px.visible and px.mesh == m.mesh and (px.layers & _camera.cull_mask) != 0 \
+						and px.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY:
+					ok = true
+		if ok:
+			casting += 1
+	return {"heads": heads, "casting": casting}
 
 
 ## Place capsule so its bottom matches mesh soles (AABB min.y ≈ 0 in character space).
@@ -1030,10 +1087,20 @@ func _apply_camera() -> void:
 ## Smooth lerp between stance eyes (web stanceU smoothstep over STANCE_BLEND_DUR).
 func _update_fp_eye_blend(delta: float) -> void:
 	if _fp_eye_blend < 1.0:
-		_fp_eye_blend = minf(1.0, _fp_eye_blend + delta / STANCE_BLEND_DUR)
+		_fp_eye_blend = minf(1.0, _fp_eye_blend + delta / FP_EYE_BLEND_DUR)
+	# 眼位比身体（0.7s）快、ease-out：先到位，让视点始终领先于正在弯曲的脖子/头部。
 	var t := _fp_eye_blend
-	var u := t * t * (3.0 - 2.0 * t)
+	var u := 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
 	_fp_eye_cur = _fp_eye_from.lerp(_fp_eye_to, u)
+	# 起身（眼位往后收、靠近身体）时，前后分量跟身体同速（0.7s smoothstep）：先抬高、再后收，
+	# 否则视点会先退进正在抬起的胸口/脖子里。
+	if _fp_eye_to.z < _fp_eye_from.z:
+		var bt := _stance_blend
+		_fp_eye_cur.z = lerpf(_fp_eye_from.z, _fp_eye_to.z, bt * bt * (3.0 - 2.0 * bt))
+
+
+func is_stance_blending() -> bool:
+	return _stance_blend < 1.0 or _fp_eye_blend < 1.0
 
 
 func _update_stance_capsule_blend(delta: float) -> void:
@@ -1058,6 +1125,8 @@ func _update_stance_capsule_blend(delta: float) -> void:
 ## - 结果做指数平滑（误差 >0.28m 时 22/s，否则 12/s），起跳 / 落地 / 换姿态不会硬跳。
 ## 第一人称近裁球半径：主相机看不到眼睛周围这么近的皮肤（颈 / 锁骨），镜子里不受影响。
 const FP_CLIP_RADIUS := 0.1
+## 姿态过渡中近相机皮肤裁切半径放大（脖子/锁骨在 0.7s 内会扫过视点附近）。
+const FP_CLIP_RADIUS_BLEND := 0.13
 const FP_PUSH_IDLE := 0.028
 const FP_PUSH_WALK := 0.035
 const FP_PUSH_SPRINT := 0.05
@@ -1107,7 +1176,7 @@ func _update_fp_eye(delta: float, moving: bool, sprinting: bool, airborne: bool)
 		_fp_eye_smooth = want
 		_fp_eye_init = true
 	var err := _fp_eye_smooth.distance_to(want)
-	var k := 1.0 - exp(-(22.0 if err > 0.28 else 12.0) * delta)
+	var k := 1.0 - exp(-(22.0 if (err > 0.28 or is_stance_blending()) else 12.0) * delta)
 	_fp_eye_smooth = _fp_eye_smooth.lerp(want, k)
 
 
