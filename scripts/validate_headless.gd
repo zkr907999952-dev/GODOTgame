@@ -499,5 +499,108 @@ func _run() -> void:
 	sec.call("clear_gaze")
 	print("validate: gaze stability OK")
 
+	# Organs + abdomen x-ray (web figure.tsx port).
+	var organs: Node = player.call("get_organs") if player.has_method("get_organs") else null
+	if organs == null or not bool(organs.get("ready_ok")):
+		push_error("validate: OrganRig missing / not ready")
+		quit(1)
+		return
+	if not bool(organs.get("xray_enabled")) or absf(float(organs.call("effective_xray")) - 0.38) > 1e-4:
+		push_error("validate: abdomen x-ray should default ON at 0.38")
+		quit(1)
+		return
+	var om: Array = organs.get("organ_meshes")
+	var n_gut := 0
+	var n_pelvis := 0
+	for o in om:
+		var omi := o as MeshInstance3D
+		if omi.get_parent() != skel or omi.skin == null or omi.get_node_or_null(omi.skeleton) != skel:
+			push_error("validate: organ %s not skinned to Tifa skeleton" % omi.name)
+			quit(1)
+			return
+		if str(omi.get_meta("organ_group")) == "gut":
+			n_gut += 1
+		else:
+			n_pelvis += 1
+	var has_uterus := false
+	for o in om:
+		if "uterus" in str((o as MeshInstance3D).get_meta("organ_material")).to_lower():
+			has_uterus = true
+	print("validate: organs gut=", n_gut, " pelvis=", n_pelvis, " uterus=", has_uterus)
+	if n_gut < 3 or n_pelvis < 3 or not has_uterus:
+		push_error("validate: expected intestines (3) + pelvis pack incl. uterus")
+		quit(1)
+		return
+	var sk_meshes: Array = organs.get("skin_meshes")
+	if sk_meshes.size() < 2:
+		push_error("validate: torso skin x-ray materials not installed")
+		quit(1)
+		return
+	var smat := (sk_meshes[0] as MeshInstance3D).get_surface_override_material(0) as ShaderMaterial
+	if smat == null or smat.next_pass == null:
+		push_error("validate: skin x-ray punch+fade materials missing")
+		quit(1)
+		return
+	# Navel frame sits on the belly (inside body AABB, in front of spine).
+	organs.call("step", 0.016)
+	var nav: Vector3 = organs.call("navel_world")
+	var nav_local: Vector3 = (player as Node3D).to_local(nav)
+	print("validate: navel world=", nav, " local=", nav_local)
+	if nav_local.y < 0.95 or nav_local.y > 1.15:
+		push_error("validate: navel frame height off %s" % nav_local)
+		quit(1)
+		return
+	# Ray from in front hits belly ellipsoid.
+	var fr: Transform3D = organs.call("abdomen_frame")
+	var ro := fr.origin + fr.basis.z * 0.8
+	var hit_v: Variant = organs.call("ray_hit_belly", ro, -fr.basis.z)
+	if hit_v == null:
+		push_error("validate: belly ray hit failed")
+		quit(1)
+		return
+	var hit_p: Vector3 = hit_v
+	print("validate: belly hit dist from navel=", snappedf(hit_p.distance_to(fr.origin), 0.0001))
+	# Toggle x-ray off/on.
+	organs.call("toggle_xray")
+	if float(organs.call("effective_xray")) != 0.0:
+		push_error("validate: toggle_xray did not turn off")
+		quit(1)
+		return
+	organs.call("toggle_xray")
+	# Drag: deforms, then springs back after release.
+	organs.call("set_interact_mode", "drag")
+	organs.call("begin_drag", hit_p)
+	organs.call("update_drag", hit_p + fr.basis.x * 0.06 + fr.basis.z * 0.03)
+	for _d in 30:
+		organs.call("step", 0.016)
+	var d_on: float = organs.call("drag_offset_length")
+	organs.call("end_drag")
+	var d_peak := d_on
+	for _d2 in 120:
+		organs.call("step", 0.016)
+		d_peak = maxf(d_peak, float(organs.call("drag_offset_length")))
+	var d_off: float = organs.call("drag_offset_length")
+	print("validate: drag offset held=", snappedf(d_on, 0.0001), " after release=", snappedf(d_off, 0.00001))
+	if d_on < 0.03 or d_off > 0.002:
+		push_error("validate: drag should deform (>3cm) then recover (<2mm); got %s / %s" % [d_on, d_off])
+		quit(1)
+		return
+	# Strike: wave deforms guts, then fades out.
+	organs.call("set_interact_mode", "strike")
+	organs.call("strike_at", hit_p)
+	for _s in 8:
+		organs.call("step", 0.016)
+	var probe := fr.affine_inverse() * hit_p + Vector3(0.0, 0.0, -0.03)
+	var s_on: float = organs.call("debug_strike_displacement", probe)
+	for _s2 in 240:
+		organs.call("step", 0.016)
+	var waves_left: int = organs.call("active_waves")
+	print("validate: strike disp=", snappedf(s_on, 0.0001), " waves after 4s=", waves_left)
+	if s_on < 0.01 or waves_left != 0:
+		push_error("validate: strike should dent guts then recover")
+		quit(1)
+		return
+	print("validate: organs / x-ray OK")
+
 	print("validate: OK")
 	quit(0)

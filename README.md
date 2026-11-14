@@ -23,10 +23,21 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 | 滚轮 | 第三人称：拉近/推远距离（1.2–6）；第一人称：FOV（50–90）；HUD 面板打开时忽略 |
 | Esc | 关闭 HUD 面板，或释放 / 重新捕获鼠标 |
 | **Tab** | **切换游玩模式**：展示互动 ↔ 角色控制 |
+| **X** | **腹部透视**开 / 关（默认开，强度 0.38，同网页） |
+| 鼠标左键 | 点腹部互动：**拖拽**=按住拖动腹壁与体内脏器，松手回弹；**打击**=点击释放环状冲击。光标可见时取光标位置（Esc 释放鼠标），捕获时取屏幕中心 |
 | M | 房间 ↔ 城市 切换 |
 | HUD「设置」 | 左上角：呼吸 / 眨眼 / 头发物理、鼠标灵敏度 |
-| HUD「互动」 | 右侧：拖拽 / 打击 / 拳头 / 刺刀 / 肚脐（模式占位） |
-| HUD「摄像机」 | 重置视角、**游玩模式切换**、灵敏度 |
+| HUD「互动」 | 右侧：**拖拽 / 打击 已接入脏器**；拳头 / 刺刀 / 肚脐 仍为占位 |
+| HUD「摄像机」 | 重置视角、**游玩模式切换**、**腹部透视**开关 + **腹部半透明**滑条（0–1）、**显示脏器**、**肠蠕动**、灵敏度 |
+
+### 腹部透视与体内脏器（移植自网页 figure.tsx）
+
+- **脏器**：网页的大肠/小肠（`intestines.glb`）与盆腔包（子宫、膀胱、卵巢、输卵管、韧带；外阴已按网页删除）由 `tools/bake_organs.py` 按网页同款算法摆进腹腔，蒙皮到 `C_Hip_a` / `C_Spine_a..d`，随走、蹲、匍匐、呼吸一起动；肠管有网页同款**蠕动**。
+- **透视**：只作用于腹前区域（肚脐上下 −0.20…+0.145m、左右约 ±0.12m、身体前侧），中心挖孔 + 半透明边缘过渡，强度 0–1（默认 0.38）。镜子、第一人称同样生效。
+- **互动**（展示互动模式为主，角色控制模式也可用）：
+  - **拖拽**：按住左键拖动腹壁，皮肤与肠/子宫一起被拉动（脏器跟随 0.82），松手弹簧回弹。
+  - **打击**：点击腹部 → 环形冲击波 + 中心凹陷压到肠管上，约 1.7s 回弹，同时肠蠕动短时加快。
+- 细节见 `docs/organs_port_notes.md`。渲染自检：`xvfb-run -a godot --path . -s res://scripts/tests/organs_check.gd`（截图到 `user://organs_check` 或 `ORGANS_CHECK_OUT`）。
 
 ### 游玩模式
 
@@ -44,8 +55,8 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 `scenes/ui/hud.tscn` + `scripts/hud.gd`，挂在主场景 CanvasLayer：
 
 - **设置（左上）**：开关 `SoftSecondary` 的呼吸 / 眨眼 / 头发物理；鼠标灵敏度滑条；面板说明显隐。打开面板时释放鼠标便于点击。
-- **互动（右侧）**：五种模式按钮，写入 HUD 内部状态并显示「当前模式」文案。软体拖拽/打击等尚未接入，仅占位。
-- **摄像机**：重置视角；**游玩模式**（展示互动 / 角色控制，等同 Tab）；灵敏度（与设置共用）。**展示**：第三人称、锁移动、头+眼 `set_gaze_target` 看向相机，头/发/眼可见。**控制**：第一人称；身体 yaw **不**瞬时跟相机（静止时约 ±60° 死区 / 共约 120° 自由看，移动时朝向移动方向）；颈/头 `setBodyLook`；隐藏头/发/眼/嘴防裁切；眼高网页 `stanceEye`（站 1.52 / 蹲 1.06 / 匍 0.3，蹲↔站 **0.7s** 过渡）；近裁剪 ≈0.06；俯仰 ≈±89°；滚轮调 FOV。
+- **互动（右侧）**：五种模式按钮，写入 `OrganRig.interact_mode`。拖拽 / 打击 已接入腹壁与脏器；拳头 / 刺刀 / 肚脐 仍占位。
+- **摄像机**：重置视角；**透视**（腹部透视开关 / 腹部半透明滑条 / 显示脏器 / 肠蠕动）；**游玩模式**（展示互动 / 角色控制，等同 Tab）；灵敏度（与设置共用）。**展示**：第三人称、锁移动、头+眼 `set_gaze_target` 看向相机，头/发/眼可见。**控制**：第一人称；身体 yaw **不**瞬时跟相机（静止时约 ±60° 死区 / 共约 120° 自由看，移动时朝向移动方向）；颈/头 `setBodyLook`；隐藏头/发/眼/嘴防裁切；眼高网页 `stanceEye`（站 1.52 / 蹲 1.06 / 匍 0.3，蹲↔站 **0.7s** 过渡）；近裁剪 ≈0.06；俯仰 ≈±89°；滚轮调 FOV。
 
 ## 动画（网页 loco-clips）
 
@@ -123,6 +134,10 @@ scripts/game_root.gd
 scripts/hud.gd
 scripts/validate_headless.gd
 scripts/room_mirror.gd
+scripts/organs/organ_rig.gd
+shaders/organ.gdshader, skin_xray*.gdshader, *.gdshaderinc, fx_ring.gdshader
+assets/organs/organs_mesh.bin（gzip，2.8MB）+ organs_meta.json + 4×JPG
+tools/bake_organs.py
 scenes/ui/hud.tscn
 scenes/maps/room_mirror.tscn
 assets/characters/tifa/Tifa_Web_Skinned.glb
@@ -137,7 +152,10 @@ tools/bake_tifa_skinned.py
 ## 已知限制
 
 - 城市首次进入会为大量网格生成 trimesh，加载稍慢；树叶无碰撞。
-- 动画为关键帧程序化驱动；已移植头发 Verlet / 眨眼 / 呼吸。软体脏器、刺刀等互动仍为 HUD 占位。
+- 动画为关键帧程序化驱动；已移植头发 Verlet / 眨眼 / 呼吸、腹部透视与脏器（拖拽 / 打击 / 蠕动）。拳头、刺刀、肚脐互动和网页的肠道血量变色、彭腹仍未移植。
+- 脏器网格是运行时从 `assets/organs/organs_mesh.bin` 读取的（非 Godot 资源）。若以后导出游戏，需要在导出预设的「要导出的非资源文件」里加 `assets/organs/*.bin, assets/organs/*.json`。重新烘焙：`/workspace/tools/blender/blender --background --python tools/bake_organs.py`。
+- 第一人称低头时胸部会挡住大部分腹部，透视效果在镜子里或第三人称更容易看到。
+- 网页的腹部软笼没有完整移植：拖拽 / 打击在着色器里做顶点位移（皮肤 + 脏器），法线不重算。
 - 下蹲为**切换** Ctrl/C（0.7s 过渡）；匍匐为 Z 切换；胶囊近似网页（站 1.64 / 蹲 0.94 / 匍 0.42），底边仍贴地。
 - 游玩模式：启动为展示互动；Tab / HUD 切换。展示锁定移动并注视相机；控制为第一人称可移动。滚轮：TP 改距离，FP 改 FOV。
 - 房间镜子为 SubViewport 实时平面镜：只渲染屏幕上可见的镜面区域，分辨率按屏幕像素密度自适应（上限 2048）；相机在镜后或镜子不在视野内时停止渲染，城市地图下隐藏。渲染自检：`xvfb-run -a godot --path . -s res://scripts/tests/mirror_check.gd`（截图输出到 user://mirror_check，或用环境变量 MIRROR_CHECK_OUT 指定）。
