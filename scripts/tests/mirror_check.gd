@@ -131,9 +131,7 @@ func _run() -> void:
 
 	# 1) 展示模式 TP：相机在角色后方（房间内）看镜子。
 	player.call("set_play_mode", 0)
-	player.set("_yaw", PI)
-	player.set("_pitch", -0.12)
-	player.call("_apply_camera")
+	player.call("set_tp_view", PI, 0.12, 1.6)
 	await _frames(6)
 	var img := await _shot("01_tp_display_front")
 	checks.call(img, "tp_front")
@@ -172,13 +170,11 @@ func _run() -> void:
 	img = await _shot("06_fp_look_down")
 	checks.call(img, "fp_down")
 
-	# 7) 展示模式默认（相机在空墙外侧）：镜子背面应透明，可看到房间里的角色。
+	# 7) 展示模式默认（房间内正面，镜中为背影）。
 	player.call("set_play_mode", 0)
-	player.set("_yaw", 0.0)
-	player.set("_pitch", -0.15)
-	player.call("_apply_camera")
+	player.call("tp_home", true)
 	await _frames(6)
-	await _shot("07_tp_from_behind_mirror")
+	await _shot("07_tp_display_home")
 
 	# 8) 背对镜子：镜子不在视野内应停止渲染。
 	player.set("_yaw", PI)

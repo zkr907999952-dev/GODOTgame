@@ -9,6 +9,10 @@ extends Node3D
 
 const ROOM_SPAWN := Vector3(-0.2, 0.1, 0.3)
 const CITY_SPAWN := Vector3(42.5, 2.0, 40.2)
+## 出生朝向（逻辑 yaw，0 = 面向 -Z）：背对镜子、面向房间，观察相机在房间内正面。
+const ROOM_SPAWN_YAW := 0.0
+## 房间墙内空间（相机碰撞用，网页 pullCameraOutOfWalls 同款盒子）；+Z 面是镜子。
+const ROOM_CAMERA_BOUNDS := AABB(Vector3(-1.98, 0.05, -3.30), Vector3(5.5, 2.27, 4.25))
 
 var _in_city: bool = false
 
@@ -39,6 +43,9 @@ func _show_home() -> void:
 	_set_colliders_enabled(_room, true)
 	_player.global_position = ROOM_SPAWN
 	_player.velocity = Vector3.ZERO
+	_player.set("camera_bounds", ROOM_CAMERA_BOUNDS)
+	if _player.has_method("set_facing"):
+		_player.call("set_facing", ROOM_SPAWN_YAW)
 	print("game_root: home (room)")
 
 
@@ -54,6 +61,9 @@ func _show_city() -> void:
 	_set_colliders_enabled(_city, true)
 	_player.global_position = CITY_SPAWN
 	_player.velocity = Vector3.ZERO
+	_player.set("camera_bounds", AABB())
+	if _player.has_method("set_facing") and not bool(_player.get("first_person")):
+		_player.call("tp_home", true)
 	print("game_root: city")
 
 

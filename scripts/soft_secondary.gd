@@ -7,6 +7,7 @@ const RIG_PATH := "res://assets/characters/tifa/soft_rig_bones.json"
 const LID_RE := "^(L|R)_(U|D)lid_([A-E])$"
 ## Web stepHair: indices 0..HAIR_PIN_MAX (HairRoot + next) stay rigid to FK; Verlet only for k > pin.
 const HAIR_PIN_MAX := 1
+const BreastPhysicsScript = preload("res://scripts/breast_physics.gd")
 
 var hair_enabled: bool = true
 var hair_damp: float = 0.01
@@ -27,6 +28,8 @@ var breath_speed: float = 0.3
 var breath_boost: float = 0.0
 
 var skeleton: Skeleton3D
+## 物理乳摇（scripts/breast_physics.gd）
+var breasts: RefCounted = null
 
 var bone_i: Dictionary = {}
 var rest_pos: Dictionary = {}
@@ -180,6 +183,9 @@ func setup(skel: Skeleton3D) -> bool:
 		lid_w[sname] = w
 		lid_kind[sname] = 1 if m.get_string(2) == "U" else -1
 
+	breasts = BreastPhysicsScript.new()
+	if not breasts.setup(skeleton):
+		breasts = null
 	next_blink = 0.8 + _rng.randf() * 1.4
 	blink_t = -1.0
 	blink_amt = 0.0
@@ -257,6 +263,9 @@ func update(delta: float, sprint: bool = false) -> void:
 
 	if hair_enabled and hair_names.size() >= 2:
 		_step_hair(d)
+	# 乳摇用原始 delta（内部 240Hz 固定子步），低帧率不发散。
+	if breasts != null:
+		breasts.update(delta)
 
 
 func _update_breath(d: float) -> void:
@@ -643,9 +652,11 @@ func _step_hair(d: float) -> void:
 		p.z += pitch_f * 0.12 * u * hi * dt2 * 60.0
 		var i_nm: String = hair_names[k3]
 		var to: Vector3 = rq * ((rest_pos[i_nm] as Vector3) - (rest_pos[root_name] as Vector3)) + rp
-		p.x += (to.x - p.x) * shape
-		p.y += (to.y - p.y) * shape * 0.75
-		p.z += (to.z - p.z) * shape
+		# 根部更硬、发梢更软：靠近头皮的发段几乎贴着头型，只有垂下的发尾甩动。
+		var sh := minf(shape * (1.0 + 2.5 * (1.0 - u) * (1.0 - u)), 0.5)
+		p.x += (to.x - p.x) * sh
+		p.y += (to.y - p.y) * sh * 0.75
+		p.z += (to.z - p.z) * sh
 		if p.y < to.y - 0.1:
 			p.y = to.y - 0.1
 		if p.z > to.z + 0.03:
