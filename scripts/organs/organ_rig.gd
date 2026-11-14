@@ -161,6 +161,14 @@ func end_drag() -> void:
 	_drag_active = false
 
 
+## R 键：清掉拖拽 / 打击形变（网页 resetSim 的腹部部分）。
+func reset_interaction() -> void:
+	_drag_active = false
+	_drag_off = Vector3.ZERO
+	_drag_vel = Vector3.ZERO
+	_waves.clear()
+
+
 func is_dragging() -> bool:
 	return _drag_active
 

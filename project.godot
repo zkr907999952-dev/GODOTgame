@@ -67,6 +67,10 @@ prone={
 ]
 }
 
+[rendering]
+
+anti_aliasing/quality/msaa_3d=1
+
 [layer_names]
 
 3d_render/layer_19="fp_head"

@@ -38,6 +38,17 @@ var _xray_slider: HSlider
 var _xray_value: Label
 var _chk_organs: CheckButton
 var _chk_peri: CheckButton
+var _chk_breast: CheckButton
+var _breast_slider: HSlider
+var _breast_value: Label
+var _tp_box: VBoxContainer
+var _focus_buttons: Dictionary = {}
+var _zoom_slider: HSlider
+var _zoom_value: Label
+var _chk_autorot: CheckButton
+var _preset_buttons: Array = []
+var _root_ui: Control
+var _ui_hidden: bool = false
 
 
 func setup(player: Node) -> void:
@@ -69,6 +80,7 @@ func _build_ui() -> void:
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(root)
+	_root_ui = root
 
 	# Top-left: 设置
 	_btn_settings = _make_chrome_button("设置")
@@ -96,7 +108,7 @@ func _build_ui() -> void:
 	right_bar.add_child(_btn_interact)
 
 	_status = Label.new()
-	_status.text = "Tab 切换模式 · Esc 释放鼠标 · 打开面板时显示光标"
+	_status.text = "Tab 切换模式 · 右键环绕 · 中键平移 · 滚轮缩放 · 左键互动"
 	_status.add_theme_font_size_override("font_size", 13)
 	_status.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92, 0.85))
 	_status.position = Vector2(16, 56)
@@ -206,6 +218,32 @@ func _build_settings_panel() -> PanelContainer:
 	_chk_hair.toggled.connect(_on_hair_toggled)
 	v.add_child(_chk_hair)
 
+	_chk_breast = CheckButton.new()
+	_chk_breast.text = "乳摇物理"
+	_chk_breast.button_pressed = true
+	_chk_breast.toggled.connect(_on_breast_toggled)
+	v.add_child(_chk_breast)
+
+	var br_row := HBoxContainer.new()
+	var br_l := Label.new()
+	br_l.text = "乳摇强度"
+	br_l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	br_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	br_row.add_child(br_l)
+	_breast_value = Label.new()
+	_breast_value.text = "0.50"
+	_breast_value.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	br_row.add_child(_breast_value)
+	v.add_child(br_row)
+	_breast_slider = HSlider.new()
+	_breast_slider.min_value = 0.0
+	_breast_slider.max_value = 1.0
+	_breast_slider.step = 0.01
+	_breast_slider.value = 0.5
+	_breast_slider.custom_minimum_size = Vector2(220, 18)
+	_breast_slider.value_changed.connect(_on_breast_strength)
+	v.add_child(_breast_slider)
+
 	var sens_row := HBoxContainer.new()
 	var sens_l := Label.new()
 	sens_l.text = "鼠标灵敏度"
@@ -230,7 +268,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画与鼠标灵敏度。Esc 关闭面板并释放鼠标。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）与鼠标灵敏度。Esc 关闭面板，H 隐藏界面。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)
@@ -255,7 +293,7 @@ func _build_interact_panel() -> PanelContainer:
 	v.add_child(title)
 
 	var hint := Label.new()
-	hint.text = "左键点腹部：拖拽=按住拖动软组织，打击=点击释放环状冲击（Esc 显示光标后点击；捕获鼠标时以屏幕中心为准）。拳头/刺刀/肚脐暂为占位。"
+	hint.text = "左键点腹部：拖拽=按住拖动软组织，打击=点击释放环状冲击。观察视角直接用光标点；第一人称以屏幕中心为准。T 循环模式。拳头/刺刀/肚脐暂为占位。"
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.custom_minimum_size = Vector2(210, 0)
 	hint.add_theme_font_size_override("font_size", 12)
@@ -294,9 +332,15 @@ func _build_camera_panel() -> PanelContainer:
 	var p := PanelContainer.new()
 	p.custom_minimum_size = Vector2(240, 0)
 	_style_panel(p)
+	# 内容较多：放进滚动容器，矮窗口也能完整操作。
+	var sc := ScrollContainer.new()
+	sc.custom_minimum_size = Vector2(250, 520)
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	p.add_child(sc)
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 8)
-	p.add_child(v)
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sc.add_child(v)
 
 	var title := Label.new()
 	title.text = "摄像机"
@@ -319,7 +363,7 @@ func _build_camera_panel() -> PanelContainer:
 	v.add_child(_btn_play_mode)
 
 	var mode_hint := Label.new()
-	mode_hint.text = "Tab 切换 · 展示=第三人称注视 / 控制=第一人称移动"
+	mode_hint.text = "Tab 切换 · 展示=第三人称观察（右键环绕 / 中键或 Shift+右键平移 / 滚轮缩放 / 左键互动）· 控制=第一人称移动"
 	mode_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	mode_hint.custom_minimum_size = Vector2(200, 0)
 	mode_hint.add_theme_font_size_override("font_size", 11)
@@ -333,6 +377,79 @@ func _build_camera_panel() -> PanelContainer:
 	_btn_fp.pressed.connect(_on_toggle_fp)
 	_btn_fp.visible = false  # superseded by play mode; keep for sync safety
 	v.add_child(_btn_fp)
+
+	# ---- 观察视角控制（网页 CameraMenu：视角预设 / 视觉中心 / 缩放 / 平移）
+	_tp_box = VBoxContainer.new()
+	_tp_box.add_theme_constant_override("separation", 6)
+	v.add_child(_tp_box)
+	var fl := Label.new()
+	fl.text = "视觉中心（F 循环）"
+	fl.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	_tp_box.add_child(fl)
+	var fg := GridContainer.new()
+	fg.columns = 4
+	fg.add_theme_constant_override("h_separation", 4)
+	_tp_box.add_child(fg)
+	_focus_buttons.clear()
+	for f in [["face", "面部"], ["chest", "胸部"], ["belly", "腹部"], ["groin", "阴部"]]:
+		var fb := Button.new()
+		fb.text = f[1]
+		fb.custom_minimum_size = Vector2(48, 28)
+		fb.add_theme_font_size_override("font_size", 12)
+		_style_button(fb, false)
+		fb.pressed.connect(_on_focus.bind(f[0]))
+		fg.add_child(fb)
+		_focus_buttons[f[0]] = fb
+	var zr := HBoxContainer.new()
+	var zl := Label.new()
+	zl.text = "缩放（滚轮）"
+	zl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	zl.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	zr.add_child(zl)
+	_zoom_value = Label.new()
+	_zoom_value.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	zr.add_child(_zoom_value)
+	_tp_box.add_child(zr)
+	_zoom_slider = HSlider.new()
+	_zoom_slider.min_value = 0.2
+	_zoom_slider.max_value = 6.2
+	_zoom_slider.step = 0.01
+	_zoom_slider.custom_minimum_size = Vector2(200, 18)
+	_zoom_slider.value_changed.connect(_on_zoom)
+	_tp_box.add_child(_zoom_slider)
+	var pan := GridContainer.new()
+	pan.columns = 5
+	pan.add_theme_constant_override("h_separation", 4)
+	_tp_box.add_child(pan)
+	for spec in [["◀", -0.08, 0.0, 0.0], ["▲", 0.0, 0.08, 0.0], ["▼", 0.0, -0.08, 0.0], ["▶", 0.08, 0.0, 0.0], ["近", 0.0, 0.0, 0.08]]:
+		var pb := Button.new()
+		pb.text = spec[0]
+		pb.custom_minimum_size = Vector2(36, 28)
+		_style_button(pb, false)
+		pb.pressed.connect(_on_pan.bind(spec[1], spec[2], spec[3]))
+		pan.add_child(pb)
+	_chk_autorot = CheckButton.new()
+	_chk_autorot.text = "自动旋转"
+	_chk_autorot.toggled.connect(_on_autorot)
+	_tp_box.add_child(_chk_autorot)
+	var pl := Label.new()
+	pl.text = "视角预设（点=调用，右键=保存）"
+	pl.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	_tp_box.add_child(pl)
+	var pg := GridContainer.new()
+	pg.columns = 4
+	pg.add_theme_constant_override("h_separation", 4)
+	_tp_box.add_child(pg)
+	_preset_buttons.clear()
+	for i in 4:
+		var b := Button.new()
+		b.text = "预设%d·空" % (i + 1)
+		b.custom_minimum_size = Vector2(48, 28)
+		b.add_theme_font_size_override("font_size", 11)
+		_style_button(b, false)
+		b.gui_input.connect(_on_preset_input.bind(i))
+		pg.add_child(b)
+		_preset_buttons.append(b)
 
 	var xray_title := Label.new()
 	xray_title.text = "透视"
@@ -435,6 +552,25 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 		elif event.keycode == KEY_X:
 			call_deferred("_sync_from_systems")
+		elif event.keycode == KEY_H:
+			# 网页 H：隐藏 / 显示界面
+			_ui_hidden = not _ui_hidden
+			if _root_ui:
+				_root_ui.visible = not _ui_hidden
+		elif event.keycode == KEY_B:
+			# 网页 B：呼吸开关
+			var sec := _sec()
+			if sec:
+				sec.set("breath_enabled", not bool(sec.get("breath_enabled")))
+			_sync_from_systems()
+		elif event.keycode == KEY_T:
+			# 网页 T：循环互动模式
+			var ids: Array = []
+			for m in INTERACT_MODES:
+				ids.append(str(m["id"]))
+			_on_mode_pressed(ids[(ids.find(_interact_mode) + 1) % ids.size()])
+		elif event.keycode == KEY_F or event.keycode == KEY_R:
+			call_deferred("_sync_from_systems")
 		elif event.keycode == KEY_TAB:
 			# Player also toggles; refresh chrome labels.
 			call_deferred("_sync_from_systems")
@@ -458,10 +594,25 @@ func _sync_from_systems() -> void:
 		_style_button(_btn_play_mode, disp)
 		if _status:
 			_status.text = (
-				("展示互动 · 第三人称注视 · 不可移动 · Tab 切换")
+				("展示互动（观察）· 右键环绕 · 中键/Shift+右键平移 · 滚轮缩放 · 左键互动 · F 视觉中心 · R 复位 · Tab 切换")
 				if disp
-				else ("角色控制 · 第一人称可移动 · Tab 切换")
+				else ("角色控制 · 第一人称 · WASD 移动 · Shift 奔跑 · 空格跳 · C 蹲 · Z 匍匐 · Esc 释放鼠标 · Tab 切换")
 			)
+		if _tp_box:
+			_tp_box.visible = disp
+		if disp and _player.has_method("get_tp_distance"):
+			if _zoom_slider:
+				_zoom_slider.set_value_no_signal(float(_player.call("get_tp_distance")))
+			if _zoom_value:
+				_zoom_value.text = "%.2f" % float(_player.call("get_tp_distance"))
+			var foc := str(_player.call("get_tp_focus"))
+			for k in _focus_buttons.keys():
+				_style_button(_focus_buttons[k], k == foc)
+			if _chk_autorot:
+				_chk_autorot.set_pressed_no_signal(bool(_player.get("tp_auto_rotate")))
+			for i in _preset_buttons.size():
+				var has := bool(_player.call("has_tp_preset", i))
+				(_preset_buttons[i] as Button).text = ("预设%d" % (i + 1)) if has else ("预设%d·空" % (i + 1))
 	var org := _org()
 	if org != null:
 		if _chk_xray:
@@ -485,6 +636,14 @@ func _sync_from_systems() -> void:
 			_chk_blink.set_pressed_no_signal(bool(sec.get("blink_enabled")))
 		if _chk_hair:
 			_chk_hair.set_pressed_no_signal(bool(sec.get("hair_enabled")))
+		var br: RefCounted = sec.get("breasts")
+		if br != null:
+			if _chk_breast:
+				_chk_breast.set_pressed_no_signal(bool(br.get("enabled")))
+			if _breast_slider:
+				_breast_slider.set_value_no_signal(float(br.get("strength")))
+			if _breast_value:
+				_breast_value.text = "%.2f" % float(br.get("strength"))
 
 
 func _org() -> Node:
@@ -539,6 +698,71 @@ func _on_hair_toggled(on: bool) -> void:
 	var sec := _sec()
 	if sec:
 		sec.set("hair_enabled", on)
+
+
+func _breasts() -> RefCounted:
+	var sec := _sec()
+	if sec == null:
+		return null
+	return sec.get("breasts")
+
+
+func _on_breast_toggled(on: bool) -> void:
+	var br := _breasts()
+	if br:
+		br.set("enabled", on)
+
+
+func _on_breast_strength(v: float) -> void:
+	var br := _breasts()
+	if br:
+		br.set("strength", v)
+	if _breast_value:
+		_breast_value.text = "%.2f" % v
+
+
+func _on_focus(f: String) -> void:
+	if _player and _player.has_method("set_tp_focus"):
+		_player.call("set_tp_focus", f)
+	_sync_from_systems()
+
+
+func _on_zoom(v: float) -> void:
+	if _player and _player.has_method("set_tp_distance"):
+		_player.call("set_tp_distance", v)
+	if _zoom_value:
+		_zoom_value.text = "%.2f" % v
+
+
+func _on_pan(dx: float, dy: float, dz: float) -> void:
+	if _player and _player.has_method("tp_pan_step"):
+		_player.call("tp_pan_step", dx, dy, dz)
+
+
+func _on_autorot(on: bool) -> void:
+	if _player:
+		_player.set("tp_auto_rotate", on)
+
+
+func _on_preset_input(ev: InputEvent, i: int) -> void:
+	if not (ev is InputEventMouseButton) or not ev.pressed or _player == null:
+		return
+	var mb := ev as InputEventMouseButton
+	if mb.button_index == MOUSE_BUTTON_RIGHT:
+		_player.call("save_tp_preset", i)
+	elif mb.button_index == MOUSE_BUTTON_LEFT:
+		_player.call("apply_tp_preset", i)
+	_sync_from_systems()
+
+
+func _process(_delta: float) -> void:
+	# 缩放滑条跟随滚轮
+	if _open == PanelId.CAMERA and _player and _zoom_slider and _player.has_method("get_tp_distance"):
+		var d := float(_player.call("get_tp_distance"))
+		if absf(_zoom_slider.value - d) > 0.005:
+			_zoom_slider.set_value_no_signal(d)
+			if _zoom_value:
+				_zoom_value.text = "%.2f" % d
 
 
 func _on_sens_changed(v: float) -> void:

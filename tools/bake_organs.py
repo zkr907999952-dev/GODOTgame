@@ -36,6 +36,12 @@ TIFA = os.path.join(GODOT, "assets", "characters", "tifa", "Tifa_Web_Skinned.glb
 GUT_GLB = f"{WEB}/public/models/intestines.glb"
 PELVIS_GLB = f"{WEB}/public/models/pelvis.glb"
 DECIMATE = {"Tjocktarm_Default Material_0": 0.2, "Tjocktarm_Default Material_0.001": 0.22, "Tunntarm_Default Material_0": 0.36}
+# 布局参数（相对肚脐，米）。网页原值：GUT_CENTER_DY=+0.016, FLEXURE=0.046, UTERUS_TOP=-0.06。
+GUT_CENTER_DY = -0.046
+GUT_FLEXURE_LIFT = 0.022
+GUT_CAVITY = (-0.17, 0.15)
+UTERUS_TOP_DY = -0.098
+XRAY_Y = (-0.205, 0.12)
 ORGAN_BONES = ["C_Hip_a", "C_Spine_a", "C_Spine_b", "C_Spine_c", "C_Spine_d"]
 
 
@@ -241,7 +247,8 @@ def place_guts(parts, cav_min, cav_max, navel, prof):
     amin, amax = box_of(P)
     ac = (amin + amax) * 0.5
     cz = (cav_min[2] + cav_max[2]) * 0.5
-    off = np.array([navel[0] - ac[0], navel[1] + 0.016 - ac[1], cz - ac[2]])
+    # Godot 版：整体比网页低 ~5cm —— 小肠团中心落在肚脐下方，不再顶到乳房下缘。
+    off = np.array([navel[0] - ac[0], navel[1] + GUT_CENTER_DY - ac[1], cz - ac[2]])
     P = [q + off for q in P]
     ny = navel[1]
     # liftColonFlexures
@@ -251,7 +258,7 @@ def place_guts(parts, cav_min, cav_max, navel, prof):
         t = (q[:, 1] - y0) / span
         w = np.where(t >= 0.38, (t - 0.38) / 0.62, 0)
         side = smoothstep(np.abs(q[:, 0] - cx), 0.03, 0.075)
-        q[:, 1] += 0.046 * w * (0.62 + 0.38 * side)
+        q[:, 1] += GUT_FLEXURE_LIFT * w * (0.62 + 0.38 * side)
     # fitGutEnvelope
     gmin, gmax = box_of(P)
     y0 = gmin[1]; span = max(1e-4, gmax[1] - y0); cx = (gmin[0] + gmax[0]) * 0.5
@@ -364,7 +371,7 @@ def place_pelvis(parts, navel):
     scale_named("vessie|bladder", 0.7)
     umin, umax = box_of([P[p.name] for p in ut])
     czz = (umin[2] + umax[2]) * 0.5
-    dy = navel[1] - 0.06 - umax[1]
+    dy = navel[1] + UTERUS_TOP_DY - umax[1]
     dz = navel[2] - 0.07 - czz
     for p in named(parts, "uterus|vessie|bladder|ovaire|trompe|ligament|vagin"):
         P[p.name] = P[p.name] + np.array([0, dy, dz])
@@ -582,8 +589,8 @@ def main():
     skinZ = navel[2]
     amax[2] = skinZ - 0.012
     amin[2] = skinZ - 0.1
-    gut_min = np.array([acx - 0.12, yN - 0.16, amin[2]])
-    gut_max = np.array([acx + 0.12, yN + 0.22, amax[2]])
+    gut_min = np.array([acx - 0.12, yN + GUT_CAVITY[0], amin[2]])
+    gut_max = np.array([acx + 0.12, yN + GUT_CAVITY[1], amax[2]])
     prof = torso_profile(T, gut_min[1] - 0.02, gut_max[1] + 0.1)
     # weights KD on torso skin (blender coords)
     TB = t2b(T)
@@ -597,6 +604,9 @@ def main():
     pparts = import_parts(PELVIS_GLB, weld=False)
     pparts, umin, umax = place_pelvis(pparts, navel)
     print("uterus box", umin, umax)
+    bladder_pos = [get_pos(p) for p in named(pparts, "vessie|bladder")]
+    if bladder_pos:
+        print("bladder box", *box_of(bladder_pos))
     for p in pparts:
         p.group = "pelvis"
         mat = p.obj.data.materials[0]
@@ -615,6 +625,9 @@ def main():
     # place first (on full-res, like web), then decimate
     place_guts(gparts, gut_min, gut_max, navel, prof)
     lift_guts_off_uterus(gparts, umin, umax)
+    if bladder_pos:
+        bmin, bmax = box_of(bladder_pos)
+        lift_guts_off_uterus(gparts, bmin, bmax)
     for p in gparts:
         decimate(p, DECIMATE.get(p.name, 0.25))
         p.group = "gut"
@@ -631,6 +644,14 @@ def main():
         print("gut", p.name, len(d["pos"]), "verts", len(d["idx"]), "tris")
     gmin, gmax = box_of([m["pos"] for m in meshes if m["group"] == 0])
     pmin, pmax = box_of([m["pos"] for m in meshes if m["group"] == 1])
+
+    # ---- 皮肤内检查：器官顶点不得穿出躯干前表面（profile z_front）/ 侧面（half_x）
+    allp = np.concatenate([m["pos"] for m in meshes])
+    hx_a, zf_a = prof_at(prof, allp[:, 1])
+    out_z = (allp[:, 2] > zf_a - 0.002).mean()
+    out_x = (np.abs(allp[:, 0]) > hx_a).mean()
+    print("organs guts y %.3f..%.3f pelvis y %.3f..%.3f centroid %s" % (gmin[1], gmax[1], pmin[1], pmax[1], allp.mean(0)))
+    print("inside-skin: front-out %.4f side-out %.4f" % (out_z, out_x))
 
     import io
     f = io.BytesIO()
@@ -665,7 +686,7 @@ def main():
         "pelvis": {"min": pmin.tolist(), "max": pmax.tolist()},
         "uterus": {"min": umin.tolist(), "max": umax.tolist()},
         # web attachXray(yX0 - navel.y, yX1 - navel.y, 0.12, skinZ - 0.01 - navel.z)
-        "xray": {"y0": -0.2, "y1": 0.145, "x_max": 0.12, "z_front": -0.01},
+        "xray": {"y0": XRAY_Y[0], "y1": XRAY_Y[1], "x_max": 0.12, "z_front": -0.01},
         "profile": {"y": prof[0].tolist(), "half_x": prof[1].tolist(), "z_front": prof[2].tolist(), "z_back": prof[3].tolist()},
         "bones": ORGAN_BONES,
     }

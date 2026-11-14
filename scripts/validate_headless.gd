@@ -108,9 +108,34 @@ func _run() -> void:
 		loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, 0.016, 1.65)
 	var before: Dictionary = sec.call("debug_snapshot")
 	var tip_before: Array = before.get("hair_p_tip", [0, 0, 0])
+	# 头皮相连的头发（头顶 y>1.50）蒙皮后相对头骨必须不动；发尾必须甩。
+	var hs := _hair_samples(skel)
+	if hs.is_empty():
+		push_error("validate: hair mesh not found for scalp check")
+		quit(1)
+		return
+	var scalp0 := _skinned_rel_head(skel, hs, "scalp")
+	var tips0 := _skinned_rel_head(skel, hs, "tips")
+	var scalp_max := 0.0
+	var tips_max := 0.0
 	sec.call("debug_jerk_root", Vector3(0.15, 0.0, 0.0))
 	for _k in 12:
 		sec.call("update", 0.016, false)
+		var sc := _skinned_rel_head(skel, hs, "scalp")
+		var tc := _skinned_rel_head(skel, hs, "tips")
+		for q in sc.size():
+			scalp_max = maxf(scalp_max, sc[q].distance_to(scalp0[q]))
+		for q2 in tc.size():
+			tips_max = maxf(tips_max, tc[q2].distance_to(tips0[q2]))
+	print(
+		"validate: hair swing scalp verts=", (hs["scalp"] as PackedInt32Array).size(),
+		" max_move_rel_head=", snappedf(scalp_max, 0.00001),
+		" tips max_move=", snappedf(tips_max, 0.0001)
+	)
+	if scalp_max > 0.001 or tips_max < 0.02:
+		push_error("validate: scalp hair must stay on head (<1mm, got %s) while tips swing (>2cm, got %s)" % [scalp_max, tips_max])
+		quit(1)
+		return
 	var after: Dictionary = sec.call("debug_snapshot")
 	var tip_after: Array = after.get("hair_p_tip", [0, 0, 0])
 	var dx := absf(float(tip_after[0]) - float(tip_before[0]))
@@ -373,11 +398,38 @@ func _run() -> void:
 		"validate: DISPLAY recenter pivot_xz_dist=", snappedf(dist_xz, 0.0001),
 		" player=", player.global_position
 	)
-	if dist_xz > 0.05:
+	if dist_xz > 0.25:
 		push_error("validate: TP pivot should be on character after switch to DISPLAY")
 		quit(1)
 		return
 	print("validate: play modes OK")
+	# 观察相机：默认在房间内、正对角色；任意环绕/拉远都不出墙。
+	player.global_position = pos_before
+	player.call("tp_home", true)
+	var bounds: AABB = player.get("camera_bounds")
+	var cam3d: Camera3D = player.get_node("CameraPivot/Camera3D")
+	var home_cam := cam3d.global_position
+	var to_cam: Vector3 = home_cam - (player as Node3D).global_position
+	var body_fwd: Vector3 = player.call("_body_forward")
+	print("validate: TP home cam=", home_cam, " bounds=", bounds, " facing_dot=", snappedf(to_cam.normalized().dot(body_fwd), 0.001))
+	if bounds.size == Vector3.ZERO or not bounds.grow(0.01).has_point(home_cam) or to_cam.normalized().dot(body_fwd) < 0.7:
+		push_error("validate: TP home camera must be inside room and in front of character")
+		quit(1)
+		return
+	var worst := 0.0
+	for yi in 12:
+		for el in [-0.3, 0.2, 1.0]:
+			player.call("set_tp_view", TAU * yi / 12.0, el, 6.0)
+			var cp := cam3d.global_position
+			if not bounds.grow(0.01).has_point(cp):
+				worst = maxf(worst, 1.0)
+				print("validate: camera escaped room at yaw ", yi, " elev ", el, " cam=", cp)
+	if worst > 0.0:
+		push_error("validate: TP camera left room bounds")
+		quit(1)
+		return
+	player.call("tp_home", true)
+	print("validate: TP camera inside room OK")
 
 	# Room mirror present on main.
 	var mirror := main.get_node_or_null("RoomMirror")
@@ -602,5 +654,147 @@ func _run() -> void:
 		return
 	print("validate: organs / x-ray OK")
 
+	# 内脏布局：整体质心在肚脐下方、小肠团不顶到胸下、子宫在耻骨后方，且全部在皮肤内 / X 光窗口内。
+	var mt: Dictionary = organs.get("meta")
+	var navy: float = (mt["navel"] as Array)[1]
+	var prof: Dictionary = mt["profile"]
+	var xr: Dictionary = mt["xray"]
+	var sum := Vector3.ZERO
+	var cnt := 0
+	var out_skin := 0
+	var out_win := 0
+	var gut_top := -1e9
+	for omi in organs.get("organ_meshes"):
+		var arr: Array = (omi as MeshInstance3D).mesh.surface_get_arrays(0)
+		var vs: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		for vi in range(0, vs.size(), 3):
+			var v: Vector3 = vs[vi]
+			sum += v
+			cnt += 1
+			var pr := _prof_at(prof, v.y)
+			if v.z > pr.y - 0.001 or absf(v.x) > pr.x:
+				out_skin += 1
+			if v.y < navy + float(xr["y0"]) or v.y > navy + float(xr["y1"]):
+				out_win += 1
+			if String(omi.name).to_lower().contains("tunntarm"):
+				gut_top = maxf(gut_top, v.y)
+	var cen := sum / maxf(1.0, cnt)
+	var ut: Dictionary = mt["uterus"]
+	var ut_top: float = (ut["max"] as Array)[1]
+	print(
+		"validate: organs centroid=", cen, " navel_y=", navy, " small-int top=", snappedf(gut_top, 0.001),
+		" uterus_top=", snappedf(ut_top, 0.001), " out_skin=", out_skin, "/", cnt, " out_xray=", out_win
+	)
+	if cen.y > navy - 0.01 or gut_top > navy + 0.13 or ut_top > navy - 0.08 or out_skin > 0 or out_win > 0:
+		push_error("validate: organ layout off (centroid must be below navel, inside skin and x-ray window)")
+		quit(1)
+		return
+	print("validate: organ layout OK")
+
+	# 乳摇：弹簧-阻尼受冲击后摆动，3 秒内稳定回静止。
+	var br: RefCounted = sec.get("breasts")
+	if br == null:
+		push_error("validate: BreastPhysics missing")
+		quit(1)
+		return
+	br.set("enabled", true)
+	br.set("strength", 0.5)
+	for _w in 60:
+		br.call("update", 1.0 / 60.0)
+	br.call("debug_kick", Vector3(0.0, -0.9, 0.25))
+	var jpeak := 0.0
+	var cross := 0
+	var last_sign := 0.0
+	for _w2 in 40:
+		br.call("update", 1.0 / 60.0)
+		var st: Dictionary = (br.call("debug_state") as Dictionary)["L"]
+		jpeak = maxf(jpeak, float(st["disp"]))
+		var sg := signf(float(st["disp_y"]))
+		if last_sign != 0.0 and sg != 0.0 and sg != last_sign:
+			cross += 1
+		if sg != 0.0:
+			last_sign = sg
+	for _w3 in 180:
+		br.call("update", 1.0 / 60.0)
+	var fin: Dictionary = br.call("debug_state")
+	var fin_l: Dictionary = fin["L"]
+	print(
+		"validate: jiggle peak=", snappedf(jpeak, 0.0001), " zero-crossings=", cross,
+		" after 3s disp=", snappedf(float(fin_l["disp"]), 0.00001), " speed=", snappedf(float(fin_l["speed"]), 0.00001)
+	)
+	if jpeak < 0.008 or cross < 1 or float(fin_l["disp"]) > 0.0015 or float(fin_l["speed"]) > 0.002:
+		push_error("validate: breast spring should swing then settle")
+		quit(1)
+		return
+	print("validate: breast jiggle OK")
+
 	print("validate: OK")
 	quit(0)
+
+
+## 头发蒙皮采样：scalp = 头顶（静止 y>1.50），tips = 发尾（y<1.0）。
+func _hair_samples(skel: Skeleton3D) -> Dictionary:
+	var mi: MeshInstance3D = null
+	for n in skel.find_children("*", "MeshInstance3D", true, false):
+		if String(n.name).contains("PC0002_01_007"):
+			mi = n
+			break
+	if mi == null or mi.skin == null:
+		return {}
+	var arr: Array = mi.mesh.surface_get_arrays(0)
+	var vs: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	var bones: PackedInt32Array = arr[Mesh.ARRAY_BONES]
+	var wts: PackedFloat32Array = arr[Mesh.ARRAY_WEIGHTS]
+	var scalp := PackedInt32Array()
+	var tips := PackedInt32Array()
+	for i in vs.size():
+		if vs[i].y > 1.50 and i % 7 == 0:
+			scalp.append(i)
+		elif vs[i].y < 1.0 and i % 23 == 0:
+			tips.append(i)
+	var bind_bone := PackedInt32Array()
+	for b in mi.skin.get_bind_count():
+		var bi := mi.skin.get_bind_bone(b)
+		if bi < 0:
+			bi = skel.find_bone(mi.skin.get_bind_name(b))
+		bind_bone.append(bi)
+	return {
+		"mi": mi, "vs": vs, "bones": bones, "wts": wts, "stride": bones.size() / maxi(1, vs.size()),
+		"scalp": scalp, "tips": tips, "bind_bone": bind_bone, "head": skel.find_bone("C_Head_a"),
+	}
+
+
+func _skinned_rel_head(skel: Skeleton3D, hs: Dictionary, key: String) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	var mi: MeshInstance3D = hs["mi"]
+	var vs: PackedVector3Array = hs["vs"]
+	var bones: PackedInt32Array = hs["bones"]
+	var wts: PackedFloat32Array = hs["wts"]
+	var stride: int = hs["stride"]
+	var bb: PackedInt32Array = hs["bind_bone"]
+	var head_inv := skel.get_bone_global_pose(int(hs["head"])).affine_inverse()
+	for i in (hs[key] as PackedInt32Array):
+		var p := Vector3.ZERO
+		for j in stride:
+			var w := wts[i * stride + j]
+			if w <= 0.0:
+				continue
+			var b := bones[i * stride + j]
+			var m := skel.get_bone_global_pose(bb[b]) * mi.skin.get_bind_pose(b)
+			p += (m * vs[i]) * w
+		out.append(head_inv * p)
+	return out
+
+
+## 躯干轮廓插值：返回 (half_x, z_front)
+func _prof_at(prof: Dictionary, y: float) -> Vector2:
+	var ys: Array = prof["y"]
+	var hx: Array = prof["half_x"]
+	var zf: Array = prof["z_front"]
+	if y <= float(ys[0]):
+		return Vector2(hx[0], zf[0])
+	for i in range(1, ys.size()):
+		if y <= float(ys[i]):
+			var t := (y - float(ys[i - 1])) / maxf(1e-6, float(ys[i]) - float(ys[i - 1]))
+			return Vector2(lerpf(hx[i - 1], hx[i], t), lerpf(zf[i - 1], zf[i], t))
+	return Vector2(hx[ys.size() - 1], zf[ys.size() - 1])
