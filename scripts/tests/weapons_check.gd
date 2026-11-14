@@ -77,9 +77,11 @@ func _ready_up() -> void:
 func _hold(sec: float) -> int:
 	var s0 := shots
 	ws.call("set_trigger", true)
-	var t0 := Time.get_ticks_msec()
-	while Time.get_ticks_msec() - t0 < int(sec * 1000.0):
+	# 用游戏时间（各帧 delta 之和）计时：软件渲染下引擎会截断过长的帧
+	var sim := 0.0
+	while sim < sec:
 		await process_frame
+		sim += main.get_process_delta_time()
 		if ws.get("flash").visible:
 			flash_any = true
 		recoil_max = maxf(recoil_max, Vector2(ws.get("recoil")).length())
