@@ -67,6 +67,10 @@ var _fire_t: float = 99.0
 var hidden_by_mode: bool = false
 ## 换弹时是否已抛出弹匣（每轮一次）
 var _mag_ejected: bool = false
+## 手枪空仓挂机：弹匣打空后锁在后方，换弹结束必须关闭。不依赖 empty 动画（该片段 0 轨道）。
+var _slide_locked: bool = false
+const PISTOL_SLIDE_CLOSED := Vector3(0.003878, 0.119461, 0.0)
+const PISTOL_SLIDE_OPEN := Vector3(-0.036122, 0.119461, 0.0)
 var _mag_meshes: Dictionary = {}  # id -> Mesh
 var _bob_t: float = 0.0
 var _bob_pos: Vector3 = Vector3.ZERO
@@ -357,8 +361,9 @@ func _load_weapon(id: String) -> void:
 	flash_light.position = w.muzzle + Vector3(0.05, 0.0, 0.0)
 	_audio.reparent(gun, false)
 	_audio.position = w.muzzle
-	if id == "pistol" and ammo_of(id).x == 0:
-		_gun_anim("empty", 0.0, true)
+	_slide_locked = (id == "pistol" and ammo_of(id).x == 0)
+	if _slide_locked:
+		_set_pistol_slide_open(true)
 	var mag_n := gun.find_child("Magazine", true, false)
 	if mag_n is MeshInstance3D and (mag_n as MeshInstance3D).mesh:
 		_mag_meshes[id] = (mag_n as MeshInstance3D).mesh
@@ -471,8 +476,9 @@ func _fire_once(w: WeaponDef) -> void:
 	if _clips.has("fire_aim" if ads else "fire"):
 		_play_clip("fire_aim" if ads else "fire", false, true)
 	_gun_anim("fire", (60.0 / w.rpm) if w.fire_mode == "auto" else 0.0)
-	if a.x == 0 and current == "pistol":
-		_gun_anim("empty", 0.0, true)
+	if a.x == 0 and str(w.category) == "pistol":
+		_slide_locked = true
+		_set_pistol_slide_open(true)
 	_eject_shell(w)
 
 
@@ -648,7 +654,60 @@ func _tp_hold_adjust(w: WeaponDef) -> Transform3D:
 	return Transform3D(Basis(Vector3.RIGHT, -0.05), Vector3(0.12, 0.03, 0.06))
 
 
-func _apply_view_xf(local_xf: Transform3D) -> void:
+func _stock_local(w: WeaponDef) -> Vector3:
+	# 枪托/握把在枪局部的位置（+X 朝枪口）。步枪用网格最小 X 当枪托。
+	if w and not _is_long_gun(w):
+		return Vector3(0.0, 0.02, 0.0)
+	if gun:
+		var lo := 0.0
+		var found := false
+		for mi in gun.find_children("*", "MeshInstance3D", true, false):
+			if mi.mesh == null:
+				continue
+			var a: AABB = mi.mesh.get_aabb()
+			var p0: Vector3 = mi.transform * a.position
+			if not found or p0.x < lo:
+				lo = p0.x
+				found = true
+		if found:
+			return Vector3(lo + 0.02, 0.04, 0.0)
+	return Vector3(-0.18, 0.04, 0.0)
+
+
+func _tp_view_xf(w: WeaponDef, pose: Dictionary) -> Transform3D:
+	# 不要把第一人称视模型偏移（髋射下移/开镜）带到观察模式——那会把枪托甩到胸前悬空。
+	# 直接把枪托放到右肩肩窝，枪管沿身体朝向，略低头。
+	var fwd: Vector3 = Vector3(0, 0, 1)
+	if player and player.has_method("_body_forward"):
+		fwd = player.call("_body_forward")
+	if fwd.length_squared() < 1e-6:
+		fwd = Vector3(0, 0, -1)
+	var up := Vector3.UP
+	var pocket: Vector3
+	if player and player.has_method("shoulder_aim_transform"):
+		pocket = (player.call("shoulder_aim_transform") as Transform3D).origin
+	elif player:
+		pocket = player.global_position + Vector3(0, 1.35, 0)
+	else:
+		pocket = Vector3.ZERO
+	# 步枪再往肩窝外侧一点点，略向前，让托底板贴肩而不是穿胸
+	if _is_long_gun(w):
+		var right := up.cross(fwd).normalized()
+		pocket += right * 0.02 + fwd * 0.02
+	# 枪 +X = 前方，略俯
+	var aim := (fwd + up * -0.06).normalized()
+	var gz := aim.cross(up)
+	if gz.length_squared() < 1e-8:
+		gz = Vector3.RIGHT
+	gz = gz.normalized()
+	var gy := gz.cross(aim).normalized()
+	var want_gun := Transform3D(Basis(aim, gy, gz).orthonormalized(), Vector3.ZERO)
+	want_gun.origin = pocket - want_gun.basis * _stock_local(w)
+	var gun_local: Transform3D = pose["gun"] if pose and pose.has("gun") else Transform3D()
+	return want_gun * gun_local.affine_inverse()
+
+
+func _apply_view_xf(local_xf: Transform3D, pose: Dictionary = {}) -> void:
 	var fp := bool(player.get("first_person")) if player else true
 	var w: WeaponDef = cur_def()
 	if fp:
@@ -656,18 +715,9 @@ func _apply_view_xf(local_xf: Transform3D) -> void:
 		if view.get_parent() != camera and camera:
 			view.reparent(camera, false)
 		view.transform = local_xf
-		_align_iron_sights(w)
 	else:
-		# 观察模式：抵肩持枪，不跟环绕相机，也不放在眼位（否则枪托怼头）。
 		view.top_level = true
-		var hold: Transform3D
-		if player and player.has_method("shoulder_aim_transform"):
-			hold = player.call("shoulder_aim_transform")
-		elif player and player.has_method("eye_aim_transform"):
-			hold = player.call("eye_aim_transform")
-		else:
-			hold = camera.global_transform if camera else Transform3D()
-		view.global_transform = hold * _tp_hold_adjust(w) * local_xf
+		view.global_transform = _tp_view_xf(w, pose)
 
 
 func _try_eject_mag(w: WeaponDef) -> void:
@@ -690,20 +740,97 @@ func _try_eject_mag(w: WeaponDef) -> void:
 	_mag_ejected = true
 
 
+func _finish_gun_reload_anim() -> void:
+	# 换弹结束必须关闩。AnimationPlayer.stop() 默认回到第 0 帧，
+	# 而手枪 reload 的第 0 帧正是空仓挂机（滑套后坐），会把刚上好的弹又锁在后面。
+	if gun_ap:
+		if gun_ap.is_playing() or gun_ap.current_animation != "":
+			var an := gun_ap.get_animation(gun_ap.current_animation) if gun_ap.current_animation != "" else null
+			if an:
+				gun_ap.seek(an.length, true)
+		gun_ap.pause()
+		gun_ap.speed_scale = 1.0
+	_slide_locked = false
+	_set_pistol_slide_open(false)
+
+
+func _pistol_skel() -> Skeleton3D:
+	return gun.find_child("Skeleton3D", true, false) if gun else null
+
+
+func _set_pistol_slide_open(open: bool) -> void:
+	if current != "pistol" and (cur_def() == null or str(cur_def().category) != "pistol"):
+		return
+	var sk := _pistol_skel()
+	if sk == null:
+		return
+	var i := sk.find_bone("Slide")
+	if i < 0:
+		return
+	sk.set_bone_pose_position(i, PISTOL_SLIDE_OPEN if open else PISTOL_SLIDE_CLOSED)
+
+
+func debug_slide_open() -> bool:
+	var sk := _pistol_skel()
+	if sk == null:
+		return false
+	var i := sk.find_bone("Slide")
+	if i < 0:
+		return false
+	return sk.get_bone_pose_position(i).x < (PISTOL_SLIDE_CLOSED.x - 0.015)
+
+
+func _sight_locals(w: WeaponDef) -> PackedVector3Array:
+	# 照门 / 准星在枪局部空间。优先用骨骼，避免把枪管轴线（muzzle）当成准星——
+	# AR-15 机瞄比枪管高约 4cm，对准枪管会让照门明显高过准星。
+	var rear := Vector3(w.muzzle.x * 0.15, w.muzzle.y, 0.0) if w else Vector3.ZERO
+	var front := w.muzzle if w else Vector3.RIGHT
+	if gun:
+		var sk: Skeleton3D = gun.find_child("Skeleton3D", true, false)
+		if sk:
+			var ir := sk.find_bone("RearSight")
+			var ifr := sk.find_bone("FrontSight")
+			var sk_to_gun := gun.global_transform.affine_inverse() * sk.global_transform
+			if ir >= 0:
+				rear = sk_to_gun * sk.get_bone_global_pose(ir).origin
+			if ifr >= 0:
+				front = sk_to_gun * sk.get_bone_global_pose(ifr).origin
+	return PackedVector3Array([rear, front])
+
+
 func _align_iron_sights(w: WeaponDef) -> void:
-	# 开镜时把照门/准星平移到相机 -Z 轴上，实现三点一线对准屏幕中心准星。
+	# 开镜：照门与准星三点一线，落在屏幕中心的 + 上。必须在写入 gun.transform 之后调用。
 	if w == null or gun == null or camera == null or _ads_k < 0.05:
 		return
 	if view.get_parent() != camera:
 		return
-	var front: Vector3 = gun.to_global(Vector3(w.muzzle.x, w.muzzle.y, 0.0))
-	var cf: Vector3 = camera.global_transform.affine_inverse() * front
-	# 按开镜程度把准星 XY 推到 0；若太近则再沿 -Z 推远一点，避免机匣顶到镜头。
+	var pts := _sight_locals(w)
+	var rear_w: Vector3 = gun.to_global(pts[0])
+	var front_w: Vector3 = gun.to_global(pts[1])
+	var cam_inv := camera.global_transform.affine_inverse()
+	var r: Vector3 = cam_inv * rear_w
+	var f: Vector3 = cam_inv * front_w
 	var k := _ads_k
-	view.position.x -= cf.x * k
-	view.position.y -= cf.y * k
-	if cf.z > -0.22:
-		view.position.z -= (cf.z + 0.28) * k
+	# 先把照门平移到相机 -Z 轴（x=y=0）
+	view.position.x -= r.x * k
+	view.position.y -= r.y * k
+	# 再绕相机微调，让准星也落到同一轴线（俯仰 / 偏航）
+	var axis: Vector3 = (f - r)
+	if axis.length_squared() > 1e-8:
+		axis = axis.normalized()
+		# 目标是 (0,0,-1)
+		var want := Vector3(0, 0, -1)
+		var pitch := atan2(axis.y, -axis.z)  # 正值 = 准星偏上，需要低头
+		var yaw := atan2(axis.x, -axis.z)
+		view.rotate_object_local(Vector3.RIGHT, -pitch * k)
+		view.rotate_object_local(Vector3.UP, -yaw * k)
+	# 再校正一次平移（旋转后照门可能离轴）
+	rear_w = gun.to_global(pts[0])
+	r = camera.global_transform.affine_inverse() * rear_w
+	view.position.x -= r.x * k
+	view.position.y -= r.y * k
+	if r.z > -0.18:
+		view.position.z -= (r.z + 0.26) * k
 
 
 func debug_muzzle_ahead() -> float:
@@ -879,12 +1006,17 @@ func _process(delta: float) -> void:
 	if w:
 		kick_t = Transform3D(Basis(Vector3.RIGHT, deg_to_rad(w.kick_rot) * _kick) * Basis(Vector3.UP, _sway.x) * Basis(Vector3.RIGHT, _sway.y), Vector3(0.0, 0.0, w.kick_back * _kick))
 	var local_xf := _view_local(w) * kick_t * _loco_bob_xf(delta)
-	_apply_view_xf(local_xf)
 	var pose := _update_clip(delta)
 	if pose.is_empty():
 		return
 	if gun:
 		gun.transform = pose["gun"]
+	_apply_view_xf(local_xf, pose)
+	if fp:
+		_align_iron_sights(w)
+	# 空仓挂机：每帧写回滑套，避免射击动画结束把滑套带回关闭位
+	if _slide_locked and state == "ready":
+		_set_pistol_slide_open(true)
 	_apply_ik(pose, _ik_w)
 
 
@@ -905,9 +1037,7 @@ func _step_reload() -> void:
 			_clip_speed = 1.0
 			ammo_changed.emit(current, a.x, a.y)
 			reloaded.emit(current)
-			if gun_ap:
-				gun_ap.stop()
-				gun_ap.speed_scale = 1.0
+			_finish_gun_reload_anim()
 		return
 	# 霰弹：开始 → 逐发 → 结束
 	if state_t < state_len:
@@ -1127,19 +1257,22 @@ func _aim_bone_chain_to(prefix: String, world_dir: Vector3, w: float) -> void:
 
 
 func debug_ads_error() -> float:
-	## 开镜时准星（枪管上方照门点）与屏幕中心的像素距离。
+	## 开镜时照门与准星投影到屏幕中心的最大像素偏差。
 	if gun == null or camera == null:
 		return 999.0
 	var w: WeaponDef = cur_def()
 	if w == null:
 		return 999.0
-	var front: Vector3 = gun.to_global(Vector3(w.muzzle.x, w.muzzle.y, 0.0))
-	if camera.is_position_behind(front):
-		return 999.0
-	var sp: Vector2 = camera.unproject_position(front)
+	var pts := _sight_locals(w)
 	var vp := camera.get_viewport()
 	var c: Vector2 = Vector2(vp.get_visible_rect().size) * 0.5 if vp else Vector2.ZERO
-	return sp.distance_to(c)
+	var err := 0.0
+	for i in 2:
+		var world: Vector3 = gun.to_global(pts[i])
+		if camera.is_position_behind(world):
+			return 999.0
+		err = maxf(err, camera.unproject_position(world).distance_to(c))
+	return err
 
 
 func debug_stock_vs_head() -> Dictionary:
@@ -1148,10 +1281,7 @@ func debug_stock_vs_head() -> Dictionary:
 	if gun == null or skeleton == null:
 		return out
 	var w: WeaponDef = cur_def()
-	var stock_local := Vector3(-0.04, 0.04, 0.0)
-	if w:
-		stock_local = Vector3(-0.02 if str(w.category) == "pistol" else -0.06, w.muzzle.y * 0.2, 0.0)
-	out["stock"] = gun.to_global(stock_local)
+	out["stock"] = gun.to_global(_stock_local(w))
 	var sh_i := skeleton.find_bone("R_Shoulder_a")
 	var hd_i := skeleton.find_bone("C_Head_a")
 	var skx := skeleton.global_transform

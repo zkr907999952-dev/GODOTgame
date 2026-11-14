@@ -31,15 +31,18 @@ bool fp_clipped(vec3 wp, uint cam_layers) {
 	return fp_clip_r > 0.0 && (cam_layers & (1u << 18u)) == 0u && distance(wp, fp_eye_w) < fp_clip_r;
 }
 
-// 躯干截面轮廓（静止姿态，相对肚脐）：纹理每像素 RGBA = (y, half_x, z_front, z_back)。
-// 用 24×1 纹理而不是 float[24] 数组：移动端 Mobile 渲染器上传大数组经常失败或变 0，
-// 侧壁裁切错位，透视窗口看起来从腹部「偏移」到腰侧。
+// 躯干截面轮廓（静止姿态，相对肚脐）：24×1 RGBA8 纹理，解码后为 (y, half_x, z_front, z_back)。
+// 不用 float[24] 数组（Mobile 上传常失败），也不用 RGBAF/半浮点纹理——中端 GLES/Vulkan
+// 设备经常不支持或被强制成 UNORM，负数和 >1 的剖面被裁掉，透视窗口会完全消失。
 const int PROF_MAX = 24;
 uniform int prof_n = 0;
 uniform sampler2D prof_tex : hint_default_black, filter_nearest, repeat_disable;
+uniform vec4 prof_bias = vec4(0.0);
+uniform vec4 prof_scale = vec4(1.0);
 
 vec4 prof_at(int i) {
-	return texture(prof_tex, vec2((float(i) + 0.5) / 24.0, 0.5));
+	vec4 t = texture(prof_tex, vec2((float(i) + 0.5) / 24.0, 0.5));
+	return t * prof_scale + prof_bias;
 }
 
 vec3 torso_profile(float y) {

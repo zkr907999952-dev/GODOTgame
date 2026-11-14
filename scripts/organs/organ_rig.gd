@@ -1229,22 +1229,59 @@ func _set_profile_params(m: ShaderMaterial) -> void:
 	var cnt := mini(ys.size(), 24)
 	if _prof_tex == null:
 		_prof_tex = ImageTexture.new()
-	var img := Image.create(24, 1, false, Image.FORMAT_RGBAF)
+	# 先收集带符号的剖面，再编码进全平台都支持的 RGBA8（0..1），用 bias/scale 还原。
+	var raw: Array[Color] = []
+	var mn := Vector4(INF, INF, INF, INF)
+	var mx := Vector4(-INF, -INF, -INF, -INF)
 	for i in 24:
 		var j := mini(i, cnt - 1)
-		# Color 可存 0..1 以外的浮点；RGBAF 保留负数（y / z_back）
-		img.set_pixel(i, 0, Color(
+		var c := Color(
 			float(ys[j]) - _navel_rest.y,
 			float(prof["half_x"][j]),
 			float(prof["z_front"][j]) - _navel_rest.z,
 			float(prof["z_back"][j]) - _navel_rest.z
+		)
+		raw.append(c)
+		mn = Vector4(minf(mn.x, c.r), minf(mn.y, c.g), minf(mn.z, c.b), minf(mn.w, c.a))
+		mx = Vector4(maxf(mx.x, c.r), maxf(mx.y, c.g), maxf(mx.z, c.b), maxf(mx.w, c.a))
+	var bias := Vector4(mn.x - 0.02, mn.y - 0.02, mn.z - 0.02, mn.w - 0.02)
+	var scale := Vector4(
+		maxf(0.04, mx.x - bias.x + 0.02),
+		maxf(0.04, mx.y - bias.y + 0.02),
+		maxf(0.04, mx.z - bias.z + 0.02),
+		maxf(0.04, mx.w - bias.w + 0.02)
+	)
+	var img := Image.create(24, 1, false, Image.FORMAT_RGBA8)
+	for i in 24:
+		var c: Color = raw[i]
+		img.set_pixel(i, 0, Color(
+			clampf((c.r - bias.x) / scale.x, 0.0, 1.0),
+			clampf((c.g - bias.y) / scale.y, 0.0, 1.0),
+			clampf((c.b - bias.z) / scale.z, 0.0, 1.0),
+			clampf((c.a - bias.w) / scale.w, 0.0, 1.0)
 		))
 	_prof_tex.set_image(img)
 	m.set_shader_parameter("prof_n", cnt)
 	m.set_shader_parameter("prof_tex", _prof_tex)
+	m.set_shader_parameter("prof_bias", Vector4(bias.x, bias.y, bias.z, bias.w))
+	m.set_shader_parameter("prof_scale", Vector4(scale.x, scale.y, scale.z, scale.w))
 
 
 ## 校验：透视窗口中心（肚脐附近前腹壁）投影应落在腹部网格上，而不是旁边。
+func debug_profile_tex() -> Dictionary:
+	var out := {"ok": false, "format": -1, "n": 0, "roundtrip": 99.0}
+	if _prof_tex == null or not meta.has("profile"):
+		return out
+	var img := _prof_tex.get_image()
+	if img == null:
+		return out
+	out["format"] = int(img.get_format())
+	out["n"] = mini((meta["profile"]["y"] as Array).size(), 24)
+	# RGBA8 才算移动端安全；RGBAF/RH 在许多真机上不可用
+	out["ok"] = img.get_format() == Image.FORMAT_RGBA8 and img.get_width() == 24
+	return out
+
+
 func debug_window_on_belly(cam: Camera3D) -> Dictionary:
 	_update_frame()
 	var out := {"ok": false, "navel": _frame.origin, "window": Vector3.ZERO, "screen": Vector2.ZERO, "navel_screen": Vector2.ZERO, "dist": 99.0, "px": 999.0}

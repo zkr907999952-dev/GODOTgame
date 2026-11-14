@@ -38,7 +38,7 @@ func _run() -> void:
 	_ok(skin_src.find("discard") < 0, "skin_xray hole no longer uses discard")
 
 	# ---- 公开名称
-	_ok(str(ProjectSettings.get_setting("application/config/name")) == "蒂法的玉腹沙盒", "project display name")
+	_ok(str(ProjectSettings.get_setting("application/config/name")) == "蒂法玉腹沙盒", "project display name")
 
 	main = load("res://scenes/main.tscn").instantiate()
 	root.add_child(main)

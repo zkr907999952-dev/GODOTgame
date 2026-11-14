@@ -301,9 +301,37 @@ func to_camera_pixel(p: Vector2) -> Vector2:
 	return p
 
 
+## 真机事件坐标可能是逻辑像素、物理 backing，或还带窗口变换。穷举几种解释，避免只在一种约定下自检通过。
+func pointer_variants(p: Vector2) -> Array[Vector2]:
+	var out: Array[Vector2] = []
+	var seen := {}
+	var add := func(q: Vector2) -> void:
+		var k := Vector2i(int(round(q.x)), int(round(q.y)))
+		if seen.has(k):
+			return
+		seen[k] = true
+		out.append(q)
+	add.call(p)
+	add.call(to_camera_pixel(p))
+	var vp := get_viewport()
+	if vp:
+		var backing := Vector2(vp.size)
+		var vis := vp.get_visible_rect().size
+		if backing.x > 1.0 and vis.x > 1.0 and (absf(backing.x - vis.x) > 0.5 or absf(backing.y - vis.y) > 0.5):
+			add.call(Vector2(p.x * vis.x / backing.x, p.y * vis.y / backing.y))
+		var xf := vp.get_final_transform()
+		add.call(xf * p)
+		add.call(xf.affine_inverse() * p)
+	return out
+
+
 ## 屏幕点 → 世界射线（捕获鼠标时用屏幕中心）
 func _screen_ray(screen: Vector2) -> Array:
 	var p := to_camera_pixel(screen)
+	if _ptr_mode >= 0:
+		var vs := pointer_variants(screen)
+		if _ptr_mode < vs.size():
+			p = vs[_ptr_mode]
 	return [_camera.project_ray_origin(p), _camera.project_ray_normal(p)]
 
 
@@ -342,30 +370,45 @@ func pick_interact_rig(origin: Vector3, dir: Vector3) -> Node:
 func _try_begin_interact(screen: Vector2) -> bool:
 	if not _organs_live():
 		return false
-	var ray := _screen_ray(screen)
-	var rig := pick_interact_rig(ray[0], ray[1])
-	if rig == null:
-		return false
-	_interact_target = rig
-	var mode := str(_organs.get("interact_mode"))
-	if mode == "fist" or mode == "bayonet" or mode == "navel":
-		if rig.get("interact_mode") != mode:
-			rig.call("copy_settings_from", _organs)
-		var cam_fwd := -_camera.global_transform.basis.z
-		if rig.call("tool_begin", ray[0], ray[1], cam_fwd):
+	var variants := pointer_variants(screen)
+	# 若已经锁定过一种坐标解释，先试它，再试其余
+	if _ptr_mode >= 0 and _ptr_mode < variants.size():
+		var pref: Vector2 = variants[_ptr_mode]
+		variants.remove_at(_ptr_mode)
+		variants.insert(0, pref)
+	for i in variants.size():
+		var p: Vector2 = variants[i]
+		var origin: Vector3 = _camera.project_ray_origin(p)
+		var dir: Vector3 = _camera.project_ray_normal(p)
+		var rig := pick_interact_rig(origin, dir)
+		if rig == null:
+			continue
+		var mode := str(_organs.get("interact_mode"))
+		if mode == "fist" or mode == "bayonet" or mode == "navel":
+			if rig.get("interact_mode") != mode:
+				rig.call("copy_settings_from", _organs)
+			var cam_fwd := -_camera.global_transform.basis.z
+			var ok := bool(rig.call("tool_begin", origin, dir, cam_fwd))
+			if not ok:
+				continue
+			_interact_target = rig
 			_interact_held = true
 			_interact_screen = screen
+			_ptr_mode = i if _ptr_mode < 0 else _ptr_mode
+			return true
+		var hit: Variant = rig.call("ray_hit_belly", origin, dir)
+		if hit == null:
+			continue
+		_interact_target = rig
+		if mode == "strike":
+			rig.call("strike_at", hit)
+		elif mode == "drag":
+			rig.call("begin_drag", hit)
+			_interact_held = true
+			_interact_screen = screen
+		_ptr_mode = i if _ptr_mode < 0 else _ptr_mode
 		return true
-	var hit: Variant = rig.call("ray_hit_belly", ray[0], ray[1])
-	if hit == null:
-		return false
-	if mode == "strike":
-		rig.call("strike_at", hit)
-	elif mode == "drag":
-		rig.call("begin_drag", hit)
-		_interact_held = true
-		_interact_screen = screen
-	return true
+	return false
 
 
 ## 拖拽中：鼠标射线与「过抓取点、法线=相机前向」平面求交（网页 grab plane）
@@ -1027,6 +1070,8 @@ func _calc_aabb(n: Node) -> AABB:
 ## 触屏操作开启时，触摸模拟出来的鼠标事件（device = DEVICE_ID_EMULATION）只给 GUI 用，
 ## 这里不再处理，避免与 touch_controls 的手指逻辑重复（同一次点按 = 两次互动）。
 var touch_active: bool = false
+## 已确认的指针坐标解释（-1 = 自动尝试多种）
+var _ptr_mode: int = -1
 var touch_move: Vector2 = Vector2.ZERO  # 虚拟摇杆（x 右，y 下 = 后退），已去死区
 var touch_sprint: bool = false
 var touch_jump_req: bool = false
