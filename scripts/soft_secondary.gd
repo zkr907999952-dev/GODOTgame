@@ -12,7 +12,8 @@ const BreastPhysicsScript = preload("res://scripts/breast_physics.gd")
 var hair_enabled: bool = true
 var hair_damp: float = 0.01
 var hair_inertia: float = 0.55
-var hair_gravity: float = -1.4
+## 重力（加大：抬头时发尾要往下 / 往背后垂，而不是跟着头转到胸前）。
+var hair_gravity: float = -3.0
 var hair_wind: float = 0.0
 
 var blink_enabled: bool = true
@@ -595,6 +596,36 @@ func _soft_pose(name: String) -> Array:
 	return [soft_pos, soft_rot]
 
 
+## 长发 vs 上身：在 C_Spine_d 参考系里，发段不能跑到背面以外（肩宽范围内不许到身体前方），
+## 也不能钻进躯干（背部 / 胸腔椭圆柱）。乳房骨骼附近再加两个球（跟随乳摇）。
+const HAIR_BACK_MARGIN := 0.035
+const HAIR_TORSO_HALF_X := 0.17
+
+
+func _hair_body_collide(p: Vector3, nm: String, ref: String, bp: Vector3, bq: Quaternion) -> Vector3:
+	var l := bq.inverse() * (p - bp)
+	var lr: Vector3 = (rest_pos[nm] as Vector3) - (rest_pos[ref] as Vector3)
+	# 只管垂在背后的发段（静止时在参考骨后方）
+	if lr.z > -0.02:
+		return p
+	var back_z := lr.z + HAIR_BACK_MARGIN
+	if absf(l.x) < HAIR_TORSO_HALF_X and l.z > back_z:
+		# 越过背面：沿 z 推回背后；靠近侧边的推得少一点（自然搭在肩侧）
+		var edge := smoothstep(HAIR_TORSO_HALF_X * 0.7, HAIR_TORSO_HALF_X, absf(l.x))
+		l.z = lerpf(back_z, l.z, edge)
+	p = bp + bq * l
+	# 乳房球：*_Breast_b_Phy 在乳头附近（跟随乳摇），球心往胸腔里收 4.5cm。
+	for bn in ["L_Breast_b_Phy", "R_Breast_b_Phy"]:
+		if not bone_i.has(bn):
+			continue
+		var c := skeleton.get_bone_global_pose(bone_i[bn]).origin - (bq * Vector3(0.0, 0.0, 0.045))
+		var dv := p - c
+		var r := 0.068
+		if dv.length() < r:
+			p = c + dv.normalized() * r
+	return p
+
+
 func _hair_pinned(k: int) -> bool:
 	return k <= HAIR_PIN_MAX
 
@@ -642,6 +673,15 @@ func _step_hair(d: float) -> void:
 
 	hair_p[0] = rp
 	hair_prev[0] = rp
+	# 上身参考系（C_Spine_d）：发尾目标形状 + 背部碰撞都在这个坐标系里算。
+	var body_ref := "C_Spine_d" if bone_i.has("C_Spine_d") else ""
+	var has_body_frame := body_ref != "" and rest_pos.has(body_ref)
+	var body_p := Vector3.ZERO
+	var body_q := Quaternion.IDENTITY
+	if has_body_frame:
+		var bp: Array = _soft_pose(body_ref)
+		body_p = bp[0]
+		body_q = bp[1]
 	var dt2 := d * d
 	var g := hair_gravity * 1.8
 	var hd := clampf(hair_damp, 0.0, 1.0)
@@ -672,6 +712,11 @@ func _step_hair(d: float) -> void:
 		p.z += pitch_f * 0.12 * u * hi * dt2 * 60.0
 		var i_nm: String = hair_names[k3]
 		var to: Vector3 = rq * ((rest_pos[i_nm] as Vector3) - (rest_pos[root_name] as Vector3)) + rp
+		# 发尾的目标形状跟「上身」而不是跟头：抬头（下巴上扬）时，头部旋转会把垂在背后的发尾
+		# 目标转到身体前方，形状拉力 + 颈部圆柱碰撞就把整束长发从侧面绕到胸前（穿过胸 / 乳房）。
+		if has_body_frame:
+			var to_body: Vector3 = body_q * ((rest_pos[i_nm] as Vector3) - (rest_pos[body_ref] as Vector3)) + body_p
+			to = to.lerp(to_body, smoothstep(0.0, 0.45, u))
 		# 根部更硬、发梢更软：靠近头皮的发段几乎贴着头型，只有垂下的发尾甩动。
 		var sh := minf(shape * (1.0 + 2.5 * (1.0 - u) * (1.0 - u)), 0.5)
 		p.x += (to.x - p.x) * sh
@@ -691,6 +736,8 @@ func _step_hair(d: float) -> void:
 				p.z = 0.03 + cz * s2
 				if p.z > to.z:
 					p.z = to.z
+		if has_body_frame:
+			p = _hair_body_collide(p, i_nm, body_ref, body_p, body_q)
 		hair_p[k3] = p
 
 	for _iter in 3:
@@ -705,6 +752,8 @@ func _step_hair(d: float) -> void:
 			var lenv := maxf(from.length(), 1e-8)
 			var rest_l: float = hair_len[k4] if hair_len[k4] > 0.0 else lenv
 			hair_p[k4] = b - from * (((lenv - rest_l) / lenv) * 0.85)
+			if has_body_frame and k4 >= 3:
+				hair_p[k4] = _hair_body_collide(hair_p[k4], hair_names[k4], body_ref, body_p, body_q)
 
 	for k5 in n:
 		var nm: String = hair_names[k5]

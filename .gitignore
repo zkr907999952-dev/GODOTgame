@@ -33,3 +33,5 @@ assets/maps/*_*.png
 assets/maps/*_*.png.import
 assets/maps/*_*.webp
 assets/maps/*_*.webp.import
+assets/props/*_[0-9].webp
+assets/props/*_[0-9].webp.import

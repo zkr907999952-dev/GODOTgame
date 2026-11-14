@@ -76,11 +76,39 @@ float belly_mask(vec3 l) {
 	return mx * my * mz;
 }
 
+// 拳交鼓包（网页 soft-skeleton fistDepth 段）：x,y = 拳心(ab-local)，z = 顶出量(wallOver)，w = 开关
+uniform vec4 fist_bulge = vec4(0.0);
+uniform vec2 fist_lean = vec2(0.0);
+// x = 鼓包强度，y = 范围，z = 抬升，w = 杠杆
+uniform vec4 fist_par = vec4(1.4, 1.0, 0.7, 1.0);
+
+float smoother(float d, float r) {
+	float t = d / max(r, 1e-4);
+	if (t >= 1.0) return 0.0;
+	float u = 1.0 - t;
+	return u * u * u * (u * (u * 6.0 - 15.0) + 10.0);
+}
+
+vec3 fist_offset(vec3 l) {
+	if (fist_bulge.w <= 0.0 || fist_bulge.z <= 0.0) return vec3(0.0);
+	float over = fist_bulge.z;
+	// 网页 front = clamp((z_rest + 0.01) / 0.11)，z_rest = ab-local z + 肚脐 z(≈0.114)
+	float front = clamp((l.z + 0.124) / 0.11, 0.0, 1.0);
+	float b = smoother(length(l.xy - fist_bulge.xy), 0.16 * max(0.2, fist_par.y)) * front;
+	float rise = fist_par.z;
+	vec3 o = vec3(0.0);
+	o.z += over * 0.9 * fist_par.x * rise * b;
+	o.y += over * 0.26 * fist_par.x * rise * b;
+	o.x += fist_lean.x * 0.07 * over * b * 6.0 * fist_par.w * rise;
+	o.z += fist_lean.y * 0.05 * over * b * 6.0 * fist_par.w * rise;
+	return o;
+}
+
 void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
 	float m = belly_mask(l);
-	vec3 off = (strike_offset(l) * skin_strike_k + drag_offset(l) * skin_drag_k) * m;
+	vec3 off = (strike_offset(l) * skin_strike_k + drag_offset(l) * skin_drag_k + dent_offset(l)) * m + fist_offset(l);
 	l += off;
 	wp += ab_dir_to_world(off);
 	VERTEX = (inverse(MODEL_MATRIX) * vec4(wp, 1.0)).xyz;

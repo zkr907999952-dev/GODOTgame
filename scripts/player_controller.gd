@@ -190,6 +190,7 @@ func _ready() -> void:
 	add_child(_organs)
 	if skel == null or not _organs.setup(skel):
 		push_warning("player: organs failed to init")
+	_organs.set("secondary", _loco.get("secondary"))
 	if _col.shape is CylinderShape3D:
 		_capsule_stand_h = (_col.shape as CylinderShape3D).height
 		_capsule_stand_y = _col.position.y
@@ -275,19 +276,55 @@ func _interact_point(ev_pos: Vector2) -> Vector2:
 	return ev_pos
 
 
-## 左键按下：拖拽=抓住腹壁 / 击腹=释放冲击。命中腹部返回 true。
+## 当前互动的角色（本体或某个分身）的 OrganRig
+var _interact_target: Node = null
+
+
+func get_interact_target_rig() -> Node:
+	return _interact_target if is_instance_valid(_interact_target) and _interact_target.is_inside_tree() else _organs
+
+
+
+## 射线挑选互动目标：本体 + 所有分身（组 organ_rigs）里射线最先命中的那个。
+func pick_interact_rig(origin: Vector3, dir: Vector3) -> Node:
+	var best: Node = null
+	var best_t := INF
+	for r in get_tree().get_nodes_in_group("organ_rigs"):
+		if not bool(r.get("ready_ok")):
+			continue
+		var t: float = r.call("ray_pick_distance", origin, dir)
+		if t < best_t:
+			best_t = t
+			best = r
+	return best
+
+
+## 左键按下：拖拽=抓住腹壁 / 击腹=释放冲击 / 拳交=抓住拳头 / 刺刀=选入口或推拉刀柄。
+## 目标可以是本体或任意分身（第一人称下用准星射线）。
 func _try_begin_interact(screen: Vector2) -> bool:
 	if not _organs_live():
 		return false
 	var ray := _screen_ray(screen)
-	var hit: Variant = _organs.call("ray_hit_belly", ray[0], ray[1])
+	var rig := pick_interact_rig(ray[0], ray[1])
+	if rig == null:
+		return false
+	_interact_target = rig
+	var mode := str(_organs.get("interact_mode"))
+	if mode == "fist" or mode == "bayonet":
+		if rig.get("interact_mode") != mode:
+			rig.call("copy_settings_from", _organs)
+		var cam_fwd := -_camera.global_transform.basis.z
+		if rig.call("tool_begin", ray[0], ray[1], cam_fwd):
+			_interact_held = true
+			_interact_screen = screen
+		return true
+	var hit: Variant = rig.call("ray_hit_belly", ray[0], ray[1])
 	if hit == null:
 		return false
-	var mode := str(_organs.get("interact_mode"))
 	if mode == "strike":
-		_organs.call("strike_at", hit)
+		rig.call("strike_at", hit)
 	elif mode == "drag":
-		_organs.call("begin_drag", hit)
+		rig.call("begin_drag", hit)
 		_interact_held = true
 		_interact_screen = screen
 	return true
@@ -295,18 +332,24 @@ func _try_begin_interact(screen: Vector2) -> bool:
 
 ## 拖拽中：鼠标射线与「过抓取点、法线=相机前向」平面求交（网页 grab plane）
 func _update_interact_drag(screen: Vector2) -> void:
+	var rig := _interact_target if is_instance_valid(_interact_target) else _organs
 	var ray := _screen_ray(screen)
-	var grab: Vector3 = _organs.call("drag_grab_world")
+	if rig.call("is_tool_mode"):
+		rig.call("tool_drag", ray[0], ray[1])
+		return
+	var grab: Vector3 = rig.call("drag_grab_world")
 	var n := -_camera.global_transform.basis.z
 	var plane := Plane(n, grab)
 	var hit: Variant = plane.intersects_ray(ray[0], ray[1])
 	if hit != null:
-		_organs.call("update_drag", hit)
+		rig.call("update_drag", hit)
 
 
 func _end_interact() -> void:
-	if _interact_held and _organs:
-		_organs.call("end_drag")
+	var rig := _interact_target if is_instance_valid(_interact_target) else _organs
+	if _interact_held and rig:
+		rig.call("end_drag")
+		rig.call("tool_end")
 	_interact_held = false
 
 
@@ -933,8 +976,9 @@ func escape_mouse() -> void:
 ## R：复位视角 + 腹部形变（网页 R）。
 func reset_view_and_belly() -> void:
 	reset_camera()
-	if _organs and _organs.has_method("reset_interaction"):
-		_organs.call("reset_interaction")
+	# 本体 + 所有分身的腹部形变 / 工具 / 伤口一起复位
+	for r in get_tree().get_nodes_in_group("organ_rigs"):
+		r.call("reset_interaction")
 
 
 ## F（仅观察视角）：视觉中心 面部→胸部→腹部→阴部

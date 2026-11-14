@@ -21,6 +21,12 @@ const XRAY_DEFAULT := 0.38
 ## 光照层：腹内补光只照脏器
 const ORGAN_LIGHT_LAYER := 1 << 19
 const STRIKE_LIFE := 3.6
+const InsertTools := preload("res://scripts/organs/insert_tools.gd")
+const PropMeshes := preload("res://scripts/organs/prop_meshes.gd")
+const SKIN_DECAL_LAYER := 1 << 14  # 伤口贴花只投到躯干皮肤（Decal.cull_mask）
+## 网页 findCrotch / findAnus 在本模型上的结果（骨架静止空间）
+const CROTCH_REST := Vector3(0.0, 0.9024, 0.105)
+const ANUS_REST := Vector3(0.0, 0.8969, -0.0021)
 
 # --- 公共状态（HUD 读写）
 var xray_enabled: bool = true
@@ -66,10 +72,31 @@ var _poke: MeshInstance3D
 var _ring_mat: ShaderMaterial
 var _poke_mat: ShaderMaterial
 var _light: OmniLight3D
+## 拳交 / 刺刀 / 长刺刀（insert_tools.gd：网页 FistPlay + BayonetPlay）
+var tools: InsertTools = InsertTools.new()
+var _tool_grab: bool = false
+var _tool_plane_n: Vector3 = Vector3.FORWARD
+var _tool_plane_p: Vector3 = Vector3.ZERO
+var _arm: MeshInstance3D
+var _knife: MeshInstance3D
+var _knife_long: MeshInstance3D
+var _marker: MeshInstance3D
+var _marker_mat: ShaderMaterial
+var _decals: Array[Decal] = []
+var _colon_end_rest: Variant = null
+## 网页 GutHealth：肠道「受损」度 0..1（伤口越多越红，组织更软）
+var gut_health: float = 0.0
+## 拳交兴奋 → 呼吸加深（网页 arousal → breath boost）；由本体 / 分身设置
+var secondary: RefCounted = null
+## 由分身 / 本体按 RefCounted 共享的已解析脏器网格缓存
+static var _organ_cache: Array = []
+static var _organ_bones: Array = []
+static var _colon_cache: Variant = null
 
 
 func setup(skel: Skeleton3D) -> bool:
 	_skel = skel
+	add_to_group("organ_rigs")
 	if _skel == null:
 		push_warning("organs: no skeleton")
 		return false
@@ -85,10 +112,11 @@ func setup(skel: Skeleton3D) -> bool:
 	if not _build_organs():
 		return false
 	_build_fx()
+	_setup_tools()
 	ready_ok = true
 	_update_frame()
 	# Park hidden FX quads at the navel (tiny) so body AABB checks stay valid.
-	for q in [_ring, _poke]:
+	for q in [_ring, _poke, _marker, _arm, _knife, _knife_long]:
 		q.global_transform = Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * 0.01), _frame.origin)
 	_push_uniforms()
 	print("organs: ready meshes=", organ_meshes.size(), " skin=", skin_meshes.size(), " navel=", _navel_rest)
@@ -132,15 +160,170 @@ func set_show_organs(on: bool) -> void:
 
 
 func set_interact_mode(m: String) -> void:
+	if m == "bayonet_long":
+		tools.set_kind("long")
+		m = "bayonet"
+	elif m == "bayonet_short":
+		tools.set_kind("short")
+		m = "bayonet"
 	interact_mode = m
 	if m != "drag":
 		end_drag()
+	tools.set_fist_enabled(m == "fist")
+	tools.set_blade_enabled(m == "bayonet")
+	if m != "fist" and m != "bayonet":
+		_tool_grab = false
 
 
-## 该模式是否已接入脏器互动（网页：拖拽 / 击腹）
+## 该模式是否已接入脏器互动（网页：拖拽 / 击腹 / 拳交 / 刺刀）
 func mode_is_live(m: String = "") -> bool:
 	var k := interact_mode if m == "" else m
-	return k == "drag" or k == "strike"
+	return k in ["drag", "strike", "fist", "bayonet", "bayonet_long", "bayonet_short"]
+
+
+func is_tool_mode() -> bool:
+	return interact_mode == "fist" or interact_mode == "bayonet"
+
+
+## 工具模式下点击（射线：世界坐标）。返回 true = 已开始按住拖动。
+## 拳交：任意命中腹部 / 下身的点击都抓住拳头（网页 FistPlay.drag）。
+## 刺刀：还没选入口 → 命中腹部的点作为入口（刀悬停在体外）；已选 → 抓住刀柄推拉。
+func tool_begin(origin: Vector3, dir: Vector3, cam_fwd: Vector3) -> bool:
+	_update_frame()
+	var inv := _frame.affine_inverse()
+	if interact_mode == "fist":
+		var tipw := _frame * tools.fist_tip
+		var hit: Variant = ray_hit_belly(origin, dir)
+		var near := _ray_point_dist(origin, dir, tipw) < 0.3
+		if hit == null and not near:
+			return false
+		tools.set_fist_enabled(true)
+		_tool_plane_n = cam_fwd.normalized()
+		_tool_plane_p = tipw
+		_tool_grab = true
+		return true
+	if interact_mode == "bayonet":
+		tools.set_blade_enabled(true)
+		if not tools.has_entry:
+			var hit2: Variant = ray_hit_belly(origin, dir)
+			if hit2 == null:
+				return false
+			var l: Vector3 = inv * (hit2 as Vector3)
+			var nrm := ((l - _ellipsoid_c) / (_ellipsoid_r * _ellipsoid_r)).normalized()
+			tools.blade_pick(l, nrm)
+			return false
+		var hw := _frame * tools.handle
+		if _ray_point_dist(origin, dir, _frame * tools.entry) > 0.35 and _ray_point_dist(origin, dir, hw) > 0.2:
+			return false
+		_tool_plane_n = cam_fwd.normalized()
+		_tool_plane_p = hw
+		_tool_grab = true
+		return true
+	return false
+
+
+func tool_drag(origin: Vector3, dir: Vector3) -> void:
+	if not _tool_grab:
+		return
+	var den := _tool_plane_n.dot(dir)
+	if absf(den) < 1e-5:
+		return
+	var t := _tool_plane_n.dot(_tool_plane_p - origin) / den
+	if t < 0.0:
+		return
+	var wp := origin + dir * t
+	_update_frame()
+	var l := _frame.affine_inverse() * wp
+	if interact_mode == "fist":
+		tools.fist_drag_to(l)
+	elif interact_mode == "bayonet":
+		tools.blade_drag_to(l)
+
+
+func tool_end() -> void:
+	_tool_grab = false
+
+
+func is_tool_grabbing() -> bool:
+	return _tool_grab
+
+
+## 测试 / HUD：直接设置深度（0..1）。拳交 = 伸入深度；刺刀 = 推入量（自动选默认入口）。
+func tool_set_depth01(t: float) -> void:
+	if interact_mode == "fist":
+		tools.set_fist_enabled(true)
+		tools.fist_set_depth01(t)
+	elif interact_mode == "bayonet":
+		tools.set_blade_enabled(true)
+		if not tools.has_entry:
+			var l := Vector3(0.0, -0.02, _profile_at(-0.02).y)
+			tools.blade_pick(l, Vector3(0, 0, 1))
+		tools.set_pen01(t)
+
+
+func tool_depth01() -> float:
+	if interact_mode == "fist":
+		return tools.fist_depth01()
+	if interact_mode == "bayonet":
+		return tools.pen01()
+	return 0.0
+
+
+func tool_release() -> void:
+	tools.release_entry()
+	_tool_grab = false
+
+
+func arousal() -> float:
+	return tools.fist_arousal
+
+
+## 互动目标挑选：射线到本角色的距离（腹部椭球命中，或工具模式下靠近拳头 / 刀的位置），未命中 = INF。
+func ray_pick_distance(origin: Vector3, dir: Vector3) -> float:
+	if not ready_ok:
+		return INF
+	var hit: Variant = ray_hit_belly(origin, dir)
+	var best := INF
+	if hit != null:
+		best = origin.distance_to(hit)
+	if interact_mode == "fist" and tools.fist_enabled:
+		var tw := _frame * tools.fist_tip
+		if _ray_point_dist(origin, dir, tw) < 0.3:
+			best = minf(best, (tw - origin).dot(dir))
+	elif interact_mode == "bayonet" and tools.has_entry:
+		var ew := _frame * tools.entry
+		var hw := _frame * tools.handle
+		if _ray_point_dist(origin, dir, ew) < 0.35 or _ray_point_dist(origin, dir, hw) < 0.2:
+			best = minf(best, (ew - origin).dot(dir))
+	return best
+
+
+func _ray_point_dist(o: Vector3, d: Vector3, p: Vector3) -> float:
+	var t := maxf(0.0, (p - o).dot(d))
+	return (o + d * t).distance_to(p)
+
+
+## 分身：同步本体的显示 / 互动参数（工具参数全局共享，伤口 / 深度各自独立）
+func copy_settings_from(o: Node) -> void:
+	if o == null or o == self:
+		return
+	xray_enabled = o.xray_enabled
+	xray_amount = o.xray_amount
+	if show_organs != o.show_organs:
+		set_show_organs(o.show_organs)
+	strike_force = o.strike_force
+	strike_range = o.strike_range
+	strike_rebound = o.strike_rebound
+	for k in PERI_DEFAULTS.keys():
+		set(k, o.get(k))
+	peristalsis_on = o.peristalsis_on
+	var ot: InsertTools = o.tools
+	for k in ["fist_bulge", "fist_spread", "fist_gut", "fist_lever", "fist_max_depth", "fist_rise", "fist_thrust", "fist_stir", "fist_thrust_speed", "fist_stir_speed", "fist_stir_radius", "bayonet_auto", "bayonet_pump"]:
+		tools.set(k, ot.get(k))
+	if tools.bayonet_kind != ot.bayonet_kind:
+		tools.set_kind(ot.bayonet_kind)
+	if interact_mode != o.interact_mode:
+		set_interact_mode(o.interact_mode)
 
 
 ## 网页 fireStrike：在世界坐标点释放一次击腹冲击
@@ -185,6 +368,11 @@ func reset_interaction() -> void:
 	_drag_off = Vector3.ZERO
 	_drag_vel = Vector3.ZERO
 	_waves.clear()
+	_tool_grab = false
+	tools.fist_reset()
+	tools.release_entry()
+	tools.clear_marks()
+	gut_health = 0.0
 
 
 func is_dragging() -> bool:
@@ -287,6 +475,12 @@ func debug_snapshot() -> Dictionary:
 		"drag_off": _drag_off.length(),
 		"gut_exc": _gut_exc,
 		"navel_w": _frame.origin,
+		"mode": interact_mode,
+		"fist_depth": tools.fist_depth,
+		"blade_pen": tools.penetration,
+		"punctured": tools.punctured,
+		"wounds": tools.wounds.size(),
+		"damage": tools.damage.size(),
 	}
 
 
@@ -307,11 +501,36 @@ func step(delta: float) -> void:
 	var s_eff := clampf(gut_speed * (1.0 + _gut_exc * 0.3), 0.0, 1.0)
 	_peri_clock += Vector3(0.03 + s_eff * 0.2, 0.45 + s_eff * 0.9, 0.25 + s_eff * 0.5) * dt
 	_step_drag(dt)
+	_step_tools(dt)
 	for mi in organ_meshes:
 		mi.visible = show_organs
 	_update_frame()
 	_push_uniforms()
 	_update_fx()
+	_update_props()
+
+
+func _step_tools(dt: float) -> void:
+	tools.fist_step(dt)
+	var gut := clampf(tools.fist_gut, 0.0, 2.0)
+	tools.blade_step(dt, _tool_grab, gut)
+	if tools.puncture_event:
+		tools.puncture_event = false
+		# 网页 puncture：一次无圆环的冲击 + 肠道兴奋
+		_waves.append({"p": tools.entry, "t": 0.0, "force": 0.45, "range": 0.22, "rebound": strike_rebound, "ring": false})
+		if _waves.size() > 4:
+			_waves.pop_front()
+		_gut_exc = minf(0.35, _gut_exc + 0.12)
+	if tools.auto_released:
+		tools.auto_released = false
+	var h := 0.0
+	for d in tools.damage:
+		h += (d as Vector4).w
+	gut_health = clampf(h / 6.0, 0.0, 1.0)
+	if tools.fist_enabled and tools.fist_depth > 0.03:
+		_gut_exc = maxf(_gut_exc, tools.fist_arousal * 0.3)
+	if secondary != null and tools.fist_arousal > 0.01:
+		secondary.set("breath_boost", maxf(float(secondary.get("breath_boost")), clampf(tools.fist_arousal * 0.9, 0.0, 1.0)))
 
 
 func _step_drag(dt: float) -> void:
@@ -374,14 +593,48 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("strike_par", spar)
 		m.set_shader_parameter("drag_grab", _drag_grab)
 		m.set_shader_parameter("drag_off", _drag_off)
+	var sq := tools.squeeze_target()
+	for m in _all_mats:
+		if sq.is_empty():
+			m.set_shader_parameter("dent", Vector4.ZERO)
+		else:
+			var g0: Vector3 = sq[0]
+			m.set_shader_parameter("dent", Vector4(g0.x, g0.y, g0.z, float(sq[2])))
+			m.set_shader_parameter("dent_off", (sq[1] as Vector3) - g0)
+	var fb := tools.fist_bulge_params()
+	var fpar := Vector4(tools.fist_bulge, tools.fist_spread, tools.fist_rise, tools.fist_lever)
 	for m in _skin_mats:
 		m.set_shader_parameter("xray", xr)
+		m.set_shader_parameter("fist_bulge", fb[0])
+		m.set_shader_parameter("fist_lean", fb[1])
+		m.set_shader_parameter("fist_par", fpar)
+	var ra: Array = []
+	var rd: Array = []
+	var rm: Array = []
+	for r in [tools.fist_rod(), tools.blade_rod(clampf(tools.fist_gut, 0.0, 2.0))]:
+		if r.is_empty():
+			ra.append(Vector4(0, 0, 0, -1))
+			rd.append(Vector4(0, 0, 1, 0))
+			rm.append(Vector4.ZERO)
+		else:
+			var a: Vector3 = r[0]
+			var d: Vector3 = r[1]
+			ra.append(Vector4(a.x, a.y, a.z, float(r[2])))
+			rd.append(Vector4(d.x, d.y, d.z, float(r[3])))
+			rm.append(Vector4(float(r[4]), float(r[5]), 0, 0))
+	var dm: Array = []
+	for i in 12:
+		dm.append(tools.damage[i] if i < tools.damage.size() else Vector4.ZERO)
 	for m in _organ_mats:
 		m.set_shader_parameter("peri_amp", clampf(gut_amp * (1.0 + g * 0.38), 0.0, 1.0))
 		m.set_shader_parameter("peri_on", 1.0 if peristalsis_on else 0.0)
 		m.set_shader_parameter("peri_waves", peri_waves)
 		m.set_shader_parameter("peri_clock", _peri_clock)
 		m.set_shader_parameter("peri_seg", peri_seg)
+		m.set_shader_parameter("rod_a", ra)
+		m.set_shader_parameter("rod_d", rd)
+		m.set_shader_parameter("rod_m", rm)
+		m.set_shader_parameter("dmg", dm)
 	if _light:
 		_light.global_position = _frame.origin - b.z * 0.04
 		_light.light_energy = (0.05 + xr * 0.06) * 8.0 if (show_organs and xr > 0.08) else 0.0
@@ -446,6 +699,7 @@ func _install_skin_xray() -> void:
 			_all_mats.append(m)
 		base.next_pass = fade
 		mi.set_surface_override_material(0, base)
+		mi.layers |= SKIN_DECAL_LAYER
 		skin_meshes.append(mi)
 
 
@@ -533,7 +787,10 @@ func _read_str(buf: PackedByteArray, off: int) -> Array:
 	return [buf.slice(off + 2, off + 2 + n).get_string_from_utf8(), off + 2 + n]
 
 
-func _build_organs() -> bool:
+## 解析 organs_mesh.bin（只做一次，静态缓存 → 分身共用网格，只各自建材质 / 实例）。
+static func _parse_organ_pack() -> bool:
+	if not _organ_cache.is_empty():
+		return true
 	var raw := FileAccess.get_file_as_bytes(PACK_PATH)
 	if raw.is_empty():
 		push_warning("organs: pack missing " + PACK_PATH)
@@ -542,41 +799,28 @@ func _build_organs() -> bool:
 	if buf.size() < 16 or buf.slice(0, 4).get_string_from_ascii() != "ORGN":
 		push_warning("organs: bad pack")
 		return false
+	var rd := func(o: int) -> Array:
+		var n := buf.decode_u16(o)
+		return [buf.slice(o + 2, o + 2 + n).get_string_from_utf8(), o + 2 + n]
 	var off := 8
 	var nb := buf.decode_u32(off)
 	off += 4
-	var bone_names: Array[String] = []
+	var bone_names: Array = []
 	for _i in nb:
-		var r := _read_str(buf, off)
+		var r: Array = rd.call(off)
 		bone_names.append(r[0])
 		off = r[1]
-	# Skin binds copied (by name) from the body's skin so organs share the body's bind space.
-	var body_skin: Skin = null
-	if not skin_meshes.is_empty():
-		body_skin = skin_meshes[0].skin
-	var skin := Skin.new()
-	for bn in bone_names:
-		var pose := Transform3D.IDENTITY
-		var found := false
-		if body_skin:
-			for bi in body_skin.get_bind_count():
-				if String(body_skin.get_bind_name(bi)) == bn:
-					pose = body_skin.get_bind_pose(bi)
-					found = true
-					break
-		if not found:
-			var idx := _skel.find_bone(bn)
-			if idx >= 0:
-				pose = _skel.get_bone_global_rest(idx).affine_inverse()
-		skin.add_named_bind(bn, pose)
 	var mesh_count := buf.decode_u32(off)
 	off += 4
-	var tex_cache := {}
+	var entries: Array = []
+	# 网页 pickColon：along ≥ 0.9 的顶点平均高度最低的肠管 = 结肠（末端 = 直肠方向）
+	var best_y := INF
+	var colon: Variant = null
 	for _m in mesh_count:
-		var r1 := _read_str(buf, off)
+		var r1: Array = rd.call(off)
 		var mname: String = r1[0]
 		off = r1[1]
-		var r2 := _read_str(buf, off)
+		var r2: Array = rd.call(off)
 		var matname: String = r2[0]
 		off = r2[1]
 		var group := buf.decode_u8(off)
@@ -612,11 +856,26 @@ func _build_organs() -> bool:
 		uvs.resize(vc)
 		var bones := PackedInt32Array()
 		bones.resize(vc * 4)
+		var tail_sum := 0.0
+		var tail_n := 0
+		var end_c := Vector3.ZERO
+		var end_n := 0
 		for i in vc:
 			var j := i * 3
 			verts[i] = Vector3(pos_f[j], pos_f[j + 1], pos_f[j + 2])
 			nrms[i] = Vector3(nrm_f[j], nrm_f[j + 1], nrm_f[j + 2])
 			uvs[i] = Vector2(uv_f[i * 2], uv_f[i * 2 + 1])
+			if group == 0:
+				var along := cust_f[i * 4]
+				if along >= 0.9:
+					tail_sum += verts[i].y
+					tail_n += 1
+				if along >= 0.88:
+					end_c += verts[i]
+					end_n += 1
+		if group == 0 and tail_n > 20 and end_n > 0 and tail_sum / tail_n < best_y:
+			best_y = tail_sum / tail_n
+			colon = end_c / float(end_n)
 		for i in vc * 4:
 			bones[i] = bone_b[i]
 		var arrays := []
@@ -632,7 +891,43 @@ func _build_organs() -> bool:
 		var am := ArrayMesh.new()
 		var flags := Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM0_SHIFT
 		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [], {}, flags)
+		entries.append({"name": mname, "mat": matname, "group": group, "tex": tex_id, "col": col, "mesh": am})
+	_organ_bones = bone_names
+	_organ_cache = entries
+	_colon_cache = colon
+	return true
 
+
+func _build_organs() -> bool:
+	if not _parse_organ_pack():
+		return false
+	_colon_end_rest = _colon_cache
+	# Skin binds copied (by name) from the body's skin so organs share the body's bind space.
+	var body_skin: Skin = null
+	if not skin_meshes.is_empty():
+		body_skin = skin_meshes[0].skin
+	var skin := Skin.new()
+	for bn in _organ_bones:
+		var pose := Transform3D.IDENTITY
+		var found := false
+		if body_skin:
+			for bi in body_skin.get_bind_count():
+				if String(body_skin.get_bind_name(bi)) == bn:
+					pose = body_skin.get_bind_pose(bi)
+					found = true
+					break
+		if not found:
+			var idx := _skel.find_bone(bn)
+			if idx >= 0:
+				pose = _skel.get_bone_global_rest(idx).affine_inverse()
+		skin.add_named_bind(bn, pose)
+	var tex_cache := {}
+	for e in _organ_cache:
+		var mname: String = e["name"]
+		var matname: String = e["mat"]
+		var group: int = e["group"]
+		var tex_id: int = e["tex"]
+		var col: Color = e["col"]
 		var mat := ShaderMaterial.new()
 		mat.shader = ORGAN_SHADER
 		var is_gut := group == 0
@@ -657,7 +952,7 @@ func _build_organs() -> bool:
 
 		var mi := MeshInstance3D.new()
 		mi.name = ("Gut_" if is_gut else "Pelvis_") + mname.validate_node_name().replace(" ", "_")
-		mi.mesh = am
+		mi.mesh = e["mesh"]
 		mi.material_override = mat
 		mi.skin = skin
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -669,6 +964,96 @@ func _build_organs() -> bool:
 		mi.skeleton = mi.get_path_to(_skel)
 		organ_meshes.append(mi)
 	return organ_meshes.size() > 0
+
+
+# ------------------------------------------------------------------ 拳交 / 刺刀
+func _setup_tools() -> void:
+	var anus_l := ANUS_REST - _navel_rest
+	var colon_l: Variant = null
+	if _colon_end_rest != null:
+		colon_l = (_colon_end_rest as Vector3) - _navel_rest
+	var slices: Array = []
+	var prof: Dictionary = meta.get("profile", {})
+	if not prof.is_empty():
+		for i in (prof["y"] as Array).size():
+			slices.append([float(prof["y"][i]) - _navel_rest.y, float(prof["half_x"][i])])
+	tools.setup(anus_l, colon_l, slices, _profile_at, CROTCH_REST.y + 0.012 - _navel_rest.y, 0.108)
+	_arm = _make_prop(PropMeshes.arm_mesh(), "FistArm")
+	_knife = _make_prop(PropMeshes.bayonet_mesh(false), "Bayonet")
+	_knife_long = _make_prop(PropMeshes.bayonet_mesh(true), "BayonetLong")
+	_marker_mat = ShaderMaterial.new()
+	_marker_mat.shader = RING_SHADER
+	_marker_mat.set_shader_parameter("color", Color(0.85, 0.25, 0.2, 0.85))
+	_marker_mat.set_shader_parameter("inner", 0.6)
+	_marker = _make_quad(_marker_mat, "BladeMarker")
+	for i in InsertTools.MAX_WOUNDS:
+		var d := Decal.new()
+		d.name = "Wound%d" % i
+		d.top_level = true
+		d.visible = false
+		d.cull_mask = SKIN_DECAL_LAYER
+		d.upper_fade = 0.3
+		d.lower_fade = 0.3
+		d.normal_fade = 0.35
+		d.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		_skel.add_child(d)
+		_decals.append(d)
+
+
+func _make_prop(mesh: Mesh, nm: String) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = nm
+	mi.mesh = mesh
+	mi.top_level = true
+	mi.visible = false
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	mi.layers = 1
+	mi.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	_skel.add_child(mi)
+	return mi
+
+
+## 道具 / 入口标记 / 伤口贴花：每帧从 ab-local 摆到世界。
+func _update_props() -> void:
+	if _arm == null:
+		return
+	var fist_on := interact_mode == "fist" and tools.fist_enabled
+	_arm.visible = fist_on and _arm.mesh != null
+	if _arm.visible:
+		_arm.global_transform = _frame * tools.fist_arm_xform()
+	var blade_on := interact_mode == "bayonet" and tools.blade_enabled and tools.has_entry
+	var long := tools.bayonet_kind == "long"
+	_knife.visible = blade_on and not long and _knife.mesh != null
+	_knife_long.visible = blade_on and long and _knife_long.mesh != null
+	if blade_on:
+		var kx := _frame * tools.blade_xform()
+		_knife.global_transform = kx
+		_knife_long.global_transform = kx
+	_marker.visible = blade_on and not tools.punctured
+	if _marker.visible:
+		var n := (_frame.basis * tools.entry_normal).normalized()
+		var bx := InsertTools._basis_y_to(n)
+		# quad 面朝 +Z → 把 Z 对齐法线
+		var qb := Basis(bx.z, bx.x, n).orthonormalized() * Basis.from_scale(Vector3(0.016, 0.016, 1.0))
+		_marker.global_transform = Transform3D(qb, _frame * (tools.entry + tools.entry_normal * 0.004))
+	var tiles: Array = PropMeshes.wound_tiles() if not tools.wounds.is_empty() else []
+	for i in _decals.size():
+		var d := _decals[i]
+		if i >= tools.wounds.size():
+			d.visible = false
+			continue
+		var w: Dictionary = tools.wounds[i]
+		var n: Vector3 = (_frame.basis * (w["n"] as Vector3)).normalized()
+		var along: Vector3 = _frame.basis * (w["dir"] as Vector3)
+		along = (along - n * along.dot(n))
+		if along.length_squared() < 1e-6:
+			along = _frame.basis.y
+		along = along.normalized().rotated(n, float(w["twist"]))
+		var xb := n.cross(along).normalized()
+		d.global_transform = Transform3D(Basis(xb, n, along), _frame * (w["p"] as Vector3))
+		d.size = Vector3(float(w["w"]), 0.05, float(w["h"]))
+		d.texture_albedo = tiles[int(w["tile"]) % tiles.size()]
+		d.visible = true
 
 
 func _build_fx() -> void:
@@ -716,7 +1101,7 @@ func _update_fx() -> void:
 		_ring.visible = false
 	else:
 		var w: Dictionary = _waves[_waves.size() - 1]
-		var t: float = w["t"]
+		var t: float = w["t"] if w.get("ring", true) else 99.0
 		var rr := maxf(0.02, t * (0.2 + float(w["range"]) * 0.16))
 		var op := maxf(0.0, 1.0 - t / 1.2) * 0.85 * float(w["force"])
 		var p: Vector3 = w["p"]

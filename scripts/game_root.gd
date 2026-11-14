@@ -8,6 +8,9 @@ extends Node3D
 
 const MapViewScript = preload("res://scripts/map_view.gd")
 const LightingRigScript = preload("res://scripts/lighting_rig.gd")
+const CloneDollScript = preload("res://scripts/clone_doll.gd")
+## 分身上限（每个分身 = 一套蒙皮网格 + 脏器 + 物理；共享网格 / 贴图资源）
+const CLONE_MAX := 8
 
 @onready var _room: Node3D = $Room
 @onready var _room_col: Node = $RoomCollision
@@ -56,12 +59,16 @@ var current_map: String = "room"
 var map_view: Node3D
 var _overhead_preview: bool = false
 var _busy: bool = false
+var _clones_root: Node3D
 
 
 func _ready() -> void:
 	map_view = MapViewScript.new()
 	map_view.name = "MapView"
 	add_child(map_view)
+	_clones_root = Node3D.new()
+	_clones_root.name = "Clones"
+	add_child(_clones_root)
 	LightingRigScript.tune_room_shadows(_room)
 	_apply_map_visibility("room")
 	_place_player(ROOM_SPAWN, ROOM_SPAWN_YAW)
@@ -188,6 +195,9 @@ func switch_map(id: String, spawn_i: int = 0) -> void:
 	var spawns: Array = m["spawns"]
 	var s: Dictionary = spawns[clampi(spawn_i, 0, spawns.size() - 1)]
 	close_overhead(false)
+	# 分身属于当前地图：换图时清掉（房间 / 城市在同一场景里，只是显隐切换）
+	if clone_count() > 0:
+		clear_clones()
 	current_map = str(m["id"])
 	_apply_map_visibility(current_map)
 	if current_map == "room":
@@ -282,3 +292,75 @@ func _set_colliders_enabled(root: Node, enabled: bool) -> void:
 		for cs in body.get_children():
 			if cs is CollisionShape3D:
 				(cs as CollisionShape3D).disabled = not enabled
+
+
+# ------------------------------------------------------------------ 分身
+
+func clone_count() -> int:
+	var n := 0
+	for c in _clones_root.get_children():
+		if not c.is_queued_for_deletion():
+			n += 1
+	return n
+
+
+func get_clones() -> Array:
+	return _clones_root.get_children().filter(func(c): return not c.is_queued_for_deletion())
+
+
+## 视线（当前相机中心射线）所指的地面位置；没打到东西就取前方 3m 再向下找地面。
+func clone_spawn_point() -> Vector3:
+	var cam := get_viewport().get_camera_3d()
+	var o := cam.global_position
+	var d := -cam.global_transform.basis.z
+	var space := get_world_3d().direct_space_state
+	var q := PhysicsRayQueryParameters3D.create(o, o + d * 40.0, 1)
+	q.exclude = [_player.get_rid()]
+	var hit := space.intersect_ray(q)
+	var p: Vector3 = o + d * 3.0
+	if not hit.is_empty():
+		p = hit["position"]
+		var n: Vector3 = hit["normal"]
+		if n.y < 0.6:
+			# 打到墙：退回到墙前 0.35m
+			p += n * 0.35
+	# 向下找地面
+	var q2 := PhysicsRayQueryParameters3D.create(p + Vector3.UP * 1.5, p + Vector3.DOWN * 30.0, 1)
+	q2.exclude = [_player.get_rid()]
+	var g := space.intersect_ray(q2)
+	if not g.is_empty():
+		p = g["position"]
+	else:
+		p.y = _player.global_position.y
+	return p
+
+
+## 菜单「创建分身」：返回 HUD 提示文字。
+func spawn_clone(at: Variant = null) -> String:
+	if clone_count() >= CLONE_MAX:
+		return "分身已达上限（%d 个），先「清除所有分身」" % CLONE_MAX
+	var p: Vector3 = at if at != null else clone_spawn_point()
+	var c := CloneDollScript.new()
+	c.name = "Clone%d" % (Time.get_ticks_msec() % 100000)
+	c.set("source_player", _player)
+	_clones_root.add_child(c)
+	var cam := get_viewport().get_camera_3d()
+	var to := cam.global_position - p if cam else Vector3.BACK
+	to.y = 0.0
+	var yaw := atan2(to.x, to.z) if to.length_squared() > 1e-6 else 0.0
+	c.global_transform = Transform3D(Basis(Vector3.UP, yaw), p)
+	var n := clone_count()
+	print("game_root: clone #", n, " at ", p)
+	return "已创建分身 %d / %d" % [n, CLONE_MAX]
+
+
+## 菜单「清除所有分身」
+func clear_clones() -> String:
+	var n := 0
+	for c in _clones_root.get_children():
+		if c.is_queued_for_deletion():
+			continue
+		_clones_root.remove_child(c)
+		c.queue_free()
+		n += 1
+	return "已清除 %d 个分身" % n if n > 0 else "当前没有分身"

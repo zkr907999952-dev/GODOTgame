@@ -17,6 +17,7 @@ const LOCO_STOP_DUR := 0.5
 const CLIP_BLEND_DUR := 0.5
 
 var skeleton: Skeleton3D
+static var _clips_cache: Dictionary = {}
 var clips: Dictionary = {} # name -> {dur,n,hipY,bones,stride,fmt}
 var bone_idx: Dictionary = {} # name -> int
 var rest_local_q: Dictionary = {} # name -> Quaternion
@@ -57,16 +58,19 @@ func setup(skel: Skeleton3D) -> bool:
 	if skeleton == null:
 		push_error("SoftLoco: no skeleton")
 		return false
-	var f := FileAccess.open(CLIPS_PATH, FileAccess.READ)
-	if f == null:
-		push_error("SoftLoco: cannot open %s" % CLIPS_PATH)
-		return false
-	var parsed = JSON.parse_string(f.get_as_text())
-	f.close()
-	if typeof(parsed) != TYPE_DICTIONARY or not parsed.has("clips"):
-		push_error("SoftLoco: bad clips JSON")
-		return false
-	clips = parsed["clips"]
+	# 动画 JSON 只解析一次（本体 + 分身共用，只读）
+	if _clips_cache.is_empty():
+		var f := FileAccess.open(CLIPS_PATH, FileAccess.READ)
+		if f == null:
+			push_error("SoftLoco: cannot open %s" % CLIPS_PATH)
+			return false
+		var parsed = JSON.parse_string(f.get_as_text())
+		f.close()
+		if typeof(parsed) != TYPE_DICTIONARY or not parsed.has("clips"):
+			push_error("SoftLoco: bad clips JSON")
+			return false
+		_clips_cache = parsed["clips"]
+	clips = _clips_cache
 	bone_idx.clear()
 	rest_local_q.clear()
 	rest_world_q.clear()

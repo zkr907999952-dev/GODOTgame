@@ -29,6 +29,9 @@ float lobe(float frac, float width) {
 // clk = 脚本里按速度积分的三个时钟：∫(0.03+0.2s)dt、∫(0.45+0.9s)dt、∫(0.25+0.5s)dt
 // （速度滑条实时调整时相位连续，不会跳变）
 uniform vec3 peri_clock = vec3(0.0);
+// 肠道伤痕（网页 GutHealth 掉血变红）：xyz = ab-local，w = 程度
+uniform vec4 dmg[12];
+varying vec3 v_l0;
 
 float pulse(float along, vec3 clk, float amp) {
 	float n = max(0.2, peri_waves);
@@ -52,7 +55,9 @@ void vertex() {
 	}
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
-	vec3 off = strike_offset(l) * strike_k + drag_offset(l) * organ_soft;
+	v_l0 = l;
+	vec3 off = strike_offset(l) * strike_k + drag_offset(l) * organ_soft + dent_offset(l) * organ_soft;
+	if (is_gut) off += rod_offset(l + off);
 	wp += ab_dir_to_world(off);
 	VERTEX = (inverse(MODEL_MATRIX) * vec4(wp, 1.0)).xyz;
 }
@@ -64,6 +69,13 @@ void fragment() {
 		NORMAL_MAP = texture(normal_tex, UV).rgb;
 		NORMAL_MAP_DEPTH = normal_scale;
 	}
+	float hurt = 0.0;
+	for (int i = 0; i < 12; i++) {
+		if (dmg[i].w <= 0.0) continue;
+		vec3 dd = v_l0 - dmg[i].xyz;
+		hurt = max(hurt, dmg[i].w * exp(-dot(dd, dd) / (0.03 * 0.03)));
+	}
+	c *= vec3(1.0, 1.0 - hurt * 0.88, 1.0 - hurt * 0.9);
 	if (!FRONT_FACING) c *= 0.55;
 	ALBEDO = c;
 	METALLIC = 0.0;

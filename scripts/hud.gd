@@ -6,8 +6,9 @@ enum PanelId { NONE, SETTINGS, INTERACT, CAMERA, MAP }
 const INTERACT_MODES := [
 	{"id": "drag", "label": "拖拽"},
 	{"id": "strike", "label": "打击"},
-	{"id": "fist", "label": "拳头"},
+	{"id": "fist", "label": "拳交"},
 	{"id": "bayonet", "label": "刺刀"},
+	{"id": "bayonet_long", "label": "长刺刀"},
 	{"id": "navel", "label": "肚脐"},
 ]
 
@@ -42,6 +43,10 @@ var _chk_breast: CheckButton
 var _breast_slider: HSlider
 var _breast_value: Label
 var _tp_box: VBoxContainer
+var _fist_box: VBoxContainer
+var _blade_box: VBoxContainer
+var _clone_status: Label
+var _tool_depth_sl: Array = []
 var _focus_buttons: Dictionary = {}
 var _zoom_slider: HSlider
 var _zoom_value: Label
@@ -543,9 +548,14 @@ func _build_interact_panel() -> PanelContainer:
 	var p := PanelContainer.new()
 	p.custom_minimum_size = Vector2(240, 0)
 	_style_panel(p)
+	var sc := ScrollContainer.new()
+	sc.custom_minimum_size = Vector2(250, 540)
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	p.add_child(sc)
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 8)
-	p.add_child(v)
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sc.add_child(v)
 
 	var title := Label.new()
 	title.text = "互动"
@@ -554,7 +564,7 @@ func _build_interact_panel() -> PanelContainer:
 	v.add_child(title)
 
 	var hint := Label.new()
-	hint.text = "左键点腹部：拖拽=按住拖动软组织，打击=点击释放环状冲击。观察视角直接用光标点；第一人称以屏幕中心为准。T 循环模式。拳头/刺刀/肚脐暂为占位。"
+	hint.text = "左键点腹部：拖拽=按住拖动软组织，打击=点击释放环状冲击；拳交=按住拖动手臂（往里推=深入，左右=倾斜）；刺刀/长刺刀=先点腹部选入口，再按住刀柄往里推。观察视角用光标点，第一人称以屏幕中心为准；本体和分身都能互动。T 循环模式，R 复位。肚脐暂为占位。"
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.custom_minimum_size = Vector2(210, 0)
 	hint.add_theme_font_size_override("font_size", 12)
@@ -585,8 +595,151 @@ func _build_interact_panel() -> PanelContainer:
 	_interact_status.add_theme_font_size_override("font_size", 13)
 	_interact_status.add_theme_color_override("font_color", Color(0.85, 0.9, 0.95))
 	v.add_child(_interact_status)
+	_build_tool_boxes(v)
+	_build_clone_box(v)
 	_refresh_interact_status()
 	return p
+
+
+## 当前互动目标的 OrganRig（最近点过的本体 / 分身）；参数类设置一律写本体（分身每帧同步）。
+func _target_org() -> Node:
+	if _player and _player.has_method("get_interact_target_rig"):
+		var r: Node = _player.call("get_interact_target_rig")
+		if r:
+			return r
+	return _org()
+
+
+func _tools() -> RefCounted:
+	var o := _org()
+	return o.get("tools") if o else null
+
+
+func _set_tool(k: String, v: Variant) -> void:
+	var t := _tools()
+	if t:
+		t.set(k, v)
+
+
+func _section(v: Control, text: String) -> void:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", 15)
+	l.add_theme_color_override("font_color", Color(0.95, 0.9, 0.86))
+	v.add_child(l)
+
+
+func _small_button(parent: Control, text: String, cb: Callable) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(100, 28)
+	b.add_theme_font_size_override("font_size", 13)
+	_style_button(b, false)
+	b.pressed.connect(cb)
+	parent.add_child(b)
+	return b
+
+
+func _check(parent: Control, text: String, on: bool, cb: Callable) -> CheckButton:
+	var c := CheckButton.new()
+	c.text = text
+	c.button_pressed = on
+	c.toggled.connect(cb)
+	parent.add_child(c)
+	return c
+
+
+## 网页 overlay 拳交 / 刺刀参数（studio-store 默认值）
+func _build_tool_boxes(v: VBoxContainer) -> void:
+	_tool_depth_sl.clear()
+	_fist_box = VBoxContainer.new()
+	_fist_box.add_theme_constant_override("separation", 4)
+	v.add_child(_fist_box)
+	_section(_fist_box, "拳交参数")
+	_tool_depth_sl.append(_slider_row(_fist_box, "深度", 0.0, 1.0, 0.01, 0.0, func(x: float):
+		var o := _target_org()
+		if o:
+			o.call("tool_set_depth01", x))[0])
+	_slider_row(_fist_box, "腹部鼓包", 0.0, 3.0, 0.05, 1.4, func(x: float): _set_tool("fist_bulge", x))
+	_slider_row(_fist_box, "鼓包范围", 0.2, 2.0, 0.05, 1.0, func(x: float): _set_tool("fist_spread", x))
+	_slider_row(_fist_box, "抬升", 0.0, 1.5, 0.05, 0.7, func(x: float): _set_tool("fist_rise", x))
+	_slider_row(_fist_box, "倾斜杠杆", 0.0, 2.0, 0.05, 1.0, func(x: float): _set_tool("fist_lever", x))
+	_slider_row(_fist_box, "肠道撑开", 0.0, 2.0, 0.05, 1.0, func(x: float): _set_tool("fist_gut", x))
+	_slider_row(_fist_box, "最大深度", 0.5, 1.5, 0.05, 1.0, func(x: float):
+		_set_tool("fist_max_depth", x)
+		var t := _tools()
+		if t:
+			t.call("set_fist_max_scale", x))
+	_check(_fist_box, "自动抽插", false, func(on: bool): _set_tool("fist_thrust", on))
+	_slider_row(_fist_box, "抽插速度", 0.1, 1.0, 0.01, 0.45, func(x: float): _set_tool("fist_thrust_speed", x))
+	_check(_fist_box, "搅动", false, func(on: bool): _set_tool("fist_stir", on))
+	_slider_row(_fist_box, "搅动速度", 0.1, 1.0, 0.01, 0.55, func(x: float): _set_tool("fist_stir_speed", x))
+	_slider_row(_fist_box, "搅动幅度", 0.05, 1.0, 0.01, 0.4, func(x: float): _set_tool("fist_stir_radius", x))
+
+	_blade_box = VBoxContainer.new()
+	_blade_box.add_theme_constant_override("separation", 4)
+	v.add_child(_blade_box)
+	_section(_blade_box, "刺刀参数")
+	_tool_depth_sl.append(_slider_row(_blade_box, "刺入深度", 0.0, 1.0, 0.01, 0.0, func(x: float):
+		var o := _target_org()
+		if o:
+			o.call("tool_set_depth01", x))[0])
+	var g := GridContainer.new()
+	g.columns = 2
+	g.add_theme_constant_override("h_separation", 6)
+	_blade_box.add_child(g)
+	_small_button(g, "自动刺入", func():
+		var o := _target_org()
+		if o:
+			var t: RefCounted = o.get("tools")
+			if not bool(t.get("has_entry")):
+				o.call("tool_set_depth01", 0.0)
+			t.call("begin_auto"))
+	_small_button(g, "拔出 / 重选", func():
+		var o := _target_org()
+		if o:
+			o.call("tool_release"))
+	_small_button(g, "清除伤口", func():
+		var o := _target_org()
+		if o:
+			(o.get("tools") as RefCounted).call("clear_marks"))
+	_check(_blade_box, "连续抽插", false, func(on: bool): _set_tool("bayonet_pump", on))
+
+
+func _build_clone_box(v: VBoxContainer) -> void:
+	_section(v, "分身")
+	var g := GridContainer.new()
+	g.columns = 2
+	g.add_theme_constant_override("h_separation", 6)
+	v.add_child(g)
+	_small_button(g, "创建分身", _on_spawn_clone)
+	_small_button(g, "清除所有分身", _on_clear_clones)
+	_clone_status = Label.new()
+	_clone_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_clone_status.custom_minimum_size = Vector2(210, 0)
+	_clone_status.add_theme_font_size_override("font_size", 12)
+	_clone_status.add_theme_color_override("font_color", Color(0.8, 0.85, 0.9))
+	_clone_status.text = "分身站在视线所指的位置，面朝你；最多 %d 个。" % 8
+	v.add_child(_clone_status)
+
+
+func _on_spawn_clone() -> void:
+	var g := _game()
+	if g and g.has_method("spawn_clone"):
+		set_clone_message(str(g.call("spawn_clone")))
+
+
+func _on_clear_clones() -> void:
+	var g := _game()
+	if g and g.has_method("clear_clones"):
+		set_clone_message(str(g.call("clear_clones")))
+
+
+func set_clone_message(msg: String) -> void:
+	if _clone_status:
+		_clone_status.text = msg
+	if _status and msg != "":
+		_status.text = msg
 
 
 func _build_camera_panel() -> PanelContainer:
@@ -1093,7 +1246,7 @@ func _on_mode_pressed(mode_id: String) -> void:
 	_interact_mode = mode_id
 	var o := _org()
 	if o:
-		o.call("set_interact_mode", mode_id)
+		o.call("set_interact_mode", "bayonet_short" if mode_id == "bayonet" else mode_id)
 	for id in _mode_buttons.keys():
 		_style_button(_mode_buttons[id], id == mode_id)
 	_refresh_interact_status()
@@ -1107,8 +1260,16 @@ func _refresh_interact_status() -> void:
 		if str(m["id"]) == _interact_mode:
 			label = str(m["label"])
 			break
+	if _fist_box:
+		_fist_box.visible = _interact_mode == "fist"
+	if _blade_box:
+		_blade_box.visible = _interact_mode == "bayonet" or _interact_mode == "bayonet_long"
 	if _interact_mode == "drag" or _interact_mode == "strike":
 		_interact_status.text = "当前模式：%s（已接入：腹壁 + 体内肠道/子宫随之形变并回弹）" % label
+	elif _interact_mode == "fist":
+		_interact_status.text = "当前模式：拳交（按住拖动：往里推深入、左右倾斜；腹部随拳头鼓起，透视可见肠道被撑开）"
+	elif _interact_mode == "bayonet" or _interact_mode == "bayonet_long":
+		_interact_status.text = "当前模式：%s（点腹部选入口 → 按住刀柄往里推；刺破留伤口、肠道受伤变红%s）" % [label, "，长刀可刺穿背部" if _interact_mode == "bayonet_long" else ""]
 	else:
 		_interact_status.text = "当前模式：%s（占位，尚未接入）" % label
 

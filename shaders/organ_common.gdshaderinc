@@ -66,3 +66,42 @@ vec3 drag_offset(vec3 p) {
 	float w = exp(-dot(d, d) / (2.0 * s * s));
 	return drag_off * w;
 }
+
+// 拳交 / 刺刀「杆」（网页 FistPlay.deformColon / BayonetPlay.deformGuts）：把杆周围的肠管推到杆半径外。
+// rod_a: xyz = 起点(ab-local)，w = 长度（<=0 关闭）；rod_d: xyz = 方向，w = 半径；rod_m: x = 混合，y = 起点前的余量(s_min)
+uniform vec4 rod_a[2];
+uniform vec4 rod_d[2];
+uniform vec4 rod_m[2];
+
+vec3 rod_offset(vec3 p) {
+	vec3 q = p;
+	for (int i = 0; i < 2; i++) {
+		float reach = rod_a[i].w;
+		if (reach <= 0.0) continue;
+		vec3 a = rod_a[i].xyz;
+		vec3 d = rod_d[i].xyz;
+		float rad = rod_d[i].w;
+		vec3 v = q - a;
+		float s = clamp(dot(v, d), rod_m[i].y, reach);
+		float w = 1.0 - smoothstep(reach - 0.01, reach + 0.05, s);
+		if (w < 0.02) continue;
+		vec3 c = a + d * s;
+		vec3 o = q - c;
+		float len = length(o);
+		float want = rad + 0.01 * w;
+		if (len >= want) continue;
+		vec3 o2 = len > 1e-5 ? o * (want / len) : vec3(want, 0.0, 0.0);
+		q += (c + o2 - q) * w * rod_m[i].x;
+	}
+	return q - p;
+}
+
+// 刺入前的压陷（网页 squeezeTarget → setTissueDrag 小半径）：xyz = 中心，w = 半径；dent_off = 位移
+uniform vec4 dent = vec4(0.0);
+uniform vec3 dent_off = vec3(0.0);
+
+vec3 dent_offset(vec3 p) {
+	if (dent.w <= 0.0) return vec3(0.0);
+	vec3 d = p - dent.xyz;
+	return dent_off * exp(-dot(d, d) / (dent.w * dent.w));
+}
