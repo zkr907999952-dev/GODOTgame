@@ -12,10 +12,13 @@ var mouse_sensitivity: float = 0.0025
 var touch_look_sensitivity: float = 0.009
 ## 举枪瞄准：true = 切换，false = 长按。手机默认切换。
 var ads_toggle: bool = true
+## 3D 渲染分辨率倍率（0 = 按平台默认：手机 75%，PC 100%）。只缩放 3D，不影响 HUD 点击。
+var render_scale: float = 0.0
 
 
 func _ready() -> void:
 	load_cfg()
+	call_deferred("apply_render_scale")
 
 
 func load_cfg() -> void:
@@ -27,6 +30,8 @@ func load_cfg() -> void:
 	mouse_sensitivity = clampf(float(c.get_value("look", "mouse", 0.0025)), 0.0005, 0.02)
 	touch_look_sensitivity = clampf(float(c.get_value("look", "touch", 0.009)), 0.001, 0.04)
 	ads_toggle = bool(c.get_value("ads", "toggle", true))
+	if c.has_section_key("graphics", "render_scale"):
+		render_scale = clampf(float(c.get_value("graphics", "render_scale", 0.0)), 0.0, 1.0)
 
 
 func save_cfg() -> void:
@@ -37,6 +42,7 @@ func save_cfg() -> void:
 	c.set_value("look", "mouse", mouse_sensitivity)
 	c.set_value("look", "touch", touch_look_sensitivity)
 	c.set_value("ads", "toggle", ads_toggle)
+	c.set_value("graphics", "render_scale", render_scale)
 	c.save(PATH)
 	changed.emit()
 
@@ -77,3 +83,36 @@ func set_ads_toggle(on: bool) -> void:
 		return
 	ads_toggle = on
 	save_cfg()
+
+
+func is_mobile_os() -> bool:
+	return OS.has_feature("mobile") or OS.has_feature("android") or OS.get_name() == "Android"
+
+
+func default_render_scale() -> float:
+	return 0.75 if is_mobile_os() else 1.0
+
+
+func effective_render_scale() -> float:
+	if render_scale >= 0.49:
+		return clampf(render_scale, 0.5, 1.0)
+	return default_render_scale()
+
+
+func apply_render_scale(vp: Viewport = null) -> void:
+	if vp == null:
+		vp = get_viewport()
+	if vp == null:
+		return
+	vp.scaling_3d_scale = effective_render_scale()
+
+
+func set_render_scale(v: float) -> void:
+	v = clampf(v, 0.5, 1.0)
+	if is_equal_approx(render_scale, v):
+		apply_render_scale()
+		return
+	render_scale = v
+	apply_render_scale()
+	save_cfg()
+

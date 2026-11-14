@@ -63,8 +63,9 @@ void vertex() {
 		off += uter_offset(l);
 		off += rod_offset(l + off) * 0.55;
 	}
-	wp += ab_dir_to_world(off);
-	VERTEX = (inverse(MODEL_MATRIX) * vec4(wp, 1.0)).xyz;
+	vec3 off_w = ab_dir_to_world(off);
+	wp += off_w;
+	VERTEX += inverse(mat3(MODEL_MATRIX)) * off_w;
 }
 
 void fragment() {

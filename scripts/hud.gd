@@ -31,6 +31,7 @@ var _chk_hair: CheckButton
 var _sens_slider: HSlider
 var _touch_sens_slider: HSlider
 var _chk_ads_toggle: CheckButton
+var _res_option: OptionButton
 var _cam_sens_slider: HSlider
 var _btn_fp: Button
 var _btn_play_mode: Button
@@ -91,6 +92,7 @@ func setup(player: Node) -> void:
 	_player = player
 	_bind_weapons()
 	_sync_bullet_cam_ui()
+	_sync_render_scale_ui()
 	if _touch:
 		_touch.call("setup", player, self, get_parent())
 		set_touch_ui(is_touch_device())
@@ -610,6 +612,17 @@ func _build_settings_panel() -> PanelContainer:
 	_chk_ads_toggle.toggled.connect(_on_ads_toggle_changed)
 	v.add_child(_chk_ads_toggle)
 
+	var res_l := Label.new()
+	res_l.text = "画面分辨率"
+	res_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	v.add_child(res_l)
+	_res_option = OptionButton.new()
+	_res_option.add_item("100%", 100)
+	_res_option.add_item("75%", 75)
+	_res_option.add_item("50%", 50)
+	_res_option.item_selected.connect(_on_render_scale_selected)
+	v.add_child(_res_option)
+
 	_chk_bullet_cam = CheckButton.new()
 	_chk_bullet_cam.text = "弹道特写"
 	_chk_bullet_cam.button_pressed = true
@@ -643,7 +656,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），以及弹道特写（默认开，肠道/子宫被命中时按概率慢动作跟随）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，肠道/子宫被命中时按概率慢动作跟随）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)
@@ -1406,6 +1419,33 @@ func _on_ads_toggle_changed(on: bool) -> void:
 		_player.call("set_ads_toggle", on)
 	if _chk_ads_toggle:
 		_chk_ads_toggle.text = "举枪瞄准：切换（关=长按）" if on else "举枪瞄准：长按（开=切换）"
+
+
+func _sync_render_scale_ui() -> void:
+	var s := _settings()
+	if s == null or _res_option == null:
+		return
+	var sc := float(s.call("effective_render_scale"))
+	var idx := 0
+	if sc <= 0.6:
+		idx = 2
+	elif sc <= 0.85:
+		idx = 1
+	_res_option.set_block_signals(true)
+	_res_option.select(idx)
+	_res_option.set_block_signals(false)
+
+
+func _on_render_scale_selected(idx: int) -> void:
+	var s := _settings()
+	if s == null:
+		return
+	var v := 1.0
+	if idx == 1:
+		v = 0.75
+	elif idx == 2:
+		v = 0.5
+	s.call("set_render_scale", v)
 
 
 func camera_panel_open() -> bool:

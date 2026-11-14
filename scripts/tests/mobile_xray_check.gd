@@ -27,6 +27,9 @@ func _run() -> void:
 	_ok(organ_src.find("CLEARCOAT") < 0, "no CLEARCOAT")
 	_ok(skin_src.find("ALPHA_SCISSOR_THRESHOLD") >= 0, "alpha scissor hole")
 	_ok(skin_src.find("if (hole > 0.07) discard") < 0, "hole not discarded")
+	var skin_c := FileAccess.get_file_as_string("res://shaders/skin_common.gdshaderinc")
+	_ok(skin_c.find("prof_tex") >= 0, "profile uses texture")
+	_ok(skin_c.find("uniform float prof_y[24]") < 0, "no float[24] profile arrays")
 
 	# 编译材质：挂到场景里让渲染器实际 set_code
 	var world := Node3D.new()

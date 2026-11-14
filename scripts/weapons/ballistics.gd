@@ -17,7 +17,7 @@ const BALL := {
 	"pistol": {"v0": 350.0, "drag": 0.0009, "mass": 0.008, "energy": 0.45, "overpen": 0.35, "impulse": 0.40, "proj": "9mm_Projectile", "scale": 1.0, "radius": 0.004},
 	"rifle": {"v0": 850.0, "drag": 0.00022, "mass": 0.004, "energy": 1.0, "overpen": 0.85, "impulse": 0.82, "proj": "5_56mm_Projectile", "scale": 1.0, "radius": 0.0035},
 	"smg": {"v0": 400.0, "drag": 0.0007, "mass": 0.008, "energy": 0.58, "overpen": 0.45, "impulse": 0.52, "proj": "9mm_Projectile", "scale": 1.0, "radius": 0.004},
-	"shotgun": {"v0": 400.0, "drag": 0.0038, "mass": 0.0035, "energy": 0.70, "overpen": 0.12, "impulse": 0.70, "proj": "BuckShot_Projectile", "scale": 0.28, "radius": 0.003},
+	"shotgun": {"v0": 400.0, "drag": 0.0038, "mass": 0.0035, "energy": 0.70, "overpen": 0.12, "impulse": 0.70, "proj": "pellet_sphere", "scale": 1.0, "radius": 0.0045},
 }
 
 var exclude: Array[RID] = []
@@ -93,6 +93,10 @@ func params_of(weapon_id: String, w: Resource = null) -> Dictionary:
 			p["overpen"] = float(w.penetration)
 	p["category"] = cat
 	p["weapon_id"] = weapon_id
+	# 霰弹必须是黑色小球，忽略资源里可能残留的弹壳网格名
+	if cat == "shotgun":
+		p["proj"] = "pellet_sphere"
+		p["scale"] = 1.0
 	return p
 
 
@@ -205,7 +209,7 @@ func _step(p: Dictionary, dt: float) -> bool:
 			break
 		var from: Vector3 = p["pos"]
 		var to := from + travel
-		var hitd := _ray(from, to)
+		var hitd := _ray(from, to, p.get("skip", []))
 		if hitd.is_empty():
 			p["pos"] = to
 			p["vel"] = vel2
@@ -255,21 +259,53 @@ func _on_body(p: Dictionary, body: Node, hp: Vector3, hn: Vector3, dir: Vector3,
 	if organs and organs.has_method("apply_ballistic_hit"):
 		organs.call("apply_ballistic_hit", hp - dir * 0.05, dir, par, qinfo)
 	hit.emit(hp, hn, body, str(p["id"]))
+	# 肉体必须贯穿：先结算伤口，弹头沿原方向继续，绝不把网格停在入弹皮肤上。
+	# 特写期间由 bullet_cam 摆放弹头，这里只记下出口，不冻结在入射点。
 	if p.get("cinematic", false):
-		p["pos"] = hp
+		if qinfo.get("exit") != null:
+			# 让特写路径能走到出口以外
+			pass
 		_place(p)
 		return true
-	var over := bool(qinfo.get("overpen", false))
-	if over and qinfo.get("exit") != null:
-		# 贯穿：从出口继续，能量下降
-		var ex: Vector3 = qinfo["exit"]
-		p["pos"] = ex + dir * 0.01
-		p["vel"] = dir * speed * clampf(0.35 + float(par["overpen"]) * 0.4, 0.2, 0.75)
-		_spawn_decal(ex, -hn, false)
-		_place(p)
-		return true
-	_end(p, true, hp, dir)
-	return false
+	var exit_p := _body_exit(body, hp, dir, qinfo)
+	# 同一具身体不再二次拦截（角色胶囊往往比腹截面大，出口后还会再撞上）
+	var skip: Array = p.get("skip", [])
+	if body is CollisionObject3D:
+		skip.append((body as CollisionObject3D).get_rid())
+	p["skip"] = skip
+	var residual := clampf(0.32 + float(par.get("overpen", 0.3)) * 0.45, 0.18, 0.85)
+	if qinfo.get("thick") != null:
+		residual *= clampf(1.0 - float(qinfo["thick"]) * 0.7, 0.18, 1.0)
+	var v2 := speed * residual
+	if v2 < 18.0:
+		# 动能耗尽：在出口外侧消失，不留弹头在皮肤上
+		_end(p, false)
+		return false
+	p["pos"] = exit_p
+	p["vel"] = dir * v2
+	_spawn_decal(exit_p - dir * 0.01, -hn, false)
+	_place(p)
+	return true
+
+
+func _body_exit(body: Node, entry: Vector3, dir: Vector3, qinfo: Dictionary) -> Vector3:
+	var ex: Variant = qinfo.get("exit")
+	var best: Vector3 = entry + dir * 0.25
+	if ex is Vector3:
+		best = ex
+	# 再沿弹道穿过该身体的碰撞体，确保弹头离开胶囊而不是停在表皮
+	var p := entry + dir * 0.008
+	var last := best
+	for _i in 20:
+		var hit := _ray(p, p + dir * 1.4)
+		if hit.is_empty():
+			break
+		var b := _body_of(hit.get("collider"))
+		if b != body:
+			break
+		last = hit["position"]
+		p = last + dir * 0.012
+	return last + dir * 0.02
 
 
 func _body_of(n: Object) -> Node:
@@ -283,12 +319,17 @@ func _body_of(n: Object) -> Node:
 	return null
 
 
-func _ray(from: Vector3, to: Vector3) -> Dictionary:
+func _ray(from: Vector3, to: Vector3, extra: Array = []) -> Dictionary:
 	var w3 := _world()
 	if w3 == null:
 		return {}
 	var q := PhysicsRayQueryParameters3D.create(from, to)
-	q.exclude = exclude
+	var ex: Array[RID] = []
+	ex.assign(exclude)
+	for r in extra:
+		if r is RID:
+			ex.append(r)
+	q.exclude = ex
 	q.collide_with_areas = false
 	q.collision_mask = 1 | 2
 	return w3.direct_space_state.intersect_ray(q)
@@ -357,8 +398,33 @@ func _park(p: Dictionary) -> void:
 	p["tracer"] = null
 
 
+func _pellet_mesh() -> Mesh:
+	if _meshes.has("pellet_sphere"):
+		return _meshes["pellet_sphere"]
+	var sm := SphereMesh.new()
+	sm.radius = 0.005
+	sm.height = 0.01
+	sm.radial_segments = 10
+	sm.rings = 6
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.04, 0.04, 0.04)
+	mat.roughness = 0.85
+	mat.metallic = 0.15
+	sm.material = mat
+	_meshes["pellet_sphere"] = sm
+	return sm
+
+
+func is_pellet_visual(n: MeshInstance3D) -> bool:
+	if n == null or n.mesh == null:
+		return false
+	var m := n.mesh
+	return m is SphereMesh and is_instance_valid(m.material) and (m.material as StandardMaterial3D).albedo_color.r < 0.15
+
+
 func _make_visual(kind: String, scl: float) -> MeshInstance3D:
-	var mesh: Mesh = _meshes.get(kind)
+	var pellet := kind == "pellet_sphere" or kind == "BuckShot_Projectile" or kind.to_lower().begins_with("buck")
+	var mesh: Mesh = _pellet_mesh() if pellet else _meshes.get(kind)
 	var mi: MeshInstance3D = null
 	if not _pool.is_empty():
 		mi = _pool.pop_back()
@@ -368,7 +434,8 @@ func _make_visual(kind: String, scl: float) -> MeshInstance3D:
 		_host_add(mi)
 	if mesh:
 		mi.mesh = mesh
-	mi.scale = Vector3.ONE * scl
+	mi.material_override = mesh.material if pellet and mesh else null
+	mi.scale = Vector3.ONE * (1.0 if pellet else scl)
 	mi.visible = true
 	return mi
 

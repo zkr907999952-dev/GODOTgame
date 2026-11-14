@@ -23,7 +23,7 @@ const EDGE_X := 20.0
 const EDGE_B := 32.0
 const STICK_SPRINT := 0.72
 const DEADZONE := 0.15
-const TAP_MS := 340
+const TAP_MS := 480
 const TAP_PX := 38.0
 const HOLD_MS := 280
 const CROUCH_LONG_MS := 500
@@ -46,11 +46,14 @@ var _crouch_long: bool = false
 var _pressed_btn: Dictionary = {}  # id -> true（高亮）
 var _font: Font
 var _weapon_drag_moved: bool = false
+## 最近一次真实 ScreenTouch 的时间戳；这段时间内忽略触摸模拟鼠标，避免同一指被处理两次。
+var _screen_touch_until: int = 0
 
 
 func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	set_process(true)
 	_font = ThemeDB.fallback_font
 	visible = false
 
@@ -161,18 +164,41 @@ func _input(event: InputEvent) -> void:
 	if not enabled or not is_visible_in_tree():
 		return
 	if event is InputEventScreenTouch:
+		_screen_touch_until = Time.get_ticks_msec() + 120
 		var st := event as InputEventScreenTouch
 		if st.pressed:
 			_on_down(st.index, st.position)
 		else:
 			_on_up(st.index, st.position)
 	elif event is InputEventScreenDrag:
+		_screen_touch_until = Time.get_ticks_msec() + 120
 		var sd := event as InputEventScreenDrag
 		_on_drag(sd.index, sd.position, sd.relative)
+	elif event is InputEventMouseButton and event.device == InputEvent.DEVICE_ID_EMULATION:
+		# 真机若同时派发 ScreenTouch 与模拟鼠标：模拟鼠标常晚一帧到达，
+		# 会把已经开始的单击工具结束并误判成双击环绕。刚收到 ScreenTouch 则忽略。
+		if Time.get_ticks_msec() < _screen_touch_until:
+			return
+		var mb := event as InputEventMouseButton
+		if mb.button_index != MOUSE_BUTTON_LEFT:
+			return
+		if mb.pressed:
+			_on_down(0, mb.position)
+		else:
+			_on_up(0, mb.position)
+	elif event is InputEventMouseMotion and event.device == InputEvent.DEVICE_ID_EMULATION:
+		if Time.get_ticks_msec() < _screen_touch_until or not fingers.has(0):
+			return
+		var mm := event as InputEventMouseMotion
+		_on_drag(0, mm.position, mm.relative)
 
 
 func _on_down(idx: int, p: Vector2) -> void:
 	if fingers.has(idx):
+		var prev: Dictionary = fingers[idx]
+		# 同一指的重复按下（ScreenTouch + 模拟鼠标）不要先抬起再开始，否则单击会被当成双击环绕。
+		if p.distance_to(prev["pos"]) < 64.0 and Time.get_ticks_msec() - int(prev["t0"]) < 500:
+			return
 		_on_up(idx, p)
 	var f := {"role": "none", "start": p, "pos": p, "t0": Time.get_ticks_msec()}
 	fingers[idx] = f
@@ -260,15 +286,16 @@ func _on_up(idx: int, p: Vector2) -> void:
 	_end_finger(idx, p)
 	fingers.erase(idx)
 	var role := str(f["role"])
-	if role == "ui" or role == "none":
+	if role == "ui" or role.begins_with("btn:"):
 		return
-	# 网页 up：短按且没怎么动 = 一次点按（用于双击判定）
-	if not _fp() and (role == "tool" or role == "orbit"):
+	# 短按且没怎么动 = 一次点按（用于双击环绕）。
+	# 含 role=none：单击没打中身体时也要记下，否则双击永远无法开始环绕。
+	if not _fp() and (role == "tool" or role == "orbit" or role == "none"):
 		var dt := Time.get_ticks_msec() - int(f["t0"])
 		if dt < HOLD_MS and p.distance_to(f["start"]) < TAP_PX:
 			_last_tap_t = Time.get_ticks_msec()
 			_last_tap_pos = p
-		else:
+		elif role != "none":
 			_last_tap_t = -100000
 	if role == "two":
 		var rest := _scene_fingers()

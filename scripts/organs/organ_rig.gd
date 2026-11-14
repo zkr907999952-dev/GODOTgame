@@ -53,6 +53,7 @@ var skin_meshes: Array[MeshInstance3D] = []
 var _skel: Skeleton3D
 var _spine_i: int = -1
 var _navel_rest: Vector3 = Vector3(0.0, 1.06, 0.114)
+var _prof_tex: ImageTexture
 var _skin_mats: Array[ShaderMaterial] = []
 var _organ_mats: Array[ShaderMaterial] = []
 var _all_mats: Array[ShaderMaterial] = []
@@ -1226,24 +1227,51 @@ func _set_profile_params(m: ShaderMaterial) -> void:
 	var prof: Dictionary = meta["profile"]
 	var ys: Array = prof["y"]
 	var cnt := mini(ys.size(), 24)
-	var py := PackedFloat32Array()
-	var phx := PackedFloat32Array()
-	var pzf := PackedFloat32Array()
-	var pzb := PackedFloat32Array()
+	if _prof_tex == null:
+		_prof_tex = ImageTexture.new()
+	var img := Image.create(24, 1, false, Image.FORMAT_RGBAF)
 	for i in 24:
 		var j := mini(i, cnt - 1)
-		py.append(float(ys[j]) - _navel_rest.y)
-		phx.append(float(prof["half_x"][j]))
-		pzf.append(float(prof["z_front"][j]) - _navel_rest.z)
-		pzb.append(float(prof["z_back"][j]) - _navel_rest.z)
+		# Color 可存 0..1 以外的浮点；RGBAF 保留负数（y / z_back）
+		img.set_pixel(i, 0, Color(
+			float(ys[j]) - _navel_rest.y,
+			float(prof["half_x"][j]),
+			float(prof["z_front"][j]) - _navel_rest.z,
+			float(prof["z_back"][j]) - _navel_rest.z
+		))
+	_prof_tex.set_image(img)
 	m.set_shader_parameter("prof_n", cnt)
-	m.set_shader_parameter("prof_y", py)
-	m.set_shader_parameter("prof_hx", phx)
-	m.set_shader_parameter("prof_zf", pzf)
-	m.set_shader_parameter("prof_zb", pzb)
+	m.set_shader_parameter("prof_tex", _prof_tex)
 
 
-## 校验用：与 shader xray_hole 相同的公式（ab-local 点），xr = 透视强度。
+## 校验：透视窗口中心（肚脐附近前腹壁）投影应落在腹部网格上，而不是旁边。
+func debug_window_on_belly(cam: Camera3D) -> Dictionary:
+	_update_frame()
+	var out := {"ok": false, "navel": _frame.origin, "window": Vector3.ZERO, "screen": Vector2.ZERO, "navel_screen": Vector2.ZERO, "dist": 99.0, "px": 999.0}
+	if cam == null:
+		return out
+	var xd: Dictionary = meta.get("xray", {})
+	var y0 := float(xd.get("y0", -0.2))
+	var y1 := float(xd.get("y1", 0.145))
+	var local := Vector3(0.0, 0.5 * (y0 + y1), 0.02)
+	var world: Vector3 = _frame * local
+	out["window"] = world
+	out["navel"] = _frame.origin
+	# 窗口中心必须就在肚脐附近（腹局部，不是碰撞胶囊侧面）
+	var lateral: Vector3 = world - _frame.origin
+	lateral -= _frame.basis.y * lateral.dot(_frame.basis.y)
+	out["dist"] = lateral.length()
+	if cam.is_position_behind(world) or cam.is_position_behind(_frame.origin):
+		out["ok"] = out["dist"] < 0.12
+		return out
+	out["screen"] = cam.unproject_position(world)
+	out["navel_screen"] = cam.unproject_position(_frame.origin)
+	out["px"] = out["screen"].distance_to(out["navel_screen"])
+	# 物理胶囊半径约 30cm，不能用来判断窗口是否偏到腰侧。用腹局部距离 + 屏幕投影。
+	out["ok"] = out["dist"] < 0.12 and out["px"] < 90.0
+	return out
+
+
 func debug_xray_hole(l: Vector3, xr: float = -1.0) -> float:
 	var x := effective_xray() if xr < 0.0 else xr
 	var xd: Dictionary = meta.get("xray", {})

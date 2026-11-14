@@ -31,28 +31,31 @@ bool fp_clipped(vec3 wp, uint cam_layers) {
 	return fp_clip_r > 0.0 && (cam_layers & (1u << 18u)) == 0u && distance(wp, fp_eye_w) < fp_clip_r;
 }
 
-// 躯干截面轮廓（静止姿态，相对肚脐）：y / 半宽 / 前表面 z / 后表面 z。由 organ_rig 从 organs_meta.json 写入。
-// 透视窗口按截面收进轮廓内：只挖前半个腹壁，侧壁和后壁永远保留（从孔里看进去是暗红腔壁），
-// 修复腰部变细处（半宽 ≈9cm < 窗口 12cm+10cm 渐隐）整个截面被挖穿、能直接看到身后背景的问题。
+// 躯干截面轮廓（静止姿态，相对肚脐）：纹理每像素 RGBA = (y, half_x, z_front, z_back)。
+// 用 24×1 纹理而不是 float[24] 数组：移动端 Mobile 渲染器上传大数组经常失败或变 0，
+// 侧壁裁切错位，透视窗口看起来从腹部「偏移」到腰侧。
 const int PROF_MAX = 24;
 uniform int prof_n = 0;
-uniform float prof_y[24];
-uniform float prof_hx[24];
-uniform float prof_zf[24];
-uniform float prof_zb[24];
+uniform sampler2D prof_tex : hint_default_black, filter_nearest, repeat_disable;
+
+vec4 prof_at(int i) {
+	return texture(prof_tex, vec2((float(i) + 0.5) / 24.0, 0.5));
+}
 
 vec3 torso_profile(float y) {
 	if (prof_n <= 0) return vec3(0.15, 0.01, -0.13);
-	if (y <= prof_y[0]) return vec3(prof_hx[0], prof_zf[0], prof_zb[0]);
+	vec4 a = prof_at(0);
+	if (y <= a.r) return a.gba;
 	for (int i = 1; i < PROF_MAX; i++) {
 		if (i >= prof_n) break;
-		if (y <= prof_y[i]) {
-			float t = (y - prof_y[i - 1]) / max(1e-5, prof_y[i] - prof_y[i - 1]);
-			return mix(vec3(prof_hx[i - 1], prof_zf[i - 1], prof_zb[i - 1]), vec3(prof_hx[i], prof_zf[i], prof_zb[i]), t);
+		vec4 b = prof_at(i);
+		if (y <= b.r) {
+			float t = (y - a.r) / max(1e-5, b.r - a.r);
+			return mix(a.gba, b.gba, t);
 		}
+		a = b;
 	}
-	int k = prof_n - 1;
-	return vec3(prof_hx[k], prof_zf[k], prof_zb[k]);
+	return a.gba;
 }
 
 float xray_hole(vec3 l) {
@@ -159,8 +162,11 @@ void vertex() {
 	float m = belly_mask(l);
 	vec3 off = (strike_offset(l) * skin_strike_k + drag_offset(l) * skin_drag_k + dent_offset(l)) * m + fist_offset(l) + navel_offset(l);
 	l += off;
-	wp += ab_dir_to_world(off);
-	VERTEX = (inverse(MODEL_MATRIX) * vec4(wp, 1.0)).xyz;
+	vec3 off_w = ab_dir_to_world(off);
+	wp += off_w;
+	// 只对位移做 3×3 逆，避免 inverse(MODEL_MATRIX) 作用在带大平移的点上：
+	// 移动端精度会让透视躯干相对四肢/肚脐偏移。
+	VERTEX += inverse(mat3(MODEL_MATRIX)) * off_w;
 	v_ab = l;
 	v_wp = wp;
 }

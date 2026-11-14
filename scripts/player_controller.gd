@@ -287,14 +287,30 @@ func _organs_live() -> bool:
 	return _organs != null and bool(_organs.get("ready_ok")) and bool(_organs.call("mode_is_live", ""))
 
 
+## 把输入/控件逻辑坐标转换成 Camera3D.project_ray_* 用的视口像素。
+## 手机上 HUD 会按 DPI 设置 Window.content_scale_size，2D 逻辑尺寸 ≠ 3D 视口像素；
+## 若不换算，点在肚子上的射线会打到画面边角，观察模式单击互动和双击环绕都会失效。
+func to_camera_pixel(p: Vector2) -> Vector2:
+	var vp := get_viewport()
+	if vp == null:
+		return p
+	var backing := Vector2(vp.size)
+	var vis := vp.get_visible_rect().size
+	if backing.x > 1.0 and vis.x > 1.0 and (absf(backing.x - vis.x) > 0.5 or absf(backing.y - vis.y) > 0.5):
+		return Vector2(p.x * backing.x / vis.x, p.y * backing.y / vis.y)
+	return p
+
+
 ## 屏幕点 → 世界射线（捕获鼠标时用屏幕中心）
 func _screen_ray(screen: Vector2) -> Array:
-	return [_camera.project_ray_origin(screen), _camera.project_ray_normal(screen)]
+	var p := to_camera_pixel(screen)
+	return [_camera.project_ray_origin(p), _camera.project_ray_normal(p)]
 
 
 func _interact_point(ev_pos: Vector2) -> Vector2:
 	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		return get_viewport().get_visible_rect().size * 0.5
+		var vp := get_viewport()
+		return Vector2(vp.get_visible_rect().size) * 0.5 if vp else ev_pos
 	return ev_pos
 
 
@@ -797,15 +813,45 @@ func apply_screen_orientation() -> void:
 
 
 func eye_aim_transform() -> Transform3D:
-	## 角色持枪空间：眼位为原点，朝向角色正面（网格 +Z）。观察模式用它放置视模型，使第三人称仍保持持枪姿势。
+	## 第一人称持枪空间：眼位为原点，朝向角色正面（网格 +Z）。
 	var origin := global_transform * (_body.transform * (_fp_eye_cur + Vector3(0.0, 0.06, 0.0)))
-	var fwd: Vector3 = _body.global_transform.basis.z
-	fwd.y = 0.0
+	var fwd := _body_forward()
 	if fwd.length_squared() < 1e-6:
 		fwd = -global_transform.basis.z
-	fwd = fwd.normalized()
+		fwd.y = 0.0
+		fwd = fwd.normalized()
 	# 相机约定看向 -Z，所以 -Z 应对准角色正面。
 	return Transform3D(Basis.looking_at(fwd, Vector3.UP), origin)
+
+
+func get_skeleton() -> Skeleton3D:
+	return _find_skeleton(_body)
+
+
+## 第三人称抵肩持枪空间：原点在右肩肩窝附近（不是眼位，避免枪托怼头/怼脸）。
+func shoulder_aim_transform() -> Transform3D:
+	var fwd := _body_forward()
+	if fwd.length_squared() < 1e-6:
+		fwd = Vector3(0, 0, -1)
+	var up := Vector3.UP
+	var sh: Variant = _bone_world("R_Shoulder_a")
+	var chest: Variant = _bone_world("C_Spine_c")
+	var origin: Vector3
+	if sh is Vector3:
+		origin = sh
+		# 肩窝：略向内（胸侧）、略向下、略向前，枪托抵在这里而不是面颊
+		if chest is Vector3:
+			var inward: Vector3 = chest - sh
+			inward.y = 0.0
+			if inward.length_squared() > 1e-6:
+				origin += inward.normalized() * 0.02
+		# 略低于肩峰，贴在肩窝外侧，不要进到胸腔中线（否则长枪会贯穿躯干）
+		origin += Vector3(0.0, -0.02, 0.0) + fwd * 0.03
+	else:
+		origin = global_transform * (_body.transform * (_fp_eye_cur + Vector3(0.16, -0.08, 0.0)))
+	# 只略退后，让枪托落在肩窝，而不是落到背后
+	origin -= fwd * 0.03
+	return Transform3D(Basis.looking_at(fwd, up), origin)
 
 
 ## FP: hide only head / hair / eye / mouth (layer-culled) to reduce camera clip; keep torso/arms/legs.

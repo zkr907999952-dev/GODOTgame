@@ -24,7 +24,7 @@ const CasingSystemScript = preload("res://scripts/weapons/casing_system.gd")
 const WEAPON_DIR := "res://assets/weapons/"
 const FLASH_TEX := preload("res://assets/weapons/shared/muzzle_flash.png")
 const SHELLS_SCENE := preload("res://assets/weapons/shared/shells.scn")
-const BLEND_T := 0.14
+const BLEND_T := 0.22
 const IK_FADE := 7.0
 ## 手臂 IK：手肘朝下 + 向外（相机空间）
 const POLE_R := Vector3(0.75, -1.0, 0.15)
@@ -588,14 +588,23 @@ func _idle_clip() -> String:
 	return "idle"
 
 
+func _is_long_gun(w: WeaponDef) -> bool:
+	return w != null and str(w.category) != "pistol"
+
+
 func _hip_offset(w: WeaponDef) -> Vector3:
-	# 相机看向 -Z：Z 更负 = 更远离镜头，Y 更负 = 更低。在原偏移上整体下移、推远，贴近主流 FPS 持枪。
-	return Vector3(w.view_offset.x + 0.024, w.view_offset.y - 0.078, w.view_offset.z - 0.13)
+	# 相机看向 -Z：Z 更负 = 更远离镜头，Y 更负 = 更低。步枪再略降，避免枪口顶到脸前。
+	var y := -0.10 if _is_long_gun(w) else -0.072
+	var z := -0.11 if _is_long_gun(w) else -0.09
+	return Vector3(w.view_offset.x + 0.02, w.view_offset.y + y, w.view_offset.z + z)
 
 
 func _ads_offset(w: WeaponDef) -> Vector3:
-	# 开镜仍保持准星对齐，但枪身不得穿进近裁面。
-	return Vector3(w.view_offset.x, w.view_offset.y - 0.016, w.view_offset.z - 0.11)
+	# 开镜：先给一个接近准星的基础偏移，再用 _align_iron_sights 把准星对准屏幕中心。
+	# Z 不能到 0（那会把机匣贴到眼睛上）。
+	var y := -0.02 if _is_long_gun(w) else -0.01
+	var z := -0.14 if _is_long_gun(w) else -0.10
+	return Vector3(w.view_offset.x, w.view_offset.y + y, w.view_offset.z + z)
 
 
 func _loco_bob_xf(delta: float) -> Transform3D:
@@ -630,18 +639,35 @@ func _view_local(w: WeaponDef) -> Transform3D:
 	return Transform3D(Basis().scaled(Vector3.ONE * sc), off)
 
 
+func _tp_hold_adjust(w: WeaponDef) -> Transform3D:
+	# 观察模式附加偏移（相机空间：+Z 朝向持枪者，-Z 朝枪口方向）。
+	if not _is_long_gun(w):
+		# 手枪：手臂接近伸直、枪身水平，略低于肩，不要过度后收
+		return Transform3D(Basis(Vector3.RIGHT, 0.04), Vector3(0.03, -0.05, -0.04))
+	# 步枪/冲锋枪/霰弹：后拉抵肩，枪口略低，不要过度前伸
+	return Transform3D(Basis(Vector3.RIGHT, -0.05), Vector3(0.12, 0.03, 0.06))
+
+
 func _apply_view_xf(local_xf: Transform3D) -> void:
 	var fp := bool(player.get("first_person")) if player else true
+	var w: WeaponDef = cur_def()
 	if fp:
 		view.top_level = false
 		if view.get_parent() != camera and camera:
 			view.reparent(camera, false)
 		view.transform = local_xf
+		_align_iron_sights(w)
 	else:
-		# 观察模式：枪留在角色手里（相对角色朝向的持枪空间），不跟环绕相机走。
+		# 观察模式：抵肩持枪，不跟环绕相机，也不放在眼位（否则枪托怼头）。
 		view.top_level = true
-		var hold: Transform3D = player.call("eye_aim_transform") if player and player.has_method("eye_aim_transform") else camera.global_transform
-		view.global_transform = hold * local_xf
+		var hold: Transform3D
+		if player and player.has_method("shoulder_aim_transform"):
+			hold = player.call("shoulder_aim_transform")
+		elif player and player.has_method("eye_aim_transform"):
+			hold = player.call("eye_aim_transform")
+		else:
+			hold = camera.global_transform if camera else Transform3D()
+		view.global_transform = hold * _tp_hold_adjust(w) * local_xf
 
 
 func _try_eject_mag(w: WeaponDef) -> void:
@@ -662,6 +688,22 @@ func _try_eject_mag(w: WeaponDef) -> void:
 	var body_vel: Vector3 = player.get("velocity") if player else Vector3.ZERO
 	casings.call("eject_mag", kind, xf, body_vel)
 	_mag_ejected = true
+
+
+func _align_iron_sights(w: WeaponDef) -> void:
+	# 开镜时把照门/准星平移到相机 -Z 轴上，实现三点一线对准屏幕中心准星。
+	if w == null or gun == null or camera == null or _ads_k < 0.05:
+		return
+	if view.get_parent() != camera:
+		return
+	var front: Vector3 = gun.to_global(Vector3(w.muzzle.x, w.muzzle.y, 0.0))
+	var cf: Vector3 = camera.global_transform.affine_inverse() * front
+	# 按开镜程度把准星 XY 推到 0；若太近则再沿 -Z 推远一点，避免机匣顶到镜头。
+	var k := _ads_k
+	view.position.x -= cf.x * k
+	view.position.y -= cf.y * k
+	if cf.z > -0.22:
+		view.position.z -= (cf.z + 0.28) * k
 
 
 func debug_muzzle_ahead() -> float:
@@ -1022,7 +1064,8 @@ func _apply_ik(pose: Dictionary, w: float) -> void:
 		var wrist_cam: Vector3 = (h["wrist"] as Vector3) + sem_cam.x * (float(h["flen"]) - float(a["flen"]))
 		var P: Vector3 = to_sk * (vx * wrist_cam)
 		var pole_cam: Vector3 = POLE_R if s == "R" else POLE_L
-		var pole_sk := (to_sk.basis * camera.global_transform.basis * pole_cam).normalized()
+		# 用持枪空间（view）而不是环绕相机，否则观察模式下肘部会随观察角扭转。
+		var pole_sk := (to_sk.basis * vx.basis * pole_cam).normalized()
 		_solve_arm(a, P, pole_sk, sem_sk, barrel if s == "L" else Vector3.ZERO, w)
 		# 手指
 		var curls: PackedFloat32Array = h["curls"]
@@ -1034,6 +1077,114 @@ func _apply_ik(pose: Dictionary, w: float) -> void:
 			var ang := (curls[i] - float(fd["bend0"])) * finger_gain
 			var q: Quaternion = (fd["rest"] as Quaternion) * Quaternion(fd["ax"] as Vector3, ang)
 			_set_rot(int(fd["i"]), q, w)
+	_align_thumbs_to_slide(pose, w)
+
+
+func _align_thumbs_to_slide(pose: Dictionary, ik_w: float) -> void:
+	# 双手大拇指沿套筒/机匣方向（+X）：托手拇指贴高位，击发手拇指沿弱侧，不包住套筒后端。
+	if skeleton == null or gun == null or ik_w <= 0.0:
+		return
+	var wdef: WeaponDef = cur_def()
+	if wdef == null:
+		return
+	var slide := (gun.global_transform.basis * Vector3.RIGHT).normalized()
+	var up := (gun.global_transform.basis * Vector3.UP).normalized()
+	for s in ["R", "L"]:
+		# 托手（左）略偏上贴套筒；击发手沿滑套外侧、略低于托手
+		var want := (slide * 0.86 + up * 0.5).normalized() if s == "L" else (slide * 0.92 - up * 0.18).normalized()
+		_aim_bone_chain_to(s + "_Thumb", want, ik_w)
+
+
+func _aim_bone_chain_to(prefix: String, world_dir: Vector3, w: float) -> void:
+	if world_dir.length_squared() < 1e-8:
+		return
+	world_dir = world_dir.normalized()
+	var sk_xf := skeleton.global_transform
+	for j in ["a", "b"]:
+		var bi := skeleton.find_bone("%s_%s" % [prefix, j])
+		if bi < 0:
+			continue
+		var ch := skeleton.get_bone_children(bi)
+		if ch.is_empty():
+			continue
+		var g := skeleton.get_bone_global_pose(bi)
+		var cg := skeleton.get_bone_global_pose(ch[0])
+		var cur := (sk_xf.basis * (cg.origin - g.origin))
+		if cur.length_squared() < 1e-10:
+			continue
+		cur = cur.normalized()
+		var axis := cur.cross(world_dir)
+		var si := axis.length()
+		if si < 1e-5:
+			continue
+		axis = (g.basis.orthonormalized().inverse() * (sk_xf.basis.inverse() * (axis / si))).normalized()
+		var ang := atan2(si, cur.dot(world_dir))
+		var rest_q := _base_rot(bi)
+		var q := rest_q * Quaternion(axis, ang)
+		# 只叠加在当前姿势上：用已写好的手指弯曲再瞄一次
+		var now := skeleton.get_bone_pose_rotation(bi)
+		_set_rot(bi, now.slerp(now * Quaternion(axis, ang), 1.0), w)
+
+
+func debug_ads_error() -> float:
+	## 开镜时准星（枪管上方照门点）与屏幕中心的像素距离。
+	if gun == null or camera == null:
+		return 999.0
+	var w: WeaponDef = cur_def()
+	if w == null:
+		return 999.0
+	var front: Vector3 = gun.to_global(Vector3(w.muzzle.x, w.muzzle.y, 0.0))
+	if camera.is_position_behind(front):
+		return 999.0
+	var sp: Vector2 = camera.unproject_position(front)
+	var vp := camera.get_viewport()
+	var c: Vector2 = Vector2(vp.get_visible_rect().size) * 0.5 if vp else Vector2.ZERO
+	return sp.distance_to(c)
+
+
+func debug_stock_vs_head() -> Dictionary:
+	## 第三人称：枪托应更靠近肩窝而不是头/脸。
+	var out := {"stock": Vector3.ZERO, "shoulder": Vector3.ZERO, "head": Vector3.ZERO, "d_sh": 99.0, "d_head": 99.0, "ok": false}
+	if gun == null or skeleton == null:
+		return out
+	var w: WeaponDef = cur_def()
+	var stock_local := Vector3(-0.04, 0.04, 0.0)
+	if w:
+		stock_local = Vector3(-0.02 if str(w.category) == "pistol" else -0.06, w.muzzle.y * 0.2, 0.0)
+	out["stock"] = gun.to_global(stock_local)
+	var sh_i := skeleton.find_bone("R_Shoulder_a")
+	var hd_i := skeleton.find_bone("C_Head_a")
+	var skx := skeleton.global_transform
+	if sh_i >= 0:
+		out["shoulder"] = skx * skeleton.get_bone_global_pose(sh_i).origin
+	if hd_i >= 0:
+		out["head"] = skx * skeleton.get_bone_global_pose(hd_i).origin
+	out["d_sh"] = out["stock"].distance_to(out["shoulder"])
+	out["d_head"] = out["stock"].distance_to(out["head"])
+	out["ok"] = out["d_sh"] + 0.02 < out["d_head"]
+	return out
+
+
+func debug_thumb_slide() -> Dictionary:
+	## 拇指骨指向与套筒 +X 的点积（越大越贴合）。
+	var out := {"L": -1.0, "R": -1.0, "ok": false}
+	if gun == null or skeleton == null:
+		return out
+	var slide := (gun.global_transform.basis * Vector3.RIGHT).normalized()
+	var skx := skeleton.global_transform
+	for s in ["R", "L"]:
+		var a := skeleton.find_bone("%s_Thumb_a" % s)
+		var b := skeleton.find_bone("%s_Thumb_b" % s)
+		if a < 0 or b < 0:
+			continue
+		var pa: Vector3 = skx * skeleton.get_bone_global_pose(a).origin
+		var pb: Vector3 = skx * skeleton.get_bone_global_pose(b).origin
+		var d := (pb - pa)
+		if d.length_squared() < 1e-10:
+			continue
+		out[s] = d.normalized().dot(slide)
+	out["ok"] = float(out["L"]) > 0.35 and float(out["R"]) > 0.25
+	return out
 
 
 func _solve_arm(a: Dictionary, P: Vector3, pole: Vector3, hand_basis: Basis, slide_axis: Vector3, w: float) -> void:
