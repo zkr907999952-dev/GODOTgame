@@ -1,0 +1,41 @@
+[gd_resource type="Resource" script_class="WeaponDef" load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/weapons/weapon_def.gd" id="1"]
+[ext_resource type="PackedScene" path="res://assets/weapons/shotgun/shotgun.scn" id="2"]
+[ext_resource type="Texture2D" path="res://assets/weapons/shotgun/shotgun_icon.png" id="3"]
+[ext_resource type="Resource" path="res://assets/weapons/shotgun/shotgun_arms.res" id="4"]
+
+[resource]
+script = ExtResource("1")
+id = "shotgun"
+display_name = "泵动霰弹枪 870（Shotgun_01）"
+category = "shotgun"
+order = 4
+scene = ExtResource("2")
+icon = ExtResource("3")
+arms = ExtResource("4")
+fire_mode = "pump"
+rpm = 70.0
+mag_size = 6
+reserve_start = 30
+reserve_max = 60
+chamber_plus_one = false
+pellets = 8
+damage = 12.0
+range_m = 40.0
+spread_deg = 4.5
+bloom_deg = 0.0
+spread_max_deg = 4.5
+spread_recover = 6.0
+recoil_pitch = 5.0
+recoil_yaw = 1.0
+recoil_recover = 7.0
+kick_back = 0.06
+kick_rot = 8.0
+shell_reload = true
+muzzle = Vector3(0.644, 0.093, 0)
+eject = Vector3(0.12, 0.08, 0.02)
+shell = "BuckShot_Shell"
+flash_scale = 1.4
+view_offset = Vector3(-0.01, 0, 0.11)
+ads_fov = 55.0

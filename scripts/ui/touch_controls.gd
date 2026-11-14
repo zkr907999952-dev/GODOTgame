@@ -46,6 +46,7 @@ var _crouch_t0: int = -1
 var _crouch_long: bool = false
 var _pressed_btn: Dictionary = {}  # id -> true（高亮）
 var _font: Font
+var _weapon_drag_moved: bool = false
 
 
 func _ready() -> void:
@@ -113,7 +114,22 @@ func buttons() -> Dictionary:
 		var crouch_txt := "匍匐" if str(player.call("get_stance")) == "prone" else "下蹲"
 		out["crouch"] = [Rect2(Vector2(x, y - BTN - GAP), Vector2(BTN, BTN)), crouch_txt]
 		out["interact"] = [Rect2(Vector2(x, y - 2.0 * (BTN + GAP)), Vector2(BTN, BTN)), "互动"]
+		# 武器列（第二列）：武器（按住拖动 = 轮盘选枪）/ 开火（按住；拖动同时转视角）/ 换弹
+		var x2 := x - BTN - GAP
+		out["weapon"] = [Rect2(Vector2(x2, y), Vector2(BTN, BTN)), "武器"]
+		if _armed():
+			out["fire"] = [Rect2(Vector2(x2 - 10.0, y - BTN - GAP - 20.0), Vector2(BTN + 20.0, BTN + 20.0)), "开火"]
+			out["reload"] = [Rect2(Vector2(x2, y - 2.0 * (BTN + GAP) - 20.0), Vector2(BTN, BTN)), "换弹"]
 	return out
+
+
+func _weapons() -> Node:
+	return player.call("get_weapons") if player and player.has_method("get_weapons") else null
+
+
+func _armed() -> bool:
+	var w := _weapons()
+	return w != null and bool(w.call("is_armed"))
 
 
 func zoom_rect() -> Rect2:
@@ -212,6 +228,13 @@ func _on_drag(idx: int, p: Vector2, rel: Vector2) -> void:
 			_zoom_to(p)
 		"tool":
 			player.call("touch_tool_drag", p)
+		"btn:weapon":
+			# 手指直接拖到轮盘格子上（轮盘以屏幕中心为圆心）
+			if hud and hud.has_method("weapon_wheel_point") and p.distance_to(f["start"]) > TAP_PX * 0.6:
+				f["moved"] = true
+				hud.call("weapon_wheel_point", p)
+		"btn:fire":
+			player.call("touch_look", rel)
 		"orbit":
 			player.call("touch_orbit", rel)
 		"two":
@@ -259,6 +282,8 @@ func _end_finger(idx: int, _p: Vector2) -> void:
 		if player:
 			player.call("touch_tool_end")
 	elif role.begins_with("btn:"):
+		if role == "btn:weapon":
+			_weapon_drag_moved = bool(fingers[idx].get("moved", false))
 		_button(role.substr(4), false)
 	queue_redraw()
 
@@ -356,6 +381,23 @@ func _button(id: String, down: bool) -> void:
 				player.set("touch_jump_req", true)
 		"interact":
 			player.call("touch_interact", down)
+		"weapon":
+			# 按下 = 打开轮盘；拖到格子上松手 = 选中；原地松手 = 关闭不变
+			if hud == null:
+				pass
+			elif down:
+				hud.call("open_weapon_wheel", null)
+			elif bool(hud.call("is_wheel_open")):
+				hud.call("close_weapon_wheel", _weapon_drag_moved)
+				_weapon_drag_moved = false
+		"fire":
+			var w := _weapons()
+			if w:
+				w.call("set_trigger", down)
+		"reload":
+			var w2 := _weapons()
+			if w2 and down:
+				w2.call("reload")
 		"crouch":
 			# 网页 CrouchHold：点按 = 蹲下 / 起身；长按 0.5s = 匍匐（切换）
 			if down:

@@ -50,7 +50,9 @@ const KEYMAP := {
 		KEY_9: "dance_clear", KEY_0: "dance_clear",
 	},
 	"display": {KEY_F: "focus"},
-	"control": {KEY_Z: "prone"},
+	"control": {KEY_Z: "prone", KEY_G: "holster", KEY_Q: "weapon_wheel",
+		KEY_1: "weapon_slot", KEY_2: "weapon_slot", KEY_3: "weapon_slot", KEY_4: "weapon_slot", KEY_5: "weapon_slot",
+		KEY_6: "weapon_slot", KEY_7: "weapon_slot", KEY_8: "weapon_slot", KEY_9: "weapon_slot"},
 	## 俯视地图打开时只响应这两个
 	"overhead": {KEY_M: "overhead_close", KEY_ESCAPE: "overhead_close"},
 }
@@ -108,6 +110,11 @@ func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventKey):
 		return
 	var ke := event as InputEventKey
+	# 松开 Q：轮盘选中
+	if not ke.pressed and key_of(ke) == KEY_Q and _hud.call("is_wheel_open"):
+		_hud.call("close_weapon_wheel", true)
+		get_viewport().set_input_as_handled()
+		return
 	if not ke.pressed or ke.echo:
 		return
 	var k := key_of(ke)
@@ -142,7 +149,21 @@ func run_action(action: String, key: int = 0) -> void:
 		"interact_mode":
 			_hud.call("cycle_interact_mode")
 		"reset":
-			_player.call("reset_view_and_belly")
+			# 角色控制 + 持枪：R = 换弹；否则 R = 复位视角 / 腹部形变（网页 R）
+			if _player.call("weapon_armed"):
+				_player.call("get_weapons").call("reload")
+			else:
+				_player.call("reset_view_and_belly")
+		"weapon_slot":
+			_player.call("get_weapons").call("select_slot", key - KEY_1)
+		"holster":
+			var ws: Node = _player.call("get_weapons")
+			if ws.call("is_armed"):
+				ws.call("holster")
+			elif ws.get("defs").size() > 0:
+				ws.call("select", ws.get("last_id") if str(ws.get("last_id")) != "" else ws.get("defs")[0].id)
+		"weapon_wheel":
+			_hud.call("open_weapon_wheel")
 		"focus":
 			_player.call("cycle_tp_focus")
 		"prone":

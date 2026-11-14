@@ -1,0 +1,41 @@
+[gd_resource type="Resource" script_class="WeaponDef" load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/weapons/weapon_def.gd" id="1"]
+[ext_resource type="PackedScene" path="res://assets/weapons/rifle/rifle.scn" id="2"]
+[ext_resource type="Texture2D" path="res://assets/weapons/rifle/rifle_icon.png" id="3"]
+[ext_resource type="Resource" path="res://assets/weapons/rifle/rifle_arms.res" id="4"]
+
+[resource]
+script = ExtResource("1")
+id = "rifle"
+display_name = "突击步枪 AR-15（Rifle_01）"
+category = "rifle"
+order = 2
+scene = ExtResource("2")
+icon = ExtResource("3")
+arms = ExtResource("4")
+fire_mode = "auto"
+rpm = 780.0
+mag_size = 30
+reserve_start = 90
+reserve_max = 240
+chamber_plus_one = true
+pellets = 1
+damage = 30.0
+range_m = 400.0
+spread_deg = 1.4
+bloom_deg = 0.3
+spread_max_deg = 5.0
+spread_recover = 8.0
+recoil_pitch = 1.2
+recoil_yaw = 0.45
+recoil_recover = 10.0
+kick_back = 0.025
+kick_rot = 2.5
+shell_reload = false
+muzzle = Vector3(0.598, 0.165, 0)
+eject = Vector3(0.16, 0.165, 0.02)
+shell = "5_56mm_Shell"
+flash_scale = 1.0
+view_offset = Vector3(-0.01, 0, 0.11)
+ads_fov = 48.0

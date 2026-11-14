@@ -1,0 +1,41 @@
+[gd_resource type="Resource" script_class="WeaponDef" load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/weapons/weapon_def.gd" id="1"]
+[ext_resource type="PackedScene" path="res://assets/weapons/pistol/pistol.scn" id="2"]
+[ext_resource type="Texture2D" path="res://assets/weapons/pistol/pistol_icon.png" id="3"]
+[ext_resource type="Resource" path="res://assets/weapons/pistol/pistol_arms.res" id="4"]
+
+[resource]
+script = ExtResource("1")
+id = "pistol"
+display_name = "手枪 M1911（Pistol_01）"
+category = "pistol"
+order = 1
+scene = ExtResource("2")
+icon = ExtResource("3")
+arms = ExtResource("4")
+fire_mode = "semi"
+rpm = 450.0
+mag_size = 8
+reserve_start = 40
+reserve_max = 96
+chamber_plus_one = true
+pellets = 1
+damage = 34.0
+range_m = 60.0
+spread_deg = 1.0
+bloom_deg = 0.8
+spread_max_deg = 4.0
+spread_recover = 10.0
+recoil_pitch = 2.6
+recoil_yaw = 0.6
+recoil_recover = 12.0
+kick_back = 0.03
+kick_rot = 7.0
+shell_reload = false
+muzzle = Vector3(0.19, 0.119, 0)
+eject = Vector3(0.07, 0.12, 0.012)
+shell = "9mm_Shell"
+flash_scale = 0.6
+view_offset = Vector3(0, 0, 0.04)
+ads_fov = 55.0

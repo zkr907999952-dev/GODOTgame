@@ -3,6 +3,7 @@ extends CharacterBody3D
 const SoftLocoScript = preload("res://scripts/soft_loco.gd")
 const OrganRigScript = preload("res://scripts/organs/organ_rig.gd")
 const CharacterLookScript = preload("res://scripts/character_look.gd")
+const WeaponSystemScript = preload("res://scripts/weapons/weapon_system.gd")
 ## 角色控制器：展示互动 / 角色控制 双模式 + SoftLoco 网页 loco 动画驱动 Skeleton3D。
 ## Web loco bind: mesh faces +Z; Godot move uses -Z forward → visual Body needs π yaw offset.
 const BODY_YAW_OFFSET := PI
@@ -98,6 +99,8 @@ var _pivot_rot: Vector3 = Vector3.ZERO
 var _loco: Node
 ## 体内脏器 + 腹部透视 + 拖拽/击腹互动（scripts/organs/organ_rig.gd）
 var _organs: Node
+## 武器模块（scripts/weapons/weapon_system.gd）
+var _weapons: Node
 var _interact_held: bool = false
 var _interact_screen: Vector2 = Vector2.ZERO
 var _stance: String = "stand" # stand | crouch | prone
@@ -191,6 +194,10 @@ func _ready() -> void:
 	if skel == null or not _organs.setup(skel):
 		push_warning("player: organs failed to init")
 	_organs.set("secondary", _loco.get("secondary"))
+	_weapons = WeaponSystemScript.new()
+	_weapons.name = "Weapons"
+	add_child(_weapons)
+	_weapons.call("setup", self, _camera, skel)
 	if _col.shape is CylinderShape3D:
 		_capsule_stand_h = (_col.shape as CylinderShape3D).height
 		_capsule_stand_y = _col.position.y
@@ -211,6 +218,15 @@ func _ready() -> void:
 
 func get_loco() -> Node:
 	return _loco
+
+
+func get_weapons() -> Node:
+	return _weapons
+
+
+## 第一人称且持枪（左键射击、右键开镜、滚轮切枪；身体随视线转）
+func weapon_armed() -> bool:
+	return first_person and _weapons != null and bool(_weapons.call("is_armed"))
 
 
 func get_organs() -> Node:
@@ -980,6 +996,26 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	# 脏器互动：左键（捕获鼠标时取屏幕中心，否则取光标）。HUD 面板打开时也可以互动——
 	# 面板本身吃掉落在面板矩形内的点击，面板外的点击会走到这里。
+	# 武器：左键射击 / 右键开镜 / 滚轮切枪（第一人称持枪时代替身体互动）
+	if event is InputEventMouseButton and _weapons:
+		var wb := event as InputEventMouseButton
+		if wb.button_index == MOUSE_BUTTON_LEFT and not wb.pressed:
+			_weapons.call("set_trigger", false)
+		if wb.button_index == MOUSE_BUTTON_RIGHT and not wb.pressed:
+			_weapons.call("set_ads", false)
+		if weapon_armed() and (Input.mouse_mode == Input.MOUSE_MODE_CAPTURED or touch_active):
+			if wb.button_index == MOUSE_BUTTON_LEFT:
+				_weapons.call("set_trigger", wb.pressed)
+				get_viewport().set_input_as_handled()
+				return
+			if wb.button_index == MOUSE_BUTTON_RIGHT:
+				_weapons.call("set_ads", wb.pressed)
+				get_viewport().set_input_as_handled()
+				return
+			if wb.pressed and (wb.button_index == MOUSE_BUTTON_WHEEL_UP or wb.button_index == MOUSE_BUTTON_WHEEL_DOWN):
+				_weapons.call("cycle", -1 if wb.button_index == MOUSE_BUTTON_WHEEL_UP else 1)
+				get_viewport().set_input_as_handled()
+				return
 	if event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
 		var lb := event as InputEventMouseButton
 		if lb.pressed:
@@ -1453,7 +1489,7 @@ func _physics_process(delta: float) -> void:
 	# Idle free-look keeps ±60° / ~120° deadzone; DISPLAY keeps current facing.
 	if first_person:
 		var look_yaw := _yaw
-		var moving := direction != Vector3.ZERO or not on_floor
+		var moving := direction != Vector3.ZERO or not on_floor or weapon_armed()
 		_body_logic_yaw = debug_next_body_yaw(look_yaw, _body_logic_yaw, moving)
 		_body.rotation.y = _body_logic_yaw + BODY_YAW_OFFSET
 	elif direction != Vector3.ZERO:

@@ -1,7 +1,7 @@
 extends CanvasLayer
 ## 中文 HUD：设置 / 互动 / 摄像机 面板（对齐网页 overlay 结构，精简版）。
 
-enum PanelId { NONE, SETTINGS, INTERACT, CAMERA, MAP }
+enum PanelId { NONE, SETTINGS, INTERACT, CAMERA, MAP, WEAPON }
 
 const INTERACT_MODES := [
 	{"id": "drag", "label": "拖拽"},
@@ -66,6 +66,12 @@ var _overhead_clear: Button
 var _overhead_go: Button
 ## 触屏 / 手机布局
 const TouchControlsScript := preload("res://scripts/ui/touch_controls.gd")
+const WeaponUIScript := preload("res://scripts/ui/weapon_ui.gd")
+const WeaponWheelScript := preload("res://scripts/ui/weapon_wheel.gd")
+var _wui: RefCounted
+var _btn_weapon: Button
+var _panel_weapon: PanelContainer
+var wheel: Control
 var touch_ui: bool = false
 var compact: bool = false
 var _touch: Control
@@ -78,6 +84,7 @@ var _mobile_scale: float = 0.0  # > 0：按 DPI 设置界面缩放（手机）
 
 func setup(player: Node) -> void:
 	_player = player
+	_bind_weapons()
 	if _touch:
 		_touch.call("setup", player, self, get_parent())
 		set_touch_ui(is_touch_device())
@@ -133,6 +140,10 @@ func _build_ui() -> void:
 	right_bar.offset_bottom = 48
 	root.add_child(right_bar)
 
+	_btn_weapon = _make_chrome_button("武器")
+	_btn_weapon.pressed.connect(func(): _toggle_panel(PanelId.WEAPON))
+	right_bar.add_child(_btn_weapon)
+
 	_btn_camera = _make_chrome_button("摄像机")
 	_btn_camera.pressed.connect(func(): _toggle_panel(PanelId.CAMERA))
 	right_bar.add_child(_btn_camera)
@@ -175,8 +186,13 @@ func _build_ui() -> void:
 	_panel_camera.offset_right = -16
 	_panel_camera.offset_top = 88
 	root.add_child(_panel_camera)
+	_wui = WeaponUIScript.new(self)
+	_panel_weapon = _wui.call("build_panel")
+	root.add_child(_panel_weapon)
+	_wui.call("build_ammo_hud", root)
 	_wrap_scroll(_panel_settings)
 	_wrap_scroll(_panel_map)
+	_wrap_scroll(_panel_weapon)
 	# 手机底部抽屉的「收起」把手
 	_btn_sheet_close = Button.new()
 	_btn_sheet_close.text = "收起 ▾"
@@ -186,6 +202,9 @@ func _build_ui() -> void:
 	_btn_sheet_close.visible = false
 	_btn_sheet_close.pressed.connect(func(): close_panels())
 	root.add_child(_btn_sheet_close)
+	wheel = WeaponWheelScript.new()
+	wheel.name = "WeaponWheel"
+	root.add_child(wheel)
 	_no_focus(root)
 	_touch = TouchControlsScript.new()
 	_touch.name = "TouchControls"
@@ -1026,6 +1045,10 @@ func _toggle_panel(id: PanelId) -> void:
 	_panel_interact.visible = id == PanelId.INTERACT
 	_panel_camera.visible = id == PanelId.CAMERA
 	_panel_map.visible = id == PanelId.MAP
+	_panel_weapon.visible = id == PanelId.WEAPON
+	if id == PanelId.WEAPON:
+		_wui.call("rebuild")
+		_touchify(_panel_weapon, touch_ui)
 	if id == PanelId.MAP:
 		_rebuild_map_list()
 		_touchify(_panel_map, touch_ui)
@@ -1044,6 +1067,8 @@ func _close_all_panels() -> void:
 		_panel_camera.visible = false
 	if _panel_map:
 		_panel_map.visible = false
+	if _panel_weapon:
+		_panel_weapon.visible = false
 	if _btn_sheet_close:
 		_btn_sheet_close.visible = false
 	_set_mouse_for_ui(false)
@@ -1287,6 +1312,8 @@ var _last_mode: int = -1
 
 
 func _process(_delta: float) -> void:
+	if _wui:
+		_wui.call("_refresh_ammo_hud")
 	# 模式由任何途径改变（Tab / 按钮 / 脚本）都刷新状态栏
 	if _player and "play_mode" in _player and int(_player.play_mode) != _last_mode:
 		_last_mode = int(_player.play_mode)
@@ -1518,9 +1545,9 @@ func _apply_layout() -> void:
 	compact = touch_ui and v.x < 640.0
 	if _touch:
 		_touch.set("safe", _safe)
-	var bw := 72.0 if touch_ui else 80.0
+	var bw := (60.0 if compact else 72.0) if touch_ui else 80.0
 	var bh := 48.0 if touch_ui else 32.0
-	for b in [_btn_settings, _btn_map, _btn_camera, _btn_interact]:
+	for b in [_btn_settings, _btn_map, _btn_weapon, _btn_camera, _btn_interact]:
 		b.custom_minimum_size = Vector2(bw, bh)
 		b.add_theme_font_size_override("font_size", 16 if touch_ui else 15)
 	var sl := _safe.x + 16.0
@@ -1531,7 +1558,7 @@ func _apply_layout() -> void:
 	_btn_map.position = Vector2(sl + bw + 8.0, st)
 	var right_bar := _btn_camera.get_parent() as Control
 	right_bar.offset_right = -sr
-	right_bar.offset_left = -sr - (bw * 2.0 + 8.0)
+	right_bar.offset_left = -sr - (bw * 3.0 + 16.0)
 	right_bar.offset_top = st
 	right_bar.offset_bottom = st + bh
 	_status.position = Vector2(sl, st + bh + 8.0)
@@ -1539,7 +1566,7 @@ func _apply_layout() -> void:
 	_status.size = Vector2(v.x - sl - sr, 0) if compact else Vector2.ZERO
 	var top := st + bh + 40.0  # PC 默认 = 88
 	var open_p: PanelContainer = null
-	for p in [_panel_settings, _panel_map, _panel_interact, _panel_camera]:
+	for p in [_panel_settings, _panel_map, _panel_interact, _panel_camera, _panel_weapon]:
 		var panel := p as PanelContainer
 		if panel.visible:
 			open_p = panel
@@ -1547,8 +1574,8 @@ func _apply_layout() -> void:
 		var content_h := 0.0
 		if sc and sc.get_child_count() > 0:
 			content_h = (sc.get_child(0) as Control).get_combined_minimum_size().y
-		var right_side := panel == _panel_interact or panel == _panel_camera
-		var base_h := 540.0 if panel == _panel_interact else (520.0 if panel == _panel_camera else content_h)
+		var right_side := panel == _panel_interact or panel == _panel_camera or panel == _panel_weapon
+		var base_h := 540.0 if panel == _panel_interact else (520.0 if panel == _panel_camera or panel == _panel_weapon else content_h)
 		if compact:
 			var h := clampf(content_h + 24.0, 160.0, v.y * 0.5)
 			panel.anchor_left = 0.0
@@ -1585,7 +1612,47 @@ func _apply_layout() -> void:
 				panel.offset_bottom = top
 			if sc:
 				sc.custom_minimum_size = Vector2(250 if right_side else 0, h2)
+	if _wui:
+		_wui.call("layout_ammo", _safe, touch_ui)
 	if _btn_sheet_close:
 		_btn_sheet_close.visible = compact and open_p != null
 		if _btn_sheet_close.visible:
 			_btn_sheet_close.position = Vector2(v.x - _safe.z - 8.0 - 96.0, v.y + open_p.offset_top - 52.0)
+
+
+# ------------------------------------------------------------------ 武器
+func _bind_weapons() -> void:
+	if _player == null or not _player.has_method("get_weapons") or _wui == null:
+		return
+	var ws: Node = _player.call("get_weapons")
+	if ws == null or _wui.get("weapons") == ws:
+		return
+	_wui.set("weapons", ws)
+	wheel.set("weapons", ws)
+	var cb := func(_a = null, _b = null, _c = null): _wui.call("refresh")
+	for sig in ["weapon_changed", "ammo_changed", "reloaded"]:
+		ws.connect(sig, cb)
+	wheel.connect("picked", func(id: String): ws.call("select", id))
+	_wui.call("rebuild")
+
+
+func toggle_weapon_panel() -> void:
+	_toggle_panel(PanelId.WEAPON)
+
+
+func open_weapon_wheel(origin: Variant = null) -> void:
+	if wheel and not _ui_hidden:
+		wheel.call("open", origin)
+
+
+func close_weapon_wheel(apply: bool = true) -> Variant:
+	return wheel.call("close", apply) if wheel else null
+
+
+func is_wheel_open() -> bool:
+	return wheel != null and bool(wheel.get("is_open"))
+
+
+func weapon_wheel_point(p: Vector2) -> void:
+	if wheel:
+		wheel.call("point_at", p)
