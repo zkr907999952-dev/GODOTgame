@@ -118,6 +118,13 @@ func effective_xray() -> float:
 	return xray_amount if xray_enabled else 0.0
 
 
+## 第一人称近裁球（世界坐标 + 半径，0 = 关闭）：皮肤 shader 只对隐藏头部图层的相机（第一人称主相机）丢弃。
+func set_fp_clip(eye_w: Vector3, radius: float) -> void:
+	for m in _skin_mats:
+		m.set_shader_parameter("fp_eye_w", eye_w)
+		m.set_shader_parameter("fp_clip_r", radius)
+
+
 func set_show_organs(on: bool) -> void:
 	show_organs = on
 	for mi in organ_meshes:
@@ -226,6 +233,16 @@ func debug_strike_displacement(local_p: Vector3) -> float:
 		q.y += dy * inv * push * 0.7
 		q.z -= crush
 	return (q - local_p).length()
+
+
+## 校验用：冲击环 / 拖拽标记在腹部局部平面内的半轴长（世界米）
+func debug_fx_axes() -> Dictionary:
+	var out := {}
+	for pair in [["ring", _ring], ["poke", _poke]]:
+		var mi: MeshInstance3D = pair[1]
+		var bb := mi.global_transform.basis
+		out[pair[0]] = Vector3((bb * Vector3.RIGHT).length(), (bb * Vector3.UP).length(), (_frame.basis.z.dot((bb * Vector3.RIGHT).normalized())))
+	return out
 
 
 func navel_world() -> Vector3:
@@ -424,11 +441,73 @@ func _install_skin_xray() -> void:
 			m.set_shader_parameter("xray_y1", float(xr.get("y1", 0.145)))
 			m.set_shader_parameter("xray_xmax", float(xr.get("x_max", 0.12)))
 			m.set_shader_parameter("xray_zfront", float(xr.get("z_front", -0.01)))
+			_set_profile_params(m)
 			_skin_mats.append(m)
 			_all_mats.append(m)
 		base.next_pass = fade
 		mi.set_surface_override_material(0, base)
 		skin_meshes.append(mi)
+
+
+## 躯干截面轮廓（相对肚脐）→ 透视窗口只挖前腹壁，不把腰部整个截面挖穿。
+func _set_profile_params(m: ShaderMaterial) -> void:
+	if not meta.has("profile"):
+		return
+	var prof: Dictionary = meta["profile"]
+	var ys: Array = prof["y"]
+	var cnt := mini(ys.size(), 24)
+	var py := PackedFloat32Array()
+	var phx := PackedFloat32Array()
+	var pzf := PackedFloat32Array()
+	var pzb := PackedFloat32Array()
+	for i in 24:
+		var j := mini(i, cnt - 1)
+		py.append(float(ys[j]) - _navel_rest.y)
+		phx.append(float(prof["half_x"][j]))
+		pzf.append(float(prof["z_front"][j]) - _navel_rest.z)
+		pzb.append(float(prof["z_back"][j]) - _navel_rest.z)
+	m.set_shader_parameter("prof_n", cnt)
+	m.set_shader_parameter("prof_y", py)
+	m.set_shader_parameter("prof_hx", phx)
+	m.set_shader_parameter("prof_zf", pzf)
+	m.set_shader_parameter("prof_zb", pzb)
+
+
+## 校验用：与 shader xray_hole 相同的公式（ab-local 点），xr = 透视强度。
+func debug_xray_hole(l: Vector3, xr: float = -1.0) -> float:
+	var x := effective_xray() if xr < 0.0 else xr
+	var xd: Dictionary = meta.get("xray", {})
+	var y0 := float(xd.get("y0", -0.2))
+	var y1 := float(xd.get("y1", 0.145))
+	var xmax := float(xd.get("x_max", 0.12))
+	var zf0 := float(xd.get("z_front", -0.01))
+	var pr := _profile_at(l.y)
+	var band := smoothstep(y0, y0 + 0.08, l.y) * (1.0 - smoothstep(y1 - 0.04, y1, l.y))
+	var w_out := minf(xmax + 0.1, pr.x - 0.015)
+	var w_in := minf(xmax * 0.65, w_out - 0.045)
+	var torso := 1.0 - smoothstep(w_in, w_out, absf(l.x))
+	var front := smoothstep(zf0 - 0.16, zf0 + 0.04, l.z)
+	var zmid := 0.5 * (pr.y + pr.z)
+	front *= smoothstep(zmid, zmid + 0.035, l.z)
+	return clampf(band * torso * front * x, 0.0, 1.0)
+
+
+## 截面轮廓（相对肚脐）：x = 半宽，y = 前表面 z，z = 后表面 z
+func _profile_at(y_rel: float) -> Vector3:
+	var prof: Dictionary = meta.get("profile", {})
+	if prof.is_empty():
+		return Vector3(0.15, 0.01, -0.13)
+	var ys: Array = prof["y"]
+	var get_v := func(i: int) -> Vector3:
+		return Vector3(float(prof["half_x"][i]), float(prof["z_front"][i]) - _navel_rest.z, float(prof["z_back"][i]) - _navel_rest.z)
+	if y_rel <= float(ys[0]) - _navel_rest.y:
+		return get_v.call(0)
+	for i in range(1, ys.size()):
+		var yi := float(ys[i]) - _navel_rest.y
+		if y_rel <= yi:
+			var yp := float(ys[i - 1]) - _navel_rest.y
+			return (get_v.call(i - 1) as Vector3).lerp(get_v.call(i), (y_rel - yp) / maxf(1e-5, yi - yp))
+	return get_v.call(ys.size() - 1)
 
 
 func _copy_skin_params(src: BaseMaterial3D, m: ShaderMaterial) -> void:
@@ -628,6 +707,9 @@ func _make_quad(mat: ShaderMaterial, nm: String) -> MeshInstance3D:
 	return mi
 
 
+## 冲击环 / 拖拽点标记：缩放必须在腹部局部轴上（b * from_scale）。
+## 之前用 Basis.scaled() —— 那是「父空间（世界轴）缩放」，角色朝向与世界轴对齐时（房间出生朝向）看不出来，
+## 一旦身体转了任意角度（城市里走动后），圆环就被沿世界 X/Z 拉长、斜切成椭圆。
 func _update_fx() -> void:
 	var b := _frame.basis
 	if _waves.is_empty():
@@ -639,14 +721,14 @@ func _update_fx() -> void:
 		var op := maxf(0.0, 1.0 - t / 1.2) * 0.85 * float(w["force"])
 		var p: Vector3 = w["p"]
 		var wp := _frame * (p + Vector3(0, 0, 0.012))
-		_ring.global_transform = Transform3D(b.scaled(Vector3(rr, rr, 1.0)), wp)
+		_ring.global_transform = Transform3D(b * Basis.from_scale(Vector3(rr, rr, 1.0)), wp)
 		var c := Color("#f2efe9")
 		c.a = op
 		_ring_mat.set_shader_parameter("color", c)
 		_ring.visible = op > 0.02
 	if _drag_active:
 		var tp := _frame * (_drag_grab + _drag_off + Vector3(0, 0, 0.01))
-		_poke.global_transform = Transform3D(b.scaled(Vector3(0.036, 0.036, 1.0)), tp)
+		_poke.global_transform = Transform3D(b * Basis.from_scale(Vector3(0.036, 0.036, 1.0)), tp)
 		_poke.visible = true
 	else:
 		_poke.visible = false

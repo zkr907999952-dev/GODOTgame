@@ -7,6 +7,7 @@ extends Node3D
 ## 里按 InputMap 轮询，且只在「角色控制」模式下生效。
 
 const MapViewScript = preload("res://scripts/map_view.gd")
+const LightingRigScript = preload("res://scripts/lighting_rig.gd")
 
 @onready var _room: Node3D = $Room
 @onready var _room_col: Node = $RoomCollision
@@ -14,6 +15,7 @@ const MapViewScript = preload("res://scripts/map_view.gd")
 @onready var _city: Node3D = $City
 @onready var _player: CharacterBody3D = $Player
 @onready var _hud: CanvasLayer = $HUD
+@onready var _lighting: Node3D = $Lighting
 
 const ROOM_SPAWN := Vector3(-0.2, 0.0, 0.3)
 ## 出生朝向（逻辑 yaw，0 = 面向 -Z）：背对镜子、面向房间，观察相机在房间内正面。
@@ -54,13 +56,13 @@ var current_map: String = "room"
 var map_view: Node3D
 var _overhead_preview: bool = false
 var _busy: bool = false
-var _city_env: WorldEnvironment
 
 
 func _ready() -> void:
 	map_view = MapViewScript.new()
 	map_view.name = "MapView"
 	add_child(map_view)
+	LightingRigScript.tune_room_shadows(_room)
 	_apply_map_visibility("room")
 	_place_player(ROOM_SPAWN, ROOM_SPAWN_YAW)
 	if _hud and _hud.has_method("setup"):
@@ -174,26 +176,10 @@ func _apply_map_visibility(id: String) -> void:
 	_set_city_env(not in_room)
 
 
-## 网页 WorldClip：城市天空色 #7eafd0 + 雾 220–3400m；房间不加环境（保持原光照）。
+## 光照 / 环境 / 雾按地图切换（scripts/lighting_rig.gd：房间 = 网页 StudioLights，城市 = CityLights + WorldClip 雾）。
 func _set_city_env(on: bool) -> void:
-	if on and _city_env == null:
-		var env := Environment.new()
-		env.background_mode = Environment.BG_COLOR
-		env.background_color = Color("#7eafd0")
-		env.ambient_light_source = Environment.AMBIENT_SOURCE_DISABLED
-		env.fog_enabled = true
-		env.fog_mode = Environment.FOG_MODE_DEPTH
-		env.fog_light_color = Color("#7eafd0")
-		env.fog_depth_begin = 220.0
-		env.fog_depth_end = 3400.0
-		env.fog_depth_curve = 1.0
-		_city_env = WorldEnvironment.new()
-		_city_env.name = "CityEnvironment"
-		_city_env.environment = env
-		add_child(_city_env)
-	elif not on and _city_env != null:
-		_city_env.queue_free()
-		_city_env = null
+	if _lighting and _lighting.has_method("set_map"):
+		_lighting.call("set_map", "city" if on else "room")
 
 
 ## 切换地图并传送到出生点。保持当前模式（展示互动 / 角色控制）。

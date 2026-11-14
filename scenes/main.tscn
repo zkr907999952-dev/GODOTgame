@@ -1,4 +1,4 @@
-[gd_scene load_steps=8 format=3 uid="uid://cmainscene001"]
+[gd_scene load_steps=9 format=3 uid="uid://cmainscene001"]
 
 [ext_resource type="Script" path="res://scripts/game_root.gd" id="1_root"]
 [ext_resource type="PackedScene" path="res://scenes/characters/tifa.tscn" id="2_player"]
@@ -7,19 +7,13 @@
 [ext_resource type="PackedScene" path="res://scenes/ui/hud.tscn" id="5_hud"]
 [ext_resource type="PackedScene" path="res://scenes/maps/room_mirror.tscn" id="6_mirror"]
 [ext_resource type="Script" path="res://scripts/room_collision.gd" id="7_roomcol"]
+[ext_resource type="Script" path="res://scripts/lighting_rig.gd" id="8_light"]
 
 [node name="Main" type="Node3D"]
 script = ExtResource("1_root")
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
-transform = Transform3D(0.866025, -0.353553, 0.353553, 0, 0.707107, 0.707107, -0.5, -0.612372, 0.612372, 4, 10, 6)
-shadow_enabled = true
-light_energy = 1.35
-
-[node name="FillLight" type="OmniLight3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.5, 2.2, 1.2)
-light_energy = 0.55
-omni_range = 8.0
+[node name="Lighting" type="Node3D" parent="."]
+script = ExtResource("8_light")
 
 [node name="Room" parent="." instance=ExtResource("3_room")]
 

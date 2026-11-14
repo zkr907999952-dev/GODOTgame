@@ -744,6 +744,9 @@ func _run() -> void:
 	if not await _check_maps(main, player):
 		quit(1)
 		return
+	if not await _check_fix3(main, player, organs):
+		quit(1)
+		return
 
 	print("validate: OK")
 	quit(0)
@@ -1022,6 +1025,142 @@ func _check_maps(main: Node, player: CharacterBody3D) -> bool:
 	player.call("set_play_mode", 0)
 	print("validate: maps OK")
 	return true
+
+
+## 第 43 轮：透视不挖穿 / 冲击环与拖拽各地图一致 / 观察转视角带动乳摇 / 第一人称跑跳不穿模。
+func _check_fix3(main: Node, player: CharacterBody3D, organs: Node) -> bool:
+	# 1) 透视窗口：截面后壁、侧壁永远不被挖（否则从正面能直接看穿到背景），前腹壁中心照常挖开。
+	var mt: Dictionary = organs.get("meta")
+	var prof: Dictionary = mt["profile"]
+	var nav: Vector3 = organs.get("_navel_rest")
+	var bad := 0
+	for i in (prof["y"] as Array).size():
+		var y := float(prof["y"][i]) - nav.y
+		var hx := float(prof["half_x"][i])
+		var zf := float(prof["z_front"][i]) - nav.z
+		var zb := float(prof["z_back"][i]) - nav.z
+		for xr in [0.38, 1.0]:
+			for p in [Vector3(0.0, y, zb), Vector3(hx * 0.6, y, zb + 0.01), Vector3(hx, y, 0.5 * (zf + zb)), Vector3(-hx, y, 0.5 * (zf + zb)), Vector3(hx - 0.005, y, zf - 0.04)]:
+				if float(organs.call("debug_xray_hole", p, xr)) > 0.07:
+					bad += 1
+	var front_c := float(organs.call("debug_xray_hole", Vector3(0.0, 0.0, 0.0), 0.38))
+	print("validate: xray back/side wall cut samples=", bad, " front centre hole=", snappedf(front_c, 0.001))
+	if bad > 0 or front_c < 0.2:
+		push_error("validate: x-ray window must cut only the front wall (never back/side walls)")
+		return false
+
+	# 2) 冲击环 / 拖拽：房间与城市（任意朝向）形状、大小一致。
+	var fx_room: Dictionary = await _fx_sample(main, player, organs, "room", 0.0)
+	var fx_city: Dictionary = await _fx_sample(main, player, organs, "city", 0.7)
+	print("validate: fx room=", fx_room, " city=", fx_city)
+	for d in [fx_room, fx_city]:
+		if absf(float(d["ring_ratio"]) - 1.0) > 0.01 or absf(float(d["ring_tilt"])) > 0.01 or absf(float(d["poke_ratio"]) - 1.0) > 0.01:
+			push_error("validate: strike ring / drag marker must stay round in the belly plane")
+			return false
+	if absf(float(fx_room["ring_r"]) - float(fx_city["ring_r"])) > 0.002 or absf(float(fx_room["drag"]) - float(fx_city["drag"])) > 0.15 * float(fx_room["drag"]) + 0.001:
+		push_error("validate: strike / drag size differs between room and city")
+		return false
+
+	# 3) 观察模式：只转相机（身体不动）也要带动乳摇，停下后回稳。
+	var sec: RefCounted = player.call("get_secondary")
+	var br: RefCounted = sec.get("breasts")
+	player.call("set_play_mode", 0)
+	br.set("enabled", true)
+	br.set("strength", 0.5)
+	player.call("set_tp_view", 0.0, 0.05, 2.27, true)
+	await _frames(90)
+	var body_yaw0: float = player.get_node("Body").global_rotation.y
+	var base_d := float((br.call("debug_state") as Dictionary)["L"]["disp"])
+	var peak := 0.0
+	for i in 40:
+		player.set("_tp_yaw_goal", float(player.get("_tp_yaw_goal")) + 0.09)
+		await process_frame
+		peak = maxf(peak, float((br.call("debug_state") as Dictionary)["L"]["disp"]))
+	for i in 240:
+		await process_frame
+	var fin_d := float((br.call("debug_state") as Dictionary)["L"]["disp"])
+	var body_turn := absf(wrapf(player.get_node("Body").global_rotation.y - body_yaw0, -PI, PI))
+	print("validate: orbit jiggle base=", snappedf(base_d, 0.0001), " peak=", snappedf(peak, 0.0001), " settled=", snappedf(fin_d, 0.0001), " body_turn=", snappedf(body_turn, 0.001))
+	if peak < base_d + 0.006 or fin_d > base_d + 0.0025 or body_turn > 0.001:
+		push_error("validate: camera orbit in display mode should sway the breasts, then settle (body stays still)")
+		return false
+
+	# 4) 第一人称：冲刺 / 起跳时相机在头颈前方、不进胸 / 颈。
+	await main.call("switch_map", "city", 4)
+	await _frames(10)
+	player.call("set_play_mode", 1)
+	player.set("_pitch", -0.6)
+	var skel: Skeleton3D = player.find_children("*", "Skeleton3D", true, false)[0]
+	var worst := {"neck_ahead": 9.0, "chest_dist": 9.0, "head_dist": 9.0}
+	Input.action_press("move_forward")
+	Input.action_press("sprint")
+	for i in 70:
+		await physics_frame
+		if i > 30:
+			_fp_sample(player, skel, worst)
+	Input.action_press("jump")
+	await physics_frame
+	await physics_frame
+	Input.action_release("jump")
+	var air := 0
+	for i in 40:
+		await physics_frame
+		if not player.is_on_floor():
+			air += 1
+		_fp_sample(player, skel, worst)
+	Input.action_release("move_forward")
+	Input.action_release("sprint")
+	var fps: Dictionary = player.call("debug_fp_state")
+	print("validate: fp clip worst=", worst, " air_frames=", air, " loco_back=", snappedf(float(fps["loco_back"]), 0.001))
+	if air < 5 or float(worst["neck_ahead"]) < 0.06 or float(worst["chest_dist"]) < 0.2 or float(worst["head_dist"]) < 0.06:
+		push_error("validate: first-person camera clips into neck / chest while running or jumping")
+		return false
+	player.call("set_play_mode", 0)
+	await main.call("switch_map", "room", 0)
+	await _frames(3)
+	print("validate: fix3 OK")
+	return true
+
+
+func _fp_sample(player: CharacterBody3D, skel: Skeleton3D, worst: Dictionary) -> void:
+	var cam: Vector3 = player.call("get_camera").global_position
+	var body: Node3D = player.get_node("Body")
+	var fwd := body.global_transform.basis.z
+	fwd = Vector3(fwd.x, 0.0, fwd.z).normalized()
+	var neck := skel.global_transform * skel.get_bone_global_pose(skel.find_bone("C_Neck_a")).origin
+	var head := skel.global_transform * skel.get_bone_global_pose(skel.find_bone("C_Head_a")).origin
+	var chest := skel.global_transform * skel.get_bone_global_pose(skel.find_bone("C_Spine_d")).origin
+	worst["neck_ahead"] = minf(float(worst["neck_ahead"]), (cam - neck).dot(fwd))
+	worst["chest_dist"] = minf(float(worst["chest_dist"]), cam.distance_to(chest))
+	worst["head_dist"] = minf(float(worst["head_dist"]), cam.distance_to(head))
+
+
+func _fx_sample(main: Node, player: CharacterBody3D, organs: Node, map_id: String, yaw: float) -> Dictionary:
+	player.call("set_play_mode", 0)
+	await main.call("switch_map", map_id, 2 if map_id == "city" else 0)
+	player.call("set_facing", yaw)
+	await _frames(6)
+	organs.call("reset_interaction")
+	var fr: Transform3D = organs.call("abdomen_frame")
+	organs.call("strike_at", fr * Vector3(0.02, 0.01, 0.12), 0.8, 0.5)
+	await _frames(12)
+	var ax: Dictionary = organs.call("debug_fx_axes")
+	var ring: Vector3 = ax["ring"]
+	organs.call("reset_interaction")
+	fr = organs.call("abdomen_frame")
+	var g := fr * Vector3(0.03, 0.0, 0.12)
+	organs.call("begin_drag", g)
+	await _frames(2)
+	for i in 30:
+		fr = organs.call("abdomen_frame")
+		organs.call("update_drag", fr * Vector3(0.09, 0.02, 0.15))
+		await process_frame
+	var poke: Vector3 = (organs.call("debug_fx_axes") as Dictionary)["poke"]
+	var drag := float(organs.call("drag_offset_length"))
+	organs.call("end_drag")
+	organs.call("reset_interaction")
+	return {"ring_r": ring.x, "ring_ratio": ring.x / maxf(ring.y, 1e-6), "ring_tilt": ring.z,
+		"poke_ratio": poke.x / maxf(poke.y, 1e-6), "drag": drag}
 
 
 ## 头发蒙皮采样：scalp = 头顶（静止 y>1.50），tips = 发尾（y<1.0）。

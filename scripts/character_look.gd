@@ -70,6 +70,9 @@ static func _tint_scalp(mi: MeshInstance3D) -> void:
 	if src == null:
 		return
 	var m := src.duplicate() as BaseMaterial3D
+	# 面部贴图的金属度通道均值 ≈0.35（原游戏资源的打包方式），按 PBR 渲染时脸发暗发脏；皮肤不是金属。
+	m.metallic = 0.0
+	m.metallic_specular = 0.45
 	var img := Image.create(4, 4, false, Image.FORMAT_RGB8)
 	img.fill(SCALP_COLOR)
 	m.detail_enabled = true

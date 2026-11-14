@@ -6,6 +6,7 @@ render_mode cull_disabled, depth_draw_opaque, diffuse_burley, specular_schlick_g
 #include "res://shaders/skin_common.gdshaderinc"
 
 void fragment() {
+	if (fp_clipped(v_wp, CAMERA_VISIBLE_LAYERS)) discard;
 	float hole = xray_hole(v_ab);
 	if (hole > 0.07) discard;
 	skin_surface(UV, FRONT_FACING, ALBEDO, METALLIC, ROUGHNESS, SPECULAR, AO, NORMAL_MAP, NORMAL_MAP_DEPTH);

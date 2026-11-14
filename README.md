@@ -70,9 +70,12 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 - **脏器**：网页的大肠/小肠（`intestines.glb`）与盆腔包（子宫、膀胱、卵巢、输卵管、韧带；外阴已按网页删除）由 `tools/bake_organs.py` 按网页同款算法摆进腹腔，蒙皮到 `C_Hip_a` / `C_Spine_a..d`，随走、蹲、匍匐、呼吸一起动；肠管有网页同款**蠕动**。
 - **蠕动参数**（HUD「摄像机」→ 透视）：蠕动幅度、蠕动速度、蠕动波密度（0.4–4，默认 1.55）、分节收缩（0–2，默认 1.0）+「蠕动参数复位」。速度改为积分相位，拖动滑条不会跳帧。
 - **透视**：只作用于腹前区域（肚脐上下 −0.205…+0.15m、左右约 ±0.12m、身体前侧），中心挖孔 + 半透明边缘过渡，强度 0–1（默认 0.38）。镜子、第一人称同样生效。
+  窗口按躯干截面轮廓（`organs_meta.json` 的 profile）收窄：外缘留在轮廓内 1.5cm、只挖截面前半，侧壁 / 后壁永远保留，从孔里看进去是暗红腔壁。
+  之前腰部（肚脐上 4–11cm，半宽只有约 9cm）比固定窗口（12cm + 10cm 渐隐）还窄，整圈截面连同后背一起被挖掉，正面能直接看穿到身后背景。
 - **互动**（展示互动模式为主，角色控制模式也可用）：
   - **拖拽**：按住左键拖动腹壁，皮肤与肠/子宫一起被拉动（脏器跟随 0.82），松手弹簧回弹。
   - **打击**：点击腹部 → 环形冲击波 + 中心凹陷压到肠管上，约 1.7s 回弹，同时肠蠕动短时加快。
+  - 冲击环 / 拖拽标记按腹部局部轴缩放（任何地图、任何朝向都是正圆；之前用了世界轴缩放，身体转过角度后被拉成椭圆）。
 - **布局**：网页原布局在这个角色上整体偏高；Godot 版按标注调到肚脐下约 2.6cm（`GUT_CENTER_DY=-0.026`），并收窄 `GUT_SCALE_X=0.9` / 压扁 `GUT_SCALE_Y=0.94`（以顶部为锚），肠团范围约 0.956–1.180m（肚脐 1.06m），在子宫上方；透视窗口 y 为 −0.205…+0.15m；子宫 0.90–0.96m 位于耻骨后，膀胱在其前下方；全部顶点都在躯干皮肤内、透视窗口内（`validate_headless` 检查）。参数在 `tools/bake_organs.py` 顶部（`GUT_CENTER_DY` 等）。
 - 细节见 `docs/organs_port_notes.md`。渲染自检：`xvfb-run -a godot --path . -s res://scripts/tests/organs_check.gd`（截图到 `user://organs_check` 或 `ORGANS_CHECK_OUT`）。
 
@@ -111,6 +114,7 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
   - **头发蒙皮（头皮固定）**：网页运行时 `reskinHair` 会把头顶/刘海/贴头皮的发片全部改绑到头骨，只有垂下的发尾按高度插值到 Hair_2..8。Godot 版之前直接用了原始权重，头顶顶点也带 0.2–0.5 的 Hair_2+ 权重，所以甩发时头顶跟着动。`tools/fix_hair_skin.py` 已把这一步烘进 `Tifa_Web_Skinned.glb`：按高度（冠部以上=0）× 离头皮距离（<8mm=0，>35mm=1）× 前额区，平滑过渡；约 82% 的头发顶点完全刚性跟头，`validate_headless` 检查甩发时头顶顶点相对头骨位移 = 0。
   - **头发渲染**（`scripts/character_look.gd`）：原材质是「alpha 混合 + 深度预通道」，同一网格里的发片无法排序，看起来发灰、透出头皮。改为 alpha scissor 0.38（网页 alphaTest）+ alpha-to-coverage（项目开启 MSAA 2×）实心主通道 + 半透明边缘第二通道；头皮在头发覆盖区域用 `scalp_mask.png` 细节遮罩染成发根色，缝隙里不会再透肤色。
   - **乳摇物理**（`scripts/breast_physics.gd`）：每侧一个世界空间质点弹簧-阻尼（竖直 2.1Hz / 水平 2.6Hz，阻尼比 0.16，240Hz 固定子步）+ 一个 4.8Hz 乳尖二级弹簧；锚点随 C_Spine_d 运动，所以走、跑、跳（失重上浮 / 落地下坠）、急停、转身、蹲起都会自然驱动；位移写到 `L/R_Breast_a_Phy`（带权重的骨），乳尖滞后转成绕乳房中心的小角度摆动；椭球软限幅防穿模；左右频率差 6% 产生自然相位差。HUD「设置」里可开关、调强度。
+    观察模式下转视角也会带动（网页 pushViewSpin）：相机环绕的方位角 / 俯仰角速度偏移弹簧平衡点（身体局部轴，横向为主，限幅 3cm），转动时甩开、停下回弹衰减；角色控制模式仍只由身体运动驱动。
   - **眨眼**：睑骨 `L/R_(U|D)lid_[A-E]`，blinkT/nextBlink/blinkAmt 周期驱动
   - **呼吸**：web 同款 breathAmp/Speed/Chest 波形；骨级近似为 C_Spine_a..d（及 Breast_Spo）**相对 rest 的 X/Z 缩放膨胀**（吸入变宽/加深），峰值约 **1–2%**（腹略重于上胸），**不做脊柱 X 俯仰**（网页是软组织 ~1cm tz 膨胀）；软笼顶点位移仍未移植
 
@@ -160,6 +164,15 @@ godot --headless --path . --script res://scripts/validate_headless.gd
 | `scenes/maps/room.tscn` + `scripts/room_collision.gd` | 房间用**盒体碰撞**（地板、天花、四面墙含镜面墙、柱、梁、床、床头柜、椅子、柜子）；不再用逐网格 trimesh（1cm 地毯边会卡住角色，镜子那面没有墙会掉出房间） |
 | `scenes/maps/city.tscn` | 运行时对 MeshInstance3D 调用 `create_trimesh_collision()`（约 1136 个静态体，跳过树叶/细小网格，约 0.4s）；物理引擎 Jolt（活动边处理，trimesh 接缝不卡） |
 
+## 光照（`scripts/lighting_rig.gd`）
+
+参考网页 `scene.tsx`（StudioLights / CityLights，ACES 曝光 1.05）：
+- **房间**：主光（暖白方向光，角色正前上方，投影：PSSM 2 段 / 12m、小 bias、柔化、不透明度 0.82）、冷色侧补光、背后轮廓光、吸顶灯 + 台灯（网页原位），暖灰环境光。房间结构网格（墙/天花/地板）不投影——之前方向光从房顶外照进来，整个房间都在天花板的阴影里。
+- **城市**：太阳（PSSM 4 段 / 90m）+ 天光补光 + 程序天空环境光，背景 #7eafd0 + 深度雾 220–3400m。
+- 第一人称跟随相机的补光只照角色（房间 0.18 / 城市 0.06，移动时 ×0.45，同网页 BodyFillLight），观察模式关闭。
+- 镜中相机用 LINEAR 色调映射（主视口已做 ACES，避免镜子里双重色调映射发灰）。
+- 不开 SSAO：透视窗口的半透明覆盖层走透明管线、不吃 SSAO，会在窗口边缘出现方框。
+
 ### 角色物理（角色控制）
 
 - Jolt 物理 + **物理插值**（`project.godot`）；相机在 `_process` 用自己记录的插值原点放置，60Hz 物理不再抖动，传送时立即对齐。
@@ -189,6 +202,8 @@ scripts/organs/organ_rig.gd
 scripts/breast_physics.gd（乳摇弹簧）
 scripts/character_look.gd（头发 / 头皮材质）
 scripts/tests/fix_check.gd（内脏 / 头发 / 相机 / 乳摇 渲染自检）
+scripts/tests/fix_check3.gd（透视正面 / 光照 / 城市击腹+拖拽 / 第一人称跑跳 渲染自检）
+scripts/lighting_rig.gd（房间 / 城市 光照与环境）
 tools/fix_hair_skin.py（头发头皮权重修正，已烘进 GLB）
 shaders/organ.gdshader, skin_xray*.gdshader, *.gdshaderinc, fx_ring.gdshader
 assets/organs/organs_mesh.bin（gzip，2.8MB）+ organs_meta.json + 4×JPG

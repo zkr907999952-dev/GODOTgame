@@ -29,6 +29,16 @@ var tip_damping: float = 0.22
 ## 静止时额外的重力下垂（米，世界向下），很小，只为让「失重上浮 / 落地下坠」有参照。
 var static_sag: float = 0.003
 
+## 观察模式转视角也带动乳摇（网页 soft-skeleton pushViewSpin / stepBreasts）：
+## 相机环绕的角速度（方位角 yaw、俯仰 pitch，rad/s）偏移弹簧的平衡点（身体局部轴），
+## 转动时向一侧甩开、停下后弹簧回弹衰减。view_spin_gain = 0 关闭。
+var view_spin_gain: float = 1.0
+var _yaw_vel: float = 0.0
+var _pitch_vel: float = 0.0
+var _yaw_f: float = 0.0
+var _pitch_f: float = 0.0
+var _view_off: Vector3 = Vector3.ZERO
+
 var skeleton: Skeleton3D
 var _spine_i: int = -1
 var _sides: Array = []  # Array[Dictionary]
@@ -78,6 +88,11 @@ func setup(skel: Skeleton3D) -> bool:
 
 func reset() -> void:
 	_inited = false
+	_yaw_vel = 0.0
+	_pitch_vel = 0.0
+	_yaw_f = 0.0
+	_pitch_f = 0.0
+	_view_off = Vector3.ZERO
 	if skeleton == null:
 		return
 	for s in _sides:
@@ -86,6 +101,32 @@ func reset() -> void:
 		skeleton.set_bone_pose_position(i, s["rest_o"])
 		s["disp"] = Vector3.ZERO
 		s["tilt"] = Vector3.ZERO
+
+
+## 每帧由 player_controller 写入观察相机角速度（网页同样限幅 ±12 / ±8 rad/s）。
+func push_view_spin(yaw_vel: float, pitch_vel: float) -> void:
+	_yaw_vel = clampf(yaw_vel, -12.0, 12.0)
+	_pitch_vel = clampf(pitch_vel, -8.0, 8.0)
+
+
+## 网页 stepBreasts 的 tX/tY/tZ 视角项（j = 0.55 + jiggle·0.65，breastInertia 0.55），换算到本弹簧。
+func _update_view_offset(dt: float) -> void:
+	var follow := 1.0 - exp(-7.0 * dt)
+	_yaw_f += (_yaw_vel - _yaw_f) * follow
+	_pitch_f += (_pitch_vel - _pitch_f) * follow
+	var j := (0.55 + clampf(strength, 0.0, 1.0) * 0.65) * 0.55 * view_spin_gain
+	var tx := -(_yaw_f * 0.022 + _yaw_vel * 0.004) * j
+	var drop := absf(tx) * 0.28 + absf(_yaw_f) * 0.004 * j
+	var ty := -(_pitch_f * 0.012 + _pitch_vel * 0.003) * j - drop
+	var tz := absf(_yaw_f) * 0.006 * j
+	var lim := Vector3(0.03, 0.03, 0.015)
+	var local := Vector3(clampf(tx, -lim.x, lim.x), clampf(ty, -lim.y, lim.y), clampf(tz, 0.0, lim.z))
+	var b := skeleton.global_transform.basis.orthonormalized()
+	_view_off = b * local
+
+
+func debug_view_offset() -> Vector3:
+	return _view_off
 
 
 func _anchor_world(s: Dictionary) -> Vector3:
@@ -121,6 +162,7 @@ func update(delta: float) -> void:
 		_inited = true
 		_acc = 0.0
 	var dt := clampf(delta, 0.0, 0.1)
+	_update_view_offset(dt)
 	_acc += dt
 	var steps := int(floor(_acc / SUBSTEP))
 	if steps > MAX_SUBSTEPS:
@@ -156,7 +198,7 @@ func _integrate(s: Dictionary, a0: Vector3, a1: Vector3, steps: int) -> void:
 	var wt := TAU * tip_freq * fs
 	var kt := wt * wt
 	var ct := 2.0 * tip_damping * wt
-	var eq := _equilibrium_offset(fs)
+	var eq := _equilibrium_offset(fs) + _view_off
 	var span := float(steps) * SUBSTEP
 	var va := (a1 - a0) / maxf(span, 1e-5)
 	var p: Vector3 = s["p"]

@@ -197,11 +197,29 @@ func _update_mirror_camera(cam: Camera3D) -> bool:
 	_mirror_cam.set_frustum(
 		rect_size.y * s, Vector2((eye.x - center.x) * s, (center.y - eye.y) * s), near, far
 	)
-	if _mirror_cam.environment != cam.environment:
-		_mirror_cam.environment = cam.environment
+	_sync_mirror_env(cam)
 	if _mirror_cam.attributes != cam.attributes:
 		_mirror_cam.attributes = cam.attributes
 	return true
+
+
+## 镜中画面贴回场景后，主视口还会再做一次色调映射（ACES）。镜中相机若也做一次就会
+## 「双重 ACES」→ 镜子里偏暗、发灰。所以给镜中相机一份 LINEAR 色调映射的环境副本。
+var _env_src: Environment
+var _env_copy: Environment
+
+
+func _sync_mirror_env(cam: Camera3D) -> void:
+	var src: Environment = cam.environment if cam.environment else get_world_3d().environment
+	if src != _env_src:
+		_env_src = src
+		_env_copy = null
+		if src:
+			_env_copy = src.duplicate() as Environment
+			_env_copy.tonemap_mode = Environment.TONE_MAPPER_LINEAR
+			_env_copy.tonemap_exposure = 1.0
+	if _mirror_cam.environment != _env_copy:
+		_mirror_cam.environment = _env_copy
 
 
 ## Sutherland–Hodgman：保留平面内侧（非 over）部分。

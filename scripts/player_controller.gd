@@ -162,15 +162,17 @@ func _ready() -> void:
 	_align_capsule_to_feet()
 	_print_body_info()
 	CharacterLookScript.apply(_body)
-	# 网页 BodyFillLight：跟随相机的暖色补光，避免逆光时正面全黑（不投影）。
+	# 网页 BodyFillLight：只在第一人称开、跟随相机的弱暖色补光（#e6d4c6，距离 2.6，不投影）。
+	# 只照角色（CHAR_LIGHT_LAYER），不会在墙上打出光斑；无高光，不会把皮肤打平。
 	_fill_light = OmniLight3D.new()
 	_fill_light.name = "CameraFill"
-	_fill_light.light_color = Color(0.95, 0.86, 0.79)
-	_fill_light.omni_range = 4.0
-	_fill_light.omni_attenuation = 1.6
+	_fill_light.light_color = Color("#e6d4c6")
+	_fill_light.omni_range = 2.6
+	_fill_light.omni_attenuation = 2.0
 	_fill_light.shadow_enabled = false
-	_fill_light.light_specular = 0.25
-	_fill_light.position = Vector3(0.0, 0.25, 0.0)
+	_fill_light.light_specular = 0.0
+	_fill_light.light_cull_mask = CHAR_LIGHT_LAYER
+	_fill_light.position = Vector3.ZERO
 	_camera.add_child(_fill_light)
 	_loco = SoftLocoScript.new()
 	add_child(_loco)
@@ -563,15 +565,48 @@ func _process(delta: float) -> void:
 		_mmb_down = false
 	if not first_person:
 		_update_tp_camera(delta)
+		_push_view_spin(delta)
 	else:
+		_push_view_spin(0.0)
 		_step_smooth *= exp(-14.0 * delta)
 		_pivot_rot = Vector3(_pitch, _yaw, 0.0)
 		_pivot_off = _fp_eye_pivot_pos() - Vector3(0.0, _step_smooth, 0.0)
 		_sync_pivot()
+		_camera.near = 0.1 if camera_bounds.size == Vector3.ZERO else 0.04
+	if _organs and _organs.has_method("set_fp_clip"):
+		_organs.call("set_fp_clip", _camera.global_position, FP_CLIP_RADIUS if first_person else 0.0)
 	if _fill_light:
-		# 近距离时减弱，避免贴近皮肤过曝（点光源随距离平方衰减）。
-		var near_k := clampf(pow(_tp_dist_eff / 2.2, 1.7), 0.05, 1.0)
-		_fill_light.light_energy = 0.15 if first_person else 0.55 * near_k
+		# 网页：观察模式关闭；第一人称 房间 0.18 / 城市 0.06，移动时 ×0.45。
+		var city := camera_bounds.size == Vector3.ZERO
+		var moving := Vector2(velocity.x, velocity.z).length() > 0.2
+		var base := (0.06 if city else 0.18) * (0.45 if moving else 1.0)
+		_fill_light.visible = first_person
+		_fill_light.light_energy = base * 2.0
+
+
+## 观察模式：相机环绕角速度 → 乳摇（网页 pushViewSpin）。第一人称不推（身体转动本身已驱动）。
+var _spin_prev: Vector2 = Vector2.ZERO
+var _spin_has_prev: bool = false
+
+
+func _push_view_spin(delta: float) -> void:
+	var sec := get_secondary()
+	var br: RefCounted = sec.get("breasts") if sec else null
+	if br == null:
+		return
+	if delta <= 0.0:
+		_spin_has_prev = false
+		br.call("push_view_spin", 0.0, 0.0)
+		return
+	var cur := Vector2(_tp_yaw, _tp_elev)
+	if not _spin_has_prev:
+		_spin_prev = cur
+		_spin_has_prev = true
+	var inv := 1.0 / maxf(delta, 1e-4)
+	var yaw_v := wrapf(cur.x - _spin_prev.x, -PI, PI) * inv
+	var pitch_v := (cur.y - _spin_prev.y) * inv
+	_spin_prev = cur
+	br.call("push_view_spin", clampf(yaw_v, -14.0, 14.0), clampf(pitch_v, -10.0, 10.0))
 
 
 func set_first_person(enabled: bool) -> void:
@@ -664,6 +699,9 @@ func _fp_should_hide_mesh(mi: MeshInstance3D) -> bool:
 ## Render layer 19: head/hair/eyes. FP main camera culls it; the room mirror camera still
 ## renders it, so the full face shows in the mirror in first person.
 const FP_HEAD_LAYER := 1 << 18
+## 只照角色的补光层（lighting_rig.CHAR_LIGHT_LAYER）。第一人称隐藏的头部网格不加这一层
+## （层是「任一位命中即可见」，加了会让主相机重新看到头）。
+const CHAR_LIGHT_LAYER := 1 << 17
 
 
 func _apply_fp_mesh_visibility() -> void:
@@ -674,6 +712,8 @@ func _apply_fp_mesh_visibility() -> void:
 		mesh_i.visible = true
 		if _fp_should_hide_mesh(mesh_i):
 			mesh_i.layers = FP_HEAD_LAYER
+		else:
+			mesh_i.layers |= CHAR_LIGHT_LAYER
 	if first_person:
 		_camera.cull_mask &= ~FP_HEAD_LAYER
 	else:
@@ -979,7 +1019,9 @@ func _apply_camera() -> void:
 		_pivot_off = _fp_eye_pivot_pos() - Vector3(0.0, _step_smooth, 0.0)
 		_sync_pivot()
 		_camera.position = Vector3.ZERO
-		_camera.near = 0.06
+		# 网页 syncFpProjection：身体视角 near 0.04（城市 0.12，远景精度）；头/发/眼由图层隐藏，
+		# 颈部近处由皮肤 shader 的第一人称近裁球处理（只对主相机生效，镜子里完整）。
+		_camera.near = 0.1 if camera_bounds.size == Vector3.ZERO else 0.04
 		_camera.fov = fp_fov
 	else:
 		_update_tp_camera(0.0)
@@ -1008,11 +1050,77 @@ func _update_stance_capsule_blend(delta: float) -> void:
 	camera_height = lerpf(_cam_h_from, _cam_h_to, u)
 
 
-## Body-local stance eye → CharacterBody local (Body has π yaw offset; +Z = facing).
-func _fp_eye_pivot_pos() -> Vector3:
+## 第一人称眼位（CharacterBody 本地）。移植网页 figure.tsx bodyOn 分支：
+## - 眼位 = 姿态眼位（站/蹲/趴，0.7s 过渡，不跟头骨上下晃）+ 起跳时前探（jumpEyeU：0.1s 进 / 0.2s 出，
+##   前移 0.18m + 低头时再多 0.16m、上移 3cm），只用身体朝向旋转、不跟身体平移；
+## - 再沿视线水平前推 2.8cm（走 3.5cm、冲刺 5cm）；
+## - 身体网格相对相机后移 locoBack（冲刺 0.18m、走 0.06m、静止 0.02m）→ 跑步前倾 / 摆臂时头颈胸不会顶进镜头；
+## - 结果做指数平滑（误差 >0.28m 时 22/s，否则 12/s），起跳 / 落地 / 换姿态不会硬跳。
+## 第一人称近裁球半径：主相机看不到眼睛周围这么近的皮肤（颈 / 锁骨），镜子里不受影响。
+const FP_CLIP_RADIUS := 0.1
+const FP_PUSH_IDLE := 0.028
+const FP_PUSH_WALK := 0.035
+const FP_PUSH_SPRINT := 0.05
+const FP_BACK_IDLE := 0.02
+const FP_BACK_WALK := 0.06
+const FP_BACK_SPRINT := 0.18
+var _loco_back: float = 0.0
+var _jump_eye_u: float = 0.0
+var _fp_eye_smooth: Vector3 = Vector3(0.0, 1.58, -0.2)
+var _fp_eye_init: bool = false
+
+
+func _fp_eye_target(moving: bool, sprinting: bool) -> Vector3:
 	var eye := _fp_eye_cur + Vector3(0.0, FP_EYE_LIFT, 0.0)
-	# Body is child at origin with yaw = face + BODY_YAW_OFFSET; map body-local to player space.
-	return _body.transform * eye
+	if _jump_eye_u > 0.001:
+		var j := _jump_eye_u * _jump_eye_u * (3.0 - 2.0 * _jump_eye_u)
+		var down := clampf(-_pitch, 0.0, 1.2)
+		eye.z += (0.18 + down * 0.16) * j
+		eye.y += 0.03 * j
+	var p := _body.transform.basis * eye
+	var push := FP_PUSH_SPRINT if sprinting else (FP_PUSH_WALK if moving else FP_PUSH_IDLE)
+	return p + Basis(Vector3.UP, _yaw) * Vector3(0.0, 0.0, -push)
+
+
+## 物理帧里更新：locoBack（身体后移）+ jumpEyeU + 眼位平滑。
+func _update_fp_eye(delta: float, moving: bool, sprinting: bool, airborne: bool) -> void:
+	if not first_person:
+		_loco_back = 0.0
+		_jump_eye_u = 0.0
+		_fp_eye_init = false
+		_body.position = Vector3.ZERO
+		return
+	if airborne:
+		_jump_eye_u = minf(1.0, _jump_eye_u + delta / 0.1)
+	else:
+		_jump_eye_u = maxf(0.0, _jump_eye_u - delta / 0.2)
+	var back := FP_BACK_IDLE
+	if sprinting and moving:
+		back = FP_BACK_SPRINT
+	elif moving and _stance != "prone":
+		back = FP_BACK_WALK
+	_loco_back += (back - _loco_back) * (1.0 - exp(-10.0 * delta))
+	var fwd := _body.transform.basis.z  # 网格 +Z = 面朝方向
+	_body.position = -Vector3(fwd.x, 0.0, fwd.z).normalized() * _loco_back
+	var want := _fp_eye_target(moving, sprinting)
+	if not _fp_eye_init:
+		_fp_eye_smooth = want
+		_fp_eye_init = true
+	var err := _fp_eye_smooth.distance_to(want)
+	var k := 1.0 - exp(-(22.0 if err > 0.28 else 12.0) * delta)
+	_fp_eye_smooth = _fp_eye_smooth.lerp(want, k)
+
+
+func _fp_eye_pivot_pos() -> Vector3:
+	if not _fp_eye_init:
+		return _fp_eye_target(false, false)
+	return _fp_eye_smooth
+
+
+## 校验用：第一人称状态
+func debug_fp_state() -> Dictionary:
+	return {"loco_back": _loco_back, "jump_eye": _jump_eye_u, "eye_local": _fp_eye_smooth,
+		"cam": _camera.global_position, "near": _camera.near}
 
 
 ## Debug / validate: current FP eye Y in player space for a stance (instant target).
@@ -1195,6 +1303,7 @@ func _physics_process(delta: float) -> void:
 		_loco.call("apply_pose", fwd, side, mag, airborne, sprinting, delta, speed)
 
 	# FP: stable stance eye (no head-bone bob); refresh after body yaw catch-up.
+	_update_fp_eye(delta, direction != Vector3.ZERO, sprinting, not on_floor)
 	if first_person:
 		_pivot_rot = Vector3(_pitch, _yaw, 0.0)
 		_pivot_off = _fp_eye_pivot_pos() - Vector3(0.0, _step_smooth, 0.0)

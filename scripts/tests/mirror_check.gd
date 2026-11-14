@@ -115,6 +115,10 @@ func _run() -> void:
 	var hud := main.get_node_or_null("HUD")
 	if hud:
 		hud.visible = false
+	# 只检查几何（位置 / 左右），按纯色比对：关掉 ACES（纯绿在 ACES 下会被压成黄绿）。
+	var we := main.get_node_or_null("Lighting/WorldEnvironment") as WorldEnvironment
+	if we and we.environment:
+		we.environment.tonemap_mode = Environment.TONE_MAPPER_LINEAR
 
 	# 角色面向镜子（+Z）。
 	body.rotation.y = 0.0
