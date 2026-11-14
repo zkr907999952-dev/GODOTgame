@@ -30,9 +30,14 @@ var interact_mode: String = "drag"
 var strike_force: float = 0.52
 var strike_range: float = 0.32
 var strike_rebound: float = 0.72
-var gut_amp: float = 0.3
-var gut_speed: float = 0.5
+## 肠蠕动参数（HUD 透视区可调，网页 gutAmp / gutSpeed + Godot 版额外的波密度 / 分节）
+const PERI_DEFAULTS := {"gut_amp": 0.3, "gut_speed": 0.5, "peri_waves": 1.55, "peri_seg": 1.0}
+var gut_amp: float = 0.3  # 蠕动幅度 0..1
+var gut_speed: float = 0.5  # 蠕动速度 0..1
+var peri_waves: float = 1.55  # 沿肠管同时存在的蠕动波数（波长 = 1/波数）
+var peri_seg: float = 1.0  # 分节收缩（结肠袋 / 混合运动）强度倍数 0..2
 var peristalsis_on: bool = true
+var _peri_clock: Vector3 = Vector3.ZERO
 
 var ready_ok: bool = false
 var meta: Dictionary = {}
@@ -91,6 +96,12 @@ func setup(skel: Skeleton3D) -> bool:
 
 
 # ------------------------------------------------------------------ public API
+func reset_peristalsis() -> void:
+	for k in PERI_DEFAULTS.keys():
+		set(k, PERI_DEFAULTS[k])
+	peristalsis_on = true
+
+
 func set_xray_enabled(on: bool) -> void:
 	xray_enabled = on
 
@@ -276,6 +287,8 @@ func step(delta: float) -> void:
 		w["t"] = float(w["t"]) + dt
 	_waves = _waves.filter(func(w): return float(w["t"]) < STRIKE_LIFE)
 	_gut_exc += (0.0 - _gut_exc) * (1.0 - exp(-0.42 * dt))
+	var s_eff := clampf(gut_speed * (1.0 + _gut_exc * 0.3), 0.0, 1.0)
+	_peri_clock += Vector3(0.03 + s_eff * 0.2, 0.45 + s_eff * 0.9, 0.25 + s_eff * 0.5) * dt
 	_step_drag(dt)
 	for mi in organ_meshes:
 		mi.visible = show_organs
@@ -310,7 +323,8 @@ func _step_drag(dt: float) -> void:
 func _update_frame() -> void:
 	if _skel == null or _spine_i < 0:
 		return
-	var m := _skel.global_transform * _skel.get_bone_global_pose(_spine_i) * _skel.get_bone_global_rest(_spine_i).affine_inverse()
+	# 用插值后的骨架变换：物理插值开启时与渲染出的皮肤一致（透视窗口 / 互动不抖）
+	var m := _skel.get_global_transform_interpolated() * _skel.get_bone_global_pose(_spine_i) * _skel.get_bone_global_rest(_spine_i).affine_inverse()
 	var o := m * _navel_rest
 	var right := (m.basis * Vector3.RIGHT).normalized()
 	var up := (m.basis * Vector3.UP).normalized()
@@ -346,10 +360,11 @@ func _push_uniforms() -> void:
 	for m in _skin_mats:
 		m.set_shader_parameter("xray", xr)
 	for m in _organ_mats:
-		m.set_shader_parameter("peri_time", _time)
 		m.set_shader_parameter("peri_amp", clampf(gut_amp * (1.0 + g * 0.38), 0.0, 1.0))
-		m.set_shader_parameter("peri_speed", clampf(gut_speed * (1.0 + g * 0.3), 0.0, 1.0))
 		m.set_shader_parameter("peri_on", 1.0 if peristalsis_on else 0.0)
+		m.set_shader_parameter("peri_waves", peri_waves)
+		m.set_shader_parameter("peri_clock", _peri_clock)
+		m.set_shader_parameter("peri_seg", peri_seg)
 	if _light:
 		_light.global_position = _frame.origin - b.z * 0.04
 		_light.light_energy = (0.05 + xr * 0.06) * 8.0 if (show_organs and xr > 0.08) else 0.0
@@ -608,6 +623,7 @@ func _make_quad(mat: ShaderMaterial, nm: String) -> MeshInstance3D:
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	mi.visible = false
 	mi.top_level = true
+	mi.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF  # 每帧 _process 摆放
 	_skel.add_child(mi)
 	return mi
 

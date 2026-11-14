@@ -1,7 +1,7 @@
 extends CanvasLayer
 ## 中文 HUD：设置 / 互动 / 摄像机 面板（对齐网页 overlay 结构，精简版）。
 
-enum PanelId { NONE, SETTINGS, INTERACT, CAMERA }
+enum PanelId { NONE, SETTINGS, INTERACT, CAMERA, MAP }
 
 const INTERACT_MODES := [
 	{"id": "drag", "label": "拖拽"},
@@ -49,6 +49,15 @@ var _chk_autorot: CheckButton
 var _preset_buttons: Array = []
 var _root_ui: Control
 var _ui_hidden: bool = false
+var _btn_map: Button
+var _panel_map: PanelContainer
+var _map_list: VBoxContainer
+var _map_current: Label
+var _peri_sliders: Dictionary = {}  # key -> [HSlider, Label]
+var _overhead_ui: Control
+var _overhead_info: Label
+var _overhead_clear: Button
+var _overhead_go: Button
 
 
 func setup(player: Node) -> void:
@@ -87,6 +96,12 @@ func _build_ui() -> void:
 	_btn_settings.position = Vector2(16, 16)
 	_btn_settings.pressed.connect(func(): _toggle_panel(PanelId.SETTINGS))
 	root.add_child(_btn_settings)
+
+	# 网页左上角「地图」按钮（M）
+	_btn_map = _make_chrome_button("地图")
+	_btn_map.position = Vector2(104, 16)
+	_btn_map.pressed.connect(func(): _toggle_panel(PanelId.MAP))
+	root.add_child(_btn_map)
 
 	# Top-right chrome: 摄像机 + 互动
 	var right_bar := HBoxContainer.new()
@@ -127,6 +142,13 @@ func _build_ui() -> void:
 	_panel_interact.offset_top = 88
 	root.add_child(_panel_interact)
 
+	_panel_map = _build_map_panel()
+	_panel_map.position = Vector2(16, 88)
+	root.add_child(_panel_map)
+
+	_overhead_ui = _build_overhead_ui()
+	root.add_child(_overhead_ui)
+
 	_panel_camera = _build_camera_panel()
 	_panel_camera.set_anchors_preset(Control.PRESET_TOP_RIGHT)
 	_panel_camera.grow_horizontal = Control.GROW_DIRECTION_BEGIN
@@ -134,6 +156,245 @@ func _build_ui() -> void:
 	_panel_camera.offset_right = -16
 	_panel_camera.offset_top = 88
 	root.add_child(_panel_camera)
+	_no_focus(root)
+
+
+## 所有 HUD 控件都不拿键盘焦点：否则点过的按钮会吃掉空格 / 回车（ui_accept → 再次按下
+## 按钮 → 面板开关），Tab（ui_focus_next）和方向键也会被 GUI 焦点导航吞掉。
+func _no_focus(n: Node) -> void:
+	if n is Control:
+		(n as Control).focus_mode = Control.FOCUS_NONE
+	for c in n.get_children():
+		_no_focus(c)
+
+
+func _slider_row(parent: Control, label: String, lo: float, hi: float, step: float, value: float, cb: Callable) -> Array:
+	var row := HBoxContainer.new()
+	var l := Label.new()
+	l.text = label
+	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	row.add_child(l)
+	var vl := Label.new()
+	vl.text = "%.2f" % value
+	vl.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	row.add_child(vl)
+	parent.add_child(row)
+	var sl := HSlider.new()
+	sl.min_value = lo
+	sl.max_value = hi
+	sl.step = step
+	sl.value = value
+	sl.custom_minimum_size = Vector2(200, 18)
+	sl.value_changed.connect(func(v: float):
+		vl.text = "%.2f" % v
+		cb.call(v))
+	parent.add_child(sl)
+	return [sl, vl]
+
+
+func _build_map_panel() -> PanelContainer:
+	var p := PanelContainer.new()
+	p.custom_minimum_size = Vector2(260, 0)
+	_style_panel(p)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 6)
+	p.add_child(v)
+	var title := Label.new()
+	title.text = "地图（M）"
+	title.add_theme_font_size_override("font_size", 17)
+	title.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	v.add_child(title)
+	_map_current = Label.new()
+	_map_current.add_theme_font_size_override("font_size", 12)
+	_map_current.add_theme_color_override("font_color", Color(0.7, 0.74, 0.8))
+	v.add_child(_map_current)
+	_map_list = VBoxContainer.new()
+	_map_list.add_theme_constant_override("separation", 4)
+	v.add_child(_map_list)
+	var ov := Button.new()
+	ov.text = "俯视地图 · 选点传送"
+	ov.custom_minimum_size = Vector2(230, 32)
+	_style_button(ov, true)
+	ov.pressed.connect(func():
+		_close_all_panels()
+		var g := _game()
+		if g:
+			g.call("open_overhead"))
+	v.add_child(ov)
+	var hint := Label.new()
+	hint.text = "切换地图保持当前模式。大地图里按 Tab 进角色控制测试移动物理；镜子只在房间。"
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.custom_minimum_size = Vector2(230, 0)
+	hint.add_theme_font_size_override("font_size", 11)
+	hint.add_theme_color_override("font_color", Color(0.7, 0.74, 0.8))
+	v.add_child(hint)
+	return p
+
+
+func _game() -> Node:
+	var g := get_parent()
+	return g if g and g.has_method("switch_map") else null
+
+
+func _rebuild_map_list() -> void:
+	if _map_list == null:
+		return
+	for c in _map_list.get_children():
+		c.queue_free()
+	var g := _game()
+	if g == null:
+		return
+	var cur := str(g.get("current_map"))
+	for m in g.call("get_maps"):
+		var l := Label.new()
+		l.text = str(m["label"]) + ("  ← 当前" if str(m["id"]) == cur else "")
+		l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+		_map_list.add_child(l)
+		var grid := GridContainer.new()
+		grid.columns = 2
+		grid.add_theme_constant_override("h_separation", 4)
+		grid.add_theme_constant_override("v_separation", 4)
+		_map_list.add_child(grid)
+		var spawns: Array = m["spawns"]
+		for i in spawns.size():
+			var b := Button.new()
+			b.text = str(spawns[i]["label"])
+			b.custom_minimum_size = Vector2(112, 28)
+			b.add_theme_font_size_override("font_size", 12)
+			b.focus_mode = Control.FOCUS_NONE
+			_style_button(b, false)
+			b.pressed.connect(_on_map_spawn.bind(str(m["id"]), i))
+			grid.add_child(b)
+	if _map_current:
+		_map_current.text = "当前：%s" % ("房间" if cur == "room" else "城市大地图")
+
+
+func _on_map_spawn(id: String, i: int) -> void:
+	_close_all_panels()
+	var g := _game()
+	if g:
+		g.call("switch_map", id, i)
+
+
+## 网页 CityMapPanel：顶部（标题 / 回家 / 关闭）+ 底部（坐标 / 清除 / 传送）
+func _build_overhead_ui() -> Control:
+	var ui := Control.new()
+	ui.name = "OverheadUI"
+	ui.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.visible = false
+	var top := PanelContainer.new()
+	_style_panel(top)
+	top.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	top.offset_left = -270
+	top.offset_right = 270
+	top.offset_top = 16
+	ui.add_child(top)
+	var th := HBoxContainer.new()
+	th.add_theme_constant_override("separation", 10)
+	top.add_child(th)
+	var tv := VBoxContainer.new()
+	tv.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	th.add_child(tv)
+	var t := Label.new()
+	t.text = "城市俯视"
+	t.add_theme_font_size_override("font_size", 17)
+	tv.add_child(t)
+	var t2 := Label.new()
+	t2.text = "左键拖动平移 · 滚轮缩放 · 单击选点 · M / Esc 关闭"
+	t2.add_theme_font_size_override("font_size", 11)
+	t2.add_theme_color_override("font_color", Color(0.7, 0.74, 0.8))
+	tv.add_child(t2)
+	var home := Button.new()
+	home.text = "回家"
+	home.custom_minimum_size = Vector2(72, 34)
+	_style_button(home, true)
+	home.pressed.connect(func():
+		var g := _game()
+		if g:
+			g.call("overhead_go_home"))
+	th.add_child(home)
+	var close := Button.new()
+	close.text = "关闭"
+	close.custom_minimum_size = Vector2(60, 34)
+	_style_button(close, false)
+	close.pressed.connect(func():
+		var g := _game()
+		if g:
+			g.call("close_overhead"))
+	th.add_child(close)
+	var bot := PanelContainer.new()
+	_style_panel(bot)
+	bot.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	bot.offset_left = -270
+	bot.offset_right = 270
+	bot.offset_top = -66
+	bot.offset_bottom = -16
+	ui.add_child(bot)
+	var bh := HBoxContainer.new()
+	bh.add_theme_constant_override("separation", 8)
+	bot.add_child(bh)
+	_overhead_info = Label.new()
+	_overhead_info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_overhead_info.add_theme_font_size_override("font_size", 12)
+	_overhead_info.add_theme_color_override("font_color", Color(0.8, 0.84, 0.9))
+	bh.add_child(_overhead_info)
+	_overhead_clear = Button.new()
+	_overhead_clear.text = "清除"
+	_overhead_clear.custom_minimum_size = Vector2(56, 32)
+	_style_button(_overhead_clear, false)
+	_overhead_clear.pressed.connect(func():
+		var g := _game()
+		if g:
+			g.get("map_view").call("set_marker", null))
+	bh.add_child(_overhead_clear)
+	_overhead_go = Button.new()
+	_overhead_go.text = "传送"
+	_overhead_go.custom_minimum_size = Vector2(80, 32)
+	_style_button(_overhead_go, true)
+	_overhead_go.pressed.connect(func():
+		var g := _game()
+		if g:
+			g.call("overhead_teleport"))
+	bh.add_child(_overhead_go)
+	return ui
+
+
+## game_root 调用：俯视地图开 / 关
+func set_overhead(on: bool) -> void:
+	if _overhead_ui == null:
+		return
+	_overhead_ui.visible = on
+	for c in [_btn_settings, _btn_map, _btn_camera, _btn_interact, _status]:
+		if c:
+			c.visible = not on
+	if on:
+		_close_all_panels()
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		var g := _game()
+		if g:
+			var mv: Node = g.get("map_view")
+			if not mv.is_connected("marker_changed", _on_overhead_marker):
+				mv.connect("marker_changed", _on_overhead_marker)
+		_on_overhead_marker(null)
+
+
+func _on_overhead_marker(m: Variant) -> void:
+	var g := _game()
+	var h := 120.0
+	if g:
+		h = float(g.get("map_view").get("height"))
+	if _overhead_info:
+		if m == null:
+			_overhead_info.text = "点击地面选择传送点 · 高度 %dm" % int(round(h))
+		else:
+			var p: Vector3 = m
+			_overhead_info.text = "选点 %.1f , %.1f · 高度 %dm" % [p.x, p.z, int(round(h))]
+	if _overhead_clear:
+		_overhead_clear.visible = m != null
+	if _overhead_go:
+		_overhead_go.disabled = m == null
 
 
 func _make_chrome_button(text: String) -> Button:
@@ -495,6 +756,30 @@ func _build_camera_panel() -> PanelContainer:
 	_chk_peri.toggled.connect(_on_peri_toggled)
 	v.add_child(_chk_peri)
 
+	# 肠蠕动参数（实时生效；网页 gutAmp / gutSpeed + 波密度 / 分节）
+	_peri_sliders.clear()
+	for spec in [
+		["gut_amp", "蠕动幅度", 0.0, 1.0, 0.01, 0.3],
+		["gut_speed", "蠕动速度", 0.0, 1.0, 0.01, 0.5],
+		["peri_waves", "蠕动波密度", 0.4, 4.0, 0.05, 1.55],
+		["peri_seg", "分节收缩", 0.0, 2.0, 0.01, 1.0],
+	]:
+		var key: String = spec[0]
+		_peri_sliders[key] = _slider_row(v, spec[1], spec[2], spec[3], spec[4], spec[5], func(val: float):
+			var o := _org()
+			if o:
+				o.set(key, val))
+	var peri_reset := Button.new()
+	peri_reset.text = "蠕动参数复位"
+	peri_reset.custom_minimum_size = Vector2(200, 30)
+	_style_button(peri_reset, false)
+	peri_reset.pressed.connect(func():
+		var o := _org()
+		if o:
+			o.call("reset_peristalsis")
+		_sync_from_systems())
+	v.add_child(peri_reset)
+
 	var sens_l := Label.new()
 	sens_l.text = "视角灵敏度"
 	sens_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
@@ -520,6 +805,9 @@ func _toggle_panel(id: PanelId) -> void:
 	_panel_settings.visible = id == PanelId.SETTINGS
 	_panel_interact.visible = id == PanelId.INTERACT
 	_panel_camera.visible = id == PanelId.CAMERA
+	_panel_map.visible = id == PanelId.MAP
+	if id == PanelId.MAP:
+		_rebuild_map_list()
 	_set_mouse_for_ui(true)
 	_sync_from_systems()
 
@@ -532,6 +820,8 @@ func _close_all_panels() -> void:
 		_panel_interact.visible = false
 	if _panel_camera:
 		_panel_camera.visible = false
+	if _panel_map:
+		_panel_map.visible = false
 	_set_mouse_for_ui(false)
 
 
@@ -543,37 +833,44 @@ func _set_mouse_for_ui(open: bool) -> void:
 	# When closing, leave mouse visible so user can click again; Esc / click captures as before.
 
 
-func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo:
-		if event.keycode == KEY_ESCAPE:
-			if _open != PanelId.NONE:
-				_close_all_panels()
-				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-				get_viewport().set_input_as_handled()
-		elif event.keycode == KEY_X:
-			call_deferred("_sync_from_systems")
-		elif event.keycode == KEY_H:
-			# 网页 H：隐藏 / 显示界面
-			_ui_hidden = not _ui_hidden
-			if _root_ui:
-				_root_ui.visible = not _ui_hidden
-		elif event.keycode == KEY_B:
-			# 网页 B：呼吸开关
-			var sec := _sec()
-			if sec:
-				sec.set("breath_enabled", not bool(sec.get("breath_enabled")))
-			_sync_from_systems()
-		elif event.keycode == KEY_T:
-			# 网页 T：循环互动模式
-			var ids: Array = []
-			for m in INTERACT_MODES:
-				ids.append(str(m["id"]))
-			_on_mode_pressed(ids[(ids.find(_interact_mode) + 1) % ids.size()])
-		elif event.keycode == KEY_F or event.keycode == KEY_R:
-			call_deferred("_sync_from_systems")
-		elif event.keycode == KEY_TAB:
-			# Player also toggles; refresh chrome labels.
-			call_deferred("_sync_from_systems")
+# ---- 按键由 game_root 统一路由后调用这些接口（HUD 自己不处理任何按键）
+
+func sync() -> void:
+	_sync_from_systems()
+
+
+## Esc：有面板就关面板（返回 true），否则返回 false 让角色处理鼠标。
+func close_panels() -> bool:
+	if _open == PanelId.NONE:
+		return false
+	_close_all_panels()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	return true
+
+
+func is_panel_open() -> bool:
+	return _open != PanelId.NONE
+
+
+func open_panel_name() -> String:
+	return str(PanelId.keys()[_open])
+
+
+func toggle_map_panel() -> void:
+	_toggle_panel(PanelId.MAP)
+
+
+func toggle_ui_hidden() -> void:
+	_ui_hidden = not _ui_hidden
+	if _root_ui:
+		_root_ui.visible = not _ui_hidden
+
+
+func cycle_interact_mode() -> void:
+	var ids: Array = []
+	for m in INTERACT_MODES:
+		ids.append(str(m["id"]))
+	_on_mode_pressed(ids[(ids.find(_interact_mode) + 1) % ids.size()])
 
 
 func _sync_from_systems() -> void:
@@ -596,7 +893,7 @@ func _sync_from_systems() -> void:
 			_status.text = (
 				("展示互动（观察）· 右键环绕 · 中键/Shift+右键平移 · 滚轮缩放 · 左键互动 · F 视觉中心 · R 复位 · Tab 切换")
 				if disp
-				else ("角色控制 · 第一人称 · WASD 移动 · Shift 奔跑 · 空格跳 · C 蹲 · Z 匍匐 · Esc 释放鼠标 · Tab 切换")
+				else ("角色控制 · 第一人称 · WASD 移动 · Shift 奔跑 · 空格跳 · Ctrl/C 蹲 · Z 匍匐 · Esc 释放鼠标 · M 地图 · Tab 切换")
 			)
 		if _tp_box:
 			_tp_box.visible = disp
@@ -625,6 +922,11 @@ func _sync_from_systems() -> void:
 			_chk_organs.set_pressed_no_signal(bool(org.get("show_organs")))
 		if _chk_peri:
 			_chk_peri.set_pressed_no_signal(bool(org.get("peristalsis_on")))
+		for k in _peri_sliders.keys():
+			var pair: Array = _peri_sliders[k]
+			var val := float(org.get(k))
+			(pair[0] as HSlider).set_value_no_signal(val)
+			(pair[1] as Label).text = "%.2f" % val
 		org.call("set_interact_mode", _interact_mode)
 	var sec: RefCounted = null
 	if _player.has_method("get_secondary"):
@@ -755,7 +1057,14 @@ func _on_preset_input(ev: InputEvent, i: int) -> void:
 	_sync_from_systems()
 
 
+var _last_mode: int = -1
+
+
 func _process(_delta: float) -> void:
+	# 模式由任何途径改变（Tab / 按钮 / 脚本）都刷新状态栏
+	if _player and "play_mode" in _player and int(_player.play_mode) != _last_mode:
+		_last_mode = int(_player.play_mode)
+		_sync_from_systems()
 	# 缩放滑条跟随滚轮
 	if _open == PanelId.CAMERA and _player and _zoom_slider and _player.has_method("get_tp_distance"):
 		var d := float(_player.call("get_tp_distance"))

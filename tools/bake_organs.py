@@ -37,11 +37,14 @@ GUT_GLB = f"{WEB}/public/models/intestines.glb"
 PELVIS_GLB = f"{WEB}/public/models/pelvis.glb"
 DECIMATE = {"Tjocktarm_Default Material_0": 0.2, "Tjocktarm_Default Material_0.001": 0.22, "Tunntarm_Default Material_0": 0.36}
 # 布局参数（相对肚脐，米）。网页原值：GUT_CENTER_DY=+0.016, FLEXURE=0.046, UTERUS_TOP=-0.06。
-GUT_CENTER_DY = -0.046
+GUT_CENTER_DY = -0.026  # 用户红框：比上一版（-0.046）整体上移约 2cm
 GUT_FLEXURE_LIFT = 0.022
+# 用户红框：肠团左右收窄、下缘再抬一点（缩放中心为肠团包围盒中心 / 顶部）
+GUT_SCALE_X = 0.9
+GUT_SCALE_Y = 0.94
 GUT_CAVITY = (-0.17, 0.15)
 UTERUS_TOP_DY = -0.098
-XRAY_Y = (-0.205, 0.12)
+XRAY_Y = (-0.205, 0.15)
 ORGAN_BONES = ["C_Hip_a", "C_Spine_a", "C_Spine_b", "C_Spine_c", "C_Spine_d"]
 
 
@@ -322,6 +325,13 @@ def place_guts(parts, cav_min, cav_max, navel, prof):
         z = q[:, 2]
         q[:, 2] = np.where(z > zl, z - (z - zl) * 0.45 * w, z)
         q[:, 0] = x - np.sign(x) * 0.011 * w
+    # Godot：按用户红框收窄 + 以顶部为锚压扁（下缘上移，顶部不再上顶到肋下）
+    gmin, gmax = box_of(P)
+    gcx = (gmin[0] + gmax[0]) * 0.5
+    gtop = gmax[1]
+    for q in P:
+        q[:, 0] = gcx + (q[:, 0] - gcx) * GUT_SCALE_X
+        q[:, 1] = gtop + (q[:, 1] - gtop) * GUT_SCALE_Y
     # centerGutsInCavity
     gmin, gmax = box_of(P)
     gz = (gmin[2] + gmax[2]) * 0.5

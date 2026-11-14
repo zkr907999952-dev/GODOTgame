@@ -13,7 +13,9 @@ enum GameMode { DISPLAY, CONTROL }
 @export var sprint_speed: float = 4.125  # 1.65 * 2.5 like web
 @export var crouch_speed: float = 0.7425  # 1.65 * 0.45
 @export var prone_speed: float = 0.462  # 1.65 * 0.28
-@export var jump_velocity: float = 4.2
+## 网页 FP_GRAV=20（比 Godot 默认 9.8 更干脆）；跳高保持约 0.9m（6²/(2·20)）。
+@export var jump_velocity: float = 6.0
+@export var gravity: float = 20.0
 @export var mouse_sensitivity: float = 0.0025
 @export var min_pitch: float = -1.55  # ≈ ±89° like web FP_PITCH_LIM
 @export var max_pitch: float = 1.55
@@ -76,7 +78,23 @@ var _pan_drag: bool = false
 ## 房间墙内包围盒（由 game_root 设置；城市里为空 → 只做物理碰撞）
 var camera_bounds: AABB = AABB()
 var _cam_shape: SphereShape3D
-var _gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
+## 网页 FP 移动手感（scene.tsx）：加速度 / 摩擦 / 空中加速 / 台阶 / 土狼时间 / 跳跃缓冲
+const FP_ACCEL := 12.0
+const FP_AIR_ACCEL := 3.4
+const FP_FRICTION := 6.4
+const FP_MAX_FALL := 58.0
+const STEP_HEIGHT := 0.3
+const COYOTE_TIME := 0.14
+const JUMP_BUFFER := 0.14
+var _coyote: float = 0.0
+var _jump_buf: float = 0.0
+## 台阶上抬后相机眼位平滑（避免瞬间跳一格）
+var _step_smooth: float = 0.0
+## 俯视地图打开时锁定一切输入（game_root 设置）
+var input_locked: bool = false
+## CameraPivot 是 top_level：每帧用「插值后的」角色位置 + 偏移摆放（物理插值下相机不抖）
+var _pivot_off: Vector3 = Vector3(0.0, 1.4, 0.0)
+var _pivot_rot: Vector3 = Vector3.ZERO
 var _loco: Node
 ## 体内脏器 + 腹部透视 + 拖拽/击腹互动（scripts/organs/organ_rig.gd）
 var _organs: Node
@@ -132,6 +150,13 @@ func _ready() -> void:
 	_default_tp_fov = tp_fov
 	# 展示（观察）模式光标可见：左键留给腹部互动，右键环绕（网页 OrbitControls）。
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	# 相机由 _process 每帧摆放（鼠标视角零延迟），不参与物理插值；角色本体参与插值。
+	_fti_prev = global_position
+	_fti_cur = global_position
+	_pivot.top_level = true
+	_pivot.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	process_priority = -10
+	_setup_body_params()
 	_cam_shape = SphereShape3D.new()
 	_cam_shape.radius = TP_COLLIDE_RADIUS
 	_align_capsule_to_feet()
@@ -159,12 +184,12 @@ func _ready() -> void:
 	add_child(_organs)
 	if skel == null or not _organs.setup(skel):
 		push_warning("player: organs failed to init")
-	if _col.shape is CapsuleShape3D:
-		_capsule_stand_h = (_col.shape as CapsuleShape3D).height
+	if _col.shape is CylinderShape3D:
+		_capsule_stand_h = (_col.shape as CylinderShape3D).height
 		_capsule_stand_y = _col.position.y
 		_cap_h_from = _capsule_stand_h
 		_cap_h_to = _capsule_stand_h
-		_cap_r_from = (_col.shape as CapsuleShape3D).radius
+		_cap_r_from = (_col.shape as CylinderShape3D).radius
 		_cap_r_to = _cap_r_from
 		_cap_y_from = _capsule_stand_y
 		_cap_y_to = _capsule_stand_y
@@ -189,6 +214,46 @@ func get_camera() -> Camera3D:
 	return _camera
 
 
+## CharacterBody3D 参数：防卡边 / 贴地 / 贴墙滑动。
+func _setup_body_params() -> void:
+	floor_max_angle = deg_to_rad(46.0)
+	floor_snap_length = 0.32  # 下台阶 / 下坡不腾空
+	floor_constant_speed = true  # 上下坡速度一致
+	floor_stop_on_slope = true
+	floor_block_on_wall = true
+	wall_min_slide_angle = deg_to_rad(5.0)  # 斜着撞墙也沿墙滑，不会停住
+	max_slides = 6
+	safe_margin = 0.004
+	motion_mode = CharacterBody3D.MOTION_MODE_GROUNDED
+
+
+## 相机用的角色位置：与引擎物理插值同一公式（上一 / 当前物理帧位置按插值系数混合）。
+## 自己记录而不是用 get_global_transform_interpolated()：后者在物理帧外传送时要等下一个
+## 物理帧才更新；这里检测到位置被直接改写（传送）就立即对齐。
+var _fti_prev: Vector3 = Vector3.ZERO
+var _fti_cur: Vector3 = Vector3.ZERO
+
+
+func _fti_tick() -> void:
+	_fti_prev = _fti_cur
+	_fti_cur = global_position
+
+
+func _base_origin() -> Vector3:
+	if not _fti_cur.is_equal_approx(global_position):
+		_fti_prev = global_position
+		_fti_cur = global_position
+	if not is_inside_tree() or not get_tree().physics_interpolation or Engine.is_in_physics_frame():
+		return _fti_cur
+	return _fti_prev.lerp(_fti_cur, Engine.get_physics_interpolation_fraction())
+
+
+func _sync_pivot() -> void:
+	if _pivot == null:
+		return
+	_pivot.global_transform = Transform3D(Basis.from_euler(_pivot_rot), _base_origin() + _pivot_off)
+
+
 func _organs_live() -> bool:
 	return _organs != null and bool(_organs.get("ready_ok")) and bool(_organs.call("mode_is_live", ""))
 
@@ -198,10 +263,10 @@ func _screen_ray(screen: Vector2) -> Array:
 	return [_camera.project_ray_origin(screen), _camera.project_ray_normal(screen)]
 
 
-func _interact_point() -> Vector2:
+func _interact_point(ev_pos: Vector2) -> Vector2:
 	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		return get_viewport().get_visible_rect().size * 0.5
-	return get_viewport().get_mouse_position()
+	return ev_pos
 
 
 ## 左键按下：拖拽=抓住腹壁 / 击腹=释放冲击。命中腹部返回 true。
@@ -465,15 +530,16 @@ func _update_tp_camera(delta: float, snap: bool = false) -> void:
 	_tp_elev += (_tp_elev_goal - _tp_elev) * k
 	_tp_dist = exp(lerpf(log(maxf(_tp_dist, 0.01)), log(maxf(_tp_dist_goal, 0.01)), k))
 	_tp_target = _tp_target.lerp(_tp_target_goal, k)
-	var target_w := global_position + _tp_target
+	var target_w := _base_origin() + _tp_target
 	var dir := _tp_dir(_tp_yaw, _tp_elev)
 	var want := _tp_collide(target_w, dir, _tp_dist)
 	if snap or want < _tp_dist_eff:
 		_tp_dist_eff = want  # 撞墙立刻收回，不穿模
 	else:
 		_tp_dist_eff += (want - _tp_dist_eff) * (1.0 - exp(-8.0 * delta))
-	_pivot.position = _tp_target
-	_pivot.rotation = Vector3(-_tp_elev, _tp_yaw, 0.0)
+	_pivot_off = _tp_target
+	_pivot_rot = Vector3(-_tp_elev, _tp_yaw, 0.0)
+	_sync_pivot()
 	_camera.position = Vector3(0.0, 0.0, _tp_dist_eff)
 	_camera.near = clampf(_tp_dist_eff * 0.15, 0.02, 0.1)
 	_camera.fov = tp_fov
@@ -497,6 +563,11 @@ func _process(delta: float) -> void:
 		_mmb_down = false
 	if not first_person:
 		_update_tp_camera(delta)
+	else:
+		_step_smooth *= exp(-14.0 * delta)
+		_pivot_rot = Vector3(_pitch, _yaw, 0.0)
+		_pivot_off = _fp_eye_pivot_pos() - Vector3(0.0, _step_smooth, 0.0)
+		_sync_pivot()
 	if _fill_light:
 		# 近距离时减弱，避免贴近皮肤过曝（点光源随距离平方衰减）。
 		var near_k := clampf(pow(_tp_dist_eff / 2.2, 1.7), 0.05, 1.0)
@@ -611,9 +682,9 @@ func _apply_fp_mesh_visibility() -> void:
 
 ## Place capsule so its bottom matches mesh soles (AABB min.y ≈ 0 in character space).
 func _align_capsule_to_feet() -> void:
-	if not (_col.shape is CapsuleShape3D):
+	if not (_col.shape is CylinderShape3D):
 		return
-	var cap := _col.shape as CapsuleShape3D
+	var cap := _col.shape as CylinderShape3D
 	# Mesh feet are at y≈0 (skinned GLB fitStanding). Old capsule bottom was ~0.28 → feet sank.
 	_col.position.y = cap.height * 0.5
 	_capsule_stand_h = cap.height
@@ -630,8 +701,8 @@ func _print_body_info() -> void:
 		print("player: skeleton bones=", skel.get_bone_count())
 	var aabb := _calc_aabb(_body)
 	var cap_bottom := 0.0
-	if _col.shape is CapsuleShape3D:
-		cap_bottom = _col.position.y - (_col.shape as CapsuleShape3D).height * 0.5
+	if _col.shape is CylinderShape3D:
+		cap_bottom = _col.position.y - (_col.shape as CylinderShape3D).height * 0.5
 	print(
 		"player: body AABB ", aabb,
 		" feet≈", aabb.position.y,
@@ -684,11 +755,15 @@ func _calc_aabb(n: Node) -> AABB:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	# 脏器互动：左键（捕获鼠标时取屏幕中心，否则取光标）
+	# 只处理鼠标；离散按键统一由 game_root.run_action 路由（每个键只在一处处理）。
+	if input_locked:
+		return
+	# 脏器互动：左键（捕获鼠标时取屏幕中心，否则取光标）。HUD 面板打开时也可以互动——
+	# 面板本身吃掉落在面板矩形内的点击，面板外的点击会走到这里。
 	if event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
 		var lb := event as InputEventMouseButton
 		if lb.pressed:
-			if not ui_blocks_capture and _try_begin_interact(_interact_point()):
+			if _try_begin_interact(_interact_point(lb.position)):
 				get_viewport().set_input_as_handled()
 				return
 		elif _interact_held:
@@ -729,8 +804,6 @@ func _unhandled_input(event: InputEvent) -> void:
 			var dir := 1.0 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0
 			var steps := dir * maxf(1.0, mb.factor if mb.factor > 0.0 else 1.0)
 			if first_person:
-				if ui_blocks_capture:
-					return
 				# Wheel up = zoom in = narrower FOV.
 				fp_fov = clampf(fp_fov - steps * 3.0, fp_fov_min, fp_fov_max)
 				_apply_camera()
@@ -747,70 +820,107 @@ func _unhandled_input(event: InputEvent) -> void:
 				_mmb_down = mb.pressed
 				get_viewport().set_input_as_handled()
 		elif mb.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+			# 第一人称：点画面捕获鼠标（面板打开时不捕获，光标留给面板 / 腹部互动）
 			if not ui_blocks_capture:
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-	elif event is InputEventKey and event.pressed and not event.echo:
-		match event.keycode:
-			KEY_TAB:
-				toggle_play_mode()
-			KEY_ESCAPE:
-				# HUD handles Esc first via its own _unhandled_input (higher priority when panel open).
-				# 第一人称：释放 / 重新捕获鼠标；观察视角光标一直可见。
-				if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-				elif first_person and not ui_blocks_capture:
-					Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-			KEY_R:
-				# 网页 R = 复位；这里复位视角 + 腹部形变。
-				reset_camera()
-				if _organs and _organs.has_method("reset_interaction"):
-					_organs.call("reset_interaction")
-			KEY_F:
-				# 观察视角：循环视觉中心 面部→胸部→腹部→阴部
-				if not first_person:
-					var order := ["face", "chest", "belly", "groin"]
-					var i := order.find(_tp_focus)
-					set_tp_focus(order[(i + 1) % order.size()])
-			KEY_X:
-				# 网页 X：腹部透视开关
-				if _organs:
-					_organs.call("toggle_xray")
-			KEY_Z:
-				# Prone toggle (Z). Crouch is toggle Ctrl/C — handled in physics.
-				_toggle_prone()
-			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8:
-				if _loco:
-					var n: int = int(event.keycode) - KEY_0
-					_loco.call("set_dance", "dance%d" % n)
-					print("player: dance", n)
-			KEY_0, KEY_9:
-				if _loco:
-					_loco.call("clear_dance")
-					print("player: dance cleared")
+
+
+## Esc（面板都关着时）：第一人称释放 / 重新捕获鼠标。
+func escape_mouse() -> void:
+	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	elif first_person and not ui_blocks_capture:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+## R：复位视角 + 腹部形变（网页 R）。
+func reset_view_and_belly() -> void:
+	reset_camera()
+	if _organs and _organs.has_method("reset_interaction"):
+		_organs.call("reset_interaction")
+
+
+## F（仅观察视角）：视觉中心 面部→胸部→腹部→阴部
+func cycle_tp_focus() -> void:
+	if first_person:
+		return
+	var order := ["face", "chest", "belly", "groin"]
+	var i := order.find(_tp_focus)
+	set_tp_focus(order[(i + 1) % order.size()])
+
+
+## 1–8 舞蹈；0 = 取消
+func dance(n: int) -> void:
+	if _loco == null:
+		return
+	if n <= 0:
+		_loco.call("clear_dance")
+	else:
+		_loco.call("set_dance", "dance%d" % n)
+
+
+func get_stance() -> String:
+	return _stance
 
 
 ## Crouch is toggle (Ctrl / C press). Release must NOT force stand. Prone stays Z toggle.
 func _update_crouch_toggle() -> void:
 	if not Input.is_action_just_pressed("crouch"):
 		return
-	if _stance == "prone":
-		# Tap crouch while prone → stand (web tap exits prone then toggles crouch).
-		_stance = "stand"
-	elif _stance == "crouch":
-		_stance = "stand"
+	if _stance == "crouch" or _stance == "prone":
+		# 蹲 / 匍匐中按一下 → 站起（网页：轻按退出匍匐）
+		_set_stance("stand")
 	else:
-		_stance = "crouch"
-	_apply_stance_capsule()
-	print("player: stance=", _stance)
+		_set_stance("crouch")
 
 
-func _toggle_prone() -> void:
-	if _stance == "prone":
-		_stance = "stand"
-	else:
-		_stance = "prone"
+## Z：切换匍匐（仅角色控制模式，由 game_root 路由）
+func toggle_prone() -> void:
+	if play_mode != GameMode.CONTROL:
+		return
+	_set_stance("stand" if _stance == "prone" else "prone")
+
+
+## 姿态胶囊（网页 FP 胶囊：站 1.64/0.3、蹲 0.94/0.26、匍匐 0.42/0.22）
+const STANCE_CAPSULE := {
+	"stand": Vector2(1.64, 0.3),
+	"crouch": Vector2(0.94, 0.26),
+	"prone": Vector2(0.42, 0.22),
+}
+
+
+## 头顶空间检查：目标姿态的胶囊放在当前位置是否会与世界重叠（床下 / 桌下不能站起）。
+func can_fit_stance(stance: String) -> bool:
+	if not is_inside_tree():
+		return true
+	var hr: Vector2 = STANCE_CAPSULE.get(stance, STANCE_CAPSULE["stand"])
+	if stance == "stand":
+		hr.x = _capsule_stand_h
+	var cur := (_col.shape as CylinderShape3D) if _col.shape is CylinderShape3D else null
+	if cur and hr.x <= cur.height + 0.001:
+		return true  # 变矮永远可以
+	var shape := CylinderShape3D.new()
+	shape.radius = maxf(0.05, hr.y - 0.02)
+	shape.height = maxf(0.1, hr.x - 0.06)
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = shape
+	# 底部抬高 4cm，避免与地面接触算重叠
+	q.transform = Transform3D(Basis.IDENTITY, global_position + Vector3(0.0, 0.04 + shape.height * 0.5, 0.0))
+	q.collision_mask = collision_mask
+	q.exclude = [get_rid()]
+	return get_world_3d().direct_space_state.intersect_shape(q, 1).is_empty()
+
+
+func _set_stance(stance: String) -> bool:
+	if stance == _stance:
+		return true
+	if not can_fit_stance(stance):
+		print("player: 头顶空间不足，保持 ", _stance)
+		return false
+	_stance = stance
 	_apply_stance_capsule()
 	print("player: stance=", _stance)
+	return true
 
 
 func _stance_eye_target(stance: String) -> Vector3:
@@ -830,9 +940,9 @@ func _begin_fp_eye_blend(new_stance: String) -> void:
 
 
 func _apply_stance_capsule() -> void:
-	if not (_col.shape is CapsuleShape3D):
+	if not (_col.shape is CylinderShape3D):
 		return
-	var cap := _col.shape as CapsuleShape3D
+	var cap := _col.shape as CylinderShape3D
 	# Web FP capsule approx: stand 1.64/0.3, crouch 0.94/0.26, prone 0.42/0.22.
 	# Blend height/radius/eye over STANCE_BLEND_DUR (0.7s). Bottom stays ≈ 0.
 	_begin_fp_eye_blend(_stance)
@@ -864,9 +974,10 @@ func _apply_stance_capsule() -> void:
 
 
 func _apply_camera() -> void:
-	_pivot.rotation = Vector3(_pitch, _yaw, 0.0)
+	_pivot_rot = Vector3(_pitch, _yaw, 0.0)
 	if first_person:
-		_pivot.position = _fp_eye_pivot_pos()
+		_pivot_off = _fp_eye_pivot_pos() - Vector3(0.0, _step_smooth, 0.0)
+		_sync_pivot()
 		_camera.position = Vector3.ZERO
 		_camera.near = 0.06
 		_camera.fov = fp_fov
@@ -884,13 +995,13 @@ func _update_fp_eye_blend(delta: float) -> void:
 
 
 func _update_stance_capsule_blend(delta: float) -> void:
-	if not (_col.shape is CapsuleShape3D):
+	if not (_col.shape is CylinderShape3D):
 		return
 	if _stance_blend < 1.0:
 		_stance_blend = minf(1.0, _stance_blend + delta / STANCE_BLEND_DUR)
 	var t := _stance_blend
 	var u := t * t * (3.0 - 2.0 * t)
-	var cap := _col.shape as CapsuleShape3D
+	var cap := _col.shape as CylinderShape3D
 	cap.height = lerpf(_cap_h_from, _cap_h_to, u)
 	cap.radius = lerpf(_cap_r_from, _cap_r_to, u)
 	_col.position.y = lerpf(_cap_y_from, _cap_y_to, u)
@@ -921,32 +1032,75 @@ func debug_next_body_yaw(look_yaw: float, body_yaw: float, moving: bool) -> floa
 	return wrapf(body_yaw, -PI, PI)
 
 
+## 台阶上抬：贴地且水平运动被挡住时，试「上抬 STEP_HEIGHT → 前移 → 下落」，
+## 落点是可站立地面就把角色抬到台阶高度（随后 move_and_slide 正常前进）。
+func _try_step_up(motion: Vector3) -> bool:
+	if motion.length_squared() < 1e-8:
+		return false
+	var xf := global_transform
+	var hit := KinematicCollision3D.new()
+	if not test_move(xf, motion, hit, safe_margin):
+		return false  # 没被挡
+	if hit.get_normal().angle_to(Vector3.UP) <= floor_max_angle:
+		return false  # 可走的坡，交给 move_and_slide
+	var up := Vector3.UP * STEP_HEIGHT
+	var up_col := KinematicCollision3D.new()
+	var up_travel := up
+	if test_move(xf, up, up_col, safe_margin):
+		up_travel = up_col.get_travel()
+		if up_travel.y < 0.05:
+			return false  # 头顶没空间
+	var xf_up := xf.translated(up_travel)
+	# 前探至少 radius 的一部分，保证落脚点在台阶上
+	var probe := motion.normalized() * maxf(motion.length(), 0.08)
+	if test_move(xf_up, probe):
+		return false  # 抬高后仍被挡（是墙，不是台阶）
+	var xf_fwd := xf_up.translated(probe)
+	var down_col := KinematicCollision3D.new()
+	if not test_move(xf_fwd, -up_travel - Vector3(0.0, 0.02, 0.0), down_col, safe_margin):
+		return false  # 前方悬空
+	if down_col.get_normal().angle_to(Vector3.UP) > floor_max_angle:
+		return false
+	var land_y := xf_fwd.origin.y + down_col.get_travel().y
+	var rise := land_y - xf.origin.y
+	if rise < 0.01 or rise > STEP_HEIGHT + 0.001:
+		return false
+	global_position.y += rise
+	_step_smooth += rise  # 相机平滑跟上
+	return true
+
+
 func _physics_process(delta: float) -> void:
 	var display := play_mode == GameMode.DISPLAY
-	if not display:
+	var can_act := (not display) and not input_locked
+	if can_act:
 		_update_crouch_toggle()
 	_update_fp_eye_blend(delta)
 	_update_stance_capsule_blend(delta)
 
 	var on_floor := is_on_floor()
+	# 土狼时间 + 跳跃缓冲（网页 coyote 0.14 / jumpBuf 0.14）
+	_coyote = COYOTE_TIME if on_floor else maxf(0.0, _coyote - delta)
+	if can_act and Input.is_action_just_pressed("jump"):
+		if _stance == "prone" or _stance == "crouch":
+			_set_stance("stand")  # 网页：匍匐中空格 = 站起
+		else:
+			_jump_buf = JUMP_BUFFER
+	else:
+		_jump_buf = maxf(0.0, _jump_buf - delta)
 	if not on_floor:
-		velocity.y -= _gravity * delta
 		_air_time += delta
 	else:
 		_air_time = 0.0
-		if not display and Input.is_action_just_pressed("jump"):
-			if _stance == "prone":
-				_stance = "stand"
-				_apply_stance_capsule()
-			else:
-				velocity.y = jump_velocity
 
 	var input_dir := Vector2.ZERO
-	if not display:
+	if can_act:
 		input_dir = Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 	var basis_yaw := Basis(Vector3.UP, _yaw)
-	var direction := (basis_yaw * Vector3(input_dir.x, 0.0, input_dir.y)).normalized()
-	var sprinting := (not display) and Input.is_action_pressed("sprint") and _stance == "stand"
+	var wish := basis_yaw * Vector3(input_dir.x, 0.0, input_dir.y)
+	var wish_len := minf(1.0, wish.length())
+	var direction := wish.normalized() if wish_len > 1e-4 else Vector3.ZERO
+	var sprinting := can_act and Input.is_action_pressed("sprint") and _stance == "stand"
 	var speed := move_speed
 	match _stance:
 		"crouch":
@@ -956,19 +1110,38 @@ func _physics_process(delta: float) -> void:
 		_:
 			speed = sprint_speed if sprinting else move_speed
 
-	if display:
+	var hv := Vector3(velocity.x, 0.0, velocity.z)
+	if display or input_locked:
 		# Lock locomotion — stand in place for display / tool interaction.
-		velocity.x = 0.0
-		velocity.z = 0.0
+		hv = Vector3.ZERO
 		direction = Vector3.ZERO
 		input_dir = Vector2.ZERO
 		sprinting = false
-	elif direction != Vector3.ZERO:
-		velocity.x = direction.x * speed
-		velocity.z = direction.z * speed
+		_jump_buf = 0.0
 	else:
-		velocity.x = move_toward(velocity.x, 0.0, speed)
-		velocity.z = move_toward(velocity.z, 0.0, speed)
+		# 网页同款：地面摩擦（指数减速）+ 朝输入方向加速（地面 12、空中 3.4）
+		if on_floor:
+			var sp := hv.length()
+			if sp > 0.05:
+				hv *= maxf(0.0, sp - sp * FP_FRICTION * delta) / sp
+			elif wish_len < 1e-4:
+				hv = Vector3.ZERO
+		var wish_speed := speed * wish_len
+		if wish_speed > 1e-4:
+			var acc := (FP_ACCEL if on_floor else FP_AIR_ACCEL) * wish_speed * delta
+			var add := wish_speed - hv.dot(direction)
+			if add > 0.0:
+				hv += direction * minf(acc, add)
+	velocity.x = hv.x
+	velocity.z = hv.z
+
+	if _jump_buf > 0.0 and _coyote > 0.0 and can_act:
+		velocity.y = jump_velocity
+		_jump_buf = 0.0
+		_coyote = 0.0
+		on_floor = false
+	if not on_floor or velocity.y > 0.0:
+		velocity.y = maxf(velocity.y - gravity * delta, -FP_MAX_FALL)
 
 	# Visual facing: mesh +Z vs Godot -Z → BODY_YAW_OFFSET (π).
 	# CONTROL/FP: while moving, body faces camera yaw immediately (no deadzone lag).
@@ -984,7 +1157,12 @@ func _physics_process(delta: float) -> void:
 			_body.rotation.y, face_yaw, clampf(14.0 * delta, 0.0, 1.0)
 		)
 
+	if on_floor and velocity.y <= 0.0:
+		_try_step_up(Vector3(velocity.x, 0.0, velocity.z) * delta)
 	move_and_slide()
+	_fti_tick()
+	if is_on_floor():
+		_coyote = COYOTE_TIME
 
 	# CONTROL/FP: body look BEFORE apply_pose. DISPLAY: gaze at active camera.
 	var sec2 := get_secondary()
@@ -1018,5 +1196,6 @@ func _physics_process(delta: float) -> void:
 
 	# FP: stable stance eye (no head-bone bob); refresh after body yaw catch-up.
 	if first_person:
-		_pivot.rotation = Vector3(_pitch, _yaw, 0.0)
-		_pivot.position = _fp_eye_pivot_pos()
+		_pivot_rot = Vector3(_pitch, _yaw, 0.0)
+		_pivot_off = _fp_eye_pivot_pos() - Vector3(0.0, _step_smooth, 0.0)
+		_sync_pivot()

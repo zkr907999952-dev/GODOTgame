@@ -272,8 +272,8 @@ func _run() -> void:
 			aabb_max_y = maxf(aabb_max_y, wy)
 	var col: CollisionShape3D = player.get_node("CollisionShape3D")
 	var cap_bottom := 0.0
-	if col.shape is CapsuleShape3D:
-		cap_bottom = col.position.y - (col.shape as CapsuleShape3D).height * 0.5
+	if col.shape is CylinderShape3D:
+		cap_bottom = col.position.y - (col.shape as CylinderShape3D).height * 0.5
 	print(
 		"validate: feet AABB min.y=", snappedf(aabb_min_y, 0.0001),
 		" max.y=", snappedf(aabb_max_y, 0.0001),
@@ -389,6 +389,7 @@ func _run() -> void:
 	print("validate: FP head layer culled by main camera OK")
 	var pos_before: Vector3 = player.global_position
 	player.global_position = pos_before + Vector3(0.4, 0.0, -0.3)
+	player.reset_physics_interpolation()  # 传送后重置物理插值（game_root 传送同样调用）
 	player.call("set_play_mode", 0)  # back to DISPLAY — orbit pivot follows character
 	await process_frame
 	var pivot: Node3D = player.get_node("CameraPivot")
@@ -728,8 +729,299 @@ func _run() -> void:
 		return
 	print("validate: breast jiggle OK")
 
+	var gmin: Array = (mt["guts"] as Dictionary)["min"]
+	if float(gmin[1]) < ut_top - 0.03:
+		push_error("validate: guts should sit above the uterus (user red box)")
+		quit(1)
+		return
+
+	if not await _check_input_routing(main, player, organs):
+		quit(1)
+		return
+	if not await _check_control_physics(main, player):
+		quit(1)
+		return
+	if not await _check_maps(main, player):
+		quit(1)
+		return
+
 	print("validate: OK")
 	quit(0)
+
+
+func _key(k: Key, pressed: bool = true) -> InputEventKey:
+	var e := InputEventKey.new()
+	e.keycode = k
+	e.physical_keycode = k
+	e.pressed = pressed
+	return e
+
+
+func _click(pos: Vector2, pressed: bool, button: MouseButton = MOUSE_BUTTON_LEFT) -> void:
+	if pressed:
+		var m := InputEventMouseMotion.new()
+		m.position = pos
+		m.global_position = pos
+		root.push_input(m)
+	var e := InputEventMouseButton.new()
+	e.button_index = button
+	e.position = pos
+	e.global_position = pos
+	e.pressed = pressed
+	e.button_mask = MOUSE_BUTTON_MASK_LEFT if pressed else 0
+	root.push_input(e)
+
+
+func _motion(pos: Vector2, rel: Vector2) -> void:
+	var e := InputEventMouseMotion.new()
+	e.position = pos
+	e.global_position = pos
+	e.relative = rel
+	e.button_mask = MOUSE_BUTTON_MASK_LEFT
+	root.push_input(e)
+
+
+func _frames(n: int) -> void:
+	for i in n:
+		await process_frame
+
+
+## 按键冲突：点过 HUD 按钮后，角色控制模式按空格不能再触发按钮（打开菜单）；
+## 互动面板打开时左键点腹部仍能拖拽。
+func _check_input_routing(main: Node, player: Node, organs: Node) -> bool:
+	var hud: Node = main.get_node("HUD")
+	var g: Node = main
+	root.size = Vector2i(1280, 720)  # 无头模式默认 64×64，HUD 按钮在屏幕外
+	player.call("set_play_mode", 0)
+	await _frames(3)
+	# 1) 鼠标点「摄像机」按钮打开、再点关闭（旧版按钮会留下键盘焦点）
+	var btn: Button = hud.get("_btn_camera")
+	var c := btn.get_global_rect().get_center()
+	_click(c, true)
+	_click(c, false)
+	await _frames(2)
+	if not bool(hud.call("is_panel_open")):
+		push_error("validate: clicking 摄像机 should open the camera panel")
+		return false
+	_click(c, true)
+	_click(c, false)
+	await _frames(2)
+	if bool(hud.call("is_panel_open")):
+		push_error("validate: second click should close the panel")
+		return false
+	var focus := root.gui_get_focus_owner()
+	if focus != null:
+		push_error("validate: HUD button kept keyboard focus: %s" % focus)
+		return false
+	# 2) 角色控制模式按空格：只能跳跃，不能打开 / 切换任何菜单
+	root.push_input(_key(KEY_TAB))
+	root.push_input(_key(KEY_TAB, false))
+	await _frames(2)
+	if bool(player.call("is_display_mode")):
+		push_error("validate: Tab should switch to CONTROL")
+		return false
+	var mode_before := int(player.get("play_mode"))
+	Input.action_press("jump")
+	root.push_input(_key(KEY_SPACE))
+	await physics_frame
+	await physics_frame
+	root.push_input(_key(KEY_SPACE, false))
+	Input.action_release("jump")
+	await _frames(3)
+	print("validate: space in CONTROL → panel_open=", hud.call("is_panel_open"), " vy=", snappedf(player.velocity.y, 0.01))
+	if bool(hud.call("is_panel_open")) or int(player.get("play_mode")) != mode_before:
+		push_error("validate: Space in CONTROL must not open a HUD menu")
+		return false
+	await _frames(60)
+	# 3) 每个键只映射到一个动作，且控制 / 展示模式没有重叠冲突
+	for k in [KEY_SPACE, KEY_C, KEY_CTRL, KEY_SHIFT, KEY_W, KEY_A, KEY_S, KEY_D]:
+		if g.call("action_for_key", k, "control") != "" or g.call("action_for_key", k, "display") != "":
+			push_error("validate: polled gameplay key %s must not have a discrete action" % k)
+			return false
+	if g.call("action_for_key", KEY_Z, "display") != "" or g.call("action_for_key", KEY_F, "control") != "":
+		push_error("validate: Z only in CONTROL, F only in DISPLAY")
+		return false
+	# Z 在展示模式不能改变姿态
+	player.call("set_play_mode", 0)
+	await _frames(2)
+	root.push_input(_key(KEY_Z))
+	root.push_input(_key(KEY_Z, false))
+	await _frames(2)
+	if str(player.call("get_stance")) != "stand":
+		push_error("validate: Z in DISPLAY must not change stance")
+		return false
+	print("validate: key routing OK (Space/Tab/Z no conflicts, no GUI focus)")
+	# 4) 互动面板打开时左键点腹部 → 拖拽
+	player.call("reset_camera")
+	await _frames(30)
+	var ib: Button = hud.get("_btn_interact")
+	var ic := ib.get_global_rect().get_center()
+	_click(ic, true)
+	_click(ic, false)
+	await _frames(2)
+	if str(hud.call("open_panel_name")) != "INTERACT":
+		push_error("validate: interact panel should be open")
+		return false
+	organs.call("set_interact_mode", "drag")
+	var cam: Camera3D = player.call("get_camera")
+	var navel: Vector3 = organs.call("navel_world")
+	var sp := cam.unproject_position(navel + (organs.call("abdomen_frame") as Transform3D).basis.z * 0.01)
+	var pr: Control = hud.get("_panel_interact")
+	if pr.get_global_rect().has_point(sp):
+		push_error("validate: belly is under the interact panel; test framing wrong")
+		return false
+	_click(sp, true)
+	await _frames(2)
+	var dragging := bool(organs.call("is_dragging"))
+	_motion(sp + Vector2(30, -10), Vector2(30, -10))
+	await _frames(10)
+	var off := float(organs.call("drag_offset_length"))
+	_click(sp + Vector2(30, -10), false)
+	await _frames(2)
+	print("validate: drag with 互动 panel open → dragging=", dragging, " offset=", snappedf(off, 0.0001))
+	if not dragging or off < 0.005:
+		push_error("validate: belly drag must work while the interact panel is open")
+		return false
+	hud.call("close_panels")
+	return true
+
+
+## 角色控制物理：斜撞墙要沿墙滑、0.2m 台阶能上、20° 坡能上、低矮处不能站起、松键平滑减速。
+func _check_control_physics(main: Node, player: CharacterBody3D) -> bool:
+	var arena := StaticBody3D.new()
+	arena.name = "TestArena"
+	main.add_child(arena)
+	var base := Vector3(400.0, -50.0, 400.0)
+	var add_box := func(center: Vector3, size: Vector3, rot_x: float = 0.0) -> void:
+		var cs := CollisionShape3D.new()
+		var bs := BoxShape3D.new()
+		bs.size = size
+		cs.shape = bs
+		cs.transform = Transform3D(Basis(Vector3.RIGHT, rot_x), base + center)
+		arena.add_child(cs)
+	add_box.call(Vector3(0, -0.5, 0), Vector3(60, 1, 60))  # floor top y=0
+	add_box.call(Vector3(-10, 1.0, -3.0), Vector3(12, 2, 0.4))  # wall A (normal +Z) for slide
+	add_box.call(Vector3(0, 0.1, -3.0), Vector3(3, 0.2, 2))  # step 0.2m (lane x=0)
+	# ramp 20°: lane x=8, rises toward -Z
+	var ang := deg_to_rad(20.0)
+	add_box.call(Vector3(8, 0.68 - 0.5 * cos(ang), -4.0 - 0.5 * sin(ang)), Vector3(3, 1.0, 4.0), ang)
+	add_box.call(Vector3(-20, 0.95, 0), Vector3(3, 0.1, 3))  # low ceiling 0.9m (crouch test)
+	await physics_frame
+	await physics_frame
+	player.call("set_play_mode", 1)
+	var run := func(start: Vector3, yaw: float, action: String, secs: float) -> Array:
+		player.global_position = base + start
+		player.velocity = Vector3.ZERO
+		player.reset_physics_interpolation()
+		player.set("_yaw", yaw)
+		player.set("_body_logic_yaw", yaw)
+		await physics_frame
+		Input.action_press(action)
+		var path: Array = []
+		for i in int(secs * 60.0):
+			await physics_frame
+			path.append(player.global_position - base)
+		Input.action_release(action)
+		return path
+	# A) 斜 35° 撞墙：贴墙后仍沿 -X 方向滑动
+	var pa: Array = await run.call(Vector3(-8, 0.02, 0.0), deg_to_rad(35.0), "move_forward", 2.5)
+	var a_end: Vector3 = pa[pa.size() - 1]
+	var a_mid: Vector3 = pa[pa.size() - 31]
+	var slide_speed := (a_mid.x - a_end.x) / 0.5
+	print("validate: wall slide end=", a_end.snapped(Vector3.ONE * 0.01), " slide_speed=", snappedf(slide_speed, 0.01), " on_wall=", player.is_on_wall())
+	if a_end.z > -2.4 or slide_speed < 0.6:
+		push_error("validate: walking into a wall at an angle should slide along it")
+		return false
+	# B) 0.2m 台阶
+	var pb: Array = await run.call(Vector3(0, 0.02, 0.5), 0.0, "move_forward", 2.0)
+	var b_end: Vector3 = pb[pb.size() - 1]
+	print("validate: step end=", b_end.snapped(Vector3.ONE * 0.01))
+	if b_end.y < 0.17 or b_end.z > -2.5:
+		push_error("validate: should step up a 0.2m ledge and keep walking")
+		return false
+	# C) 20° 坡
+	var pc: Array = await run.call(Vector3(8, 0.02, 0.5), 0.0, "move_forward", 4.5)
+	var c_max := -1.0
+	for q in pc:
+		c_max = maxf(c_max, (q as Vector3).y)
+	print("validate: ramp max_y=", snappedf(c_max, 0.01), " end=", (pc[pc.size() - 1] as Vector3).snapped(Vector3.ONE * 0.01))
+	if c_max < 1.0:
+		push_error("validate: should walk up a 20° ramp")
+		return false
+	# D) 松键平滑减速（网页摩擦 6.4）：不是一帧停住，0.6s 内停稳
+	player.global_position = base + Vector3(20, 0.02, 10)
+	player.velocity = Vector3.ZERO
+	player.reset_physics_interpolation()
+	player.set("_yaw", 0.0)
+	Input.action_press("move_forward")
+	for i in 40:
+		await physics_frame
+	var v0 := Vector2(player.velocity.x, player.velocity.z).length()
+	Input.action_release("move_forward")
+	await physics_frame
+	await physics_frame
+	var v1 := Vector2(player.velocity.x, player.velocity.z).length()
+	for i in 36:
+		await physics_frame
+	var v2 := Vector2(player.velocity.x, player.velocity.z).length()
+	print("validate: decel v0=", snappedf(v0, 0.01), " after2f=", snappedf(v1, 0.01), " after0.6s=", snappedf(v2, 0.01))
+	if v0 < 1.5 or v1 < 0.5 or v2 > 0.06:
+		push_error("validate: release should decelerate smoothly then stop")
+		return false
+	# E) 低矮处：蹲进去后不能站起
+	player.global_position = base + Vector3(-20, 0.02, 3.0)
+	player.velocity = Vector3.ZERO
+	player.reset_physics_interpolation()
+	player.call("_set_stance", "crouch")
+	for i in 50:
+		await physics_frame
+	player.global_position = base + Vector3(-20, 0.02, 0.0)
+	player.reset_physics_interpolation()
+	await physics_frame
+	var stood := bool(player.call("_set_stance", "stand"))
+	print("validate: stand under 0.9m ceiling allowed=", stood, " stance=", player.call("get_stance"))
+	if stood:
+		push_error("validate: must not stand up under a low ceiling")
+		return false
+	player.global_position = base + Vector3(-20, 0.02, 4.0)
+	player.reset_physics_interpolation()
+	await physics_frame
+	if not bool(player.call("_set_stance", "stand")):
+		push_error("validate: should stand up in the open")
+		return false
+	for i in 50:
+		await physics_frame
+	arena.queue_free()
+	player.call("set_play_mode", 0)
+	print("validate: control physics OK (slide / step / ramp / decel / headroom)")
+	return true
+
+
+## 地图：切到城市大地图出生点能落地、可走；切回房间镜子显示；模式保持。
+func _check_maps(main: Node, player: CharacterBody3D) -> bool:
+	player.call("set_play_mode", 1)
+	await main.call("switch_map", "city", 0)
+	for i in 30:
+		await physics_frame
+	var on_floor := player.is_on_floor()
+	var p0 := player.global_position
+	Input.action_press("move_forward")
+	for i in 60:
+		await physics_frame
+	Input.action_release("move_forward")
+	var moved := Vector2(player.global_position.x - p0.x, player.global_position.z - p0.z).length()
+	print("validate: city spawn=", p0.snapped(Vector3.ONE * 0.01), " on_floor=", on_floor, " walked=", snappedf(moved, 0.01), " mode_control=", not bool(player.call("is_display_mode")))
+	if not on_floor or moved < 0.8 or bool(player.call("is_display_mode")) or main.get_node("RoomMirror").visible:
+		push_error("validate: city spawn should be on the ground, walkable, keep mode, no mirror")
+		return false
+	await main.call("switch_map", "room", 0)
+	await _frames(3)
+	if not main.get_node("RoomMirror").visible or not main.get_node("Room").visible:
+		push_error("validate: room should show the mirror again")
+		return false
+	player.call("set_play_mode", 0)
+	print("validate: maps OK")
+	return true
 
 
 ## 头发蒙皮采样：scalp = 头顶（静止 y>1.50），tips = 发尾（y<1.0）。

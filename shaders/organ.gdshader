@@ -15,10 +15,10 @@ uniform float wet = 0.45;
 uniform bool is_gut = false;
 uniform float organ_soft = 0.82;
 uniform float strike_k = 1.0;
-uniform float peri_time = 0.0;
 uniform float peri_amp = 0.3;
-uniform float peri_speed = 0.5;
 uniform float peri_on = 1.0;
+uniform float peri_waves = 1.55;  // 蠕动波数（沿肠管）
+uniform float peri_seg = 1.0;     // 分节收缩强度倍数
 
 float lobe(float frac, float width) {
 	float d = min(frac, 1.0 - frac);
@@ -26,25 +26,28 @@ float lobe(float frac, float width) {
 	return t * t * (3.0 - 2.0 * t);
 }
 
-float pulse(float along, float time, float amp, float speed) {
-	float n = 1.55;
-	float sp = 0.03 + speed * 0.2;
-	float p = fract(along * n - time * sp * n);
+// clk = 脚本里按速度积分的三个时钟：∫(0.03+0.2s)dt、∫(0.45+0.9s)dt、∫(0.25+0.5s)dt
+// （速度滑条实时调整时相位连续，不会跳变）
+uniform vec3 peri_clock = vec3(0.0);
+
+float pulse(float along, vec3 clk, float amp) {
+	float n = max(0.2, peri_waves);
+	float p = fract(along * n - clk.x * n);
 	float perist = lobe(p, 0.34);
-	float p2 = fract(along * 0.85 - time * sp * 0.55);
+	float p2 = fract(along * 0.85 - clk.x * 0.55);
 	float perist2 = lobe(p2, 0.42);
-	float haustra = 0.5 + 0.5 * sin(along * 12.0 * PI - time * (0.45 + speed * 0.9));
-	float mixv = 0.5 + 0.5 * sin(along * 7.0 * PI + time * (0.25 + speed * 0.5));
+	float haustra = 0.5 + 0.5 * sin(along * 12.0 * PI - clk.y);
+	float mixv = 0.5 + 0.5 * sin(along * 7.0 * PI + clk.z);
 	float hs = haustra * haustra * (3.0 - 2.0 * haustra);
 	float ms = mixv * mixv * (3.0 - 2.0 * mixv);
 	float seg = hs * 0.45 + ms * 0.25;
-	float shape = perist * 0.62 + perist2 * 0.28 + seg * 0.18;
+	float shape = perist * 0.62 + perist2 * 0.28 + seg * 0.18 * peri_seg;
 	return shape * (0.16 + amp * 0.42);
 }
 
 void vertex() {
 	if (is_gut && peri_on > 0.0) {
-		float k = pulse(CUSTOM0.x, peri_time, peri_amp, peri_speed) * peri_on;
+		float k = pulse(CUSTOM0.x, peri_clock, peri_amp) * peri_on;
 		VERTEX -= CUSTOM0.yzw * k;
 	}
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;

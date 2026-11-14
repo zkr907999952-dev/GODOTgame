@@ -110,6 +110,7 @@ func _run() -> void:
 	mirror = main.get_node("RoomMirror")
 	var body: Node3D = player.get_node("Body")
 	free_cam = Camera3D.new()
+	free_cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF  # 测试中逐帧手动摆放
 	main.add_child(free_cam)
 	var hud := main.get_node_or_null("HUD")
 	if hud:

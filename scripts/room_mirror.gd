@@ -61,6 +61,7 @@ void fragment() {
 func _ready() -> void:
 	# 在主相机（玩家 _physics_process / 输入）更新之后再算镜中相机。
 	process_priority = 1000
+	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF  # 镜中相机每帧 _process 摆放
 	_build()
 
 
@@ -73,6 +74,8 @@ func _build() -> void:
 	_viewport.gui_disable_input = true
 	_viewport.audio_listener_enable_3d = false
 	_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	# Viewport 默认显式开启物理插值（不继承父节点），镜中相机必须关闭，否则镜像滞后一帧/重影。
+	_viewport.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	_viewport.size = Vector2i(TEX_STEP * 4, TEX_STEP * 4)
 	add_child(_viewport)
 
@@ -103,6 +106,9 @@ func _build() -> void:
 
 func _process(_delta: float) -> void:
 	var cam := get_viewport().get_camera_3d() if is_visible_in_tree() else null
+	# 镜像相机按主相机的“当前”变换计算；主相机若开物理插值会落后一帧，导致镜像错位。
+	if cam != null and cam != _mirror_cam and cam.is_physics_interpolated():
+		cam.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	var ok := cam != null and cam != _mirror_cam and _update_mirror_camera(cam)
 	_set_active(ok)
 
