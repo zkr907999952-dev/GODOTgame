@@ -20,6 +20,7 @@ signal sfx(event: String, weapon_id: String)
 const WeaponDefScript = preload("res://scripts/weapons/weapon_def.gd")
 const ArmClips = preload("res://scripts/weapons/arm_clips.gd")
 const BallisticsScript = preload("res://scripts/weapons/ballistics.gd")
+const CasingSystemScript = preload("res://scripts/weapons/casing_system.gd")
 const WEAPON_DIR := "res://assets/weapons/"
 const FLASH_TEX := preload("res://assets/weapons/shared/muzzle_flash.png")
 const SHELLS_SCENE := preload("res://assets/weapons/shared/shells.scn")
@@ -36,6 +37,8 @@ var player: Node
 var camera: Camera3D
 var skeleton: Skeleton3D
 var ballistics: Node
+var casings: Node
+var _eject_q: Array = []
 
 var defs: Array = []  # WeaponDef，按 order 排序
 var ammo: Dictionary = {}  # id -> Vector2i(mag, reserve)
@@ -105,6 +108,12 @@ func setup(p: Node, cam: Camera3D, sk: Skeleton3D) -> void:
 	if p is CollisionObject3D:
 		var ex: Array[RID] = [(p as CollisionObject3D).get_rid()]
 		ballistics.exclude = ex
+	var host: Node = p.get_parent() if p and p.get_parent() else self
+	ballistics._host = host
+	casings = CasingSystemScript.new()
+	casings.name = "Casings"
+	add_child(casings)
+	casings.setup(host)
 	view = Node3D.new()
 	view.name = "WeaponView"
 	cam.add_child(view)
@@ -425,7 +434,7 @@ func _fire_once(w: WeaponDef) -> void:
 	for i in maxi(1, w.pellets):
 		var dir := _spread_dir(fwd, spread)
 		shot_fired.emit(origin, dir, current)
-		ballistics.fire_ray(origin, dir, w.range_m, current)
+		ballistics.fire_projectile(origin, dir, current, w)
 	fired.emit(current)
 	sfx.emit("fire", current)
 	if w.sfx_fire:
@@ -504,45 +513,41 @@ func _build_flash() -> void:
 
 
 func _eject_shell(w: WeaponDef) -> void:
-	var mesh: Mesh = _shell_meshes.get(w.shell)
-	if mesh == null or gun == null:
+	var delay := w.eject_delay if w.eject_delay > 0.0 else (0.32 if w.fire_mode == "pump" else 0.0)
+	if delay > 0.0:
+		_eject_q.append({"t": delay, "id": w.id})
+	else:
+		_do_eject(w)
+
+
+func _do_eject(w: WeaponDef) -> void:
+	if casings == null or w == null or gun == null:
 		return
-	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mi.top_level = true
-	view.add_child(mi)
-	var gx := gun.global_transform
-	mi.global_transform = Transform3D(gx.basis.orthonormalized(), gx * w.eject)
-	var right := gx.basis.z.normalized() * -1.0
-	var vel: Vector3 = right * randf_range(1.4, 2.0) + gx.basis.y.normalized() * randf_range(0.8, 1.3) + player.velocity
-	_shells.append({"n": mi, "v": vel, "t": 0.0, "spin": Vector3(randf_range(-20, 20), randf_range(-20, 20), randf_range(-20, 20))})
-	while _shells.size() > 16:
-		var o: Dictionary = _shells.pop_front()
-		if is_instance_valid(o["n"]):
-			(o["n"] as Node).queue_free()
+	var xf := Transform3D(gun.global_transform.basis.orthonormalized(), gun.global_transform * w.eject)
+	var vel: Vector3 = player.velocity if player else Vector3.ZERO
+	casings.call("eject", w.shell, xf, w.category, vel)
 
 
-func _step_shells(dt: float) -> void:
+func _step_ejects(dt: float) -> void:
+	if _eject_q.is_empty():
+		return
 	var keep: Array = []
-	for s in _shells:
-		var n: Node3D = s["n"]
-		if not is_instance_valid(n):
-			continue
-		s["t"] = float(s["t"]) + dt
-		if float(s["t"]) > 1.4:
-			n.queue_free()
-			continue
-		var v: Vector3 = s["v"]
-		v.y -= 9.8 * dt
-		s["v"] = v
-		n.global_position += v * dt
-		n.rotation += (s["spin"] as Vector3) * dt
-		keep.append(s)
-	_shells = keep
+	for e in _eject_q:
+		e["t"] = float(e["t"]) - dt
+		if float(e["t"]) <= 0.0:
+			var w: WeaponDef = get_def(str(e.get("id", "")))
+			if w:
+				_do_eject(w)
+		else:
+			keep.append(e)
+	_eject_q = keep
 
 
-# ------------------------------------------------------------------ arm clips
+func _step_shells(_dt: float) -> void:
+	# 旧的运动学抛壳已由 casing_system 物理模拟替代
+	pass
+
+
 func _play_clip(name: String, loop: bool, restart: bool = false) -> void:
 	if _clips == null or not _clips.has(name):
 		return
@@ -587,7 +592,7 @@ func _update_clip(delta: float) -> Dictionary:
 
 
 func _process(delta: float) -> void:
-	if player == null:
+	if player == null or view == null:
 		return
 	var active := bool(player.get("first_person")) and not bool(player.get("input_locked"))
 	hidden_by_mode = not active
@@ -601,6 +606,7 @@ func _process(delta: float) -> void:
 			camera.rotation = Vector3.ZERO
 		_restore_fov()
 		_step_shells(delta)
+		_step_ejects(delta)
 		if _ik_dirty:
 			if _ik_w > 0.0 and not _last_pose.is_empty():
 				_apply_ik(_last_pose, _ik_w)
@@ -631,6 +637,7 @@ func _process(delta: float) -> void:
 	var want_ads := ads and state == "ready" and not _sprinting()
 	_ads_k = move_toward(_ads_k, 1.0 if want_ads else 0.0, delta * 6.0)
 	_step_shells(delta)
+	_step_ejects(delta)
 	if _flash_t > 0.0:
 		_flash_t -= delta
 		# 至少显示一个渲染帧（低帧率时 0.05s 可能在同一帧内就过完）

@@ -59,6 +59,12 @@ var _all_mats: Array[ShaderMaterial] = []
 var _time: float = 0.0
 var _gut_exc: float = 0.0
 var _waves: Array = []  # {p: Vector3 (ab-local), t, force, range, rebound}
+## 弹道通道（ab-local）：{a, d, len, rad}
+var _ball_ch: Array = []
+const BALL_MAX := 4
+var _gut_aabb: AABB = AABB()
+var _uterus_aabb: AABB = AABB()
+var last_ballistic: Dictionary = {}
 var _drag_active: bool = false
 var _drag_grab: Vector3 = Vector3.ZERO
 var _drag_target: Vector3 = Vector3.ZERO
@@ -132,6 +138,7 @@ func setup(skel: Skeleton3D) -> bool:
 		var n: Array = meta["navel"]
 		_navel_rest = Vector3(n[0], n[1], n[2])
 	_fit_hit_ellipsoid()
+	_build_organ_aabbs()
 	_install_skin_xray()
 	if not _build_organs():
 		return false
@@ -469,6 +476,152 @@ func end_drag() -> void:
 
 
 ## R 键：清掉拖拽 / 打击形变（网页 resetSim 的腹部部分）。
+
+func _build_organ_aabbs() -> void:
+	_gut_aabb = _aabb_from_meta("guts")
+	_uterus_aabb = _aabb_from_meta("uterus")
+
+
+func _aabb_from_meta(key: String) -> AABB:
+	if not meta.has(key):
+		return AABB()
+	var d: Dictionary = meta[key]
+	var mn: Array = d["min"]
+	var mx: Array = d["max"]
+	var a := Vector3(float(mn[0]), float(mn[1]), float(mn[2])) - _navel_rest
+	var b := Vector3(float(mx[0]), float(mx[1]), float(mx[2])) - _navel_rest
+	return AABB(a, b - a).grow(0.008)
+
+
+func _seg_aabb(o: Vector3, d: Vector3, length: float, box: AABB) -> bool:
+	if box.size == Vector3.ZERO:
+		return false
+	# 标准 slab
+	var inv := Vector3(
+		1.0 / d.x if absf(d.x) > 1e-8 else 1e16,
+		1.0 / d.y if absf(d.y) > 1e-8 else 1e16,
+		1.0 / d.z if absf(d.z) > 1e-8 else 1e16)
+	var t0 := (box.position - o) * inv
+	var t1 := (box.position + box.size - o) * inv
+	var tmin := maxf(0.0, maxf(minf(t0.x, t1.x), maxf(minf(t0.y, t1.y), minf(t0.z, t1.z))))
+	var tmax := minf(length, minf(maxf(t0.x, t1.x), minf(maxf(t0.y, t1.y), maxf(t0.z, t1.z))))
+	return tmax >= tmin
+
+
+## 查询弹道是否穿过腹部 / 肠道 / 子宫（不改状态）。origin、dir 为世界坐标。
+func ballistic_query(origin: Vector3, dir: Vector3, par: Dictionary = {}) -> Dictionary:
+	_update_frame()
+	var d := dir.normalized()
+	var inv := _frame.affine_inverse()
+	var o_ab: Vector3 = inv * origin
+	var d_ab: Vector3 = (inv.basis * d).normalized()
+	var seg := _ray_ellipsoid_ab(o_ab, d_ab)
+	var out := {
+		"hit": false, "gut": false, "uterus": false, "overpen": false,
+		"entry": null, "exit": null, "thickness": 0.0,
+		"entry_ab": Vector3.ZERO, "exit_ab": Vector3.ZERO, "dir_ab": d_ab,
+	}
+	if seg.is_empty():
+		# 没打中腹部椭球：仍报告未击中软组织（身体圆柱由弹道层判定）
+		last_ballistic = out
+		return out
+	var t0: float = seg["t0"]
+	var t1: float = seg["t1"]
+	var entry_ab: Vector3 = o_ab + d_ab * t0
+	var exit_ab: Vector3 = o_ab + d_ab * t1
+	var thick := t1 - t0
+	out["hit"] = true
+	out["entry"] = _frame * entry_ab
+	out["exit"] = _frame * exit_ab
+	out["entry_ab"] = entry_ab
+	out["exit_ab"] = exit_ab
+	out["thickness"] = thick
+	out["normal_in"] = (_frame.basis * _ellipsoid_normal(entry_ab)).normalized()
+	out["normal_out"] = -(_frame.basis * _ellipsoid_normal(exit_ab)).normalized()
+	var path_len := thick + 0.02
+	out["gut"] = _seg_aabb(entry_ab, d_ab, path_len, _gut_aabb)
+	out["uterus"] = _seg_aabb(entry_ab, d_ab, path_len, _uterus_aabb)
+	# 贯穿：步枪更容易；手枪看体厚；霰弹丸通常留下
+	var over := float(par.get("overpen", 0.4))
+	var cat := str(par.get("category", ""))
+	if cat == "shotgun":
+		out["overpen"] = thick < 0.10 and over > 0.2
+	else:
+		out["overpen"] = over >= clampf(thick / 0.32, 0.25, 1.15)
+	last_ballistic = out
+	return out
+
+
+func _ray_ellipsoid_ab(o: Vector3, d: Vector3) -> Dictionary:
+	var on := (o - _ellipsoid_c) / _ellipsoid_r
+	var dn := d / _ellipsoid_r
+	var a := dn.dot(dn)
+	var b := 2.0 * on.dot(dn)
+	var c := on.dot(on) - 1.0
+	var disc := b * b - 4.0 * a * c
+	if disc < 0.0 or a < 1e-9:
+		return {}
+	var sq := sqrt(disc)
+	var t0 := (-b - sq) / (2.0 * a)
+	var t1 := (-b + sq) / (2.0 * a)
+	if t1 < t0:
+		var tmp := t0
+		t0 = t1
+		t1 = tmp
+	if t1 < 0.0:
+		return {}
+	if t0 < 0.0:
+		t0 = 0.0
+	return {"t0": t0, "t1": t1}
+
+
+func _ellipsoid_normal(p_ab: Vector3) -> Vector3:
+	var q := (p_ab - _ellipsoid_c) / _ellipsoid_r
+	return (q / _ellipsoid_r).normalized()
+
+
+## 施加第一层弹道毁伤：创口贴花、通道、冲击波、肠道/子宫发红与撕裂。
+func apply_ballistic_hit(origin: Vector3, dir: Vector3, par: Dictionary = {}, pre: Dictionary = {}) -> Dictionary:
+	var info: Dictionary = pre if not pre.is_empty() else ballistic_query(origin, dir, par)
+	if not bool(info.get("hit", false)):
+		# 打在身上但不在腹部：仍给一次弱冲击（若有世界命中点）
+		if origin != Vector3.ZERO:
+			strike_at(origin, clampf(float(par.get("impulse", 0.3)) * 0.45, 0.12, 0.4), 0.16)
+		last_ballistic = info
+		return info
+	var energy := float(par.get("energy", 0.5))
+	var impulse := float(par.get("impulse", 0.5))
+	var entry_ab: Vector3 = info["entry_ab"]
+	var exit_ab: Vector3 = info["exit_ab"]
+	var d_ab: Vector3 = info["dir_ab"]
+	var thick: float = info["thickness"]
+	var rad := clampf(0.0045 + energy * 0.007, 0.005, 0.014)
+	var wsize := clampf(0.012 + energy * 0.018, 0.014, 0.032)
+	var n_in: Vector3 = info.get("normal_in", -d_ab)
+	tools.add_wound(entry_ab, n_in, wsize, wsize * 1.15, d_ab)
+	if bool(info.get("overpen", false)):
+		var n_out: Vector3 = info.get("normal_out", d_ab)
+		tools.add_wound(exit_ab, n_out, wsize * 1.15, wsize * 1.3, d_ab)
+	_ball_ch.append({"a": entry_ab, "d": d_ab, "len": thick, "rad": rad})
+	while _ball_ch.size() > BALL_MAX:
+		_ball_ch.pop_front()
+	strike_at(info["entry"], clampf(impulse, 0.16, 1.0), clampf(0.14 + impulse * 0.16, 0.14, 0.36))
+	# 沿通道再推一下脏器（步枪更明显）
+	if bool(info.get("gut", false)) or bool(info.get("uterus", false)):
+		var mid: Vector3 = info["entry"].lerp(info["exit"], 0.5)
+		strike_at(mid, clampf(impulse * 0.7, 0.14, 0.85), clampf(0.1 + impulse * 0.1, 0.1, 0.28))
+		var dmg := clampf(0.28 + energy * 0.55, 0.3, 1.0)
+		var steps := maxi(2, int(thick / 0.03))
+		for i in steps + 1:
+			var t := float(i) / float(steps)
+			var p: Vector3 = entry_ab.lerp(exit_ab, t)
+			var hit_o := (bool(info["gut"]) and _gut_aabb.grow(0.01).has_point(p)) or (bool(info["uterus"]) and _uterus_aabb.grow(0.01).has_point(p))
+			if hit_o:
+				tools.add_damage(p, dmg)
+	last_ballistic = info
+	return info
+
+
 func reset_interaction() -> void:
 	_drag_active = false
 	_drag_off = Vector3.ZERO
@@ -478,6 +631,8 @@ func reset_interaction() -> void:
 	tools.fist_reset()
 	tools.release_entry()
 	tools.clear_marks()
+	_ball_ch.clear()
+	last_ballistic = {}
 	gut_health = 0.0
 	navel_insert = 0.0
 	navel_live = 0.0
@@ -742,6 +897,20 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("strike_par", spar)
 		m.set_shader_parameter("drag_grab", _drag_grab)
 		m.set_shader_parameter("drag_off", _drag_off)
+		var ba: Array = []
+		var bb: Array = []
+		for i in BALL_MAX:
+			if i < _ball_ch.size():
+				var ch: Dictionary = _ball_ch[i]
+				var a: Vector3 = ch["a"]
+				var d: Vector3 = ch["d"]
+				ba.append(Vector4(a.x, a.y, a.z, float(ch["rad"])))
+				bb.append(Vector4(d.x, d.y, d.z, float(ch["len"])))
+			else:
+				ba.append(Vector4.ZERO)
+				bb.append(Vector4.ZERO)
+		m.set_shader_parameter("ball_a", ba)
+		m.set_shader_parameter("ball_b", bb)
 	var sq := tools.squeeze_target()
 	for m in _all_mats:
 		if sq.is_empty():

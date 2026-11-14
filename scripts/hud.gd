@@ -76,6 +76,9 @@ var touch_ui: bool = false
 var compact: bool = false
 var _touch: Control
 var _chk_touch: CheckButton
+var _chk_bullet_cam: CheckButton
+var _cam_chance_slider: HSlider
+var _cam_chance_value: Label
 var _btn_sheet_close: Button
 var _safe: Vector4 = Vector4.ZERO  # 逻辑像素：左 上 右 下
 var _debug_safe: Variant = null
@@ -85,6 +88,7 @@ var _mobile_scale: float = 0.0  # > 0：按 DPI 设置界面缩放（手机）
 func setup(player: Node) -> void:
 	_player = player
 	_bind_weapons()
+	_sync_bullet_cam_ui()
 	if _touch:
 		_touch.call("setup", player, self, get_parent())
 		set_touch_ui(is_touch_device())
@@ -582,6 +586,32 @@ func _build_settings_panel() -> PanelContainer:
 	_sens_slider.value_changed.connect(_on_sens_changed)
 	v.add_child(_sens_slider)
 
+	_chk_bullet_cam = CheckButton.new()
+	_chk_bullet_cam.text = "弹道特写"
+	_chk_bullet_cam.button_pressed = true
+	_chk_bullet_cam.toggled.connect(_on_bullet_cam_toggled)
+	v.add_child(_chk_bullet_cam)
+
+	var ch_row := HBoxContainer.new()
+	var ch_l := Label.new()
+	ch_l.text = "特写概率"
+	ch_l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ch_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	ch_row.add_child(ch_l)
+	_cam_chance_value = Label.new()
+	_cam_chance_value.text = "20%"
+	_cam_chance_value.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	ch_row.add_child(_cam_chance_value)
+	v.add_child(ch_row)
+	_cam_chance_slider = HSlider.new()
+	_cam_chance_slider.min_value = 0.0
+	_cam_chance_slider.max_value = 100.0
+	_cam_chance_slider.step = 1.0
+	_cam_chance_slider.value = 20.0
+	_cam_chance_slider.custom_minimum_size = Vector2(220, 18)
+	_cam_chance_slider.value_changed.connect(_on_bullet_cam_chance)
+	v.add_child(_cam_chance_slider)
+
 	var help_chk := CheckButton.new()
 	help_chk.text = "显示本面板说明"
 	help_chk.button_pressed = true
@@ -589,7 +619,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）与鼠标灵敏度。Esc 关闭面板，H 隐藏界面。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标灵敏度，以及弹道特写（默认开，肠道/子宫被命中时按概率慢动作跟随）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)
@@ -1656,3 +1686,34 @@ func is_wheel_open() -> bool:
 func weapon_wheel_point(p: Vector2) -> void:
 	if wheel:
 		wheel.call("point_at", p)
+
+
+func _settings() -> Node:
+	var g := get_parent()
+	return g.get_node_or_null("GameSettings") if g else null
+
+
+func _sync_bullet_cam_ui() -> void:
+	var s := _settings()
+	if s == null:
+		return
+	if _chk_bullet_cam:
+		_chk_bullet_cam.set_pressed_no_signal(bool(s.get("bullet_cam_enabled")))
+	if _cam_chance_slider:
+		_cam_chance_slider.set_value_no_signal(float(s.get("bullet_cam_chance")) * 100.0)
+	if _cam_chance_value:
+		_cam_chance_value.text = "%d%%" % int(round(float(s.get("bullet_cam_chance")) * 100.0))
+
+
+func _on_bullet_cam_toggled(on: bool) -> void:
+	var s := _settings()
+	if s:
+		s.call("set_bullet_cam_enabled", on)
+
+
+func _on_bullet_cam_chance(v: float) -> void:
+	if _cam_chance_value:
+		_cam_chance_value.text = "%d%%" % int(round(v))
+	var s := _settings()
+	if s:
+		s.call("set_bullet_cam_chance", v / 100.0)

@@ -56,7 +56,7 @@ void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
 	v_l0 = l;
-	vec3 off = strike_offset(l) * strike_k + drag_offset(l) * organ_soft + dent_offset(l) * organ_soft;
+	vec3 off = strike_offset(l) * strike_k + drag_offset(l) * organ_soft + dent_offset(l) * organ_soft + ball_tear(l);
 	if (is_gut) off += rod_offset(l + off);
 	wp += ab_dir_to_world(off);
 	VERTEX = (inverse(MODEL_MATRIX) * vec4(wp, 1.0)).xyz;
@@ -75,6 +75,7 @@ void fragment() {
 		vec3 dd = v_l0 - dmg[i].xyz;
 		hurt = max(hurt, dmg[i].w * exp(-dot(dd, dd) / (0.03 * 0.03)));
 	}
+	hurt = max(hurt, ball_hurt(v_l0) * 0.9);
 	c *= vec3(1.0, 1.0 - hurt * 0.88, 1.0 - hurt * 0.9);
 	if (!FRONT_FACING) c *= 0.55;
 	ALBEDO = c;

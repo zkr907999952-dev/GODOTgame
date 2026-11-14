@@ -108,7 +108,9 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 - 每把武器一个 `WeaponDef` 资源（`assets/weapons/<id>/<id>.tres`）：射速、弹匣 / 备弹、后坐力、散布、换弹时间、枪口位置等全部数据驱动；新增武器只需放一个新目录 + `.tres`。
 - 手：素材的手臂网格**没有导入**；素材手臂动画被烘焙成「相机空间的手腕位置 / 手掌朝向 / 手指弯曲」，运行时用 IK 驱动**角色自己的**手臂和手指骨骼。
 - 只在角色控制（第一人称）模式下可用，展示模式隐藏。触屏：「武器」按住拖到轮盘格子松手选枪，持枪时出现「开火」（按住，可同时拖动转视角）/「换弹」按钮。
-- 弹道：命中检测为屏幕中心射线（`ballistics.gd`，带调试弹孔），并发出 `shot_fired(origin, dir, weapon_id)` 信号，留作后续完善。素材没有音效，射击 / 换弹 / 空枪声只留了钩子（`WeaponDef.sfx_*` + `sfx` 信号）。
+- 弹道：真实弹头网格按速度 / 重力 / 阻力飞行（手枪下坠更明显，步枪更平直，霰弹 8 粒），命中世界留下弹痕；击中人体有入射/出射创口、弹道通道，肠道和子宫被击中会发红并受冲击。详见 `docs/weapons.md`。信号 `shot_fired` / `hit` / `body_hit` / `organ_path` 留给后续毁伤系统（规划见 `docs/wound_system_plan.md`）。
+- 弹壳：物理刚体落地，按武器抛对应型号，10 秒后消失，最多 40 个；霰弹在泵动时抛壳。
+- 弹道特写：设置里可开关（默认开）并调整概率（默认 20%）。弹道穿过肠道或子宫时有机会慢动作跟随，类似狙击精英；点击或触摸可跳过。素材没有音效，射击 / 换弹 / 空枪声只留了钩子（`WeaponDef.sfx_*` + `sfx` 信号）。
 - 素材许可：个人和商业项目都可免费使用，不要求署名（作者希望注明），**不得转售素材**。仓库只放转换后的游戏用资源，原始包不入库。致谢：Kuptchi。
 
 ## 界面（HUD）
@@ -221,9 +223,11 @@ scripts/map_view.gd（俯视地图相机 / 标记）
 scripts/game_root.gd（地图切换 + 按键路由 KEYMAP）
 scripts/hud.gd
 scripts/weapons/weapon_system.gd（武器状态机 / 开火 / 换弹 / 后坐 / 枪口火焰 / 手部 IK）
-scripts/weapons/weapon_def.gd（WeaponDef 资源）, arm_clips.gd（烘焙手部动作采样）, ballistics.gd（射线命中占位）
+scripts/weapons/weapon_def.gd（WeaponDef 资源）, arm_clips.gd（烘焙手部动作采样）, ballistics.gd（弹头飞行）, casing_system.gd（物理弹壳）, bullet_cam.gd（弹道特写）
+scripts/game_settings.gd（设置持久化，含弹道特写开关 / 概率）
 scripts/ui/weapon_wheel.gd（Q 轮盘）, weapon_ui.gd（武器菜单 + 弹药 HUD）
 scripts/tests/weapons_check.gd（武器自检，headless）
+scripts/tests/ballistics_check.gd（弹壳 / 弹道 / 毁伤 / 特写自检，headless）
 assets/weapons/<id>/（网格 .scn、贴图、剪影图标、烘焙手部动作 _arms.res、定义 .tres）, assets/weapons/shared/（枪口火焰、弹壳）
 scripts/validate_headless.gd
 scripts/room_mirror.gd
@@ -263,5 +267,6 @@ tools/bake_tifa_skinned.py
 - 房间镜子为 SubViewport 实时平面镜（镜子 SubViewport 关闭物理插值，否则移动时镜像滞后一帧）：只渲染屏幕上可见的镜面区域，分辨率按屏幕像素密度自适应（上限 2048）；相机在镜后或镜子不在视野内时停止渲染，城市地图下隐藏。渲染自检：`xvfb-run -a godot --path . -s res://scripts/tests/mirror_check.gd`（截图输出到 user://mirror_check，或用环境变量 MIRROR_CHECK_OUT 指定）。
 - 房间部分材质的法线贴图 UV 与基础色不一致时，Godot 会忽略法线 UV（引擎限制，有警告）。
 - 城市 GLB 已从网页版 meshopt 解压；若从网页重新拷贝 `city.glb`，需再跑解压脚本后再导入。
+- 弹道与毁伤：第一层已可用（创口、通道、冲击、肠道/子宫发红），完整的内脏状态机、出血和永久空腔见 `docs/wound_system_plan.md`，本轮未做断肢或血液流体。特写是电影速度跟随，不是按真实 800 m/s 放慢到能看清的物理时间。
 - 武器：素材手臂比我们角色前伸，视模型按武器缩放（`view_scale` 0.8）并后移，左手够不到时沿枪管往回滑、允许肩胛前伸和手臂最多拉长 18%，所以握把位置和素材不完全一致；冲锋枪左手是素材的托举姿势。素材没有空仓换弹动画（空仓换弹 = 换弹动画放慢 1.3×，手枪有空仓挂机）、没有音效、没有狙击枪 / 近战。弹道只是射线 + 调试弹孔，伤害未接入。
 

@@ -56,3 +56,14 @@ class_name WeaponDef
 @export var sfx_fire: AudioStream
 @export var sfx_reload: AudioStream
 @export var sfx_dry: AudioStream
+
+## 弹道（0 = 用类别默认值，见 ballistics.gd BALL）
+@export var muzzle_velocity: float = 0.0
+@export var drag: float = 0.0
+@export var projectile: String = ""
+## 冲击威力 0..1，穿透倾向 0..1（步枪高、手枪中、霰弹丸低）
+@export var impact: float = 0.0
+@export var penetration: float = 0.0
+## 霰弹泵动抛壳延迟（秒）；0 = 开火立刻抛
+@export var eject_delay: float = 0.0
+

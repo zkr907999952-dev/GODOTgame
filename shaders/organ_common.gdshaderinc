@@ -105,3 +105,61 @@ vec3 dent_offset(vec3 p) {
 	vec3 d = p - dent.xyz;
 	return dent_off * exp(-dot(d, d) / (dent.w * dent.w));
 }
+
+// 弹道通道（最多 4 条）：ball_a.xyz = 入射点(ab-local)，w = 半径；ball_b.xyz = 方向，w = 长度（<=0 关闭）
+uniform vec4 ball_a[4];
+uniform vec4 ball_b[4];
+
+float ball_dist(vec3 l, int i, out float t, out vec3 radial) {
+	vec3 a = ball_a[i].xyz;
+	vec3 d = ball_b[i].xyz;
+	float len = ball_b[i].w;
+	vec3 p = l - a;
+	t = clamp(dot(p, d), 0.0, len);
+	radial = p - d * t;
+	return length(radial);
+}
+
+float ball_wound(vec3 l) {
+	float h = 0.0;
+	for (int i = 0; i < 4; i++) {
+		if (ball_b[i].w <= 0.0) continue;
+		float t;
+		vec3 radial;
+		float dist = ball_dist(l, i, t, radial);
+		float rad = max(ball_a[i].w, 0.0035);
+		h = max(h, 1.0 - smoothstep(rad * 0.4, rad * 1.05, dist));
+		float te = length(l - ball_a[i].xyz);
+		float tx = length(l - (ball_a[i].xyz + ball_b[i].xyz * ball_b[i].w));
+		h = max(h, 1.0 - smoothstep(rad * 0.7, rad * 1.7, min(te, tx)));
+	}
+	return clamp(h, 0.0, 1.0);
+}
+
+vec3 ball_tear(vec3 l) {
+	vec3 o = vec3(0.0);
+	for (int i = 0; i < 4; i++) {
+		if (ball_b[i].w <= 0.0) continue;
+		float t;
+		vec3 radial;
+		float dist = ball_dist(l, i, t, radial);
+		float rad = max(ball_a[i].w, 0.004);
+		float k = exp(-dist * dist / (rad * rad * 2.8)) * rad * 0.85;
+		if (dist > 1e-5) o += (radial / dist) * k;
+	}
+	return o;
+}
+
+float ball_hurt(vec3 l) {
+	float h = 0.0;
+	for (int i = 0; i < 4; i++) {
+		if (ball_b[i].w <= 0.0) continue;
+		float t;
+		vec3 radial;
+		float dist = ball_dist(l, i, t, radial);
+		float rad = max(ball_a[i].w * 2.2, 0.012);
+		h = max(h, exp(-dist * dist / (rad * rad)));
+	}
+	return h;
+}
+

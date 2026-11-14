@@ -9,6 +9,8 @@ extends Node3D
 const MapViewScript = preload("res://scripts/map_view.gd")
 const LightingRigScript = preload("res://scripts/lighting_rig.gd")
 const CloneDollScript = preload("res://scripts/clone_doll.gd")
+const GameSettingsScript = preload("res://scripts/game_settings.gd")
+const BulletCamScript = preload("res://scripts/weapons/bullet_cam.gd")
 ## 分身上限（每个分身 = 一套蒙皮网格 + 脏器 + 物理；共享网格 / 贴图资源）
 const CLONE_MAX := 8
 
@@ -62,6 +64,8 @@ var map_view: Node3D
 var _overhead_preview: bool = false
 var _busy: bool = false
 var _clones_root: Node3D
+var settings: Node
+var bullet_cam: Node
 
 
 func _ready() -> void:
@@ -74,9 +78,34 @@ func _ready() -> void:
 	LightingRigScript.tune_room_shadows(_room)
 	_apply_map_visibility("room")
 	_place_player(ROOM_SPAWN, ROOM_SPAWN_YAW)
+	settings = GameSettingsScript.new()
+	settings.name = "GameSettings"
+	add_child(settings)
+	bullet_cam = BulletCamScript.new()
+	bullet_cam.name = "BulletCam"
+	add_child(bullet_cam)
 	if _hud and _hud.has_method("setup"):
 		_hud.call("setup", _player)
+	call_deferred("_bind_ballistics")
 	print("game_root: ready — Tab 模式 · WASD/Shift/空格 · Ctrl/C 蹲 · Z 匍匐 · M 地图 · H 界面 · X 透视")
+
+
+func _bind_ballistics() -> void:
+	if bullet_cam and bullet_cam.has_method("setup"):
+		bullet_cam.call("setup", _player, settings)
+	if _player == null or not _player.has_method("get_weapons"):
+		return
+	var ws: Node = _player.call("get_weapons")
+	if ws == null:
+		return
+	var bal: Node = ws.get("ballistics")
+	if bal and not bal.is_connected("organ_path", _on_organ_path):
+		bal.connect("organ_path", _on_organ_path)
+
+
+func _on_organ_path(info: Dictionary) -> void:
+	if bullet_cam:
+		bullet_cam.call("consider", info, info.get("projectile", {}))
 
 
 # ------------------------------------------------------------------ input

@@ -18,6 +18,19 @@ var organs: Node
 
 
 func _ready() -> void:
+	add_to_group("wound_body")
+	var hit := StaticBody3D.new()
+	hit.name = "BodyHit"
+	hit.collision_layer = 2
+	hit.collision_mask = 0
+	var cs := CollisionShape3D.new()
+	var cyl := CylinderShape3D.new()
+	cyl.radius = 0.3
+	cyl.height = 1.64
+	cs.shape = cyl
+	cs.position = Vector3(0, 0.82, 0)
+	hit.add_child(cs)
+	add_child(hit)
 	body = BODY_SCENE.instantiate() as Node3D
 	body.name = "Body"
 	add_child(body)

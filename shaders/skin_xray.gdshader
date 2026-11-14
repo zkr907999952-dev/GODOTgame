@@ -9,6 +9,11 @@ void fragment() {
 	if (fp_clipped(v_wp, CAMERA_VISIBLE_LAYERS)) discard;
 	float hole = xray_hole(v_ab);
 	if (hole > 0.07) discard;
+	float bw = ball_wound(v_ab);
+	if (bw > 0.55) discard;
 	skin_surface(UV, FRONT_FACING, ALBEDO, METALLIC, ROUGHNESS, SPECULAR, AO, NORMAL_MAP, NORMAL_MAP_DEPTH);
+	if (bw > 0.12) {
+		ALBEDO = mix(ALBEDO, cavity_color, smoothstep(0.12, 0.55, bw));
+	}
 	AO_LIGHT_AFFECT = 0.0;
 }

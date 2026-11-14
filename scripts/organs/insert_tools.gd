@@ -467,10 +467,17 @@ func _find_exit() -> Variant:
 	return null
 
 
-func _add_wound(p: Vector3, n: Vector3, w: float, h: float) -> void:
-	wounds.append({"p": p, "n": n.normalized(), "w": w, "h": h, "tile": randi() % 4, "twist": randf_range(-0.25, 0.25), "dir": blade_dir})
+func add_wound(p: Vector3, n: Vector3, w: float, h: float, dir: Vector3 = Vector3.ZERO) -> void:
+	var d := dir if dir.length_squared() > 1e-8 else blade_dir
+	if d.length_squared() < 1e-8:
+		d = Vector3(0, 0, 1)
+	wounds.append({"p": p, "n": n.normalized(), "w": w, "h": h, "tile": randi() % 4, "twist": randf_range(-0.25, 0.25), "dir": d})
 	while wounds.size() > MAX_WOUNDS:
 		wounds.pop_front()
+
+
+func _add_wound(p: Vector3, n: Vector3, w: float, h: float) -> void:
+	add_wound(p, n, w, h, blade_dir)
 
 
 ## 网页 GutHealth.hit 的简化：附近已有伤痕就加深，否则新加一个点。

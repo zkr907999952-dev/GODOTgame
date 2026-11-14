@@ -147,6 +147,7 @@ var _fill_light: OmniLight3D
 
 
 func _ready() -> void:
+	add_to_group("wound_body")
 	_default_yaw = _yaw
 	_default_pitch = _pitch
 	_default_cam_dist = camera_distance
