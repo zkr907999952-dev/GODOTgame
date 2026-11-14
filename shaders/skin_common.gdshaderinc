@@ -104,11 +104,60 @@ vec3 fist_offset(vec3 l) {
 	return o;
 }
 
+// 肚脐形变（网页 navel-morph.ts applyNavelMorph）：杏仁形开口向内凹陷成管，开口外 0.32 圈渐隐。
+// navel_m = (hx, hy, D, cap)，navel_s = (squeeze, planeZ)，均为 ab-local（原点 = 肚脐）
+uniform float navel_on = 0.0;
+uniform vec4 navel_m = vec4(0.0);
+uniform vec2 navel_s = vec2(0.0, 0.006);
+
+float almond_u(float dx, float dy, float hx, float hy) {
+	float ny = dy / max(1e-6, hy);
+	float point = ny >= 0.0 ? 0.58 : 0.34;
+	float pinch = max(0.16, 1.0 - point * ny * ny);
+	return length(vec2(dx / max(1e-6, hx * pinch), ny));
+}
+
+vec3 navel_offset(vec3 l) {
+	if (navel_on <= 0.0) return vec3(0.0);
+	float D = navel_m.z;
+	float sq = navel_s.x;
+	float pz = navel_s.y;
+	if (D < 0.008 * 0.092 && sq < 0.008) return vec3(0.0);
+	if (l.z < pz - 0.05 || length(l.xy) > 0.052) return vec3(0.0);
+	float u = almond_u(l.x, l.y, navel_m.x, navel_m.y);
+	if (u > 1.32) return vec3(0.0);
+	float cap = navel_m.w;
+	float target_u;
+	float along;
+	if (u <= 1.0) {
+		if (u < 0.2) {
+			float th = (u / 0.2) * PI * 0.5;
+			target_u = sin(th);
+			along = D - cap * (1.0 - cos(th));
+		} else {
+			target_u = 1.0;
+			along = (D - cap) * (1.0 - (u - 0.2) / 0.8);
+		}
+	} else {
+		float f = 1.0 - (u - 1.0) / 0.32;
+		float s = f * f * (3.0 - 2.0 * f);
+		return vec3(0.0, 0.0, (pz - l.z) * s * 0.16);
+	}
+	if (u < 1e-4) return vec3(-l.x, -l.y, pz - D - l.z);
+	float k = target_u / u;
+	vec2 t = l.xy * k;
+	if (sq > 0.001 && u > 0.12 && u < 1.18) {
+		float pin = sq * 0.58 * sin(PI * min(1.0, u / 1.05));
+		t *= (1.0 - pin);
+	}
+	return vec3(t - l.xy, pz - along - l.z);
+}
+
 void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
 	float m = belly_mask(l);
-	vec3 off = (strike_offset(l) * skin_strike_k + drag_offset(l) * skin_drag_k + dent_offset(l)) * m + fist_offset(l);
+	vec3 off = (strike_offset(l) * skin_strike_k + drag_offset(l) * skin_drag_k + dent_offset(l)) * m + fist_offset(l) + navel_offset(l);
 	l += off;
 	wp += ab_dir_to_world(off);
 	VERTEX = (inverse(MODEL_MATRIX) * vec4(wp, 1.0)).xyz;

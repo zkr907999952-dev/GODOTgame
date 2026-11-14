@@ -75,8 +75,14 @@ func _physics_process(delta: float) -> void:
 	_sync_from_source()
 	var sec := get_secondary()
 	var cam := get_viewport().get_camera_3d()
+	var navel_t: float = organs.call("navel_pose_t") if organs else -1.0
 	if sec and cam:
 		sec.call("clear_body_look")
-		sec.call("set_gaze_target", cam.global_position)
+		if navel_t >= 0.0:
+			sec.call("clear_gaze")
+		else:
+			sec.call("set_gaze_target", cam.global_position)
 	if loco:
+		loco.set("navel_t", navel_t)
+		loco.set("navel_stir", organs.get("navel_stir_off") if organs else Vector2.ZERO)
 		loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, delta, 1.65)

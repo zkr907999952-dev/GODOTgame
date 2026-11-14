@@ -481,9 +481,154 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 	last_clip_name = clip_name
 	loco_was_moving = active
 
+	_apply_navel_pose()
+
 	# Secondary: hair Verlet + blink + full breath (after loco pose)
 	if secondary != null:
 		secondary.update(delta, sprint)
+
+
+# ------------------------------------------------------------------ 插肚脐（网页 pose "navelPoke"）
+## 网页 soft-skeleton setPose("navelPoke") + applyNavelFingerInsert：右手食指从肚脐前 ~5cm（park）
+## 插到 ~5cm 深（ins），只用肩 / 肘 / 腕 / 指根 FK；手势 "point"（中 / 无名 / 小指弯曲）。
+const NAVEL_PARK := {
+	"R_Shoulder_a": Vector3(-0.232, 0.327, -0.098),
+	"R_UpperArm_a": Vector3(-1.12, -0.726, 0.367),
+	"R_Forearm_a": Vector3(1.07, -0.431, 0.617),
+	"R_Hand_a": Vector3(1.096, -0.72, 0.438),
+	"R_Index_a": Vector3(0.413, -0.363, -0.009),
+}
+const NAVEL_INS := {
+	"R_Shoulder_a": Vector3(-0.232, 0.328, -0.108),
+	"R_UpperArm_a": Vector3(-0.989, -0.732, 0.443),
+	"R_Forearm_a": Vector3(1.415, -0.438, 0.791),
+	"R_Hand_a": Vector3(0.792, -0.614, 0.244),
+	"R_Index_a": Vector3(0.306, -0.281, -0.044),
+}
+const NAVEL_TORSO := ["C_Spine_a", "C_Spine_b", "C_Spine_c", "C_Spine_d"]
+const NAVEL_HEAD := {"C_Neck_a": Vector3(0.2, 0.03, 0.0), "C_Head_a": Vector3(0.14, 0.05, 0.0)}
+## 插入量 0..1（< 0 = 关闭姿势）与搅动偏移（网页 stirX / stirY）
+var navel_t: float = -1.0
+var navel_stir: Vector2 = Vector2.ZERO
+var _navel_was_on: bool = false
+var _point_q: Dictionary = {}  # bone → soft-space quat（右手 point 手势）
+
+
+func _set_soft_any(name: String, soft_q: Quaternion) -> void:
+	var i := skeleton.find_bone(name)
+	if i < 0:
+		return
+	var rest_q: Quaternion = rest_local_q.get(name, Quaternion.IDENTITY)
+	var parent := skeleton.get_bone_parent(i)
+	var rest_w_p := Quaternion.IDENTITY
+	if parent >= 0:
+		rest_w_p = rest_world_q.get(skeleton.get_bone_name(parent), Quaternion.IDENTITY)
+	skeleton.set_bone_pose_rotation(i, (rest_w_p.inverse() * soft_q * rest_w_p) * rest_q)
+
+
+func _reset_bone(name: String) -> void:
+	var i := skeleton.find_bone(name)
+	if i >= 0:
+		skeleton.set_bone_pose_rotation(i, rest_local_q.get(name, Quaternion.IDENTITY))
+
+
+func _apply_navel_pose() -> void:
+	if navel_t < 0.0:
+		if _navel_was_on:
+			_navel_was_on = false
+			for n in ["C_Head_a", "R_Index_a"] + _point_q.keys():
+				_reset_bone(n)
+		return
+	_navel_was_on = true
+	if _point_q.is_empty():
+		_point_q = _build_point_gesture()
+	var k := clampf(navel_t, 0.0, 1.0)
+	# 网页 navelPoke 其余骨骼为静止姿势：躯干摆正，手臂相对肚脐的位置才与网页一致
+	for n in NAVEL_TORSO:
+		_set_soft_any(n, Quaternion.IDENTITY)
+	for n in NAVEL_HEAD.keys():
+		var e: Vector3 = NAVEL_HEAD[n]
+		_set_soft_any(n, _quat_from_euler_xyz(e.x, e.y, e.z))
+	for n in NAVEL_PARK.keys():
+		var a: Vector3 = NAVEL_PARK[n]
+		var b: Vector3 = NAVEL_INS[n]
+		var q := _quat_from_euler_xyz(a.x, a.y, a.z).slerp(_quat_from_euler_xyz(b.x, b.y, b.z), k)
+		if navel_stir.length() > 1e-5:
+			var sx := navel_stir.x
+			var sy := navel_stir.y
+			if n == "R_Forearm_a":
+				q = q * _quat_from_euler_xyz(sy * 5.5, sx * 4.2, 0.0)
+			elif n == "R_Hand_a":
+				q = q * _quat_from_euler_xyz(sy * 9.5, sx * 7.5, sx * 2.2)
+			elif n == "R_Index_a":
+				q = q * _quat_from_euler_xyz(sy * 3.5, sx * 2.8, 0.0)
+		_set_soft_any(n, q * (_point_q.get(n, Quaternion.IDENTITY) as Quaternion))
+	for n in _point_q.keys():
+		if not NAVEL_PARK.has(n):
+			_set_soft_any(n, _point_q[n])
+
+
+## 网页 initHandAxes + setHandGesture("point")：用左手静止骨位算弯曲轴，再镜像到右手 (x, -y, -z, w)。
+func _build_point_gesture() -> Dictionary:
+	var out := {}
+	var rp := func(n: String) -> Vector3:
+		return rest_pos.get(n, Vector3.ZERO)
+	if not (rest_pos.has("L_Hand_a") and rest_pos.has("L_Middle_a") and rest_pos.has("L_Index_a") and rest_pos.has("L_Pinky_a")):
+		return out
+	var f: Vector3 = ((rp.call("L_Middle_a") as Vector3) - rp.call("L_Hand_a")).normalized()
+	var t: Vector3 = (rp.call("L_Index_a") as Vector3) - rp.call("L_Pinky_a")
+	var palm := f.cross(t).normalized()
+	if palm.x > 0.0:
+		palm = -palm
+	var curls := {"Index": 0.0, "Middle": 1.0, "Ring": 1.05, "Pinky": 1.1}
+	var spread_g := 0.02
+	for d in curls.keys():
+		var curl: float = curls[d]
+		var spread := spread_g if d == "Index" else (-spread_g * 0.9 if d == "Middle" else (-spread_g * 0.12 if d == "Pinky" else 0.0))
+		var joints := [["a", 0.1 if curl == 0.0 else 1.32 * curl, spread], ["b", 0.14 if curl == 0.0 else 1.62 * curl, spread * 0.1], ["c", 0.08 if curl == 0.0 else 1.18 * curl, 0.0]]
+		for j in joints:
+			var nm := "L_%s_%s" % [d, j[0]]
+			var bi := skeleton.find_bone(nm)
+			if bi < 0:
+				continue
+			var child := -1
+			for c in skeleton.get_bone_children(bi):
+				child = c
+				break
+			var v: Vector3
+			if child >= 0:
+				v = (rp.call(skeleton.get_bone_name(child)) as Vector3) - rp.call(nm)
+			else:
+				var par := skeleton.get_bone_parent(bi)
+				v = (rp.call(nm) as Vector3) - rp.call(skeleton.get_bone_name(par))
+			if v.length_squared() < 1e-10:
+				continue
+			var curl_ax := v.normalized().cross(palm)
+			if curl_ax.length_squared() < 1e-10:
+				continue
+			curl_ax = curl_ax.normalized()
+			var q := Quaternion.IDENTITY
+			if absf(float(j[1])) > 0.001:
+				q = q * Quaternion(curl_ax, float(j[1]))
+			if absf(float(j[2])) > 0.001:
+				q = q * Quaternion(palm, float(j[2]))
+			out["%s_%s" % [d, j[0]]] = q
+	# 拇指（point：flip 0.68，a/b/c 欧拉）
+	var th := {"Thumb_a": [Vector3(-0.28, 0.24, 0.1), 0.68], "Thumb_b": [Vector3(0.82, 0.08, 0.0), 0.0], "Thumb_c": [Vector3(0.66, 0.0, 0.0), 0.0]}
+	for sfx in th.keys():
+		var e: Vector3 = th[sfx][0]
+		var flip: float = th[sfx][1]
+		var q2 := Quaternion.IDENTITY
+		if flip > 0.001:
+			q2 = q2 * Quaternion(f, flip)
+		q2 = q2 * _quat_from_euler_xyz(e.x, e.y, e.z)
+		out[sfx] = q2
+	var r := {}
+	for sfx in out.keys():
+		var q3: Quaternion = out[sfx]
+		if skeleton.find_bone("R_" + sfx) >= 0:
+			r["R_" + sfx] = Quaternion(q3.x, -q3.y, -q3.z, q3.w)
+	return r
 
 
 func _capture_loco_hold() -> void:

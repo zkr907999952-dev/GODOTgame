@@ -45,6 +45,7 @@ var _breast_value: Label
 var _tp_box: VBoxContainer
 var _fist_box: VBoxContainer
 var _blade_box: VBoxContainer
+var _navel_box: VBoxContainer
 var _clone_status: Label
 var _tool_depth_sl: Array = []
 var _focus_buttons: Dictionary = {}
@@ -63,10 +64,23 @@ var _overhead_ui: Control
 var _overhead_info: Label
 var _overhead_clear: Button
 var _overhead_go: Button
+## 触屏 / 手机布局
+const TouchControlsScript := preload("res://scripts/ui/touch_controls.gd")
+var touch_ui: bool = false
+var compact: bool = false
+var _touch: Control
+var _chk_touch: CheckButton
+var _btn_sheet_close: Button
+var _safe: Vector4 = Vector4.ZERO  # 逻辑像素：左 上 右 下
+var _debug_safe: Variant = null
+var _mobile_scale: float = 0.0  # > 0：按 DPI 设置界面缩放（手机）
 
 
 func setup(player: Node) -> void:
 	_player = player
+	if _touch:
+		_touch.call("setup", player, self, get_parent())
+		set_touch_ui(is_touch_device())
 	_sync_from_systems()
 
 
@@ -161,7 +175,24 @@ func _build_ui() -> void:
 	_panel_camera.offset_right = -16
 	_panel_camera.offset_top = 88
 	root.add_child(_panel_camera)
+	_wrap_scroll(_panel_settings)
+	_wrap_scroll(_panel_map)
+	# 手机底部抽屉的「收起」把手
+	_btn_sheet_close = Button.new()
+	_btn_sheet_close.text = "收起 ▾"
+	_btn_sheet_close.custom_minimum_size = Vector2(96, 44)
+	_btn_sheet_close.add_theme_font_size_override("font_size", 15)
+	_style_button(_btn_sheet_close, false)
+	_btn_sheet_close.visible = false
+	_btn_sheet_close.pressed.connect(func(): close_panels())
+	root.add_child(_btn_sheet_close)
 	_no_focus(root)
+	_touch = TouchControlsScript.new()
+	_touch.name = "TouchControls"
+	add_child(_touch)
+	move_child(_touch, 0)  # 画在 HUD 面板下面
+	get_viewport().size_changed.connect(_apply_layout)
+	call_deferred("_apply_layout")
 
 
 ## 所有 HUD 控件都不拿键盘焦点：否则点过的按钮会吃掉空格 / 回车（ui_accept → 再次按下
@@ -466,6 +497,11 @@ func _build_settings_panel() -> PanelContainer:
 	title.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
 	v.add_child(title)
 
+	_chk_touch = CheckButton.new()
+	_chk_touch.text = "触屏操作（摇杆 / 手势）"
+	_chk_touch.toggled.connect(func(on: bool): set_touch_ui(on))
+	v.add_child(_chk_touch)
+
 	_chk_breath = CheckButton.new()
 	_chk_breath.text = "呼吸"
 	_chk_breath.button_pressed = true
@@ -564,7 +600,7 @@ func _build_interact_panel() -> PanelContainer:
 	v.add_child(title)
 
 	var hint := Label.new()
-	hint.text = "左键点腹部：拖拽=按住拖动软组织，打击=点击释放环状冲击；拳交=按住拖动手臂（往里推=深入，左右=倾斜）；刺刀/长刺刀=先点腹部选入口，再按住刀柄往里推。观察视角用光标点，第一人称以屏幕中心为准；本体和分身都能互动。T 循环模式，R 复位。肚脐暂为占位。"
+	hint.text = "左键点腹部：拖拽=按住拖动软组织，打击=点击释放环状冲击；拳交=按住拖动手臂（往里推=深入，左右=倾斜）；刺刀/长刺刀=先点腹部选入口，再按住刀柄往里推；肚脐=按住往里拖让她的手指插入肚脐。观察视角用光标点，第一人称以屏幕中心为准；本体和分身都能互动。T 循环模式，R 复位。"
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.custom_minimum_size = Vector2(210, 0)
 	hint.add_theme_font_size_override("font_size", 12)
@@ -704,6 +740,37 @@ func _build_tool_boxes(v: VBoxContainer) -> void:
 		if o:
 			(o.get("tools") as RefCounted).call("clear_marks"))
 	_check(_blade_box, "连续抽插", false, func(on: bool): _set_tool("bayonet_pump", on))
+
+	# 网页 overlay 肚脐面板：插入深度 / 深度比率 / 抽插 / 搅动（studio-store 默认值）
+	_navel_box = VBoxContainer.new()
+	_navel_box.add_theme_constant_override("separation", 4)
+	v.add_child(_navel_box)
+	_section(_navel_box, "肚脐参数")
+	_tool_depth_sl.append(_slider_row(_navel_box, "插入深度", 0.0, 1.0, 0.01, 0.0, func(x: float):
+		var o := _target_org()
+		if o:
+			o.set("navel_insert", x))[0])
+	_slider_row(_navel_box, "深度比率", 0.0, 1.2, 0.01, 0.7, func(x: float): _set_org("navel_depth_ratio", x))
+	_check(_navel_box, "抽插", false, func(on: bool):
+		var o := _target_org()
+		if on and o and float(o.get("navel_insert")) < 0.55:
+			o.set("navel_insert", 1.0)
+		_set_org("navel_thrust", on))
+	_check(_navel_box, "搅动", false, func(on: bool):
+		var o := _target_org()
+		if on and o and float(o.get("navel_insert")) < 0.55:
+			o.set("navel_insert", 0.85)
+		_set_org("navel_stir", on))
+	_slider_row(_navel_box, "抽插速度", 0.0, 1.0, 0.01, 0.45, func(x: float): _set_org("navel_thrust_speed", x))
+	_slider_row(_navel_box, "抽插起始", 0.0, 0.98, 0.01, 0.5, func(x: float): _set_org("navel_thrust_start", x))
+	_slider_row(_navel_box, "搅动速度", 0.0, 1.0, 0.01, 0.55, func(x: float): _set_org("navel_stir_speed", x))
+	_slider_row(_navel_box, "搅动半径", 0.0, 1.0, 0.01, 0.4, func(x: float): _set_org("navel_stir_radius", x))
+
+
+func _set_org(k: String, v: Variant) -> void:
+	var o := _org()
+	if o:
+		o.set(k, v)
 
 
 func _build_clone_box(v: VBoxContainer) -> void:
@@ -961,7 +1028,9 @@ func _toggle_panel(id: PanelId) -> void:
 	_panel_map.visible = id == PanelId.MAP
 	if id == PanelId.MAP:
 		_rebuild_map_list()
+		_touchify(_panel_map, touch_ui)
 	_set_mouse_for_ui(true)
+	_apply_layout()
 	_sync_from_systems()
 
 
@@ -975,6 +1044,8 @@ func _close_all_panels() -> void:
 		_panel_camera.visible = false
 	if _panel_map:
 		_panel_map.visible = false
+	if _btn_sheet_close:
+		_btn_sheet_close.visible = false
 	_set_mouse_for_ui(false)
 
 
@@ -1048,6 +1119,8 @@ func _sync_from_systems() -> void:
 				if disp
 				else ("角色控制 · 第一人称 · WASD 移动 · Shift 奔跑 · 空格跳 · Ctrl/C 蹲 · Z 匍匐 · Esc 释放鼠标 · M 地图 · Tab 切换")
 			)
+			if touch_ui:
+				_status.text = "触屏观察：单指点身体=互动 · 双击后拖=环绕 · 双指=平移/缩放" if disp else "触屏控制：左下摇杆（外圈奔跑）· 右侧拖动转视角 · 右下 互动/下蹲(长按匍匐)/跳跃"
 		if _tp_box:
 			_tp_box.visible = disp
 		if disp and _player.has_method("get_tp_distance"):
@@ -1247,6 +1320,9 @@ func _on_mode_pressed(mode_id: String) -> void:
 	var o := _org()
 	if o:
 		o.call("set_interact_mode", "bayonet_short" if mode_id == "bayonet" else mode_id)
+	# 网页：进入肚脐模式时相机切到腹部近景
+	if mode_id == "navel" and _player and _player.has_method("is_display_mode") and bool(_player.call("is_display_mode")):
+		_player.call("set_tp_focus", "belly")
 	for id in _mode_buttons.keys():
 		_style_button(_mode_buttons[id], id == mode_id)
 	_refresh_interact_status()
@@ -1264,14 +1340,18 @@ func _refresh_interact_status() -> void:
 		_fist_box.visible = _interact_mode == "fist"
 	if _blade_box:
 		_blade_box.visible = _interact_mode == "bayonet" or _interact_mode == "bayonet_long"
+	if _navel_box:
+		_navel_box.visible = _interact_mode == "navel"
 	if _interact_mode == "drag" or _interact_mode == "strike":
 		_interact_status.text = "当前模式：%s（已接入：腹壁 + 体内肠道/子宫随之形变并回弹）" % label
 	elif _interact_mode == "fist":
 		_interact_status.text = "当前模式：拳交（按住拖动：往里推深入、左右倾斜；腹部随拳头鼓起，透视可见肠道被撑开）"
 	elif _interact_mode == "bayonet" or _interact_mode == "bayonet_long":
 		_interact_status.text = "当前模式：%s（点腹部选入口 → 按住刀柄往里推；刺破留伤口、肠道受伤变红%s）" % [label, "，长刀可刺穿背部" if _interact_mode == "bayonet_long" else ""]
+	elif _interact_mode == "navel":
+		_interact_status.text = "当前模式：肚脐（她用右手食指插入自己的肚脐：按住往里拖=插深，往外=拔出；0.5 处指尖接触，越深肚脐被撑得越深越大）"
 	else:
-		_interact_status.text = "当前模式：%s（占位，尚未接入）" % label
+		_interact_status.text = "当前模式：%s" % label
 
 
 func _on_reset_camera() -> void:
@@ -1298,3 +1378,214 @@ func _sec() -> RefCounted:
 	if _player and _player.has_method("get_secondary"):
 		return _player.call("get_secondary")
 	return null
+
+
+# ------------------------------------------------------------------ 触屏 / 手机布局
+## 网页 touchUi：(pointer: coarse) || maxTouchPoints > 0 || 窄屏。这里：移动平台或有触摸屏。
+static func is_touch_device() -> bool:
+	return OS.has_feature("mobile") or OS.has_feature("web_android") or OS.has_feature("web_ios") or DisplayServer.is_touchscreen_available()
+
+
+static func is_mobile_os() -> bool:
+	return OS.has_feature("mobile") or OS.has_feature("web_android") or OS.has_feature("web_ios")
+
+
+func set_touch_ui(on: bool) -> void:
+	touch_ui = on
+	if _chk_touch and _chk_touch.button_pressed != on:
+		_chk_touch.set_pressed_no_signal(on)
+	if _touch:
+		_touch.call("set_enabled", on)
+	_touchify(_root_ui, on)
+	_apply_layout()
+
+
+## 触屏「切换」按钮放在顶部按钮 + 状态提示下面（不遮挡）
+func touch_top_y() -> float:
+	var y := 0.0
+	for c in [_btn_interact, _status]:
+		var ctl := c as Control
+		if ctl and ctl.is_visible_in_tree():
+			y = maxf(y, ctl.get_global_rect().end.y)
+	return y + 8.0
+
+
+func get_touch_controls() -> Control:
+	return _touch
+
+
+## 测试 / 截图：模拟手机（DPI 缩放 + 安全区）
+func debug_force_mobile(scale: float, safe_px: Vector4 = Vector4.ZERO) -> void:
+	_mobile_scale = scale
+	_debug_safe = safe_px
+	_apply_ui_scale()
+	set_touch_ui(true)
+
+
+## 手机：按屏幕 DPI 设界面缩放（Android 160dpi = 1x），canvas_items + expand 下逻辑尺寸 = 窗口 / 缩放
+func _apply_ui_scale() -> void:
+	var win := get_window()
+	if win == null:
+		return
+	var s := _mobile_scale
+	if s <= 0.0 and is_mobile_os():
+		s = clampf(float(DisplayServer.screen_get_dpi()) / 160.0, 1.0, 4.0)
+	if s <= 0.0:
+		var base := Vector2i(int(ProjectSettings.get_setting("display/window/size/viewport_width", 1280)), int(ProjectSettings.get_setting("display/window/size/viewport_height", 720)))
+		if win.content_scale_size != base:
+			win.content_scale_size = base
+		return
+	var want := Vector2i(maxi(320, int(win.size.x / s)), maxi(320, int(win.size.y / s)))
+	if win.content_scale_size != want:
+		win.content_scale_size = want
+
+
+func _compute_safe() -> Vector4:
+	if _debug_safe != null:
+		return _debug_safe
+	if not is_mobile_os():
+		return Vector4.ZERO
+	var sa := DisplayServer.get_display_safe_area()
+	var scr := DisplayServer.screen_get_size()
+	var win := get_window()
+	var k := float(win.size.x) / maxf(1.0, get_viewport().get_visible_rect().size.x)
+	return Vector4(sa.position.x, sa.position.y, scr.x - sa.end.x, scr.y - sa.end.y) / maxf(0.01, k)
+
+
+## 触屏：按钮 / 开关 ≥ 44px 高、滑条 32px（网页 h-11 = 44px 触控目标）
+func _touchify(n: Node, on: bool) -> void:
+	if n == null:
+		return
+	if n is BaseButton or n is HSlider:
+		var c := n as Control
+		if not c.has_meta("min0"):
+			c.set_meta("min0", c.custom_minimum_size)
+		var m0: Vector2 = c.get_meta("min0")
+		if on:
+			c.custom_minimum_size = Vector2(m0.x, maxf(m0.y, 44.0 if n is BaseButton else 32.0))
+		else:
+			c.custom_minimum_size = m0
+	for ch in n.get_children():
+		_touchify(ch, on)
+
+
+## 把面板内容放进滚动容器（参数列表长，手机上可滚动）
+func _wrap_scroll(p: PanelContainer) -> void:
+	if p.get_child_count() == 0 or p.get_child(0) is ScrollContainer:
+		return
+	var content := p.get_child(0)
+	p.remove_child(content)
+	var sc := ScrollContainer.new()
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	p.add_child(sc)
+	sc.add_child(content)
+	(content as Control).size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+
+func _panel_scroll(p: PanelContainer) -> ScrollContainer:
+	return p.get_child(0) as ScrollContainer if p.get_child_count() > 0 else null
+
+
+## 触摸点是否落在 HUD 控件上（交给 GUI，不当作场景手势）
+func point_over_ui(pos: Vector2) -> bool:
+	if _root_ui == null or not _root_ui.visible:
+		return false
+	return _over(_root_ui, pos, get_viewport().get_visible_rect().size)
+
+
+func _over(n: Node, pos: Vector2, vp: Vector2) -> bool:
+	for ch in n.get_children():
+		var c := ch as Control
+		if c == null or not c.visible:
+			continue
+		if c.mouse_filter == Control.MOUSE_FILTER_STOP and c.size.x < vp.x * 0.98 and c.get_global_rect().has_point(pos):
+			return true
+		if _over(c, pos, vp):
+			return true
+	return false
+
+
+## 响应式布局：
+##   PC / 横屏：原布局（左上 设置 / 地图，右上 摄像机 / 互动，面板在下方），高度不够时面板内滚动；
+##   手机竖屏（触屏且逻辑宽度 < 640，网页 sm 断点）：面板变成底部抽屉（左右铺满，最高半屏，可滚动，「收起」把手）；
+##   触屏时顶栏按钮 48px 高；所有位置都加上安全区（刘海 / 圆角 / 手势条）。
+func _apply_layout() -> void:
+	if _root_ui == null:
+		return
+	_apply_ui_scale()
+	var v := get_viewport().get_visible_rect().size
+	_safe = _compute_safe()
+	compact = touch_ui and v.x < 640.0
+	if _touch:
+		_touch.set("safe", _safe)
+	var bw := 72.0 if touch_ui else 80.0
+	var bh := 48.0 if touch_ui else 32.0
+	for b in [_btn_settings, _btn_map, _btn_camera, _btn_interact]:
+		b.custom_minimum_size = Vector2(bw, bh)
+		b.add_theme_font_size_override("font_size", 16 if touch_ui else 15)
+	var sl := _safe.x + 16.0
+	var st := _safe.y + 16.0
+	var sr := _safe.z + 16.0
+	var sb := _safe.w + 16.0
+	_btn_settings.position = Vector2(sl, st)
+	_btn_map.position = Vector2(sl + bw + 8.0, st)
+	var right_bar := _btn_camera.get_parent() as Control
+	right_bar.offset_right = -sr
+	right_bar.offset_left = -sr - (bw * 2.0 + 8.0)
+	right_bar.offset_top = st
+	right_bar.offset_bottom = st + bh
+	_status.position = Vector2(sl, st + bh + 8.0)
+	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART if compact else TextServer.AUTOWRAP_OFF
+	_status.size = Vector2(v.x - sl - sr, 0) if compact else Vector2.ZERO
+	var top := st + bh + 40.0  # PC 默认 = 88
+	var open_p: PanelContainer = null
+	for p in [_panel_settings, _panel_map, _panel_interact, _panel_camera]:
+		var panel := p as PanelContainer
+		if panel.visible:
+			open_p = panel
+		var sc := _panel_scroll(panel)
+		var content_h := 0.0
+		if sc and sc.get_child_count() > 0:
+			content_h = (sc.get_child(0) as Control).get_combined_minimum_size().y
+		var right_side := panel == _panel_interact or panel == _panel_camera
+		var base_h := 540.0 if panel == _panel_interact else (520.0 if panel == _panel_camera else content_h)
+		if compact:
+			var h := clampf(content_h + 24.0, 160.0, v.y * 0.5)
+			panel.anchor_left = 0.0
+			panel.anchor_right = 1.0
+			panel.anchor_top = 1.0
+			panel.anchor_bottom = 1.0
+			panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+			panel.offset_left = _safe.x + 8.0
+			panel.offset_right = -(_safe.z + 8.0)
+			panel.offset_bottom = -(_safe.w + 8.0)
+			panel.offset_top = panel.offset_bottom - h
+			if sc:
+				sc.custom_minimum_size = Vector2(0, h - 24.0)
+		else:
+			var h2 := minf(base_h, maxf(160.0, v.y - top - sb))
+			panel.grow_vertical = Control.GROW_DIRECTION_END
+			if right_side:
+				panel.anchor_left = 1.0
+				panel.anchor_right = 1.0
+				panel.anchor_top = 0.0
+				panel.anchor_bottom = 0.0
+				panel.offset_left = -sr - 264.0
+				panel.offset_right = -sr
+				panel.offset_top = top
+				panel.offset_bottom = top
+			else:
+				panel.anchor_left = 0.0
+				panel.anchor_right = 0.0
+				panel.anchor_top = 0.0
+				panel.anchor_bottom = 0.0
+				panel.offset_left = sl
+				panel.offset_top = top
+				panel.offset_right = sl
+				panel.offset_bottom = top
+			if sc:
+				sc.custom_minimum_size = Vector2(250 if right_side else 0, h2)
+	if _btn_sheet_close:
+		_btn_sheet_close.visible = compact and open_p != null
+		if _btn_sheet_close.visible:
+			_btn_sheet_close.position = Vector2(v.x - _safe.z - 8.0 - 96.0, v.y + open_p.offset_top - 52.0)

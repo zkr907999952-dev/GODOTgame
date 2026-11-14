@@ -310,7 +310,7 @@ func _try_begin_interact(screen: Vector2) -> bool:
 		return false
 	_interact_target = rig
 	var mode := str(_organs.get("interact_mode"))
-	if mode == "fist" or mode == "bayonet":
+	if mode == "fist" or mode == "bayonet" or mode == "navel":
 		if rig.get("interact_mode") != mode:
 			rig.call("copy_settings_from", _organs)
 		var cam_fwd := -_camera.global_transform.basis.z
@@ -620,6 +620,8 @@ func _process(delta: float) -> void:
 		_pivot_off = _fp_eye_pivot_pos() - Vector3(0.0, _step_smooth, 0.0)
 		_sync_pivot()
 		_camera.near = 0.1 if camera_bounds.size == Vector3.ZERO else 0.04
+	if _touch_interact and _interact_held:
+		_update_interact_drag(get_viewport().get_visible_rect().size * 0.5)
 	if _organs and _organs.has_method("set_fp_clip"):
 		_organs.call("set_fp_clip", _camera.global_position, (FP_CLIP_RADIUS_BLEND if is_stance_blending() else FP_CLIP_RADIUS) if first_person else 0.0)
 	if _fill_light:
@@ -894,9 +896,87 @@ func _calc_aabb(n: Node) -> AABB:
 	return result
 
 
+# ------------------------------------------------------------------ 触屏（touch_controls.gd 调用）
+## 触屏操作开启时，触摸模拟出来的鼠标事件（device = DEVICE_ID_EMULATION）只给 GUI 用，
+## 这里不再处理，避免与 touch_controls 的手指逻辑重复（同一次点按 = 两次互动）。
+var touch_active: bool = false
+var touch_move: Vector2 = Vector2.ZERO  # 虚拟摇杆（x 右，y 下 = 后退），已去死区
+var touch_sprint: bool = false
+var touch_jump_req: bool = false
+var _touch_interact: bool = false
+## 网页 FP_TOUCH_SENS 0.00305 rad/px × fpLookSpeed 0.9（随灵敏度设置等比例缩放）
+const FP_TOUCH_SENS := 0.00305 * 0.9
+
+
+func touch_look(rel: Vector2) -> void:
+	var k := FP_TOUCH_SENS * (mouse_sensitivity / 0.0025)
+	_yaw -= rel.x * k
+	_pitch = clampf(_pitch - rel.y * k, min_pitch, max_pitch)
+	_apply_camera()
+
+
+func touch_orbit(rel: Vector2) -> void:
+	_tp_orbit_pixels(rel)
+
+
+func touch_pan(rel: Vector2) -> void:
+	_tp_pan_pixels(rel)
+
+
+## 双指捏合：scale = 旧间距 / 新间距（网页 dollyCam）
+func touch_dolly(scale: float) -> void:
+	_tp_dist_goal = clampf(_tp_dist_goal * scale, camera_distance_min, camera_distance_max)
+
+
+func touch_set_fov(v: float) -> void:
+	fp_fov = clampf(v, fp_fov_min, fp_fov_max)
+	_apply_camera()
+
+
+## 观察视角：手指按在角色身上 = 当前工具（与鼠标左键同一套逻辑）
+func touch_tool_begin(screen: Vector2) -> bool:
+	if _interact_held:
+		_end_interact()
+	return _try_begin_interact(screen)
+
+
+func touch_tool_drag(screen: Vector2) -> void:
+	if _interact_held:
+		_interact_screen = screen
+		_update_interact_drag(screen)
+
+
+func touch_tool_end() -> void:
+	if _interact_held:
+		_end_interact()
+
+
+func touch_tool_active() -> bool:
+	return _interact_held
+
+
+## 第一人称「互动」按钮（网页 tapFpInteract：屏幕中心射线按下）；按住时视线移动 = 拖动工具
+func touch_interact(pressed: bool) -> void:
+	var c := get_viewport().get_visible_rect().size * 0.5
+	if pressed:
+		_touch_interact = true
+		touch_tool_begin(c)
+	else:
+		_touch_interact = false
+		touch_tool_end()
+
+
+func touch_crouch_tap() -> void:
+	if play_mode != GameMode.CONTROL:
+		return
+	_set_stance("stand" if (_stance == "crouch" or _stance == "prone") else "crouch")
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	# 只处理鼠标；离散按键统一由 game_root.run_action 路由（每个键只在一处处理）。
 	if input_locked:
+		return
+	if touch_active and event is InputEventMouse and event.device == InputEvent.DEVICE_ID_EMULATION:
 		return
 	# 脏器互动：左键（捕获鼠标时取屏幕中心，否则取光标）。HUD 面板打开时也可以互动——
 	# 面板本身吃掉落在面板矩形内的点击，面板外的点击会走到这里。
@@ -1302,7 +1382,9 @@ func _physics_process(delta: float) -> void:
 	var on_floor := is_on_floor()
 	# 土狼时间 + 跳跃缓冲（网页 coyote 0.14 / jumpBuf 0.14）
 	_coyote = COYOTE_TIME if on_floor else maxf(0.0, _coyote - delta)
-	if can_act and Input.is_action_just_pressed("jump"):
+	var touch_jump := touch_jump_req
+	touch_jump_req = false
+	if can_act and (Input.is_action_just_pressed("jump") or touch_jump):
 		if _stance == "prone" or _stance == "crouch":
 			_set_stance("stand")  # 网页：匍匐中空格 = 站起
 		else:
@@ -1317,11 +1399,13 @@ func _physics_process(delta: float) -> void:
 	var input_dir := Vector2.ZERO
 	if can_act:
 		input_dir = Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+		if touch_move.length_squared() > 1e-6:
+			input_dir = touch_move.limit_length(1.0)
 	var basis_yaw := Basis(Vector3.UP, _yaw)
 	var wish := basis_yaw * Vector3(input_dir.x, 0.0, input_dir.y)
 	var wish_len := minf(1.0, wish.length())
 	var direction := wish.normalized() if wish_len > 1e-4 else Vector3.ZERO
-	var sprinting := can_act and Input.is_action_pressed("sprint") and _stance == "stand"
+	var sprinting := can_act and (Input.is_action_pressed("sprint") or touch_sprint) and _stance == "stand"
 	var speed := move_speed
 	match _stance:
 		"crouch":
@@ -1394,7 +1478,13 @@ func _physics_process(delta: float) -> void:
 			sec2.call("clear_gaze")
 	elif display and sec2:
 		sec2.call("clear_body_look")
-		sec2.call("set_gaze_target", _camera.global_position)
+		if _organs and float(_organs.call("navel_pose_t")) >= 0.0:
+			sec2.call("clear_gaze")  # 插肚脐：低头看肚脐（网页 navelPoke 头颈姿势）
+		else:
+			sec2.call("set_gaze_target", _camera.global_position)
+	if _loco and _organs:
+		_loco.set("navel_t", _organs.call("navel_pose_t"))
+		_loco.set("navel_stir", _organs.get("navel_stir_off"))
 
 	if _loco:
 		# After π visual offset, mesh forward = Body +Z. Invert prior -Z fwd/side signs.

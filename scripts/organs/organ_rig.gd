@@ -92,6 +92,30 @@ var secondary: RefCounted = null
 static var _organ_cache: Array = []
 static var _organ_bones: Array = []
 static var _colon_cache: Variant = null
+static var _navel_plane_cache: Variant = null
+
+## 肚脐互动（网页 interactMode "navel" + pose "navelPoke" + navel-morph.ts）：
+## 角色自己的右手食指插入肚脐；插入量 0..1（0.5 = 指尖刚接触），深度比例决定肚脐被撑深 / 撑大多少。
+const NAVEL_CONTACT_T := 0.5
+const NAVEL_DEPTH_BASE := 0.06
+const NAVEL_DIA_BASE := 0.42
+var navel_insert: float = 0.0
+var navel_depth_ratio: float = 0.7
+var navel_thrust: bool = false
+var navel_stir: bool = false
+var navel_thrust_speed: float = 0.45
+var navel_thrust_start: float = 0.5
+var navel_stir_speed: float = 0.55
+var navel_stir_radius: float = 0.4
+var navel_live: float = 0.0
+var navel_stir_off: Vector2 = Vector2.ZERO
+var _navel_thrust_phase: float = 0.0
+var _navel_thrust_on: bool = false
+var _navel_stir_phase: float = 0.0
+var _navel_grab: bool = false
+var _navel_t0: float = 0.0
+var _navel_o: Vector3 = Vector3.ZERO
+var _navel_plane_z: float = 0.006
 
 
 func setup(skel: Skeleton3D) -> bool:
@@ -113,6 +137,7 @@ func setup(skel: Skeleton3D) -> bool:
 		return false
 	_build_fx()
 	_setup_tools()
+	_navel_plane_z = _compute_navel_plane()
 	ready_ok = true
 	_update_frame()
 	# Park hidden FX quads at the navel (tiny) so body AABB checks stay valid.
@@ -166,7 +191,16 @@ func set_interact_mode(m: String) -> void:
 	elif m == "bayonet_short":
 		tools.set_kind("short")
 		m = "bayonet"
+	var entering_navel := m == "navel" and interact_mode != "navel"
+	var leaving_navel := interact_mode == "navel" and m != "navel"
 	interact_mode = m
+	if entering_navel:
+		navel_insert = 0.0
+	if leaving_navel:
+		navel_insert = 0.0
+		navel_thrust = false
+		navel_stir = false
+		_navel_grab = false
 	if m != "drag":
 		end_drag()
 	tools.set_fist_enabled(m == "fist")
@@ -178,11 +212,46 @@ func set_interact_mode(m: String) -> void:
 ## 该模式是否已接入脏器互动（网页：拖拽 / 击腹 / 拳交 / 刺刀）
 func mode_is_live(m: String = "") -> bool:
 	var k := interact_mode if m == "" else m
-	return k in ["drag", "strike", "fist", "bayonet", "bayonet_long", "bayonet_short"]
+	return k in ["drag", "strike", "fist", "bayonet", "bayonet_long", "bayonet_short", "navel"]
 
 
 func is_tool_mode() -> bool:
-	return interact_mode == "fist" or interact_mode == "bayonet"
+	return interact_mode == "fist" or interact_mode == "bayonet" or interact_mode == "navel"
+
+
+## 网页 navelInsertMorph：插入量 → {u, depth, diameter, squeeze}
+static func navel_insert_morph(insert: float, ratio: float) -> Dictionary:
+	var t := clampf(insert, 0.0, 1.0)
+	var r := clampf(ratio, 0.0, 1.2)
+	var u := 0.0 if t <= NAVEL_CONTACT_T else (t - NAVEL_CONTACT_T) / (1.0 - NAVEL_CONTACT_T)
+	return {"u": u, "depth": NAVEL_DEPTH_BASE + u * r, "diameter": NAVEL_DIA_BASE + u * r * 0.5, "squeeze": u * minf(1.0, r * 0.72)}
+
+
+## 插肚脐姿势：给 SoftLoco 的插入量（< 0 = 不在肚脐模式）
+func navel_pose_t() -> float:
+	return navel_live if interact_mode == "navel" else -1.0
+
+
+## 网页 buildNavelMorph planeZ：肚脐周围 1–2.6cm 环上皮肤顶点的平均 z（相对肚脐）
+func _compute_navel_plane() -> float:
+	if _navel_plane_cache != null:
+		return float(_navel_plane_cache)
+	var nz := _navel_rest.z
+	var sum := 0.0
+	var cnt := 0
+	for mi in skin_meshes:
+		for si in mi.mesh.get_surface_count():
+			var v: PackedVector3Array = mi.mesh.surface_get_arrays(si)[Mesh.ARRAY_VERTEX]
+			for p in v:
+				if p.z < nz - 0.04:
+					continue
+				var r := Vector2(p.x - _navel_rest.x, p.y - _navel_rest.y).length()
+				if r > 0.01 and r < 0.026:
+					sum += p.z
+					cnt += 1
+	var pz := (sum / cnt - nz) if cnt > 6 else 0.006
+	_navel_plane_cache = pz
+	return pz
 
 
 ## 工具模式下点击（射线：世界坐标）。返回 true = 已开始按住拖动。
@@ -200,6 +269,26 @@ func tool_begin(origin: Vector3, dir: Vector3, cam_fwd: Vector3) -> bool:
 		tools.set_fist_enabled(true)
 		_tool_plane_n = cam_fwd.normalized()
 		_tool_plane_p = tipw
+		_tool_grab = true
+		return true
+	if interact_mode == "navel":
+		var hitn: Variant = ray_hit_belly(origin, dir)
+		if hitn == null and _ray_point_dist(origin, dir, _frame.origin) > 0.15:
+			return false
+		# 网页：过肚脐、法线 = up × 相机方向 的竖直平面；沿身体 z 的拖动量 / 0.09 = 插入量变化
+		var n := Vector3.UP.cross(cam_fwd)
+		n = Vector3.RIGHT if n.length_squared() < 1e-6 else n.normalized()
+		_tool_plane_n = n
+		_tool_plane_p = _frame.origin
+		var den0 := n.dot(dir)
+		var o_w := _frame.origin
+		if absf(den0) > 1e-5:
+			var t0 := n.dot(_frame.origin - origin) / den0
+			if t0 > 0.0:
+				o_w = origin + dir * t0
+		_navel_o = inv * o_w
+		_navel_t0 = navel_insert
+		_navel_grab = true
 		_tool_grab = true
 		return true
 	if interact_mode == "bayonet":
@@ -238,10 +327,18 @@ func tool_drag(origin: Vector3, dir: Vector3) -> void:
 		tools.fist_drag_to(l)
 	elif interact_mode == "bayonet":
 		tools.blade_drag_to(l)
+	elif interact_mode == "navel" and _navel_grab:
+		navel_insert = clampf(_navel_t0 + (_navel_o.z - l.z) / 0.09, 0.0, 1.0)
+		_navel_target = l
+
+
+var _navel_target: Variant = null
 
 
 func tool_end() -> void:
 	_tool_grab = false
+	_navel_grab = false
+	_navel_target = null
 
 
 func is_tool_grabbing() -> bool:
@@ -250,6 +347,9 @@ func is_tool_grabbing() -> bool:
 
 ## 测试 / HUD：直接设置深度（0..1）。拳交 = 伸入深度；刺刀 = 推入量（自动选默认入口）。
 func tool_set_depth01(t: float) -> void:
+	if interact_mode == "navel":
+		navel_insert = clampf(t, 0.0, 1.0)
+		return
 	if interact_mode == "fist":
 		tools.set_fist_enabled(true)
 		tools.fist_set_depth01(t)
@@ -262,6 +362,8 @@ func tool_set_depth01(t: float) -> void:
 
 
 func tool_depth01() -> float:
+	if interact_mode == "navel":
+		return navel_insert
 	if interact_mode == "fist":
 		return tools.fist_depth01()
 	if interact_mode == "bayonet":
@@ -290,6 +392,8 @@ func ray_pick_distance(origin: Vector3, dir: Vector3) -> float:
 		var tw := _frame * tools.fist_tip
 		if _ray_point_dist(origin, dir, tw) < 0.3:
 			best = minf(best, (tw - origin).dot(dir))
+	elif interact_mode == "navel" and _ray_point_dist(origin, dir, _frame.origin) < 0.15:
+		best = minf(best, (_frame.origin - origin).dot(dir))
 	elif interact_mode == "bayonet" and tools.has_entry:
 		var ew := _frame * tools.entry
 		var hw := _frame * tools.handle
@@ -320,6 +424,8 @@ func copy_settings_from(o: Node) -> void:
 	var ot: InsertTools = o.tools
 	for k in ["fist_bulge", "fist_spread", "fist_gut", "fist_lever", "fist_max_depth", "fist_rise", "fist_thrust", "fist_stir", "fist_thrust_speed", "fist_stir_speed", "fist_stir_radius", "bayonet_auto", "bayonet_pump"]:
 		tools.set(k, ot.get(k))
+	for k in ["navel_depth_ratio", "navel_thrust", "navel_stir", "navel_thrust_speed", "navel_thrust_start", "navel_stir_speed", "navel_stir_radius"]:
+		set(k, o.get(k))
 	if tools.bayonet_kind != ot.bayonet_kind:
 		tools.set_kind(ot.bayonet_kind)
 	if interact_mode != o.interact_mode:
@@ -373,6 +479,9 @@ func reset_interaction() -> void:
 	tools.release_entry()
 	tools.clear_marks()
 	gut_health = 0.0
+	navel_insert = 0.0
+	navel_live = 0.0
+	_navel_grab = false
 
 
 func is_dragging() -> bool:
@@ -481,6 +590,9 @@ func debug_snapshot() -> Dictionary:
 		"punctured": tools.punctured,
 		"wounds": tools.wounds.size(),
 		"damage": tools.damage.size(),
+		"navel_insert": navel_insert,
+		"navel_live": navel_live,
+		"navel_plane_z": _navel_plane_z,
 	}
 
 
@@ -502,12 +614,49 @@ func step(delta: float) -> void:
 	_peri_clock += Vector3(0.03 + s_eff * 0.2, 0.45 + s_eff * 0.9, 0.25 + s_eff * 0.5) * dt
 	_step_drag(dt)
 	_step_tools(dt)
+	_step_navel(dt)
 	for mi in organ_meshes:
 		mi.visible = show_organs
 	_update_frame()
 	_push_uniforms()
 	_update_fx()
 	_update_props()
+
+
+## 网页 figure.tsx 每帧肚脐段：自动抽插（thrust）/ 搅动（stir）
+func _step_navel(dt: float) -> void:
+	var play := interact_mode == "navel"
+	var t := navel_insert
+	var sx := 0.0
+	var sy := 0.0
+	if play and not _navel_grab:
+		if navel_thrust:
+			if not _navel_thrust_on:
+				_navel_thrust_phase = PI
+			_navel_thrust_on = true
+			_navel_thrust_phase += dt * (0.55 + navel_thrust_speed * 2.2)
+			var wave := 0.5 - 0.5 * cos(_navel_thrust_phase)
+			var start := clampf(navel_thrust_start, 0.0, 0.98)
+			var deep := t if t > start + 0.04 else 1.0
+			t = start + (deep - start) * wave
+		else:
+			_navel_thrust_on = false
+		if navel_stir:
+			_navel_stir_phase += dt * (0.45 + navel_stir_speed * 2.5)
+			var u0: float = navel_insert_morph(t, navel_depth_ratio)["u"]
+			var r := (0.004 + navel_stir_radius * 0.014) * u0
+			sx = cos(_navel_stir_phase) * r
+			sy = sin(_navel_stir_phase) * r
+		else:
+			_navel_stir_phase = 0.0
+	elif not play:
+		_navel_thrust_phase = 0.0
+		_navel_stir_phase = 0.0
+	navel_live = t if play else 0.0
+	navel_stir_off = Vector2(sx, sy)
+	if secondary != null and play and navel_live > NAVEL_CONTACT_T:
+		var u1: float = navel_insert_morph(navel_live, navel_depth_ratio)["u"]
+		secondary.set("breath_boost", maxf(float(secondary.get("breath_boost")), u1 * 0.4))
 
 
 func _step_tools(dt: float) -> void:
@@ -601,6 +750,22 @@ func _push_uniforms() -> void:
 			var g0: Vector3 = sq[0]
 			m.set_shader_parameter("dent", Vector4(g0.x, g0.y, g0.z, float(sq[2])))
 			m.set_shader_parameter("dent_off", (sq[1] as Vector3) - g0)
+	var nm := navel_insert_morph(navel_live, navel_depth_ratio)
+	var nu: float = nm["u"]
+	if interact_mode == "navel" and nu > 0.04:
+		for m in _all_mats:
+			m.set_shader_parameter("dent", Vector4(0, 0, 0, 0.036))
+			m.set_shader_parameter("dent_off", Vector3(navel_stir_off.x, navel_stir_off.y - 0.003 * nu, -0.028 * nu))
+	var n_on := interact_mode == "navel"
+	var dia := clampf(float(nm["diameter"]), 0.0, 2.2)
+	var nhx := 0.0027 + dia * 0.0078
+	var nhy := 0.0051 + dia * 0.0135
+	var nD := clampf(float(nm["depth"]), 0.0, 1.0) * 0.092
+	var ncap := minf(nhy * 0.85, nD * 0.38)
+	for m in _skin_mats:
+		m.set_shader_parameter("navel_on", 1.0 if n_on else 0.0)
+		m.set_shader_parameter("navel_m", Vector4(nhx, nhy, nD, ncap))
+		m.set_shader_parameter("navel_s", Vector2(clampf(float(nm["squeeze"]), 0.0, 1.0), _navel_plane_z))
 	var fb := tools.fist_bulge_params()
 	var fpar := Vector4(tools.fist_bulge, tools.fist_spread, tools.fist_rise, tools.fist_lever)
 	for m in _skin_mats:
@@ -1111,7 +1276,10 @@ func _update_fx() -> void:
 		c.a = op
 		_ring_mat.set_shader_parameter("color", c)
 		_ring.visible = op > 0.02
-	if _drag_active:
+	if _navel_target != null and interact_mode == "navel":
+		_poke.global_transform = Transform3D(b * Basis.from_scale(Vector3(0.012, 0.012, 1.0)), _frame * (_navel_target as Vector3))
+		_poke.visible = true
+	elif _drag_active:
 		var tp := _frame * (_drag_grab + _drag_off + Vector3(0, 0, 0.01))
 		_poke.global_transform = Transform3D(b * Basis.from_scale(Vector3(0.036, 0.036, 1.0)), tp)
 		_poke.visible = true

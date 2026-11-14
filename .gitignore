@@ -3,7 +3,7 @@
 .import/
 *.translation
 export.cfg
-export_presets.cfg
+# export_presets.cfg 已提交（不含任何密钥 / 签名信息；本地签名用环境变量或编辑器设置）
 
 # Exports / local builds
 build/
