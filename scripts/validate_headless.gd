@@ -364,7 +364,7 @@ func _run() -> void:
 			continue
 		var low := mesh_i.name.to_lower()
 		var is_head := ("_head_" in low or "hair" in low or "_eye_" in low or "_007_" in mesh_i.name)
-		if not is_head:
+		if not is_head or mesh_i.name.ends_with("_ShadowProxy"):
 			continue
 		head_total += 1
 		if not mesh_i.visible:
@@ -747,6 +747,9 @@ func _run() -> void:
 	if not await _check_fix3(main, player, organs):
 		quit(1)
 		return
+	if not await _check_fix4(main, player):
+		quit(1)
+		return
 
 	print("validate: OK")
 	quit(0)
@@ -1120,6 +1123,140 @@ func _check_fix3(main: Node, player: CharacterBody3D, organs: Node) -> bool:
 	await _frames(3)
 	print("validate: fix3 OK")
 	return true
+
+
+## 第 4 轮：蹲 / 趴时头部朝向跟随视线；姿态过渡时视点不进脖子；头部在两种模式都投影。
+func _check_fix4(main: Node, player: CharacterBody3D) -> bool:
+	await main.call("switch_map", "room", 0)
+	player.call("set_play_mode", 1)
+	await _frames(5)
+	var skel: Skeleton3D = player.find_children("*", "Skeleton3D", true, false)[0]
+	var cam: Camera3D = player.call("get_camera")
+	var hb := skel.find_bone("C_Head_a")
+	player.call("set_facing", 0.0)
+	player.set("_yaw", float(player.get("_body_logic_yaw")))
+	player.set("_pitch", 0.0)
+	for i in 40:
+		await physics_frame
+	# 站立正视时头骨本地「前」方向（之后用它衡量头朝向与相机视线的夹角）。
+	var cam_fwd := -cam.global_transform.basis.z
+	var head_fwd_local := (skel.global_transform.basis * skel.get_bone_global_pose(hb).basis).orthonormalized().inverse() * cam_fwd
+	var look_err := {}
+	for st in ["crouch", "prone"]:
+		player.call("_set_stance", st)
+		for i in 50:
+			await physics_frame
+		var worst := 0.0
+		var b0 := float(player.get("_body_logic_yaw"))
+		var poses := [Vector2(0, 0), Vector2(0.6, 0), Vector2(-0.6, 0), Vector2(0, 0.45), Vector2(0, -0.45)]
+		if st == "prone":
+			poses = [Vector2(0, 0), Vector2(0.5, 0), Vector2(-0.5, 0), Vector2(0, -0.3)]
+		for yp in poses:
+			player.set("_yaw", b0 + yp.x)
+			player.set("_pitch", yp.y)
+			for i in 24:
+				await physics_frame
+			await process_frame
+			var hbw := (skel.global_transform.basis * skel.get_bone_global_pose(hb).basis).orthonormalized()
+			worst = maxf(worst, rad_to_deg((hbw * head_fwd_local).angle_to(-cam.global_transform.basis.z)))
+		look_err[st] = snappedf(worst, 0.1)
+		player.set("_yaw", b0)
+		player.set("_pitch", 0.0)
+		player.call("_set_stance", "stand")
+		for i in 50:
+			await physics_frame
+	print("validate: stance head look error deg=", look_err)
+	if float(look_err["crouch"]) > 10.0 or float(look_err["prone"]) > 18.0:
+		push_error("validate: crouched / prone head must look along the camera direction")
+		return false
+
+	# 姿态过渡：眼位 0.3s ease-out 先到位；视点到可见皮肤（CPU 蒙皮的上身顶点）和脖子线段的最近距离
+	# 都要大于过渡期近裁球半径（否则会切开皮肤看到里面）。
+	player.set("_pitch", -0.6)
+	var skin_pts := _upper_skin_samples(player)
+	var min_neck := 9.0
+	var min_skin := 9.0
+	var eye_done_t := -1.0
+	for st in ["crouch", "stand", "prone", "stand"]:
+		player.call("_set_stance", st)
+		for i in 60:
+			await physics_frame
+			await process_frame
+			var c := cam.global_position
+			var neck := skel.global_transform * skel.get_bone_global_pose(skel.find_bone("C_Neck_a")).origin
+			var head := skel.global_transform * skel.get_bone_global_pose(hb).origin
+			min_neck = minf(min_neck, c.distance_to(Geometry3D.get_closest_point_to_segment(c, neck, head)))
+			if i % 2 == 0:
+				min_skin = minf(min_skin, _skin_min_dist(skel, skin_pts, c))
+			if st == "crouch" and eye_done_t < 0.0 and float(player.get("_fp_eye_blend")) >= 1.0:
+				eye_done_t = float(i + 1) / float(Engine.physics_ticks_per_second)
+	var clip_r := float(player.get("FP_CLIP_RADIUS_BLEND"))
+	print("validate: stance transition min eye-neck=", snappedf(min_neck, 0.001), " eye-skin=", snappedf(min_skin, 0.001), " (clip r ", clip_r, ") eye blend done t=", snappedf(eye_done_t, 0.01), " samples=", skin_pts.size())
+	if min_neck < 0.15 or min_skin < clip_r + 0.01 or eye_done_t < 0.0 or eye_done_t > 0.4:
+		push_error("validate: stance transition eye must lead the body and stay clear of the neck")
+		return false
+
+	# 头/发/眼投影：显示模式本体投影；第一人称由只投影副本投影。
+	var sh_fp: Dictionary = player.call("debug_head_shadow_state")
+	player.call("set_play_mode", 0)
+	await _frames(2)
+	var sh_disp: Dictionary = player.call("debug_head_shadow_state")
+	print("validate: head shadow casters fp=", sh_fp, " display=", sh_disp)
+	for d in [sh_fp, sh_disp]:
+		if int(d["heads"]) < 3 or int(d["casting"]) != int(d["heads"]):
+			push_error("validate: head / hair / eyes must cast shadows in both modes")
+			return false
+	print("validate: fix4 OK")
+	return true
+
+
+## 第一人称可见（未隐藏）蒙皮网格上部顶点：[mesh, 顶点, 骨骼绑定索引, 权重]。
+func _upper_skin_samples(player: CharacterBody3D) -> Array:
+	var out := []
+	for n in player.find_children("*", "MeshInstance3D", true, false):
+		var mi := n as MeshInstance3D
+		if mi == null or mi.mesh == null or mi.skin == null or not mi.visible:
+			continue
+		if bool(player.call("_fp_should_hide_mesh", mi)) or mi.name.ends_with("_ShadowProxy"):
+			continue
+		var a := mi.mesh.surface_get_arrays(0)
+		var v: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+		var b = a[Mesh.ARRAY_BONES]
+		var w = a[Mesh.ARRAY_WEIGHTS]
+		if v.is_empty() or b == null or w == null:
+			continue
+		var nb: int = b.size() / v.size()
+		var bb := mi.mesh.get_aabb()
+		if bb.end.y < 1.2:
+			continue
+		for i in range(0, v.size(), 2):
+			if v[i].y < 1.2:
+				continue
+			var bs := PackedInt32Array()
+			var ws := PackedFloat32Array()
+			for k in nb:
+				if w[i * nb + k] > 0.0:
+					bs.append(b[i * nb + k])
+					ws.append(w[i * nb + k])
+			out.append([mi, v[i], bs, ws])
+	return out
+
+
+func _skin_min_dist(skel: Skeleton3D, pts: Array, c: Vector3) -> float:
+	var m := 9.0
+	var cl := skel.global_transform.affine_inverse() * c
+	for e in pts:
+		var mi: MeshInstance3D = e[0]
+		var p := Vector3.ZERO
+		var bs: PackedInt32Array = e[2]
+		var ws: PackedFloat32Array = e[3]
+		for k in bs.size():
+			var bone := mi.skin.get_bind_bone(bs[k])
+			if bone < 0:
+				bone = skel.find_bone(mi.skin.get_bind_name(bs[k]))
+			p += (skel.get_bone_global_pose(bone) * mi.skin.get_bind_pose(bs[k]) * (e[1] as Vector3)) * ws[k]
+		m = minf(m, cl.distance_to(p))
+	return m * skel.global_transform.basis.get_scale().x
 
 
 func _fp_sample(player: CharacterBody3D, skel: Skeleton3D, worst: Dictionary) -> void:

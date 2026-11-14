@@ -30,6 +30,27 @@ static func apply(body: Node) -> void:
 			_polish_hair(mi)
 		elif is_head_mesh(mi):
 			_tint_scalp(mi)
+		elif is_eye_mesh(mi):
+			_polish_eyes(mi)
+
+
+static func is_eye_mesh(mi: MeshInstance3D) -> bool:
+	return "_Eye_" in mi.name or mi.name.to_lower().ends_with("_eye_0")
+
+
+## 眼睛：glTF 的 ORM 贴图 R 通道不是 AO（同躯干，见 skin_common），导入后被当 AO 用，
+## 眼球 R 均值只有 0.27 → 环境光被压到 27%。室内有正面主光直射还看得过去；城市里太阳在头顶、
+## 眼窝被眉骨/刘海挡住，几乎只剩天空环境光 → 眼白发黑。关掉 AO，并让眼球更湿润（低粗糙度高光）。
+static func _polish_eyes(mi: MeshInstance3D) -> void:
+	var src := mi.get_active_material(0) as BaseMaterial3D
+	if src == null:
+		return
+	var m := src.duplicate() as BaseMaterial3D
+	m.ao_enabled = false
+	m.metallic = 0.0
+	m.roughness = 0.42
+	m.metallic_specular = 0.5
+	mi.set_surface_override_material(0, m)
 
 
 static func _polish_hair(mi: MeshInstance3D) -> void:
@@ -73,6 +94,8 @@ static func _tint_scalp(mi: MeshInstance3D) -> void:
 	# 面部贴图的金属度通道均值 ≈0.35（原游戏资源的打包方式），按 PBR 渲染时脸发暗发脏；皮肤不是金属。
 	m.metallic = 0.0
 	m.metallic_specular = 0.45
+	# 同眼睛：ORM 的 R 不是 AO（这里 R≡G 粗糙度通道），当 AO 会让脸在纯环境光下发灰。
+	m.ao_enabled = false
 	var img := Image.create(4, 4, false, Image.FORMAT_RGB8)
 	img.fill(SCALP_COLOR)
 	m.detail_enabled = true

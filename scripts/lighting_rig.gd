@@ -63,7 +63,7 @@ func _make_room_env() -> Environment:
 	# 网页 ambient #e6d8c8 0.34 + hemisphere #f2ebe3/#3a322c 0.48 → 暖灰环境光
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color("#cdbfb2")
-	env.ambient_light_energy = 0.2
+	env.ambient_light_energy = 0.26
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_DISABLED
 	return env
 
@@ -83,7 +83,7 @@ func _make_city_env() -> Environment:
 	sky.process_mode = Sky.PROCESS_MODE_QUALITY
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 0.28
+	env.ambient_light_energy = 0.34
 	env.ambient_light_sky_contribution = 1.0
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
 	env.fog_enabled = true
@@ -125,8 +125,10 @@ func _build_room_lights() -> Node3D:
 	g.name = "RoomLights"
 	add_child(g)
 	var c := Vector3(-0.2, 1.0, 0.3)  # 出生点（胸腹高度）
-	# 主光：前上方偏左（相对角色），暖白，投影
-	var key := _dir_light("Key", c + Vector3(-1.9, 3.1, -2.2), c, Color("#fff1e0"), 0.72)
+	# 主光：前上方偏左（相对角色），暖白，投影。仰角 ≈32°（原 47° 从正上方压在朝上的
+	# 胸口/锁骨/肩上，NdotL 最大 + 吸顶灯叠加 → 上半身一条过亮带）。
+	var key := _dir_light("Key", c + Vector3(-1.9, 1.85, -2.2), c, Color("#fff1e0"), 0.6)
+	key.light_specular = 0.55
 	key.shadow_enabled = true
 	key.shadow_bias = 0.02
 	key.shadow_normal_bias = 0.6
@@ -139,13 +141,13 @@ func _build_room_lights() -> Node3D:
 	key.directional_shadow_pancake_size = 4.0
 	g.add_child(key)
 	# 冷色侧补光（网页 #c8d0dc 0.32），不投影
-	g.add_child(_dir_light("Fill", c + Vector3(2.4, 1.6, -0.4), c, Color("#c8d0dc"), 0.26))
+	g.add_child(_dir_light("Fill", c + Vector3(2.4, 1.6, -0.4), c, Color("#c8d0dc"), 0.3))
 	# 背后轮廓光：勾出肩 / 腰 / 发丝轮廓，不投影、不出高光斑
 	var rim := _dir_light("Rim", c + Vector3(0.6, 2.2, 2.6), c, Color("#ffe6d0"), 0.35)
 	rim.light_specular = 0.6
 	g.add_child(rim)
 	# 网页吸顶灯 (0,2.55,-1.35) #ffd7b0 / 台灯 (1.4,1.7,-2.1) #ffc98a（房间原位）
-	g.add_child(_omni("CeilingLamp", Vector3(0.0, 2.45, -1.35), Color("#ffd7b0"), 0.8, 7.0))
+	g.add_child(_omni("CeilingLamp", Vector3(0.0, 2.45, -1.35), Color("#ffd7b0"), 0.45, 7.0))
 	g.add_child(_omni("Lamp", Vector3(1.4, 1.7, -2.1), Color("#ffc98a"), 0.5, 4.2))
 	return g
 
