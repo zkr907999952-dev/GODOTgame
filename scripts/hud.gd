@@ -33,6 +33,11 @@ var _btn_fp: Button
 var _btn_play_mode: Button
 var _interact_status: Label
 var _mode_buttons: Dictionary = {}  # id -> Button
+var _chk_xray: CheckButton
+var _xray_slider: HSlider
+var _xray_value: Label
+var _chk_organs: CheckButton
+var _chk_peri: CheckButton
 
 
 func setup(player: Node) -> void:
@@ -250,7 +255,9 @@ func _build_interact_panel() -> PanelContainer:
 	v.add_child(title)
 
 	var hint := Label.new()
-	hint.text = "模式（部分为占位，后续接线）"
+	hint.text = "左键点腹部：拖拽=按住拖动软组织，打击=点击释放环状冲击（Esc 显示光标后点击；捕获鼠标时以屏幕中心为准）。拳头/刺刀/肚脐暂为占位。"
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.custom_minimum_size = Vector2(210, 0)
 	hint.add_theme_font_size_override("font_size", 12)
 	hint.add_theme_color_override("font_color", Color(0.7, 0.74, 0.8))
 	v.add_child(hint)
@@ -327,6 +334,50 @@ func _build_camera_panel() -> PanelContainer:
 	_btn_fp.visible = false  # superseded by play mode; keep for sync safety
 	v.add_child(_btn_fp)
 
+	var xray_title := Label.new()
+	xray_title.text = "透视"
+	xray_title.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	v.add_child(xray_title)
+
+	_chk_xray = CheckButton.new()
+	_chk_xray.text = "腹部透视（X）"
+	_chk_xray.button_pressed = true
+	_chk_xray.toggled.connect(_on_xray_toggled)
+	v.add_child(_chk_xray)
+
+	var xr_row := HBoxContainer.new()
+	var xr_l := Label.new()
+	xr_l.text = "腹部半透明"
+	xr_l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	xr_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	xr_row.add_child(xr_l)
+	_xray_value = Label.new()
+	_xray_value.text = "0.38"
+	_xray_value.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	xr_row.add_child(_xray_value)
+	v.add_child(xr_row)
+
+	_xray_slider = HSlider.new()
+	_xray_slider.min_value = 0.0
+	_xray_slider.max_value = 1.0
+	_xray_slider.step = 0.01
+	_xray_slider.value = 0.38
+	_xray_slider.custom_minimum_size = Vector2(200, 18)
+	_xray_slider.value_changed.connect(_on_xray_amount)
+	v.add_child(_xray_slider)
+
+	_chk_organs = CheckButton.new()
+	_chk_organs.text = "显示脏器"
+	_chk_organs.button_pressed = true
+	_chk_organs.toggled.connect(_on_organs_toggled)
+	v.add_child(_chk_organs)
+
+	_chk_peri = CheckButton.new()
+	_chk_peri.text = "肠蠕动"
+	_chk_peri.button_pressed = true
+	_chk_peri.toggled.connect(_on_peri_toggled)
+	v.add_child(_chk_peri)
+
 	var sens_l := Label.new()
 	sens_l.text = "视角灵敏度"
 	sens_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
@@ -382,6 +433,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_close_all_panels()
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 				get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_X:
+			call_deferred("_sync_from_systems")
 		elif event.keycode == KEY_TAB:
 			# Player also toggles; refresh chrome labels.
 			call_deferred("_sync_from_systems")
@@ -409,6 +462,19 @@ func _sync_from_systems() -> void:
 				if disp
 				else ("角色控制 · 第一人称可移动 · Tab 切换")
 			)
+	var org := _org()
+	if org != null:
+		if _chk_xray:
+			_chk_xray.set_pressed_no_signal(bool(org.get("xray_enabled")))
+		if _xray_slider:
+			_xray_slider.set_value_no_signal(float(org.get("xray_amount")))
+		if _xray_value:
+			_xray_value.text = "%.2f" % float(org.get("xray_amount"))
+		if _chk_organs:
+			_chk_organs.set_pressed_no_signal(bool(org.get("show_organs")))
+		if _chk_peri:
+			_chk_peri.set_pressed_no_signal(bool(org.get("peristalsis_on")))
+		org.call("set_interact_mode", _interact_mode)
 	var sec: RefCounted = null
 	if _player.has_method("get_secondary"):
 		sec = _player.call("get_secondary")
@@ -419,6 +485,42 @@ func _sync_from_systems() -> void:
 			_chk_blink.set_pressed_no_signal(bool(sec.get("blink_enabled")))
 		if _chk_hair:
 			_chk_hair.set_pressed_no_signal(bool(sec.get("hair_enabled")))
+
+
+func _org() -> Node:
+	if _player and _player.has_method("get_organs"):
+		return _player.call("get_organs")
+	return null
+
+
+func _on_xray_toggled(on: bool) -> void:
+	var o := _org()
+	if o:
+		o.call("set_xray_enabled", on)
+
+
+func _on_xray_amount(v: float) -> void:
+	var o := _org()
+	if o:
+		o.call("set_xray_amount", v)
+		if v > 0.001 and not bool(o.get("xray_enabled")):
+			o.call("set_xray_enabled", true)
+			if _chk_xray:
+				_chk_xray.set_pressed_no_signal(true)
+	if _xray_value:
+		_xray_value.text = "%.2f" % v
+
+
+func _on_organs_toggled(on: bool) -> void:
+	var o := _org()
+	if o:
+		o.call("set_show_organs", on)
+
+
+func _on_peri_toggled(on: bool) -> void:
+	var o := _org()
+	if o:
+		o.set("peristalsis_on", on)
 
 
 func _on_breath_toggled(on: bool) -> void:
@@ -456,6 +558,9 @@ func _on_help_toggled(on: bool) -> void:
 
 func _on_mode_pressed(mode_id: String) -> void:
 	_interact_mode = mode_id
+	var o := _org()
+	if o:
+		o.call("set_interact_mode", mode_id)
 	for id in _mode_buttons.keys():
 		_style_button(_mode_buttons[id], id == mode_id)
 	_refresh_interact_status()
@@ -469,8 +574,10 @@ func _refresh_interact_status() -> void:
 		if str(m["id"]) == _interact_mode:
 			label = str(m["label"])
 			break
-	# Live wiring: none of the soft interact modes are implemented in Godot yet — stub state only.
-	_interact_status.text = "当前模式：%s（占位，尚未接入软体互动）" % label
+	if _interact_mode == "drag" or _interact_mode == "strike":
+		_interact_status.text = "当前模式：%s（已接入：腹壁 + 体内肠道/子宫随之形变并回弹）" % label
+	else:
+		_interact_status.text = "当前模式：%s（占位，尚未接入）" % label
 
 
 func _on_reset_camera() -> void:

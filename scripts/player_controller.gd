@@ -1,6 +1,7 @@
 extends CharacterBody3D
 
 const SoftLocoScript = preload("res://scripts/soft_loco.gd")
+const OrganRigScript = preload("res://scripts/organs/organ_rig.gd")
 ## 角色控制器：展示互动 / 角色控制 双模式 + SoftLoco 网页 loco 动画驱动 Skeleton3D。
 ## Web loco bind: mesh faces +Z; Godot move uses -Z forward → visual Body needs π yaw offset.
 const BODY_YAW_OFFSET := PI
@@ -38,6 +39,10 @@ var _default_fp_fov: float = 62.0
 var _default_tp_fov: float = 55.0
 var _gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
 var _loco: Node
+## 体内脏器 + 腹部透视 + 拖拽/击腹互动（scripts/organs/organ_rig.gd）
+var _organs: Node
+var _interact_held: bool = false
+var _interact_screen: Vector2 = Vector2.ZERO
 var _stance: String = "stand" # stand | crouch | prone
 ## Capsule bottom ≈ 0 so soles (mesh AABB min.y ≈ 0) sit on the floor.
 var _capsule_stand_h: float = 1.1
@@ -95,6 +100,11 @@ func _ready() -> void:
 		print("player: SoftLoco ready")
 	else:
 		push_warning("player: SoftLoco failed to init")
+	_organs = OrganRigScript.new()
+	_organs.name = "OrganRig"
+	add_child(_organs)
+	if skel == null or not _organs.setup(skel):
+		push_warning("player: organs failed to init")
 	if _col.shape is CapsuleShape3D:
 		_capsule_stand_h = (_col.shape as CapsuleShape3D).height
 		_capsule_stand_y = _col.position.y
@@ -113,6 +123,64 @@ func _ready() -> void:
 
 func get_loco() -> Node:
 	return _loco
+
+
+func get_organs() -> Node:
+	return _organs
+
+
+func get_camera() -> Camera3D:
+	return _camera
+
+
+func _organs_live() -> bool:
+	return _organs != null and bool(_organs.get("ready_ok")) and bool(_organs.call("mode_is_live", ""))
+
+
+## 屏幕点 → 世界射线（捕获鼠标时用屏幕中心）
+func _screen_ray(screen: Vector2) -> Array:
+	return [_camera.project_ray_origin(screen), _camera.project_ray_normal(screen)]
+
+
+func _interact_point() -> Vector2:
+	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		return get_viewport().get_visible_rect().size * 0.5
+	return get_viewport().get_mouse_position()
+
+
+## 左键按下：拖拽=抓住腹壁 / 击腹=释放冲击。命中腹部返回 true。
+func _try_begin_interact(screen: Vector2) -> bool:
+	if not _organs_live():
+		return false
+	var ray := _screen_ray(screen)
+	var hit: Variant = _organs.call("ray_hit_belly", ray[0], ray[1])
+	if hit == null:
+		return false
+	var mode := str(_organs.get("interact_mode"))
+	if mode == "strike":
+		_organs.call("strike_at", hit)
+	elif mode == "drag":
+		_organs.call("begin_drag", hit)
+		_interact_held = true
+		_interact_screen = screen
+	return true
+
+
+## 拖拽中：鼠标射线与「过抓取点、法线=相机前向」平面求交（网页 grab plane）
+func _update_interact_drag(screen: Vector2) -> void:
+	var ray := _screen_ray(screen)
+	var grab: Vector3 = _organs.call("drag_grab_world")
+	var n := -_camera.global_transform.basis.z
+	var plane := Plane(n, grab)
+	var hit: Variant = plane.intersects_ray(ray[0], ray[1])
+	if hit != null:
+		_organs.call("update_drag", hit)
+
+
+func _end_interact() -> void:
+	if _interact_held and _organs:
+		_organs.call("end_drag")
+	_interact_held = false
 
 
 func get_secondary() -> RefCounted:
@@ -297,6 +365,26 @@ func _calc_aabb(n: Node) -> AABB:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# 脏器互动：左键（捕获鼠标时取屏幕中心，否则取光标）
+	if event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+		var lb := event as InputEventMouseButton
+		if lb.pressed:
+			if not ui_blocks_capture and _try_begin_interact(_interact_point()):
+				get_viewport().set_input_as_handled()
+				return
+		elif _interact_held:
+			_end_interact()
+			get_viewport().set_input_as_handled()
+			return
+	if event is InputEventMouseMotion and _interact_held:
+		var mmd := event as InputEventMouseMotion
+		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			_interact_screen += mmd.relative
+		else:
+			_interact_screen = mmd.position
+		_update_interact_drag(_interact_screen)
+		get_viewport().set_input_as_handled()
+		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var mm := event as InputEventMouseMotion
 		_yaw -= mm.relative.x * mouse_sensitivity
@@ -334,6 +422,10 @@ func _unhandled_input(event: InputEvent) -> void:
 					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 				elif not ui_blocks_capture:
 					Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+			KEY_X:
+				# 网页 X：腹部透视开关
+				if _organs:
+					_organs.call("toggle_xray")
 			KEY_Z:
 				# Prone toggle (Z). Crouch is toggle Ctrl/C — handled in physics.
 				_toggle_prone()
