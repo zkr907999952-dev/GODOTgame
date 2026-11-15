@@ -46,6 +46,7 @@ var peristalsis_on: bool = true
 var _peri_clock: Vector3 = Vector3.ZERO
 
 var ready_ok: bool = false
+var frozen: bool = false  # 死亡后停止呼吸式蠕动 / 肚脐驱动，网格仍跟随骨骼
 var meta: Dictionary = {}
 var organ_meshes: Array[MeshInstance3D] = []
 var skin_meshes: Array[MeshInstance3D] = []
@@ -785,6 +786,14 @@ func step(delta: float) -> void:
 	if not ready_ok:
 		return
 	var dt := minf(delta, 0.05)
+	if frozen:
+		for mi in organ_meshes:
+			mi.visible = show_organs
+		_update_frame()
+		_push_uniforms()
+		_update_fx()
+		_update_props()
+		return
 	_time += dt
 	for w in _waves:
 		w["t"] = float(w["t"]) + dt

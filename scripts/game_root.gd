@@ -248,11 +248,11 @@ func switch_map(id: String, spawn_i: int = 0) -> void:
 	var spawns: Array = m["spawns"]
 	var s: Dictionary = spawns[clampi(spawn_i, 0, spawns.size() - 1)]
 	close_overhead(false)
-	# 分身属于当前地图：换图时清掉（房间 / 城市在同一场景里，只是显隐切换）
-	if clone_count() > 0:
-		clear_clones()
+	# 活着的分身仍随地图清掉；已死亡的布娃娃尸体整局保留，只在非当前地图时冻结隐藏。
+	_clear_living_clones()
 	current_map = str(m["id"])
 	_apply_map_visibility(current_map)
+	_sync_corpse_maps()
 	if current_map == "room":
 		_place_player(Vector3(float(s["x"]), 0.0, float(s["z"])), float(s["yaw"]))
 	else:
@@ -396,6 +396,7 @@ func spawn_clone(at: Variant = null) -> String:
 	var c := CloneDollScript.new()
 	c.name = "Clone%d" % (Time.get_ticks_msec() % 100000)
 	c.set("source_player", _player)
+	c.set("spawn_map", current_map)
 	_clones_root.add_child(c)
 	var cam := get_viewport().get_camera_3d()
 	var to := cam.global_position - p if cam else Vector3.BACK
@@ -417,3 +418,30 @@ func clear_clones() -> String:
 		c.queue_free()
 		n += 1
 	return "已清除 %d 个分身" % n if n > 0 else "当前没有分身"
+
+
+func _clear_living_clones() -> void:
+	if _clones_root == null:
+		return
+	for c in _clones_root.get_children():
+		if c.is_queued_for_deletion():
+			continue
+		if c.has_method("is_dead") and bool(c.call("is_dead")):
+			continue
+		_clones_root.remove_child(c)
+		c.queue_free()
+
+
+func _sync_corpse_maps() -> void:
+	if _clones_root == null:
+		return
+	for c in _clones_root.get_children():
+		if c.is_queued_for_deletion():
+			continue
+		if not (c.has_method("is_dead") and bool(c.call("is_dead"))):
+			continue
+		var on := str(c.get("spawn_map")) == current_map
+		if c.has_method("set_map_active"):
+			c.call("set_map_active", on)
+		else:
+			c.visible = on

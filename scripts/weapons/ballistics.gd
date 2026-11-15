@@ -1,4 +1,5 @@
 extends Node
+const CombatDamage := preload("res://scripts/combat_damage.gd")
 ## 弹道：真实弹头网格按速度 / 重力 / 阻力飞行，扫掠检测避免高速穿透。
 ## 命中世界留下弹痕；命中人体交给 OrganRig.apply_ballistic_hit。保留 hit / shot 信号。
 
@@ -93,6 +94,11 @@ func params_of(weapon_id: String, w: Resource = null) -> Dictionary:
 			p["overpen"] = float(w.penetration)
 	p["category"] = cat
 	p["weapon_id"] = weapon_id
+	if w:
+		if "damage" in w:
+			p["damage"] = float(w.damage)
+		if "range_m" in w:
+			p["range_m"] = float(w.range_m)
 	# 霰弹必须是黑色小球，忽略资源里可能残留的弹壳网格名
 	if cat == "shotgun":
 		p["proj"] = "pellet_sphere"
@@ -131,6 +137,7 @@ func fire_projectile(origin: Vector3, dir: Vector3, weapon_id: String, w: Resour
 	_look_along(pr, d)
 	var rec := {
 		"pos": pos,
+		"origin": pos,
 		"vel": d * float(par["v0"]),
 		"dir": d,
 		"par": par,
@@ -222,7 +229,7 @@ func _step(p: Dictionary, dt: float) -> bool:
 		p["vel"] = vel2
 		var body := _body_of(col)
 		if body:
-			return _on_body(p, body, hp, hn, dir, mid_s)
+			return _on_body(p, body, hp, hn, dir, mid_s, col)
 		# 世界
 		last_hit = hitd
 		hit.emit(hp, hn, col, str(p["id"]))
@@ -234,7 +241,7 @@ func _step(p: Dictionary, dt: float) -> bool:
 	return true
 
 
-func _on_body(p: Dictionary, body: Node, hp: Vector3, hn: Vector3, dir: Vector3, speed: float) -> bool:
+func _on_body(p: Dictionary, body: Node, hp: Vector3, hn: Vector3, dir: Vector3, speed: float, col: Object = null) -> bool:
 	var par: Dictionary = p["par"]
 	var organs: Node = body.get_organs() if body.has_method("get_organs") else null
 	var qinfo := {}
@@ -248,6 +255,8 @@ func _on_body(p: Dictionary, body: Node, hp: Vector3, hn: Vector3, dir: Vector3,
 	qinfo["normal"] = hn
 	qinfo["speed"] = speed
 	qinfo["dir"] = dir
+	qinfo["collider"] = col
+	qinfo["origin"] = p.get("origin", hp)
 	last_body = qinfo
 	last_organ = qinfo
 	p["hit_body"] = true
@@ -259,6 +268,7 @@ func _on_body(p: Dictionary, body: Node, hp: Vector3, hn: Vector3, dir: Vector3,
 	if organs and organs.has_method("apply_ballistic_hit"):
 		organs.call("apply_ballistic_hit", hp - dir * 0.05, dir, par, qinfo)
 	hit.emit(hp, hn, body, str(p["id"]))
+	_apply_combat_hit(p, body, hp, dir, col, qinfo)
 	# 肉体必须贯穿：先结算伤口，弹头沿原方向继续，绝不把网格停在入弹皮肤上。
 	# 特写期间由 bullet_cam 摆放弹头，这里只记下出口，不冻结在入射点。
 	if p.get("cinematic", false):
@@ -525,3 +535,33 @@ func predict_drop(origin: Vector3, vel: Vector3, drag: float, sec: float, step: 
 		p += v * dt
 		t += dt
 	return p
+
+
+func _apply_combat_hit(p: Dictionary, body: Node, hp: Vector3, dir: Vector3, col: Object, qinfo: Dictionary) -> void:
+	if body == null:
+		return
+	var par: Dictionary = p.get("par", {})
+	var origin: Vector3 = p.get("origin", hp)
+	var dist := origin.distance_to(hp)
+	var zone := CombatDamage.zone_of(body, hp, col)
+	var dmg := float(par.get("damage", CombatDamage.base_damage(str(p.get("id", "")), null)))
+	var cat := str(par.get("category", CombatDamage.category_of(str(p.get("id", "")), null)))
+	var amount := dmg * CombatDamage.zone_mult(zone) * CombatDamage.falloff_mult(cat, dist)
+	qinfo["zone"] = zone
+	qinfo["distance"] = dist
+	qinfo["damage"] = amount
+	var was_dead := body.has_method("is_dead") and bool(body.call("is_dead"))
+	if body.has_method("apply_damage") and not was_dead:
+		body.call("apply_damage", amount, qinfo)
+	var now_dead := body.has_method("is_dead") and bool(body.call("is_dead"))
+	if not (was_dead or now_dead):
+		return
+	if not body.has_method("get_ragdoll"):
+		return
+	var rag: Node = body.call("get_ragdoll")
+	if rag == null:
+		return
+	var imp: Vector3 = rag.call("impulse_from_ballistics", par, dir)
+	# 击杀冲量由 died 回调里 start() 施加；已死亡的后续命中在这里推尸体。
+	if was_dead:
+		rag.call("apply_hit_impulse", imp, hp, col)

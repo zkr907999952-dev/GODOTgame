@@ -4,6 +4,8 @@ const SoftLocoScript = preload("res://scripts/soft_loco.gd")
 const OrganRigScript = preload("res://scripts/organs/organ_rig.gd")
 const CharacterLookScript = preload("res://scripts/character_look.gd")
 const WeaponSystemScript = preload("res://scripts/weapons/weapon_system.gd")
+const CharacterHealthScript = preload("res://scripts/character_health.gd")
+const RagdollSystemScript = preload("res://scripts/ragdoll_system.gd")
 ## 角色控制器：展示互动 / 角色控制 双模式 + SoftLoco 网页 loco 动画驱动 Skeleton3D。
 ## Web loco bind: mesh faces +Z; Godot move uses -Z forward → visual Body needs π yaw offset.
 const BODY_YAW_OFFSET := PI
@@ -107,6 +109,10 @@ var _loco: Node
 var _organs: Node
 ## 武器模块（scripts/weapons/weapon_system.gd）
 var _weapons: Node
+var _health: Node
+var _ragdoll: Node
+var _col_layer_live: int = 2
+var _col_mask_live: int = 1
 var _interact_held: bool = false
 var _interact_screen: Vector2 = Vector2.ZERO
 var _stance: String = "stand" # stand | crouch | prone
@@ -154,6 +160,7 @@ var _fill_light: OmniLight3D
 
 func _ready() -> void:
 	add_to_group("wound_body")
+	add_to_group("health_body")
 	_default_yaw = _yaw
 	_default_pitch = _pitch
 	_default_cam_dist = camera_distance
@@ -205,6 +212,19 @@ func _ready() -> void:
 	_weapons.name = "Weapons"
 	add_child(_weapons)
 	_weapons.call("setup", self, _camera, skel)
+	_health = CharacterHealthScript.new()
+	_health.name = "Health"
+	add_child(_health)
+	_health.died.connect(_on_character_died)
+	_health.revived.connect(_on_character_revived)
+	_health.hp_changed.connect(func(_h, _m): pass)
+	_ragdoll = RagdollSystemScript.new()
+	_ragdoll.name = "Ragdoll"
+	add_child(_ragdoll)
+	if skel:
+		_ragdoll.call("setup", skel, self)
+	_col_layer_live = collision_layer
+	_col_mask_live = collision_mask
 	if _col.shape is CylinderShape3D:
 		_capsule_stand_h = (_col.shape as CylinderShape3D).height
 		_capsule_stand_y = _col.position.y
@@ -238,6 +258,130 @@ func weapon_armed() -> bool:
 
 func get_organs() -> Node:
 	return _organs
+
+
+func get_health() -> Node:
+	return _health
+
+
+func get_hp() -> float:
+	return float(_health.hp) if _health else 100.0
+
+
+func get_max_hp() -> float:
+	return float(_health.max_hp) if _health else 100.0
+
+
+func is_dead() -> bool:
+	return _health != null and bool(_health.dead)
+
+
+func apply_damage(amount: float, info: Dictionary = {}) -> float:
+	if _health == null:
+		return 0.0
+	return float(_health.call("apply_damage", amount, info))
+
+
+func revive(to: float = -1.0) -> void:
+	if _health:
+		_health.call("revive", to)
+
+
+func get_ragdoll() -> Node:
+	return _ragdoll
+
+
+func get_head_world_position() -> Vector3:
+	if is_dead() and _ragdoll and _ragdoll.has_method("get_follow_point"):
+		var pb = _ragdoll.get("bones").get("C_Head_a") if _ragdoll.get("bones") else null
+		if pb and is_instance_valid(pb):
+			return (pb as Node3D).global_position + Vector3.UP * 0.16
+	var skel := get_skeleton()
+	if skel:
+		var i := skel.find_bone("C_Head_a")
+		if i >= 0:
+			return (skel.global_transform * skel.get_bone_global_pose(i)).origin + Vector3.UP * 0.16
+	return global_position + Vector3.UP * 1.62
+
+
+func _set_pose_drivers_frozen(on: bool) -> void:
+	if _loco:
+		_loco.set("frozen", on)
+	var sec := get_secondary()
+	if sec:
+		sec.set("corpse_mode", on)
+		if on:
+			sec.set("breath_enabled", false)
+			sec.set("blink_enabled", false)
+	if _organs:
+		_organs.set("frozen", on)
+	if _weapons:
+		_weapons.set("weapon_ik", false)
+		if _loco:
+			_loco.set("weapon_ik", false)
+
+
+func _on_character_died(info: Dictionary) -> void:
+	_set_pose_drivers_frozen(true)
+	if _col:
+		_col.disabled = true
+	collision_layer = 0
+	collision_mask = 0
+	velocity = Vector3.ZERO
+	if _weapons and _weapons.has_method("holster") and bool(_weapons.call("is_armed")):
+		_weapons.call("holster")
+	var dir: Vector3 = info.get("dir", Vector3.FORWARD)
+	var hit: Vector3 = info.get("entry", info.get("hit", Vector3.ZERO))
+	var par: Dictionary = info.get("par", {})
+	var col = info.get("collider")
+	var imp := Vector3.ZERO
+	if _ragdoll and _ragdoll.has_method("impulse_from_ballistics") and not par.is_empty():
+		imp = _ragdoll.call("impulse_from_ballistics", par, dir)
+	elif dir.length_squared() > 1e-8:
+		imp = dir.normalized() * 6.0
+	if _ragdoll:
+		_ragdoll.call("start", imp, hit, col)
+	# 切到观察相机并跟随尸体，菜单仍可用；不允许再进第一人称走动。
+	if first_person:
+		set_play_mode(GameMode.DISPLAY)
+	if has_method("set_tp_view"):
+		var yaw := float(_yaw)
+		call("set_tp_view", yaw + 0.6, 0.28, 2.4, false)
+	print("player: died, ragdoll started")
+
+
+func _on_character_revived() -> void:
+	# 把原点移到尸体骨盆投影的地面，再关掉布娃娃、恢复站立胶囊。
+	var feet := global_position
+	if _ragdoll and _ragdoll.has_method("get_pelvis_point"):
+		var p: Vector3 = _ragdoll.call("get_pelvis_point")
+		var space := get_world_3d().direct_space_state if get_world_3d() else null
+		if space:
+			var q := PhysicsRayQueryParameters3D.create(p + Vector3.UP * 0.8, p + Vector3.DOWN * 3.0, 1)
+			var hit := space.intersect_ray(q)
+			feet = hit["position"] if not hit.is_empty() else Vector3(p.x, global_position.y, p.z)
+		else:
+			feet = Vector3(p.x, global_position.y, p.z)
+	if _ragdoll:
+		_ragdoll.call("stop")
+	_set_pose_drivers_frozen(false)
+	var sec := get_secondary()
+	if sec:
+		sec.set("breath_enabled", true)
+		sec.set("blink_enabled", true)
+		sec.set("hair_enabled", true)
+	if _col:
+		_col.disabled = false
+	collision_layer = _col_layer_live
+	collision_mask = _col_mask_live
+	_set_stance("stand")
+	global_position = feet
+	velocity = Vector3.ZERO
+	reset_physics_interpolation()
+	if _loco and _loco.has_method("apply_pose"):
+		_loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, 0.016, 0.0)
+	print("player: revived at ", feet)
+
 
 
 func get_camera() -> Camera3D:
@@ -820,6 +964,10 @@ func _process(delta: float) -> void:
 		_rmb_down = false
 	if _mmb_down and not Input.is_mouse_button_pressed(MOUSE_BUTTON_MIDDLE):
 		_mmb_down = false
+	if is_dead() and _ragdoll:
+		var follow: Vector3 = _ragdoll.call("get_follow_point")
+		_tp_target_goal = follow - _base_origin()
+		_tp_target = _tp_target_goal
 	if not first_person:
 		_update_tp_camera(delta)
 		_push_view_spin(delta)
@@ -886,6 +1034,8 @@ func is_display_mode() -> bool:
 
 
 func set_play_mode(mode: GameMode) -> void:
+	if is_dead() and mode == GameMode.CONTROL:
+		mode = GameMode.DISPLAY
 	var prev := play_mode
 	play_mode = mode
 	first_person = mode == GameMode.CONTROL
@@ -1733,6 +1883,11 @@ func _try_step_up(motion: Vector3) -> bool:
 
 
 func _physics_process(delta: float) -> void:
+	if is_dead():
+		velocity = Vector3.ZERO
+		if _loco:
+			_loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, delta, 0.0)
+		return
 	var display := play_mode == GameMode.DISPLAY
 	var can_act := (not display) and not input_locked
 	if can_act:

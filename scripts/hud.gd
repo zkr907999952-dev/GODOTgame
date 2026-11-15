@@ -88,6 +88,20 @@ var _safe: Vector4 = Vector4.ZERO  # 逻辑像素：左 上 右 下
 var _debug_safe: Variant = null
 var _mobile_scale: float = 0.0  # > 0：按 DPI 设置界面缩放（手机）
 
+var _hp_box: Control
+var _hp_bar: ColorRect
+var _hp_bar_bg: ColorRect
+var _hp_num: Label
+var _hp_revive: Button
+var _world_hp: Control
+var _world_hp_bar: ColorRect
+var _world_hp_bar_bg: ColorRect
+var _world_hp_num: Label
+var _world_hp_target: Node = null
+var _world_hp_hide_t: float = 0.0
+var _world_hp_alpha: float = 0.0
+var debug_world_hp_visible: bool = false
+
 
 func setup(player: Node) -> void:
 	_player = player
@@ -199,6 +213,7 @@ func _build_ui() -> void:
 	_panel_weapon = _wui.call("build_panel")
 	root.add_child(_panel_weapon)
 	_wui.call("build_ammo_hud", root)
+	_build_health_ui(root)
 	_wrap_scroll(_panel_settings)
 	_wrap_scroll(_panel_map)
 	_wrap_scroll(_panel_weapon)
@@ -225,6 +240,217 @@ func _build_ui() -> void:
 
 ## 所有 HUD 控件都不拿键盘焦点：否则点过的按钮会吃掉空格 / 回车（ui_accept → 再次按下
 ## 按钮 → 面板开关），Tab（ui_focus_next）和方向键也会被 GUI 焦点导航吞掉。
+func _build_health_ui(root: Control) -> void:
+	# 玩家生命值：屏幕左下角，数字 + 动态颜色条（绿→黄→红），手机上放到摇杆上方。
+	_hp_box = Control.new()
+	_hp_box.name = "PlayerHealth"
+	_hp_box.custom_minimum_size = Vector2(220, 52)
+	_hp_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hp_box.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_hp_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	root.add_child(_hp_box)
+	var title := Label.new()
+	title.text = "HP"
+	title.position = Vector2(0, 0)
+	title.add_theme_font_size_override("font_size", 13)
+	title.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92, 0.9))
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hp_box.add_child(title)
+	_hp_num = Label.new()
+	_hp_num.name = "HpNumber"
+	_hp_num.text = "100"
+	_hp_num.position = Vector2(28, -4)
+	_hp_num.add_theme_font_size_override("font_size", 26)
+	_hp_num.add_theme_color_override("font_color", Color(0.55, 0.95, 0.45))
+	_hp_num.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hp_box.add_child(_hp_num)
+	_hp_bar_bg = ColorRect.new()
+	_hp_bar_bg.color = Color(0.05, 0.06, 0.07, 0.7)
+	_hp_bar_bg.position = Vector2(0, 30)
+	_hp_bar_bg.size = Vector2(200, 14)
+	_hp_bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hp_box.add_child(_hp_bar_bg)
+	var border := ColorRect.new()
+	border.color = Color(1, 1, 1, 0.18)
+	border.position = Vector2(-1, 29)
+	border.size = Vector2(202, 16)
+	border.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hp_box.add_child(border)
+	_hp_box.move_child(border, _hp_bar_bg.get_index())
+	_hp_bar = ColorRect.new()
+	_hp_bar.name = "HpBar"
+	_hp_bar.color = Color(0.35, 0.9, 0.35)
+	_hp_bar.position = Vector2(0, 30)
+	_hp_bar.size = Vector2(200, 14)
+	_hp_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hp_box.add_child(_hp_bar)
+	_hp_revive = Button.new()
+	_hp_revive.name = "ReviveButton"
+	_hp_revive.text = "复活"
+	_hp_revive.visible = false
+	_hp_revive.custom_minimum_size = Vector2(88, 36)
+	_hp_revive.position = Vector2(108, -4)
+	_hp_revive.focus_mode = Control.FOCUS_NONE
+	_hp_revive.pressed.connect(func():
+		if _player and _player.has_method("revive"):
+			_player.call("revive")
+			_refresh_player_hp()
+	)
+	_style_button(_hp_revive, true)
+	_hp_box.add_child(_hp_revive)
+
+	# 准星指向的目标头顶血条（默认隐藏）
+	_world_hp = Control.new()
+	_world_hp.name = "WorldHealth"
+	_world_hp.visible = false
+	_world_hp.custom_minimum_size = Vector2(140, 32)
+	_world_hp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_world_hp.modulate.a = 0.0
+	root.add_child(_world_hp)
+	_world_hp_bar_bg = ColorRect.new()
+	_world_hp_bar_bg.color = Color(0.05, 0.06, 0.07, 0.75)
+	_world_hp_bar_bg.position = Vector2(0, 16)
+	_world_hp_bar_bg.size = Vector2(140, 10)
+	_world_hp_bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_world_hp.add_child(_world_hp_bar_bg)
+	_world_hp_bar = ColorRect.new()
+	_world_hp_bar.name = "WorldHpBar"
+	_world_hp_bar.color = Color(0.35, 0.9, 0.35)
+	_world_hp_bar.position = Vector2(0, 16)
+	_world_hp_bar.size = Vector2(140, 10)
+	_world_hp_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_world_hp.add_child(_world_hp_bar)
+	_world_hp_num = Label.new()
+	_world_hp_num.name = "WorldHpNumber"
+	_world_hp_num.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_world_hp_num.position = Vector2(0, -4)
+	_world_hp_num.size = Vector2(140, 20)
+	_world_hp_num.add_theme_font_size_override("font_size", 14)
+	_world_hp_num.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	_world_hp_num.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	_world_hp_num.add_theme_constant_override("outline_size", 4)
+	_world_hp_num.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_world_hp.add_child(_world_hp_num)
+	_refresh_player_hp()
+
+
+func _hp_color(ratio: float) -> Color:
+	var r := clampf(ratio, 0.0, 1.0)
+	if r > 0.5:
+		return Color(0.35, 0.88, 0.32).lerp(Color(0.95, 0.86, 0.22), 1.0 - (r - 0.5) / 0.5)
+	return Color(0.95, 0.86, 0.22).lerp(Color(0.92, 0.18, 0.16), 1.0 - r / 0.5)
+
+
+func _refresh_player_hp() -> void:
+	if _hp_box == null or _player == null:
+		return
+	var hp := 100.0
+	var mx := 100.0
+	if _player.has_method("get_hp"):
+		hp = float(_player.call("get_hp"))
+		mx = float(_player.call("get_max_hp"))
+	var ratio := 0.0 if mx <= 0.0 else clampf(hp / mx, 0.0, 1.0)
+	if _hp_num:
+		_hp_num.text = str(int(round(hp)))
+		_hp_num.add_theme_color_override("font_color", _hp_color(ratio))
+	if _hp_bar:
+		_hp_bar.size = Vector2(200.0 * ratio, 14)
+		_hp_bar.color = _hp_color(ratio)
+	if _hp_revive:
+		_hp_revive.visible = _player.has_method("is_dead") and bool(_player.call("is_dead"))
+
+
+func _aim_health_target() -> Node:
+	if _player == null:
+		return null
+	var cam: Camera3D = _player.call("get_camera") if _player.has_method("get_camera") else get_viewport().get_camera_3d()
+	if cam == null:
+		return null
+	var w3 := cam.get_world_3d()
+	if w3 == null:
+		return null
+	var from := cam.global_position
+	var to := from + (-cam.global_transform.basis.z) * 80.0
+	var q := PhysicsRayQueryParameters3D.create(from, to)
+	q.collision_mask = 1 | 2
+	q.collide_with_areas = false
+	var ex: Array[RID] = []
+	if _player is CollisionObject3D:
+		ex.append((_player as CollisionObject3D).get_rid())
+	q.exclude = ex
+	var hit := w3.direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		return null
+	var n: Node = hit.get("collider") as Node
+	while n:
+		if n != _player and n.has_method("get_hp") and n.has_method("is_dead") and not bool(n.call("is_dead")):
+			return n
+		n = n.get_parent()
+	return null
+
+
+func _refresh_world_hp(delta: float) -> void:
+	if _world_hp == null:
+		return
+	var tgt := _aim_health_target()
+	if tgt:
+		_world_hp_target = tgt
+		_world_hp_hide_t = 0.7
+	else:
+		_world_hp_hide_t = maxf(0.0, _world_hp_hide_t - delta)
+		if _world_hp_hide_t <= 0.0:
+			_world_hp_target = null
+	var show := _world_hp_target != null and is_instance_valid(_world_hp_target)
+	var want := 1.0 if show else 0.0
+	_world_hp_alpha = move_toward(_world_hp_alpha, want, delta * (8.0 if show else 5.0))
+	debug_world_hp_visible = show and _world_hp_alpha > 0.15
+	_world_hp.visible = _world_hp_alpha > 0.02
+	_world_hp.modulate.a = _world_hp_alpha
+	if not show or not is_instance_valid(_world_hp_target):
+		return
+	var body: Node = _world_hp_target
+	var hp := float(body.call("get_hp"))
+	var mx := float(body.call("get_max_hp"))
+	var ratio := 0.0 if mx <= 0.0 else clampf(hp / mx, 0.0, 1.0)
+	_world_hp_num.text = "%d / %d" % [int(round(hp)), int(round(mx))]
+	_world_hp_bar.size = Vector2(140.0 * ratio, 10)
+	_world_hp_bar.color = _hp_color(ratio)
+	var world_p: Vector3 = body.global_position + Vector3.UP * 1.7
+	if body.has_method("get_head_world_position"):
+		world_p = (body.call("get_head_world_position") as Vector3) + Vector3.UP * 0.08
+	var cam := get_viewport().get_camera_3d()
+	if cam == null or cam.is_position_behind(world_p):
+		_world_hp.visible = false
+		debug_world_hp_visible = false
+		return
+	var sp := cam.unproject_position(world_p)
+	_world_hp.position = sp - Vector2(70, 36)
+
+
+func _layout_health_ui(safe: Vector4, touch: bool) -> void:
+	if _hp_box == null:
+		return
+	_hp_box.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_hp_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	var left := safe.x + 16.0
+	var bottom := safe.w + 16.0
+	if touch:
+		# 摇杆约占左下 128+32，血条放在摇杆上方，避免重叠。
+		bottom = safe.w + 32.0 + 128.0 + 16.0
+		_hp_num.add_theme_font_size_override("font_size", 22)
+		_hp_bar_bg.size = Vector2(180, 12)
+		_hp_bar.size.y = 12
+	else:
+		_hp_num.add_theme_font_size_override("font_size", 26)
+		_hp_bar_bg.size = Vector2(200, 14)
+		_hp_bar.size.y = 14
+	_hp_box.offset_left = left
+	_hp_box.offset_right = left + 220.0
+	_hp_box.offset_top = -(bottom + 56.0)
+	_hp_box.offset_bottom = -bottom
+	_refresh_player_hp()
+
+
 func _no_focus(n: Node) -> void:
 	if n is Control:
 		(n as Control).focus_mode = Control.FOCUS_NONE
@@ -1397,6 +1623,8 @@ var _last_mode: int = -1
 func _process(_delta: float) -> void:
 	if _wui:
 		_wui.call("_refresh_ammo_hud")
+	_refresh_player_hp()
+	_refresh_world_hp(_delta)
 	# 模式由任何途径改变（Tab / 按钮 / 脚本）都刷新状态栏
 	if _player and "play_mode" in _player and int(_player.play_mode) != _last_mode:
 		_last_mode = int(_player.play_mode)
@@ -1749,6 +1977,7 @@ func _apply_layout() -> void:
 				sc.custom_minimum_size = Vector2(250 if right_side else 0, h2)
 	if _wui:
 		_wui.call("layout_ammo", _safe, touch_ui)
+	_layout_health_ui(_safe, touch_ui)
 	# 动态重建的按钮也要能「拖菜单不点按」
 	for panel in [_panel_settings, _panel_map, _panel_interact, _panel_camera, _panel_weapon]:
 		var sc2 := _panel_scroll(panel)

@@ -1435,6 +1435,12 @@ func _update_clip(delta: float) -> Dictionary:
 func _process(delta: float) -> void:
 	if player == null or view == null:
 		return
+	if player.has_method("is_dead") and bool(player.call("is_dead")):
+		trigger = false
+		_ik_w = 0.0
+		if is_armed() and has_method("holster"):
+			holster()
+		return
 	# 射击 / 开镜 / 后坐只在第一人称。持枪切到观察模式时仍保持持枪姿势（不自动收枪）。
 	# 观察模式：点角色身体仍走互动工具；开火键隐藏，扳机在此模式无效。
 	var fp := bool(player.get("first_person")) and not bool(player.get("input_locked"))
@@ -1660,6 +1666,9 @@ func _setup_arms() -> void:
 
 ## 物理帧：loco 刚写完姿势 → 记下手臂 / 手指的 loco 姿势，作为 IK 混合的底
 func _physics_process(_dt: float) -> void:
+	if player and player.has_method("is_dead") and bool(player.call("is_dead")):
+		_ik_w = 0.0
+		return
 	if skeleton == null:
 		return
 	if _ik_w <= 0.0 and not is_armed() and not _ik_dirty:

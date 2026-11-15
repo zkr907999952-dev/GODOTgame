@@ -9,6 +9,8 @@ const LID_RE := "^(L|R)_(U|D)lid_([A-E])$"
 const HAIR_PIN_MAX := 1
 const BreastPhysicsScript = preload("res://scripts/breast_physics.gd")
 
+var corpse_mode: bool = false  # 尸体：只让头发跟随头部，停止呼吸 / 眨眼 / 注视
+var _corpse_hair_snapped: bool = false
 var hair_enabled: bool = true
 var hair_damp: float = 0.01
 var hair_inertia: float = 0.55
@@ -298,6 +300,22 @@ func update(delta: float, sprint: bool = false) -> void:
 	if skeleton == null:
 		return
 	var d := minf(delta, 0.04)
+	if corpse_mode:
+		if not _corpse_hair_snapped:
+			snap_hair_to_pose()
+			_corpse_hair_snapped = true
+		if hair_enabled and hair_names.size() >= 2:
+			var old_damp := hair_damp
+			var old_in := hair_inertia
+			hair_damp = maxf(hair_damp, 0.22)
+			hair_inertia = minf(hair_inertia, 0.28)
+			_step_hair(d)
+			hair_damp = old_damp
+			hair_inertia = old_in
+		if breasts != null:
+			breasts.update(delta)
+		return
+	_corpse_hair_snapped = false
 	if sprint:
 		breath_boost = maxf(breath_boost, 0.35)
 	else:
@@ -696,6 +714,19 @@ func _hair_body_collide(p: Vector3, nm: String, ref: String, bp: Vector3, bq: Qu
 
 func _hair_pinned(k: int) -> bool:
 	return k <= HAIR_PIN_MAX
+
+
+func snap_hair_to_pose() -> void:
+	# 布娃娃启动时头骨会突然进入物理，把 Verlet 头发重钉到当前骨骼，避免炸开。
+	if skeleton == null or hair_names.size() < 2:
+		return
+	for k in hair_names.size():
+		var gp: Array = _soft_pose(hair_names[k])
+		hair_p[k] = gp[0]
+		hair_prev[k] = gp[0]
+	hair_root_init = false
+	hair_root_prev = Vector3.ZERO
+	hair_root_rot_prev = Quaternion.IDENTITY
 
 
 func _step_hair(d: float) -> void:

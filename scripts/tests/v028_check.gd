@@ -83,8 +83,8 @@ func _run() -> void:
 
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
 	# version asserts filled after the bump; still require package id
-	_ok(presets.find("version/name=\"0.2.8\"") >= 0, "export version is 0.2.8")
-	_ok(presets.find("version/code=10") >= 0, "versionCode is 10")
+	_ok(presets.find("version/name=\"0.2.9\"") >= 0, "export version is 0.2.9")
+	_ok(presets.find("version/code=11") >= 0, "versionCode is 11")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 	_ok(presets.find("assets/organs/*.bin") >= 0, "organs include_filter present")
 

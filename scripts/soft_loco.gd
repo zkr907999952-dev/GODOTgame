@@ -37,6 +37,7 @@ var breath_chest: float = 0.0
 var breath_enabled: bool = false  # SoftSecondary owns breath now
 
 var secondary: RefCounted = null  # SoftSecondary
+var frozen: bool = false  # 死亡布娃娃期间停止写骨骼姿势
 
 var loco_was_moving: bool = false
 var loco_settle: float = 1.0
@@ -332,6 +333,11 @@ func _soft_to_godot_pose(bone_name: String, soft_q: Quaternion) -> Quaternion:
 
 
 func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: bool, delta: float, speed_mps: float = 1.65) -> void:
+	if frozen:
+		if secondary and secondary.has_method("update"):
+			secondary.set("corpse_mode", true)
+			secondary.update(delta, false)
+		return
 	if skeleton == null or clips.is_empty():
 		return
 	var clip_name := pick_clip(fwd, side, mag, airborne, sprint)
