@@ -51,8 +51,8 @@ const KEYMAP := {
 		KEY_5: "dance", KEY_6: "dance", KEY_7: "dance", KEY_8: "dance",
 		KEY_9: "dance_clear", KEY_0: "dance_clear",
 	},
-	"display": {KEY_F: "focus"},
-	"control": {KEY_Z: "prone", KEY_G: "holster", KEY_Q: "weapon_wheel",
+	"display": {KEY_F: "focus", KEY_E: "corpse_drag"},
+	"control": {KEY_Z: "prone", KEY_G: "holster", KEY_Q: "weapon_wheel", KEY_E: "corpse_drag",
 		KEY_1: "weapon_slot", KEY_2: "weapon_slot", KEY_3: "weapon_slot", KEY_4: "weapon_slot", KEY_5: "weapon_slot",
 		KEY_6: "weapon_slot", KEY_7: "weapon_slot", KEY_8: "weapon_slot", KEY_9: "weapon_slot"},
 	## 俯视地图打开时只响应这两个
@@ -90,12 +90,14 @@ func _ready() -> void:
 	if _hud and _hud.has_method("setup"):
 		_hud.call("setup", _player)
 	call_deferred("_bind_ballistics")
-	print("game_root: ready — Tab 模式 · WASD/Shift/空格 · Ctrl/C 蹲 · Z 匍匐 · M 地图 · H 界面 · X 透视")
+	print("game_root: ready — Tab 模式 · WASD/Shift/空格 · Ctrl/C 蹲 · Z 匍匐 · E 拖尸体 · M 地图 · H 界面 · X 透视")
 
 
 func _bind_ballistics() -> void:
 	if bullet_cam and bullet_cam.has_method("setup"):
 		bullet_cam.call("setup", _player, settings)
+		if not bullet_cam.is_connected("started", _on_bullet_cam_started):
+			bullet_cam.connect("started", _on_bullet_cam_started)
 	if _player == null or not _player.has_method("get_weapons"):
 		return
 	var ws: Node = _player.call("get_weapons")
@@ -109,6 +111,13 @@ func _bind_ballistics() -> void:
 func _on_organ_path(info: Dictionary) -> void:
 	if bullet_cam:
 		bullet_cam.call("consider", info, info.get("projectile", {}))
+
+
+func _on_bullet_cam_started() -> void:
+	if _player and _player.has_method("get_weapons"):
+		var ws: Node = _player.call("get_weapons")
+		if ws and ws.has_method("interrupt_for_bullet_cam"):
+			ws.call("interrupt_for_bullet_cam")
 
 
 # ------------------------------------------------------------------ input
@@ -206,6 +215,10 @@ func run_action(action: String, key: int = 0) -> void:
 			_player.call("dance", 0)
 		"overhead_close":
 			close_overhead()
+		"corpse_drag":
+			# E：切换拖拽尸体。T 仍是腹部互动模式循环，两者并存。
+			if _player and _player.has_method("toggle_corpse_drag"):
+				_player.call("toggle_corpse_drag")
 	_hud.call("sync")
 
 

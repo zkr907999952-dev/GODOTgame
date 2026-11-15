@@ -101,6 +101,8 @@ var _world_hp_target: Node = null
 var _world_hp_hide_t: float = 0.0
 var _world_hp_alpha: float = 0.0
 var debug_world_hp_visible: bool = false
+var _drag_btn: Button
+var debug_drag_btn_visible: bool = false
 
 
 func setup(player: Node) -> void:
@@ -332,6 +334,18 @@ func _build_health_ui(root: Control) -> void:
 	_world_hp_num.add_theme_constant_override("outline_size", 4)
 	_world_hp_num.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_world_hp.add_child(_world_hp_num)
+
+	_drag_btn = Button.new()
+	_drag_btn.name = "CorpseDragButton"
+	_drag_btn.text = "拖拽"
+	_drag_btn.visible = false
+	_drag_btn.focus_mode = Control.FOCUS_NONE
+	_drag_btn.custom_minimum_size = Vector2(92, 40)
+	_drag_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_drag_btn.pressed.connect(_on_corpse_drag_pressed)
+	_style_button(_drag_btn, false)
+	root.add_child(_drag_btn)
+
 	_refresh_player_hp()
 
 
@@ -426,6 +440,53 @@ func _refresh_world_hp(delta: float) -> void:
 		return
 	var sp := cam.unproject_position(world_p)
 	_world_hp.position = sp - Vector2(70, 36)
+
+
+func _on_corpse_drag_pressed() -> void:
+	if _player and _player.has_method("toggle_corpse_drag"):
+		_player.call("toggle_corpse_drag")
+		_refresh_corpse_drag_btn()
+
+
+func _refresh_corpse_drag_btn() -> void:
+	if _drag_btn == null:
+		return
+	var drag = _player.call("get_corpse_drag") if _player and _player.has_method("get_corpse_drag") else null
+	var dragging := false
+	var can := false
+	var grab_pt := Vector3.ZERO
+	if drag:
+		dragging = bool(drag.call("is_dragging"))
+		can = bool(drag.call("can_start"))
+		if dragging and drag.has_method("current_grab_point"):
+			grab_pt = drag.call("current_grab_point")
+		elif can:
+			grab_pt = drag.get("aimed_point")
+	var hide_for_ui := false
+	if has_method("is_wheel_open") and bool(call("is_wheel_open")):
+		hide_for_ui = true
+	var g := get_parent()
+	if g and g.get("map_view") and bool(g.get("map_view").get("is_open")):
+		hide_for_ui = true
+	# 第一人称优先；观察视角只要瞄到尸体也可以显示，方便按 E / 点按钮。
+	var show := (not hide_for_ui) and drag != null and (dragging or can)
+	debug_drag_btn_visible = show
+	_drag_btn.visible = show
+	_drag_btn.mouse_filter = Control.MOUSE_FILTER_STOP if show else Control.MOUSE_FILTER_IGNORE
+	if not show:
+		return
+	_drag_btn.text = "放下" if dragging else "拖拽"
+	_style_button(_drag_btn, dragging)
+	var vp := get_viewport().get_visible_rect().size
+	var pos := Vector2(vp.x * 0.5 - 46.0, vp.y * 0.5 - 86.0)
+	var cam := get_viewport().get_camera_3d()
+	if cam and grab_pt != Vector3.ZERO and not cam.is_position_behind(grab_pt):
+		var sp := cam.unproject_position(grab_pt)
+		pos = sp + Vector2(-46.0, -64.0)
+	pos.x = clampf(pos.x, 8.0, maxf(8.0, vp.x - 100.0))
+	pos.y = clampf(pos.y, 8.0, maxf(8.0, vp.y - 52.0))
+	_drag_btn.position = pos
+	_drag_btn.size = Vector2(92, 40)
 
 
 func _layout_health_ui(safe: Vector4, touch: bool) -> void:
@@ -1634,6 +1695,7 @@ func _process(_delta: float) -> void:
 		_wui.call("_refresh_ammo_hud")
 	_refresh_player_hp()
 	_refresh_world_hp(_delta)
+	_refresh_corpse_drag_btn()
 	# 模式由任何途径改变（Tab / 按钮 / 脚本）都刷新状态栏
 	if _player and "play_mode" in _player and int(_player.play_mode) != _last_mode:
 		_last_mode = int(_player.play_mode)

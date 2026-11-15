@@ -555,6 +555,8 @@ func _apply_combat_hit(p: Dictionary, body: Node, hp: Vector3, dir: Vector3, col
 		body.call("apply_damage", amount, qinfo)
 	var now_dead := body.has_method("is_dead") and bool(body.call("is_dead"))
 	if not (was_dead or now_dead):
+		if body.has_method("apply_hit_reaction"):
+			body.call("apply_hit_reaction", qinfo)
 		return
 	if not body.has_method("get_ragdoll"):
 		return

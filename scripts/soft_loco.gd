@@ -769,6 +769,70 @@ func debug_sample_walk() -> Dictionary:
 	return out
 
 
+## Sample walkLeft / walkRight at the same phase (Mixamo strafe clips already in loco-clips.json).
+func debug_sample_strafe() -> Dictionary:
+	var out := {"ok": false, "left": "", "right": "", "distinct": false, "hip_ang": 0.0}
+	if not clips.has("walkLeft") or not clips.has("walkRight"):
+		return out
+	if pick_clip(0.0, -1.0, 1.0, false, false) != "walkLeft":
+		return out
+	if pick_clip(0.0, 1.0, 1.0, false, false) != "walkRight":
+		return out
+	mode = "stand"
+	dance_override = ""
+	phase = 0.28
+	_reset_blend_for_debug()
+	apply_pose(0.0, -1.0, 1.0, false, false, 0.016, 1.06)
+	out["left"] = current_clip
+	var left: Dictionary = {}
+	for name in ["C_Hip_a", "L_UpperLeg_a", "R_UpperLeg_a", "C_Spine_c"]:
+		if not bone_idx.has(name):
+			continue
+		var q := skeleton.get_bone_pose_rotation(bone_idx[name])
+		left[name] = [q.x, q.y, q.z, q.w]
+	out["left_bones"] = left
+	phase = 0.28
+	_reset_blend_for_debug()
+	apply_pose(0.0, 1.0, 1.0, false, false, 0.016, 1.06)
+	out["right"] = current_clip
+	var right: Dictionary = {}
+	for name in ["C_Hip_a", "L_UpperLeg_a", "R_UpperLeg_a", "C_Spine_c"]:
+		if not bone_idx.has(name):
+			continue
+		var q := skeleton.get_bone_pose_rotation(bone_idx[name])
+		right[name] = [q.x, q.y, q.z, q.w]
+	out["right_bones"] = right
+	var hip_ang := 0.0
+	if left.has("C_Hip_a") and right.has("C_Hip_a"):
+		var a: Array = left["C_Hip_a"]
+		var b: Array = right["C_Hip_a"]
+		var qa := Quaternion(a[0], a[1], a[2], a[3])
+		var qb := Quaternion(b[0], b[1], b[2], b[3])
+		var d := qa.inverse() * qb
+		hip_ang = 2.0 * acos(clampf(absf(d.w), 0.0, 1.0))
+	out["hip_ang"] = hip_ang
+	var distinct := hip_ang > 0.08
+	if left.has("L_UpperLeg_a") and right.has("L_UpperLeg_a"):
+		var la: Array = left["L_UpperLeg_a"]
+		var ra: Array = right["L_UpperLeg_a"]
+		var ql := Quaternion(la[0], la[1], la[2], la[3])
+		var qr := Quaternion(ra[0], ra[1], ra[2], ra[3])
+		var ld := ql.inverse() * qr
+		distinct = distinct or (2.0 * acos(clampf(absf(ld.w), 0.0, 1.0)) > 0.08)
+	out["distinct"] = distinct
+	out["ok"] = out["left"] == "walkLeft" and out["right"] == "walkRight" and distinct
+	out["run_left"] = pick_clip(0.0, -1.0, 1.0, false, true)
+	out["run_right"] = pick_clip(0.0, 1.0, 1.0, false, true)
+	out["crouch_left"] = ""
+	out["crouch_right"] = ""
+	var prev := mode
+	mode = "crouch"
+	out["crouch_left"] = pick_clip(0.0, -1.0, 1.0, false, false)
+	out["crouch_right"] = pick_clip(0.0, 1.0, 1.0, false, false)
+	mode = prev
+	return out
+
+
 ## Walk mid-swing then release: first idle frame stays near walk; 0.5s later near idle.
 func debug_sample_stop_blend() -> Dictionary:
 	if not clips.has("walk") or not bone_idx.has("L_UpperArm_a"):

@@ -32,7 +32,12 @@ const BONES := [
 ]
 
 ## 子弹冲量系数：乘以 ballistics 的 impulse(0..1)。步枪应能明显推动躯干/肢体，霰弹更重，手枪更轻。
+## 命中时再生成短寿命高速球体，用刚体碰撞推动尸体，比单独 apply_impulse 更有撞击感。
 const IMPULSE_SCALE := 8.5
+const SPHERE_RADIUS := 0.032
+const SPHERE_LIFE := 0.14
+const MAX_BONE_SPEED := 8.5
+const MAX_BONE_ANG := 18.0
 
 var skeleton: Skeleton3D
 var simulator: PhysicalBoneSimulator3D
@@ -43,8 +48,13 @@ var last_impulse: Vector3 = Vector3.ZERO
 var last_impulse_bone: String = ""
 var last_impulse_speed: float = 0.0
 var impulse_count: int = 0
+var last_sphere_speed: float = 0.0
+var last_sphere_mass: float = 0.0
+var sphere_count: int = 0
 var _host: Node = null
 var _map_frozen: bool = false
+var _spheres: Array = []
+var _clamp_t: float = 0.0
 
 
 func setup(skel: Skeleton3D, host: Node = null) -> bool:
@@ -217,18 +227,25 @@ func apply_hit_impulse(impulse: Vector3, hit: Vector3 = Vector3.ZERO, collider: 
 		pb = _closest_bone(hit)
 	if pb == null:
 		return
+	# 球体承担主要撞击；这里只留一部分冲量，避免两者叠加把尸体打飞。
+	var residual := impulse * 0.42
 	if hit == Vector3.ZERO:
-		pb.apply_central_impulse(impulse)
+		pb.apply_central_impulse(residual)
 	else:
-		pb.apply_impulse(impulse, hit)
+		pb.apply_impulse(residual, hit)
 	# 少量把冲量传给相邻躯干，避免单肢被拉开
 	var torso: PhysicalBone3D = bones.get("C_Spine_c", bones.get("C_Hip_a"))
 	if torso and torso != pb:
-		torso.apply_central_impulse(impulse * 0.28)
+		torso.apply_central_impulse(residual * 0.28)
+	var dir := impulse.normalized() if impulse.length_squared() > 1e-8 else Vector3.FORWARD
+	var hit_p := hit if hit != Vector3.ZERO else pb.global_position
+	spawn_impact_sphere(hit_p, dir, impulse.length(), str(pb.bone_name))
 	last_impulse = impulse
 	last_impulse_bone = str(pb.bone_name)
 	last_impulse_speed = pb.linear_velocity.length()
 	impulse_count += 1
+	_clamp_t = 0.28
+	_clamp_speeds()
 
 
 func impulse_from_ballistics(par: Dictionary, dir: Vector3) -> Vector3:
@@ -245,6 +262,85 @@ func impulse_from_ballistics(par: Dictionary, dir: Vector3) -> Vector3:
 	# 略向上，避免完全贴地推滑
 	d = (d + Vector3.UP * 0.12).normalized()
 	return d * (0.22 + imp) * scale
+
+
+func spawn_impact_sphere(hit: Vector3, dir: Vector3, impulse_len: float, _bone: String = "") -> RigidBody3D:
+	if not active or dir.length_squared() < 1e-8:
+		return null
+	dir = dir.normalized()
+	# 动量略高于旧版纯冲量，步枪/霰弹更明显，手枪仍克制。
+	var mass := clampf(0.10 + impulse_len * 0.012, 0.10, 0.22)
+	var speed := clampf(42.0 + impulse_len * 4.5, 48.0, 88.0)
+	var body := RigidBody3D.new()
+	body.name = "BulletImpactSphere"
+	body.mass = mass
+	body.continuous_cd = true
+	body.contact_monitor = true
+	body.max_contacts_reported = 6
+	body.gravity_scale = 0.2
+	body.linear_damp = 0.4
+	body.angular_damp = 1.0
+	body.collision_layer = 0
+	body.collision_mask = LAYER_CHAR
+	var cs := CollisionShape3D.new()
+	var sph := SphereShape3D.new()
+	sph.radius = SPHERE_RADIUS
+	cs.shape = sph
+	body.add_child(cs)
+	var mi := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = SPHERE_RADIUS
+	mesh.height = SPHERE_RADIUS * 2.0
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.95, 0.85, 0.35, 0.85)
+	mat.emission_enabled = true
+	mat.emission = Color(1.0, 0.75, 0.2)
+	mat.emission_energy_multiplier = 1.6
+	mesh.material = mat
+	mi.mesh = mesh
+	body.add_child(mi)
+	var parent: Node = _host if _host != null else self
+	parent.add_child(body)
+	body.global_position = hit - dir * (SPHERE_RADIUS + 0.04)
+	body.linear_velocity = dir * speed
+	_spheres.append({"n": body, "t": SPHERE_LIFE})
+	last_sphere_speed = speed
+	last_sphere_mass = mass
+	sphere_count += 1
+	return body
+
+
+func _physics_process(delta: float) -> void:
+	if _spheres.is_empty() and _clamp_t <= 0.0:
+		return
+	var keep: Array = []
+	for s in _spheres:
+		s["t"] = float(s["t"]) - delta
+		var n: Node = s["n"]
+		if not is_instance_valid(n) or float(s["t"]) <= 0.0:
+			if is_instance_valid(n):
+				n.queue_free()
+			continue
+		keep.append(s)
+	_spheres = keep
+	if _clamp_t > 0.0:
+		_clamp_t = maxf(0.0, _clamp_t - delta)
+		_clamp_speeds()
+
+
+func _clamp_speeds() -> void:
+	if not active:
+		return
+	for pb in bones.values():
+		if not is_instance_valid(pb):
+			continue
+		var b: PhysicalBone3D = pb
+		var v := b.linear_velocity
+		if v.length() > MAX_BONE_SPEED:
+			b.linear_velocity = v.normalized() * MAX_BONE_SPEED
+		var w := b.angular_velocity
+		if w.length() > MAX_BONE_ANG:
+			b.angular_velocity = w.normalized() * MAX_BONE_ANG
 
 
 func _closest_bone(hit: Vector3) -> PhysicalBone3D:

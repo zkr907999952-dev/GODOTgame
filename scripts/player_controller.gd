@@ -6,6 +6,8 @@ const CharacterLookScript = preload("res://scripts/character_look.gd")
 const WeaponSystemScript = preload("res://scripts/weapons/weapon_system.gd")
 const CharacterHealthScript = preload("res://scripts/character_health.gd")
 const RagdollSystemScript = preload("res://scripts/ragdoll_system.gd")
+const HitReactionScript = preload("res://scripts/hit_reaction.gd")
+const CorpseDragScript = preload("res://scripts/corpse_drag.gd")
 ## 角色控制器：展示互动 / 角色控制 双模式 + SoftLoco 网页 loco 动画驱动 Skeleton3D。
 ## Web loco bind: mesh faces +Z; Godot move uses -Z forward → visual Body needs π yaw offset.
 const BODY_YAW_OFFSET := PI
@@ -111,6 +113,8 @@ var _organs: Node
 var _weapons: Node
 var _health: Node
 var _ragdoll: Node
+var _hit_react: Node
+var _corpse_drag: Node
 var _col_layer_live: int = 2
 var _col_mask_live: int = 1
 var _interact_held: bool = false
@@ -223,6 +227,15 @@ func _ready() -> void:
 	add_child(_ragdoll)
 	if skel:
 		_ragdoll.call("setup", skel, self)
+	_hit_react = HitReactionScript.new()
+	_hit_react.name = "HitReaction"
+	add_child(_hit_react)
+	if skel:
+		_hit_react.call("setup", skel, self)
+	_corpse_drag = CorpseDragScript.new()
+	_corpse_drag.name = "CorpseDrag"
+	add_child(_corpse_drag)
+	_corpse_drag.call("setup", self, skel)
 	_col_layer_live = collision_layer
 	_col_mask_live = collision_mask
 	if _col.shape is CylinderShape3D:
@@ -279,7 +292,33 @@ func is_dead() -> bool:
 func apply_damage(amount: float, info: Dictionary = {}) -> float:
 	if _health == null:
 		return 0.0
-	return float(_health.call("apply_damage", amount, info))
+	var taken := float(_health.call("apply_damage", amount, info))
+	if taken > 0.0 and not is_dead() and _hit_react:
+		_hit_react.call("apply_from_info", info, taken)
+	return taken
+
+
+func apply_hit_reaction(info: Dictionary) -> void:
+	if is_dead() or _hit_react == null:
+		return
+	# ballistics 已先 apply_damage；这里避免同一发再叠一次，只在尚未记录时补。
+	if _hit_react.get("last_amp") > 0.0 and _hit_react.is_active():
+		return
+	_hit_react.call("apply_from_info", info, float(info.get("damage", 20.0)))
+
+
+func get_hit_reaction() -> Node:
+	return _hit_react
+
+
+func get_corpse_drag() -> Node:
+	return _corpse_drag
+
+
+func toggle_corpse_drag() -> bool:
+	if _corpse_drag == null:
+		return false
+	return bool(_corpse_drag.call("toggle"))
 
 
 func revive(to: float = -1.0) -> void:
@@ -384,8 +423,48 @@ func _on_character_revived() -> void:
 
 
 
+func _after_pose_feedback(delta: float) -> void:
+	var skip := PackedStringArray(["L_Shoulder_a", "R_Shoulder_a"])
+	if _weapons and bool(_weapons.call("is_armed")) and float(_weapons.get("_ik_w")) > 0.2:
+		for n in ["R_UpperArm_a", "R_Forearm_a", "R_Hand_a"]:
+			skip.append(n)
+		if _corpse_drag and _corpse_drag.call("is_dragging"):
+			pass
+		else:
+			for n in ["L_UpperArm_a", "L_Forearm_a", "L_Hand_a"]:
+				skip.append(n)
+	if _hit_react:
+		_hit_react.call("apply_to_skeleton", delta, skip)
+	if _corpse_drag:
+		if _corpse_drag.call("is_dragging"):
+			_corpse_drag.call("apply_left_hand")
+			_corpse_drag.call("physics_tick", delta)
+
+
+func _update_corpse_drag_aim() -> void:
+	if _corpse_drag == null:
+		return
+	if is_dead():
+		if _corpse_drag.call("is_dragging"):
+			_corpse_drag.call("drop", "dead")
+		return
+	var cam := get_camera()
+	if cam == null:
+		return
+	var ex: Array[RID] = []
+	ex.append(get_rid())
+	_corpse_drag.call("update_aim", cam.global_position, -cam.global_transform.basis.z, ex)
+
+
 func get_camera() -> Camera3D:
 	return _camera
+
+
+func fp_view_transform() -> Transform3D:
+	# 第一人称视线变换，观察视角下也按 yaw/pitch/眼位构造，不用环绕相机。
+	# 尸体拖拽的持握点跟这条视线走，转视角才会把尸体拉起来。
+	var off := _fp_eye_pivot_pos() - Vector3(0.0, _step_smooth, 0.0)
+	return Transform3D(Basis.from_euler(Vector3(_pitch, _yaw, 0.0)), _base_origin() + off)
 
 
 ## CharacterBody3D 参数：防卡边 / 贴地 / 贴墙滑动。
@@ -1885,6 +1964,8 @@ func _try_step_up(motion: Vector3) -> bool:
 func _physics_process(delta: float) -> void:
 	if is_dead():
 		velocity = Vector3.ZERO
+		if _corpse_drag and _corpse_drag.call("is_dragging"):
+			_corpse_drag.call("drop", "dead")
 		if _loco:
 			_loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, delta, 0.0)
 		return
@@ -2038,6 +2119,7 @@ func _physics_process(delta: float) -> void:
 		# 走跑刚写完肩臂底姿势，立刻用持枪 IK 覆写，避免节点顺序导致 IK 被冲掉或肩旋转累积。
 		if _weapons and _weapons.has_method("apply_ik_after_loco"):
 			_weapons.call("apply_ik_after_loco")
+		_after_pose_feedback(delta)
 
 	# FP: stable stance eye (no head-bone bob); refresh after body yaw catch-up.
 	_update_fp_eye(delta, direction != Vector3.ZERO, sprinting, not on_floor)
@@ -2045,3 +2127,5 @@ func _physics_process(delta: float) -> void:
 		_pivot_rot = Vector3(_pitch, _yaw, 0.0)
 		_pivot_off = _fp_eye_pivot_pos() - Vector3(0.0, _step_smooth, 0.0)
 		_sync_pivot()
+
+	_update_corpse_drag_aim()

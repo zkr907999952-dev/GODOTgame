@@ -54,6 +54,8 @@ var state_len: float = 0.0
 var pending: String = ""
 var trigger: bool = false
 var _trigger_used: bool = false
+## 弹道特写打断连射后，必须松开扳机（并等特写冷却）才能再开。
+var _need_trigger_release: bool = false
 var _cool: float = 0.0
 var _flash_frame: int = 0
 var spread_extra: float = 0.0
@@ -290,12 +292,49 @@ func cycle(dir: int) -> void:
 
 
 func set_trigger(on: bool) -> void:
+	if not on:
+		_need_trigger_release = false
+	if on and (_need_trigger_release or _cam_blocks_fire()):
+		trigger = false
+		return
 	if on and not trigger:
 		_trigger_used = false
 		# 霰弹逐发装填中扣扳机 = 打断装填
 		if state == "reloading" and _shell_phase == "step":
 			_shell_phase = "end_req"
 	trigger = on
+
+
+func interrupt_for_bullet_cam() -> void:
+	## 特写一开始就切断当前连发，不因扳机仍按着而继续出弹。
+	trigger = false
+	_need_trigger_release = true
+	if _cool < 0.05:
+		_cool = 0.05
+
+
+func _bullet_cam_node() -> Node:
+	if player == null:
+		return null
+	var root := player.get_parent()
+	if root and root.get("bullet_cam") != null:
+		return root.get("bullet_cam")
+	return null
+
+
+func _cam_blocks_fire() -> bool:
+	if _need_trigger_release:
+		return true
+	var cam := _bullet_cam_node()
+	if cam == null:
+		return false
+	if cam.has_method("is_playing") and bool(cam.call("is_playing")):
+		return true
+	if bool(cam.get("_burst_lock")):
+		return true
+	if float(cam.get("_cooldown")) > 0.0:
+		return true
+	return false
 
 
 func set_ads(on: bool) -> void:
@@ -459,6 +498,11 @@ func _try_fire(delta: float) -> void:
 		return
 	_cool -= delta
 	if trigger and OS.has_environment("WDBG"): print("dbg d=", delta, " cool=", _cool, " st=", state)
+	if _cam_blocks_fire():
+		trigger = false
+		if _cool < 0.0:
+			_cool = 0.0
+		return
 	if state != "ready" or not trigger:
 		if _cool < 0.0:
 			_cool = 0.0
@@ -490,7 +534,7 @@ func _try_fire(delta: float) -> void:
 		if OS.has_environment("WDBG"): print("dbg FIRE ", current, " cool_before=", _cool, " iv=", interval)
 		_cool += interval
 		guard += 1
-		if not auto or ammo_of(current).x <= 0:
+		if not auto or ammo_of(current).x <= 0 or _cam_blocks_fire() or not trigger:
 			break
 	if _cool < 0.0:
 		_cool = 0.0
@@ -1679,6 +1723,62 @@ func _setup_arms() -> void:
 		}
 		for k in ["sh", "ua", "fa", "ha"]:
 			_ik_bones.append(int(_arm[s][k]))
+
+
+func left_arm_reach() -> float:
+	# 上臂 + 前臂 + 手掌，约等于肩到指尖的手臂长。
+	if _arm.has("L"):
+		var a: Dictionary = _arm["L"]
+		var reach := float(a.get("l1", 0.28)) + float(a.get("l2", 0.26))
+		if skeleton:
+			var ha := skeleton.find_bone("L_Hand_a")
+			var mid := skeleton.find_bone("L_Middle_a")
+			if ha >= 0 and mid >= 0:
+				var ho := skeleton.get_bone_global_rest(ha).origin
+				var mo := skeleton.get_bone_global_rest(mid).origin
+				reach += ho.distance_to(mo)
+			else:
+				reach += 0.09
+		else:
+			reach += 0.09
+		return reach
+	return 0.70
+
+
+func left_hand_world() -> Vector3:
+	if skeleton == null:
+		return Vector3.ZERO
+	var i := skeleton.find_bone("L_Hand_a")
+	if i < 0:
+		return Vector3.ZERO
+	return (skeleton.global_transform * skeleton.get_bone_global_pose(i)).origin
+
+
+func apply_left_hand_grab(world_target: Vector3) -> void:
+	## 左手伸向拖拽点。不转锁骨，只解上臂/前臂/手，与持枪 IK 同一套求解器。
+	if skeleton == null or not _arm.has("L"):
+		return
+	var a: Dictionary = _arm["L"]
+	for k in ["sh", "ua", "fa", "ha"]:
+		var bi := int(a[k])
+		if bi >= 0 and not _loco_cache.has(bi):
+			_loco_cache[bi] = skeleton.get_bone_pose_rotation(bi)
+	var sk_xf := skeleton.global_transform
+	var to_sk := sk_xf.affine_inverse()
+	var P: Vector3 = to_sk * world_target
+	var pole := (to_sk.basis * Vector3(-0.55, -1.0, 0.2)).normalized()
+	var ua_i := int(a["ua"])
+	var sh_w: Vector3 = sk_xf * skeleton.get_bone_global_pose(ua_i).origin
+	var dir := world_target - sh_w
+	if dir.length_squared() < 1e-8:
+		dir = -sk_xf.basis.z
+	dir = dir.normalized()
+	var up := Vector3.UP
+	if absf(dir.dot(up)) > 0.92:
+		up = Vector3.RIGHT
+	var hand_world := Basis.looking_at(dir, up)
+	var hand_sk := (to_sk.basis * hand_world).orthonormalized()
+	_solve_arm(a, P, pole, hand_sk, Vector3.ZERO, 1.0)
 
 
 ## 由 player_controller 在 SoftLoco.apply_pose 之后于同一物理帧调用。

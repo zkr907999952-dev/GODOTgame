@@ -10,6 +10,7 @@ const OrganRigScript := preload("res://scripts/organs/organ_rig.gd")
 const CharacterLookScript := preload("res://scripts/character_look.gd")
 const CharacterHealthScript := preload("res://scripts/character_health.gd")
 const RagdollSystemScript := preload("res://scripts/ragdoll_system.gd")
+const HitReactionScript := preload("res://scripts/hit_reaction.gd")
 const CHAR_LIGHT_LAYER := 1 << 17
 const SEC_SYNC := ["hair_enabled", "hair_damp", "hair_inertia", "hair_gravity", "hair_wind", "blink_enabled", "breath_enabled", "breath_amp", "breath_speed"]
 
@@ -20,6 +21,7 @@ var loco: Node
 var organs: Node
 var health: Node
 var ragdoll: Node
+var hit_react: Node
 var body_hit: StaticBody3D
 var spawn_map: String = "room"
 var _map_visible: bool = true
@@ -68,6 +70,11 @@ func _ready() -> void:
 	add_child(ragdoll)
 	if skeleton:
 		ragdoll.call("setup", skeleton, self)
+	hit_react = HitReactionScript.new()
+	hit_react.name = "HitReaction"
+	add_child(hit_react)
+	if skeleton:
+		hit_react.call("setup", skeleton, self)
 	_sync_from_source()
 	organs.call("set_interact_mode", organs.get("interact_mode"))
 
@@ -99,7 +106,22 @@ func is_dead() -> bool:
 func apply_damage(amount: float, info: Dictionary = {}) -> float:
 	if health == null:
 		return 0.0
-	return float(health.call("apply_damage", amount, info))
+	var taken := float(health.call("apply_damage", amount, info))
+	if taken > 0.0 and not is_dead() and hit_react:
+		hit_react.call("apply_from_info", info, taken)
+	return taken
+
+
+func apply_hit_reaction(info: Dictionary) -> void:
+	if is_dead() or hit_react == null:
+		return
+	if hit_react.get("last_amp") > 0.0 and hit_react.is_active():
+		return
+	hit_react.call("apply_from_info", info, float(info.get("damage", 20.0)))
+
+
+func get_hit_reaction() -> Node:
+	return hit_react
 
 
 func get_ragdoll() -> Node:
@@ -205,3 +227,6 @@ func _physics_process(delta: float) -> void:
 		loco.set("navel_t", navel_t)
 		loco.set("navel_stir", organs.get("navel_stir_off") if organs else Vector2.ZERO)
 		loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, delta, 1.65)
+		if hit_react:
+			var skip := PackedStringArray(["L_Shoulder_a", "R_Shoulder_a"])
+			hit_react.call("apply_to_skeleton", delta, skip)
