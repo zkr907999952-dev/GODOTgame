@@ -296,8 +296,8 @@ func _run() -> void:
 	var ey_stand: float = float(player.call("debug_fp_eye_y", "stand"))
 	var ey_crouch: float = float(player.call("debug_fp_eye_y", "crouch"))
 	var ey_prone: float = float(player.call("debug_fp_eye_y", "prone"))
-	if absf(ey_stand - 1.58) > 0.02:
-		push_error("validate: stand FP eye y expected ~1.58, got %s" % ey_stand)
+	if absf(ey_stand - 1.54) > 0.02:
+		push_error("validate: stand FP eye y expected ~1.54, got %s" % ey_stand)
 		quit(1)
 		return
 	if absf(ey_crouch - 1.12) > 0.02:

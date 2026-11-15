@@ -5,6 +5,74 @@ render_mode cull_disabled, depth_draw_opaque, diffuse_burley, specular_schlick_g
 
 #include "res://shaders/organ_common.gdshaderinc"
 
+// 拳交时把被杆撑出的脏器限制在（含鼓包的）体表剖面内，避免穿出皮肤。
+uniform int organ_contain = 0;
+uniform int prof_n = 0;
+uniform sampler2D prof_tex : hint_default_black, filter_nearest, repeat_disable;
+uniform vec4 prof_bias = vec4(0.0);
+uniform vec4 prof_scale = vec4(1.0);
+uniform vec4 fist_bulge = vec4(0.0);
+uniform vec2 fist_lean = vec2(0.0);
+uniform vec4 fist_par = vec4(1.4, 1.0, 0.7, 1.0);
+uniform float contain_margin = 0.008;
+
+vec4 organ_prof_at(int i) {
+	vec4 s = texture(prof_tex, vec2((float(i) + 0.5) / 24.0, 0.5));
+	return s * prof_scale + prof_bias;
+}
+
+vec3 organ_torso_profile(float y) {
+	if (prof_n <= 0) return vec3(0.15, 0.01, -0.13);
+	vec4 a = organ_prof_at(0);
+	if (y <= a.r) return a.gba;
+	for (int i = 1; i < 24; i++) {
+		if (i >= prof_n) break;
+		vec4 b = organ_prof_at(i);
+		if (y <= b.r) {
+			float t = (y - a.r) / max(1e-5, b.r - a.r);
+			return mix(a.gba, b.gba, t);
+		}
+		a = b;
+	}
+	return a.gba;
+}
+
+vec3 organ_fist_offset(vec3 l) {
+	if (fist_bulge.w <= 0.0 || fist_bulge.z <= 0.0) return vec3(0.0);
+	float over = fist_bulge.z;
+	float front = clamp((l.z + 0.124) / 0.11, 0.0, 1.0);
+	float d = length(l.xy - fist_bulge.xy);
+	float r = 0.16 * max(0.2, fist_par.y);
+	float t = d / max(r, 1e-4);
+	float b = 0.0;
+	if (t < 1.0) {
+		float u = 1.0 - t;
+		b = u * u * u * (u * (u * 6.0 - 15.0) + 10.0) * front;
+	}
+	float rise = fist_par.z;
+	vec3 o = vec3(0.0);
+	o.z += over * 0.9 * fist_par.x * rise * b;
+	o.y += over * 0.26 * fist_par.x * rise * b;
+	o.x += fist_lean.x * 0.07 * over * b * 6.0 * fist_par.w * rise;
+	o.z += fist_lean.y * 0.05 * over * b * 6.0 * fist_par.w * rise;
+	return o;
+}
+
+vec3 contain_inside_skin(vec3 l) {
+	if (organ_contain <= 0 || prof_n <= 0) return l;
+	vec3 pr = organ_torso_profile(l.y);
+	vec3 bulge = organ_fist_offset(l);
+	float hx = max(pr.x - contain_margin, 0.02);
+	float zf = pr.y + bulge.z - contain_margin;
+	float zb = pr.z + min(bulge.z, 0.0) + contain_margin;
+	vec3 q = l;
+	if (abs(q.x) > hx) q.x = sign(q.x) * hx;
+	if (q.z > zf) q.z = zf;
+	if (q.z < zb) q.z = zb;
+	return q;
+}
+
+
 uniform sampler2D albedo_tex : source_color, filter_linear_mipmap, repeat_enable;
 uniform sampler2D normal_tex : hint_normal, filter_linear_mipmap, repeat_enable;
 uniform bool use_tex = false;
@@ -66,6 +134,15 @@ void vertex() {
 	vec3 off_w = ab_dir_to_world(off);
 	wp += off_w;
 	VERTEX += inverse(mat3(MODEL_MATRIX)) * off_w;
+	if (organ_contain > 0) {
+		vec3 l2 = to_ab(wp);
+		vec3 c = contain_inside_skin(l2);
+		vec3 dw = ab_dir_to_world(c - l2);
+		if (dot(dw, dw) > 1e-12) {
+			wp += dw;
+			VERTEX += inverse(mat3(MODEL_MATRIX)) * dw;
+		}
+	}
 }
 
 void fragment() {

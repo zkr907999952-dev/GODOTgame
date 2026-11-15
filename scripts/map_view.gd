@@ -29,6 +29,8 @@ var _drag_from: Vector2 = Vector2.ZERO
 var _touches: Dictionary = {}
 var _pinch_dist: float = 0.0
 var _pinch_mid: Vector2 = Vector2.ZERO
+## 刚收到 ScreenTouch 时忽略触摸模拟鼠标，避免同一指被当成「按下+单击选点」。
+var _screen_touch_until: int = 0
 
 
 func _ready() -> void:
@@ -139,6 +141,9 @@ func handle_input(event: InputEvent) -> bool:
 				zoom_steps(1.0 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0)
 			return true
 		if mb.button_index == MOUSE_BUTTON_LEFT:
+			# 真机：ScreenTouch 之后常紧跟一条模拟鼠标，不能再开一轮拖/选点。
+			if mb.device == InputEvent.DEVICE_ID_EMULATION and Time.get_ticks_msec() < _screen_touch_until:
+				return true
 			if mb.pressed:
 				_drag_on = true
 				_drag_moved = false
@@ -150,6 +155,8 @@ func handle_input(event: InputEvent) -> bool:
 			return true
 		return true
 	if event is InputEventMouseMotion and _drag_on:
+		if event.device == InputEvent.DEVICE_ID_EMULATION and Time.get_ticks_msec() < _screen_touch_until:
+			return true
 		var mm := event as InputEventMouseMotion
 		if not _drag_moved and mm.position.distance_to(_drag_from) > DRAG_PX:
 			_drag_moved = true
@@ -164,6 +171,7 @@ func handle_input(event: InputEvent) -> bool:
 		return true
 	if event is InputEventScreenTouch:
 		var st := event as InputEventScreenTouch
+		_screen_touch_until = Time.get_ticks_msec() + 160
 		if st.pressed:
 			_touch_down(st.index, st.position)
 		else:
@@ -171,6 +179,7 @@ func handle_input(event: InputEvent) -> bool:
 		return true
 	if event is InputEventScreenDrag:
 		var sd := event as InputEventScreenDrag
+		_screen_touch_until = Time.get_ticks_msec() + 160
 		_touch_move(sd.index, sd.position, sd.relative)
 		return true
 	return event is InputEventMouse

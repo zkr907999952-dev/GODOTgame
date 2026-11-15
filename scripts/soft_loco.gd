@@ -46,6 +46,8 @@ var hold_hip_y: float = 0.0
 var last_soft_q: Dictionary = {}
 var last_hip_y: float = 0.0
 var last_clip_name: String = ""
+## 武器 IK 生效时不要再用走跑动画覆盖手臂 / 肩骨，避免开镜移动时手穿枪。
+var weapon_ik: bool = false
 
 var _qa := Quaternion.IDENTITY
 var _qb := Quaternion.IDENTITY
@@ -367,7 +369,8 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 				stride = float(clip.get("stride", 0.55))
 			elif mode == "crouch":
 				stride = float(clip.get("stride", 0.72))
-			var dist := maxf(0.08, speed_mps) * mag * delta
+			# speed_mps = 实际水平速度（米/秒），不要再乘输入幅度，否则加速阶段会滑步。
+			var dist := maxf(0.0, speed_mps) * delta
 			phase += dist / maxf(0.28, stride)
 		elif loco_settle >= 1.0:
 			var idle_slow := 2.4 if clip_name == "standIdle" else 1.0
@@ -455,7 +458,10 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 		hip_y = _apply_loco_settle(final_q, hip_y, blend_u)
 
 	# Reset loco bones to rest (incl. scale), then apply — prevents dirty scale from breath.
+	# 持枪 IK 时保留上一帧手臂，交给 weapon_system 覆写，避免走跑动画把手当成腿一起摆。
 	for name in bone_idx.keys():
+		if weapon_ik and _is_arm_bone(name):
+			continue
 		var i: int = bone_idx[name]
 		skeleton.set_bone_pose_rotation(i, rest_local_q[name])
 		skeleton.set_bone_pose_position(i, rest_origin[name])
@@ -463,6 +469,8 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 
 	for name in final_q.keys():
 		if not bone_idx.has(name):
+			continue
+		if weapon_ik and _is_arm_bone(name):
 			continue
 		var soft_q: Quaternion = final_q[name]
 		var pose_q := _soft_to_godot_pose(name, soft_q)

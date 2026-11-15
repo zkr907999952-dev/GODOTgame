@@ -518,13 +518,16 @@ func _fire_once(w: WeaponDef) -> void:
 	recoil.x += deg_to_rad(w.recoil_pitch) * k
 	recoil.y += deg_to_rad(randf_range(-w.recoil_yaw, w.recoil_yaw)) * k
 	_kick = 1.0
-	_flash_t = 0.05
+	_flash_t = 0.08
 	_flash_frame = Engine.get_process_frames()
 	flash.visible = true
 	flash_light.visible = true
 	flash.rotation = Vector3(0.0, 0.0, randf() * TAU)
-	var fs: float = w.flash_scale * randf_range(0.8, 1.2)
+	var fs: float = w.flash_scale * randf_range(1.05, 1.45)
 	flash.scale = Vector3(fs, fs, fs)
+	if flash_light:
+		flash_light.light_energy = 6.0 * maxf(0.6, w.flash_scale)
+		flash_light.omni_range = 5.2
 	_fire_t = 0.0
 	if _clips.has("fire_aim" if ads else "fire"):
 		_play_clip("fire_aim" if ads else "fire", false, true)
@@ -619,7 +622,7 @@ func _build_flash() -> void:
 	flash = MeshInstance3D.new()
 	flash.name = "MuzzleFlash"
 	var q := QuadMesh.new()
-	q.size = Vector2(0.16, 0.16)
+	q.size = Vector2(0.28, 0.28)
 	var m := StandardMaterial3D.new()
 	m.albedo_texture = FLASH_TEX
 	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
@@ -627,7 +630,7 @@ func _build_flash() -> void:
 	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
-	m.albedo_color = Color(1.0, 0.85, 0.55)
+	m.albedo_color = Color(1.0, 0.92, 0.65)
 	m.no_depth_test = false
 	q.material = m
 	flash.mesh = q
@@ -636,9 +639,9 @@ func _build_flash() -> void:
 	view.add_child(flash)
 	flash_light = OmniLight3D.new()
 	flash_light.name = "MuzzleLight"
-	flash_light.light_color = Color(1.0, 0.72, 0.4)
-	flash_light.light_energy = 2.5
-	flash_light.omni_range = 3.5
+	flash_light.light_color = Color(1.0, 0.78, 0.42)
+	flash_light.light_energy = 6.0
+	flash_light.omni_range = 5.2
 	flash_light.shadow_enabled = false
 	flash_light.visible = false
 	view.add_child(flash_light)
@@ -716,15 +719,17 @@ func _hip_offset(w: WeaponDef) -> Vector3:
 		# 腰射原先太靠后（贴身），再向前/向外伸出，并保持略低于步枪。
 		y = -0.155
 		z = -0.24
-	return Vector3(w.view_offset.x + 0.02, w.view_offset.y + y, w.view_offset.z + z)
+	var extra: Vector3 = w.pose_hip if w else Vector3.ZERO
+	return Vector3(w.view_offset.x + 0.02 + extra.x, w.view_offset.y + y + extra.y, w.view_offset.z + z + extra.z)
 
 
 func _ads_offset(w: WeaponDef) -> Vector3:
-	# 开镜：先给一个接近准星的基础偏移，再用 _align_iron_sights 把准星对准屏幕中心。
+	# 开镜基线略低于旧值，再由 _align_iron_sights 把准星对准屏幕中心（随更低的摄像机）。
 	# Z 不能到 0（那会把机匣贴到眼睛上）。
-	var y := -0.02 if _is_long_gun(w) else -0.01
-	var z := -0.14 if _is_long_gun(w) else -0.10
-	return Vector3(w.view_offset.x, w.view_offset.y + y, w.view_offset.z + z)
+	var y := -0.045 if _is_long_gun(w) else -0.022
+	var z := -0.15 if _is_long_gun(w) else -0.11
+	var extra: Vector3 = w.pose_ads if w else Vector3.ZERO
+	return Vector3(w.view_offset.x + extra.x, w.view_offset.y + y + extra.y, w.view_offset.z + z + extra.z)
 
 
 func _loco_bob_xf(delta: float) -> Transform3D:
@@ -848,13 +853,19 @@ func _tp_view_xf(w: WeaponDef, pose: Dictionary) -> Transform3D:
 	else:
 		pocket = Vector3.ZERO
 	var aim: Vector3
+	var ads_k := clampf(_ads_k, 0.0, 1.0)
+	var extra: Vector3 = Vector3.ZERO
+	if w:
+		extra = (w.pose_observe as Vector3).lerp(w.pose_observe_ads as Vector3, ads_k)
 	if _is_long_gun(w):
-		# 向内收进肩窝（锁骨-三角肌内侧），不要挂在肩头外侧；枪口微俯。
-		pocket += right * -0.02 + fwd * -0.01 + Vector3(0.0, -0.02, 0.0)
-		aim = (fwd + up * -0.08).normalized()
+		# 枪托落在腋窝口袋，不要再向胸口推。开镜时略收紧抵肩。
+		pocket += right * -0.005 + fwd * -0.02 + Vector3(0.0, -0.03, 0.0)
+		pocket += extra
+		aim = (fwd + up * (-0.06 if ads_k < 0.5 else -0.02)).normalized()
 	else:
 		# 手枪握把从肩窝向前伸出到胸前，略低于肩，避免缩进躯干
 		pocket += right * 0.10 + fwd * 0.28 + Vector3(0.0, -0.10, 0.0)
+		pocket += extra
 		aim = (fwd + up * -0.03).normalized()
 	var gz := aim.cross(up)
 	if gz.length_squared() < 1e-8:
@@ -1444,9 +1455,8 @@ func _process(delta: float) -> void:
 	if fp:
 		_try_fire(delta)
 	else:
+		# 观察模式不开火，但保持开镜/瞄准姿势（不要一切视角就收回腰射）。
 		trigger = false
-		if ads:
-			ads = false
 	_fire_t += delta
 	var w: WeaponDef = cur_def()
 	var rr: float = w.recoil_recover if w else 9.0
@@ -1455,7 +1465,7 @@ func _process(delta: float) -> void:
 		recoil = Vector2.ZERO
 	_kick *= exp(-18.0 * delta)
 	spread_extra = maxf(0.0, spread_extra - (w.spread_recover if w else 8.0) * delta)
-	var want_ads := fp and ads and state == "ready" and not _sprinting()
+	var want_ads := ads and state == "ready" and not _sprinting()
 	_ads_k = move_toward(_ads_k, 1.0 if want_ads else 0.0, delta * 6.0)
 	_step_shells(delta)
 	_step_ejects(delta)
@@ -1783,11 +1793,21 @@ func _pull_gun_into_reach(pose: Dictionary) -> void:
 		_seat_stock_on_shoulder(cur_def())
 
 
+func _left_hand_adjust() -> Vector3:
+	var w: WeaponDef = cur_def()
+	var base := LEFT_HAND_ADJUST
+	if w and w.left_hand_adjust != Vector3.ZERO:
+		base = w.left_hand_adjust
+	# 开镜时动画手腕已经更贴护木，常数下调，避免走动时左手穿进机匣。
+	var k := 1.0 - 0.45 * clampf(_ads_k, 0.0, 1.0)
+	return base * k
+
+
 func _wrist_cam(s: String, h: Dictionary, a: Dictionary) -> Vector3:
 	var sem_cam := Basis(h["q"] as Quaternion)
 	var wrist: Vector3 = (h["wrist"] as Vector3) + sem_cam.x * (float(h["flen"]) - float(a["flen"]))
 	if s == "L":
-		wrist += LEFT_HAND_ADJUST
+		wrist += _left_hand_adjust()
 	return wrist
 
 
@@ -1952,7 +1972,30 @@ func debug_stock_vs_head() -> Dictionary:
 	out["along_fwd"] = delta.dot(fwd)
 	out["along_right"] = delta.dot(right)
 	out["along_up"] = delta.y
+	var chest_i := skeleton.find_bone("C_Spine_c")
+	var ua_i := skeleton.find_bone("R_UpperArm_a")
+	if chest_i >= 0:
+		out["chest"] = skx * skeleton.get_bone_global_pose(chest_i).origin
+		out["d_chest"] = out["stock"].distance_to(out["chest"])
+	if ua_i >= 0 and sh_i >= 0:
+		var axilla: Vector3 = (out["shoulder"] as Vector3).lerp(skx * skeleton.get_bone_global_pose(ua_i).origin, 0.42)
+		axilla += Vector3(0.0, -0.025, 0.0)
+		out["armpit"] = axilla
+		out["d_armpit"] = out["stock"].distance_to(axilla)
 	return out
+
+
+func debug_flash() -> Dictionary:
+	var qsz := Vector2.ZERO
+	if flash and flash.mesh is QuadMesh:
+		qsz = (flash.mesh as QuadMesh).size
+	return {
+		"quad": qsz,
+		"energy": flash_light.light_energy if flash_light else 0.0,
+		"range": flash_light.omni_range if flash_light else 0.0,
+		"duration": 0.08,
+		"visible": flash.visible if flash else false,
+	}
 
 
 func debug_thumb_slide() -> Dictionary:

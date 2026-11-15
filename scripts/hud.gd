@@ -1613,7 +1613,7 @@ func _compute_safe() -> Vector4:
 	return Vector4(sa.position.x, sa.position.y, scr.x - sa.end.x, scr.y - sa.end.y) / maxf(0.01, k)
 
 
-## 触屏：按钮 / 开关 ≥ 44px 高、滑条 32px（网页 h-11 = 44px 触控目标）
+## 触屏：按钮略小于旧的 44px，方便按住按钮后拖动滚动菜单；滑条保持可点。
 func _touchify(n: Node, on: bool) -> void:
 	if n == null:
 		return
@@ -1623,7 +1623,7 @@ func _touchify(n: Node, on: bool) -> void:
 			c.set_meta("min0", c.custom_minimum_size)
 		var m0: Vector2 = c.get_meta("min0")
 		if on:
-			c.custom_minimum_size = Vector2(m0.x, maxf(m0.y, 44.0 if n is BaseButton else 32.0))
+			c.custom_minimum_size = Vector2(m0.x, maxf(m0.y, 30.0 if n is BaseButton else 26.0))
 		else:
 			c.custom_minimum_size = m0
 	for ch in n.get_children():
@@ -1641,6 +1641,7 @@ func _wrap_scroll(p: PanelContainer) -> void:
 	p.add_child(sc)
 	sc.add_child(content)
 	(content as Control).size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_hook_menu_drag_scroll(sc)
 
 
 func _panel_scroll(p: PanelContainer) -> ScrollContainer:
@@ -1748,6 +1749,11 @@ func _apply_layout() -> void:
 				sc.custom_minimum_size = Vector2(250 if right_side else 0, h2)
 	if _wui:
 		_wui.call("layout_ammo", _safe, touch_ui)
+	# 动态重建的按钮也要能「拖菜单不点按」
+	for panel in [_panel_settings, _panel_map, _panel_interact, _panel_camera, _panel_weapon]:
+		var sc2 := _panel_scroll(panel)
+		if sc2:
+			_hook_menu_drag_scroll(sc2)
 	if _btn_sheet_close:
 		_btn_sheet_close.visible = compact and open_p != null
 		if _btn_sheet_close.visible:
@@ -1781,9 +1787,17 @@ func should_hide_weapon_ui() -> bool:
 	return _open == PanelId.MAP
 
 
+func _to_wheel_local(p: Vector2) -> Vector2:
+	if wheel == null or not wheel.is_inside_tree():
+		return p
+	var xf := wheel.get_global_transform_with_canvas()
+	return xf.affine_inverse() * p
+
+
 func open_weapon_wheel(origin: Variant = null) -> void:
 	if wheel and not _ui_hidden:
-		wheel.call("open", origin)
+		var loc: Variant = _to_wheel_local(origin) if origin is Vector2 else origin
+		wheel.call("open", loc)
 
 
 func close_weapon_wheel(apply: bool = true) -> Variant:
@@ -1796,7 +1810,85 @@ func is_wheel_open() -> bool:
 
 func weapon_wheel_point(p: Vector2) -> void:
 	if wheel:
-		wheel.call("point_at", p)
+		wheel.call("point_at", _to_wheel_local(p))
+
+
+## 手机菜单：从按钮上按下后拖动应滚动面板，只有几乎没移动的单击才触发按钮。
+var _menu_scroll_from: Vector2 = Vector2.ZERO
+var _menu_scroll_dragging: bool = false
+const MENU_DRAG_PX := 10.0
+
+
+func _hook_menu_drag_scroll(sc: ScrollContainer) -> void:
+	if sc == null:
+		return
+	_hook_menu_scroll_node(sc, sc)
+
+
+func _hook_menu_scroll_node(sc: ScrollContainer, n: Node) -> void:
+	if n is BaseButton or n is HSlider:
+		var c := n as Control
+		if not c.has_meta("menu_scroll_hooked"):
+			c.set_meta("menu_scroll_hooked", true)
+			c.gui_input.connect(_on_menu_scroll_input.bind(sc, c))
+	for ch in n.get_children():
+		_hook_menu_scroll_node(sc, ch)
+
+
+func _on_menu_scroll_input(event: InputEvent, sc: ScrollContainer, w: Control) -> void:
+	if sc == null or w == null:
+		return
+	var pos := Vector2.ZERO
+	var rel := Vector2.ZERO
+	var down := false
+	var up := false
+	var moving := false
+	if event is InputEventScreenTouch:
+		var st := event as InputEventScreenTouch
+		pos = st.position
+		down = st.pressed
+		up = not st.pressed
+	elif event is InputEventScreenDrag:
+		var sd := event as InputEventScreenDrag
+		pos = sd.position
+		rel = sd.relative
+		moving = true
+	elif event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+		var mb := event as InputEventMouseButton
+		pos = mb.position
+		down = mb.pressed
+		up = not mb.pressed
+	elif event is InputEventMouseMotion and (event as InputEventMouseMotion).button_mask & MOUSE_BUTTON_MASK_LEFT:
+		var mm := event as InputEventMouseMotion
+		pos = mm.position
+		rel = mm.relative
+		moving = true
+	else:
+		return
+	if down:
+		_menu_scroll_from = pos
+		_menu_scroll_dragging = false
+		return
+	if moving:
+		if not _menu_scroll_dragging and pos.distance_to(_menu_scroll_from) > MENU_DRAG_PX:
+			# 滑条：水平拖仍调数值；明显的竖向拖才滚菜单。
+			if w is HSlider and absf(rel.x) >= absf(rel.y):
+				return
+			_menu_scroll_dragging = true
+		if _menu_scroll_dragging:
+			if w is HSlider and absf(rel.x) > absf(rel.y) * 1.15:
+				return
+			sc.scroll_vertical = sc.scroll_vertical - int(rel.y)
+			w.accept_event()
+			if w is BaseButton:
+				(w as BaseButton).set_pressed_no_signal(false)
+		return
+	if up and _menu_scroll_dragging:
+		w.accept_event()
+		if w is BaseButton:
+			(w as BaseButton).set_pressed_no_signal(false)
+			(w as BaseButton).release_focus()
+		_menu_scroll_dragging = false
 
 
 func _settings() -> Node:

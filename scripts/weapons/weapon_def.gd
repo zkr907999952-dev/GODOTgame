@@ -50,6 +50,14 @@ class_name WeaponDef
 @export var view_offset: Vector3 = Vector3.ZERO
 ## 视模型围绕相机缩放（屏幕上大小不变，但离肩更近，方便自己的手臂够到）
 @export var view_scale: float = 0.8
+## 各姿态独立的相机空间位置微调（叠加在类别默认持枪/开镜偏移上）。
+## 相机看向 -Z：Y 更负 = 更低，Z 更负 = 更远离镜头。
+@export var pose_hip: Vector3 = Vector3.ZERO
+@export var pose_ads: Vector3 = Vector3.ZERO
+@export var pose_observe: Vector3 = Vector3.ZERO
+@export var pose_observe_ads: Vector3 = Vector3.ZERO
+## 左手相对视模型的微调；为零则用系统默认。
+@export var left_hand_adjust: Vector3 = Vector3.ZERO
 ## 开镜视野
 @export var ads_fov: float = 50.0
 ## 声音（素材包没有音频：留接口，填 AudioStream 即可）

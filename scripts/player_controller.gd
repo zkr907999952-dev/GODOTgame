@@ -10,10 +10,11 @@ const BODY_YAW_OFFSET := PI
 
 enum GameMode { DISPLAY, CONTROL }
 
-@export var move_speed: float = 1.65
-@export var sprint_speed: float = 4.125  # 1.65 * 2.5 like web
-@export var crouch_speed: float = 0.7425  # 1.65 * 0.45
-@export var prone_speed: float = 0.462  # 1.65 * 0.28
+@export var move_speed: float = 1.06  # walk clip stride/dur ≈ 1.489/1.4
+@export var sprint_speed: float = 5.0  # run clip ≈ 2.865/0.533
+@export var crouch_speed: float = 0.85  # crouchWalk ≈ 1.05/1.233
+@export var prone_speed: float = 0.24  # proneWalk ≈ 0.549/2.333
+@export var ads_speed: float = 0.78  # 开镜慢步，仍用 walk 步幅
 ## 网页 FP_GRAV=20（比 Godot 默认 9.8 更干脆）；跳高保持约 0.9m（6²/(2·20)）。
 @export var jump_velocity: float = 6.0
 @export var gravity: float = 20.0
@@ -120,7 +121,7 @@ const FP_EYE_STAND := Vector3(0.0, 1.52, 0.2)
 const FP_EYE_CROUCH := Vector3(0.0, 1.06, 0.5)
 const FP_EYE_PRONE := Vector3(0.0, 0.3, 0.74)
 ## Extra lift if mesh still clips the near plane.
-const FP_EYE_LIFT := 0.06
+const FP_EYE_LIFT := 0.02
 ## Web BODY_LOOK_DEAD = π/3: body stays until look diverges ~60° (≈120° total free look), then catches up.
 const BODY_LOOK_DEAD := PI / 3.0
 ## Stand↔crouch (and stance eye/capsule) blend duration — web STANCE_BLEND_DUR.
@@ -384,6 +385,7 @@ func pick_interact_rig(origin: Vector3, dir: Vector3) -> Node:
 ## 左键按下：拖拽=抓住腹壁 / 击腹=释放冲击 / 拳交=抓住拳头 / 刺刀=选入口或推拉刀柄。
 ## 目标可以是本体或任意分身（第一人称下用准星射线）。
 func _try_begin_interact(screen: Vector2) -> bool:
+	_last_interact_via_navel = false
 	if not _organs_live():
 		return false
 	var variants := pointer_variants(screen)
@@ -396,14 +398,19 @@ func _try_begin_interact(screen: Vector2) -> bool:
 	if mode == "" or mode == "none":
 		mode = "drag"
 	var is_tool := mode == "fist" or mode == "bayonet" or mode == "navel"
-	# 不要取第一个命中的解释：错误的坐标空间偶尔也会擦到身体，锁定后点击会整体错位。
-	# 在所有候选里选距离最近的那一发。
+	# 优先用正确换算后的主坐标。其他坐标解释只在主射线打空时作候选，
+	# 并用「命中点投回屏幕后与实际点击的距离」评分，避免错误空间擦到肚脐后被锁死。
+	var primary := to_camera_pixel(screen)
 	var best_i := -1
 	var best_score := INF
 	var best_rig: Node = null
 	var best_hit: Variant = null
 	var best_origin := Vector3.ZERO
 	var best_dir := Vector3.ZERO
+	var primary_i := variants.find(primary)
+	if primary_i < 0:
+		variants.insert(0, primary)
+		primary_i = 0
 	for i in variants.size():
 		var p: Vector2 = variants[i]
 		var origin: Vector3 = _camera.project_ray_origin(p)
@@ -411,14 +418,20 @@ func _try_begin_interact(screen: Vector2) -> bool:
 		var rig := pick_interact_rig(origin, dir)
 		if rig == null:
 			continue
-		var score: float = float(rig.call("ray_pick_distance", origin, dir))
 		var hit: Variant = null
 		if not is_tool:
 			hit = rig.call("ray_hit_belly", origin, dir)
 			if hit == null:
 				continue
-			if hit is Vector3:
-				score = origin.distance_to(hit)
+		var world: Vector3 = hit if hit is Vector3 else (origin + dir * float(rig.call("ray_pick_distance", origin, dir)))
+		if _camera.is_position_behind(world):
+			continue
+		var proj: Vector2 = _camera.unproject_position(world)
+		# 屏幕误差：实际点击应落在命中点附近。主坐标额外加权。
+		var screen_err := minf(proj.distance_to(screen), proj.distance_to(primary))
+		var score := screen_err
+		if i == primary_i:
+			score *= 0.65
 		if score < best_score:
 			best_score = score
 			best_i = i
@@ -426,17 +439,20 @@ func _try_begin_interact(screen: Vector2) -> bool:
 			best_hit = hit
 			best_origin = origin
 			best_dir = dir
-	if best_i >= 0 and best_rig != null:
+	# 屏幕误差过大说明只是错误空间擦到了身体，不当作命中。
+	if best_i >= 0 and best_rig != null and best_score <= 90.0:
 		if is_tool:
 			if best_rig.get("interact_mode") != mode:
 				best_rig.call("copy_settings_from", _organs)
 			var cam_fwd := -_camera.global_transform.basis.z
 			if not bool(best_rig.call("tool_begin", best_origin, best_dir, cam_fwd)):
-				return _try_begin_interact_near(screen, variants)
+				var near_vs: Array[Vector2] = [primary, screen]
+				return _try_begin_interact_near(screen, near_vs)
 			_interact_target = best_rig
 			_interact_held = true
 			_interact_screen = screen
-			_ptr_mode = best_i if _ptr_mode < 0 else _ptr_mode
+			_ptr_mode = best_i
+			_last_interact_via_navel = false
 			return true
 		_interact_target = best_rig
 		if mode == "strike":
@@ -445,10 +461,12 @@ func _try_begin_interact(screen: Vector2) -> bool:
 			best_rig.call("begin_drag", best_hit)
 			_interact_held = true
 			_interact_screen = screen
-		_ptr_mode = best_i if _ptr_mode < 0 else _ptr_mode
+		_ptr_mode = best_i
+		_last_interact_via_navel = false
 		return true
-	# 精确射线都未命中：用肚脐的屏幕投影做近距兜底，避免坐标空间再换算一次就打空。
-	return _try_begin_interact_near(screen, variants)
+	# 精确射线都未命中：仅当实际点击靠近肚脐投影时才兜底，绝不把远处点击吸到肚脐。
+	var near_vs: Array[Vector2] = [primary, screen]
+	return _try_begin_interact_near(screen, near_vs)
 
 
 ## 拖拽中：鼠标射线与「过抓取点、法线=相机前向」平面求交（网页 grab plane）
@@ -463,11 +481,8 @@ func _pointer_to_navel_dist(p: Vector2, navel: Vector3) -> float:
 
 
 func _tap_near_limit() -> float:
-	var vp := get_viewport()
-	var backing := Vector2(vp.size) if vp else Vector2(1280, 720)
-	var vis := vp.get_visible_rect().size if vp else backing
-	# 真机还有刘海 / 导航条 / DPI 缩放误差，给更宽的肚脐近距兜底。
-	return maxf(140.0, minf(minf(backing.x, backing.y), minf(vis.x, vis.y)) * 0.28)
+	# 只接受确实点在肚脐附近的点击；不再用屏幕短边 28% 的大圆把任意点击吸过去。
+	return 56.0
 
 
 func _try_begin_interact_near(screen: Vector2, variants: Array[Vector2]) -> bool:
@@ -491,6 +506,7 @@ func _try_begin_interact_near(screen: Vector2, variants: Array[Vector2]) -> bool
 				best_p = p
 	if best_rig == null or best_d > lim:
 		return false
+	_last_interact_via_navel = true
 	var origin: Vector3 = _camera.project_ray_origin(best_p)
 	var navel: Vector3 = (best_rig.call("abdomen_frame") as Transform3D).origin
 	var dir: Vector3 = (navel - origin)
@@ -1001,27 +1017,31 @@ func _cheek_weld_amount() -> float:
 	return 0.85
 
 
-## 第三人称抵肩持枪空间：原点在右肩肩窝附近（不是眼位，避免枪托怼头/怼脸）。
+## 第三人称抵肩持枪空间：原点在持枪侧腋窝（右腋），不要顶在胸口/胸骨。
 func shoulder_aim_transform() -> Transform3D:
 	var fwd := _body_forward()
 	if fwd.length_squared() < 1e-6:
 		fwd = Vector3(0, 0, -1)
 	var up := Vector3.UP
 	var sh: Variant = _bone_world("R_Shoulder_a")
+	var ua: Variant = _bone_world("R_UpperArm_a")
 	var chest: Variant = _bone_world("C_Spine_c")
 	var origin: Vector3
 	if sh is Vector3:
 		origin = sh
-		# 肩窝：向内收进胸侧三角肌内侧，略低于肩峰、略在肩关节前方。
+		# 腋窝在肩关节下方、略向内，并略偏向身后，形成枪托口袋；不要沿肩-胸连线拉到胸口。
+		if ua is Vector3:
+			origin = sh.lerp(ua, 0.42)
+		else:
+			origin += Vector3(0.0, -0.08, 0.0)
 		if chest is Vector3:
 			var inward: Vector3 = chest - sh
 			inward.y = 0.0
 			if inward.length_squared() > 1e-6:
-				origin += inward.normalized() * 0.055
-		origin += Vector3(0.0, -0.05, 0.0) + fwd * 0.02
+				origin += inward.normalized() * 0.02
+		origin += Vector3(0.0, -0.025, 0.0) + fwd * -0.015
 	else:
-		origin = global_transform * (_body.transform * (_fp_eye_cur + Vector3(0.16, -0.08, 0.0)))
-	# 不要再往外/往前推，枪托贴在肩窝而不是悬在身前。
+		origin = global_transform * (_body.transform * (_fp_eye_cur + Vector3(0.16, -0.12, 0.0)))
 	return Transform3D(Basis.looking_at(fwd, up), origin)
 
 
@@ -1200,6 +1220,8 @@ func _calc_aabb(n: Node) -> AABB:
 var touch_active: bool = false
 ## 已确认的指针坐标解释（-1 = 自动尝试多种）
 var _ptr_mode: int = -1
+## 最近一次互动是否走了肚脐近距兜底（自检用）
+var _last_interact_via_navel: bool = false
 var _last_tool_begin: Dictionary = {}
 var touch_move: Vector2 = Vector2.ZERO  # 虚拟摇杆（x 右，y 下 = 后退），已去死区
 var touch_sprint: bool = false
@@ -1246,6 +1268,7 @@ func touch_tool_begin(screen: Vector2) -> bool:
 		"variants": pointer_variants(screen).size(),
 		"mode": str(_organs.get("interact_mode")) if _organs else "",
 		"held": _interact_held,
+		"via_navel": _last_interact_via_navel,
 	}
 	return ok
 
@@ -1744,6 +1767,11 @@ func _physics_process(delta: float) -> void:
 	var wish_len := minf(1.0, wish.length())
 	var direction := wish.normalized() if wish_len > 1e-4 else Vector3.ZERO
 	var sprinting := can_act and (Input.is_action_pressed("sprint") or touch_sprint) and _stance == "stand"
+	var aiming := false
+	if _weapons and _weapons.has_method("is_armed") and bool(_weapons.call("is_armed")):
+		aiming = bool(_weapons.get("ads")) or float(_weapons.get("_ads_k")) > 0.35
+	if aiming:
+		sprinting = false
 	var speed := move_speed
 	match _stance:
 		"crouch":
@@ -1751,7 +1779,12 @@ func _physics_process(delta: float) -> void:
 		"prone":
 			speed = prone_speed
 		_:
-			speed = sprint_speed if sprinting else move_speed
+			if sprinting:
+				speed = sprint_speed
+			elif aiming:
+				speed = ads_speed
+			else:
+				speed = move_speed
 
 	var hv := Vector3(velocity.x, 0.0, velocity.z)
 	if display or input_locked:
@@ -1843,7 +1876,10 @@ func _physics_process(delta: float) -> void:
 		if airborne and str(_loco.get("current_clip")) != "jump":
 			_loco.set("phase", 0.28)
 		_loco.call("set_mode", _stance)
-		_loco.call("apply_pose", fwd, side, mag, airborne, sprinting, delta, speed)
+		var actual_spd := Vector2(velocity.x, velocity.z).length()
+		_loco.call("apply_pose", fwd, side, mag, airborne, sprinting, delta, actual_spd)
+		if _weapons and _weapons.has_method("is_armed"):
+			_loco.set("weapon_ik", bool(_weapons.call("is_armed")) and float(_weapons.get("_ik_w")) > 0.2)
 
 	# FP: stable stance eye (no head-bone bob); refresh after body yaw catch-up.
 	_update_fp_eye(delta, direction != Vector3.ZERO, sprinting, not on_floor)

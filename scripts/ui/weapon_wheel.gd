@@ -44,7 +44,10 @@ func open(origin: Variant = null) -> void:
 	visible = true
 	hover = -1
 	_vec = Vector2.ZERO
-	_origin = origin if origin is Vector2 else size * 0.5
+	if origin is Vector2 and (origin as Vector2) != Vector2.ZERO:
+		_origin = origin
+	else:
+		_origin = size * 0.5
 	# 打开时停在当前武器所在页
 	var ids: PackedStringArray = weapons.weapon_ids()
 	var ci := ids.find(weapons.current)
@@ -72,8 +75,8 @@ func close(apply: bool = true) -> Variant:
 
 
 func center() -> Vector2:
-	# 拉选原点：打开时传入的点击点（手机武器按钮）；未传入则用屏幕中心。
-	if _origin != Vector2.ZERO or is_open:
+	# 拉选与绘制共用同一原点：打开时传入的点击点（手机武器按钮）；键盘 Q 为屏幕中心。
+	if is_open or _origin != Vector2.ZERO:
 		return _origin
 	return size * 0.5
 

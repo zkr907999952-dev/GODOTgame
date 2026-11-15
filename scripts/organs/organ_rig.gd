@@ -1135,6 +1135,13 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("fist_bulge", fb[0])
 		m.set_shader_parameter("fist_lean", fb[1])
 		m.set_shader_parameter("fist_par", fpar)
+	var fist_on := tools != null and bool(tools.fist_enabled) and float(tools.fist_depth) > 0.01
+	for m in _organ_mats:
+		m.set_shader_parameter("organ_contain", 1 if fist_on else 0)
+		m.set_shader_parameter("fist_bulge", fb[0])
+		m.set_shader_parameter("fist_lean", fb[1])
+		m.set_shader_parameter("fist_par", fpar)
+		m.set_shader_parameter("contain_margin", 0.008)
 	var ra: Array = []
 	var rd: Array = []
 	var rm: Array = []
@@ -1631,6 +1638,7 @@ func _build_organs() -> bool:
 		_skel.add_child(mi)
 		mi.skeleton = mi.get_path_to(_skel)
 		organ_meshes.append(mi)
+		_set_profile_params(mat)
 	return organ_meshes.size() > 0
 
 

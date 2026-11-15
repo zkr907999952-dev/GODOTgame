@@ -163,11 +163,11 @@ func buttons() -> Dictionary:
 		out["jump"] = [Rect2(Vector2(x, y - BTN - GAP), Vector2(BTN, BTN)), "跳跃"]
 		out["interact"] = [Rect2(Vector2(x, y - 2.0 * (BTN + GAP)), Vector2(BTN, BTN)), "互动"]
 		var x2 := x - BTN - GAP
-		# 武器键靠下并向中间收一点，避开右边缘和开火。
-		out["weapon"] = [Rect2(Vector2(x2 - 36.0, y), Vector2(BTN, BTN)), "武器"]
+		# 武器键再向左收，避免和开火圆叠在一起，并让开火可以下移。
+		out["weapon"] = [Rect2(Vector2(x2 - 64.0, y), Vector2(BTN, BTN)), "武器"]
 		if _armed():
-			# 开火下移，但与下方武器键留出间隙；瞄准在开火左侧。
-			var fire := Rect2(Vector2(x2 - 8.0, y - (BTN + 16.0) - 12.0), Vector2(BTN + 16.0, BTN + 16.0))
+			# 开火下移，上方留出划屏转视角的空间；瞄准在开火左侧。
+			var fire := Rect2(Vector2(x2 - 8.0, y - (BTN + 16.0) + 6.0), Vector2(BTN + 16.0, BTN + 16.0))
 			out["fire"] = [fire, "开火"]
 			out["ads"] = [Rect2(Vector2(fire.position.x - BTN - GAP - 10.0, fire.position.y + 8.0), Vector2(BTN, BTN)), "瞄准"]
 			out["reload"] = [Rect2(Vector2(x2, y - 2.0 * (BTN + GAP) - 8.0), Vector2(BTN, BTN)), "换弹"]
@@ -257,7 +257,11 @@ func _on_down(idx: int, p: Vector2) -> void:
 	if bid != "":
 		f["role"] = "btn:" + bid
 		if bid == "weapon":
-			_weapon_press_pos = p
+			# 轮盘拉选原点 = 实际按下点（按钮中心作兜底），不要用屏幕中心。
+			var wr: Rect2 = (buttons().get("weapon", [Rect2()])[0] as Rect2)
+			_weapon_press_pos = p if p != Vector2.ZERO else wr.get_center()
+			if _weapon_press_pos == Vector2.ZERO:
+				_weapon_press_pos = wr.get_center()
 		_button(bid, true)
 		get_viewport().set_input_as_handled()
 		return
