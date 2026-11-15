@@ -210,28 +210,29 @@ func layout_ammo(safe: Vector4, touch: bool) -> void:
 	if ammo_box == null:
 		return
 	if touch:
-		# 缩小后放到屏幕下边缘正中央，避开右侧动作键。
+		# 底端中央；整体抬高，给下方血条留位置。枪械图标再缩小。
 		ammo_box.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
 		ammo_box.grow_horizontal = Control.GROW_DIRECTION_BOTH
 		ammo_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
 		if _ammo_icon:
-			_ammo_icon.custom_minimum_size = Vector2(52, 24)
+			_ammo_icon.custom_minimum_size = Vector2(34, 16)
 		if _ammo_num:
 			_ammo_num.add_theme_font_size_override("font_size", 18)
 		if _ammo_name:
 			_ammo_name.add_theme_font_size_override("font_size", 10)
 		if _ammo_mode:
 			_ammo_mode.add_theme_font_size_override("font_size", 9)
+		var hp_room := 52.0
 		ammo_box.offset_left = -86.0
 		ammo_box.offset_right = 86.0
-		ammo_box.offset_top = -(safe.w + 6.0 + 44.0)
-		ammo_box.offset_bottom = -(safe.w + 6.0)
+		ammo_box.offset_top = -(safe.w + 6.0 + hp_room + 40.0)
+		ammo_box.offset_bottom = -(safe.w + 6.0 + hp_room)
 	else:
 		ammo_box.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
 		ammo_box.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 		ammo_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
 		if _ammo_icon:
-			_ammo_icon.custom_minimum_size = Vector2(72, 32)
+			_ammo_icon.custom_minimum_size = Vector2(48, 22)
 		if _ammo_num:
 			_ammo_num.add_theme_font_size_override("font_size", 22)
 		ammo_box.offset_left = 0.0

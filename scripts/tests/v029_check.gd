@@ -59,8 +59,8 @@ func _run() -> void:
 		return
 
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.2.9\"") >= 0, "export version 0.2.9")
-	_ok(presets.find("version/code=11") >= 0, "versionCode 11")
+	_ok(presets.find("version/name=\"0.2.10\"") >= 0, "export version 0.2.10")
+	_ok(presets.find("version/code=12") >= 0, "versionCode 12")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 
 	await _check_touch_and_wheel()
@@ -200,8 +200,8 @@ func _check_menu_and_buttons() -> void:
 	_ok(src.find("_hook_menu_drag_scroll") >= 0 and src.find("MENU_DRAG_PX") >= 0, "menu drag-to-scroll helper present")
 	_ok(src.find("maxf(m0.y, 30.0 if n is BaseButton") >= 0, "touch button hit target reduced for easier scrolling")
 	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
-	_ok(tc_src.find("x2 - 64.0") >= 0, "weapon button moved left")
-	_ok(tc_src.find("y - (BTN + 16.0) + 6.0") >= 0, "fire button moved down")
+	_ok(tc_src.find("x2 - 128.0") >= 0, "weapon button moved left")
+	_ok(tc_src.find("y - 20.0") >= 0, "fire button moved down")
 
 
 func _check_speeds_and_camera() -> void:

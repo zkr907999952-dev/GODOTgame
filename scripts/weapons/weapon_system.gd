@@ -960,7 +960,7 @@ func _detect_mag_eject_time(w: WeaponDef, dur: float) -> float:
 
 
 func _detect_mag_insert_time(w: WeaponDef, dur: float, eject_at: float) -> float:
-	# 新弹匣开始插入（离开抛匣、回到卡槽）的时间。用于重新显示弹匣模型。
+	# 新弹匣开始插入：手把弹匣抬起 / 开始送入卡槽时就显示，不要等坐实之后。
 	if w == null or w.shell_reload:
 		return 999.0
 	dur = maxf(dur, 0.05)
@@ -974,14 +974,14 @@ func _detect_mag_insert_time(w: WeaponDef, dur: float, eject_at: float) -> float
 		var t := anim_t
 		if an_len > 0.05:
 			t = anim_t * (dur / an_len)
-		# 必须晚于抛匣，且给插入动作留出可见时间
-		return clampf(t, eject_at + 0.06, dur * 0.92)
-	# 检测失败：抛匣后一小段就显示，不要等到 68% 才出现（那时插入动画已经演完）。
-	return clampf(eject_at + 0.10, dur * 0.28, dur * 0.62)
+		# 略提前一帧，让弹匣在抬手时就看见；仍必须晚于抛匣。
+		return clampf(t - 0.05, eject_at + 0.05, dur * 0.70)
+	# 检测失败：抛匣后很快显示，宁可早一点也不要拖到插入动画演完。
+	return clampf(eject_at + 0.08, dur * 0.22, dur * 0.48)
 
 
 func _scan_mag_insert_time() -> float:
-	# 抛匣之后：可见性重新为 true，或弹匣位置回到卡槽附近。
+	# 抛匣之后：找「手把新弹匣抬起 / 开始送回卡槽」的时刻，而不是坐实（回到 1.8cm 内）的时刻。
 	if gun_ap == null or not gun_ap.has_animation("reload"):
 		return -1.0
 	var an: Animation = gun_ap.get_animation("reload")
@@ -994,15 +994,17 @@ func _scan_mag_insert_time() -> float:
 		if "agazine" not in low and "/mag" not in low and not low.ends_with(":magazine"):
 			continue
 		if typ == Animation.TYPE_VALUE and "visible" in low:
+			# 可见性重新打开往往偏晚（坐实才显示）。只作没有位移轨道时的备援，且再提前一点。
 			var seen_hide := eject_t < 0.0
 			for ki in an.track_get_key_count(ti):
-				var t := an.track_get_key_time(ti, ki)
+				var kt := an.track_get_key_time(ti, ki)
 				var v: Variant = an.track_get_key_value(ti, ki)
-				if v is bool and not v and (eject_t < 0.0 or t + 0.01 >= eject_t):
+				if v is bool and not v and (eject_t < 0.0 or kt + 0.01 >= eject_t):
 					seen_hide = true
-				if seen_hide and v is bool and v and t > (eject_t if eject_t >= 0.0 else 0.0) + 0.02:
-					if best < 0.0 or t < best:
-						best = t
+				if seen_hide and v is bool and v and kt > (eject_t if eject_t >= 0.0 else 0.0) + 0.02:
+					var early := maxf((eject_t if eject_t >= 0.0 else 0.0) + 0.06, kt - 0.18)
+					if best < 0.0 or early < best:
+						best = early
 			continue
 		if typ != Animation.TYPE_POSITION_3D and typ != Animation.TYPE_VALUE:
 			continue
@@ -1011,21 +1013,36 @@ func _scan_mag_insert_time() -> float:
 		var p0: Variant = an.track_get_key_value(ti, 0)
 		if not (p0 is Vector3):
 			continue
-		var away := false
-		for ki in range(1, an.track_get_key_count(ti)):
+		var samples: Array = []
+		for ki in range(0, an.track_get_key_count(ti)):
 			var pv: Variant = an.track_get_key_value(ti, ki)
 			if not (pv is Vector3):
 				continue
-			var t2 := an.track_get_key_time(ti, ki)
-			if eject_t >= 0.0 and t2 < eject_t - 0.01:
+			var kt2 := an.track_get_key_time(ti, ki)
+			if eject_t >= 0.0 and kt2 < eject_t - 0.01:
 				continue
-			var d: Vector3 = pv - p0
-			if d.length() >= 0.03:
-				away = true
-			elif away and d.length() <= 0.018:
-				if best < 0.0 or t2 < best:
-					best = t2
+			samples.append([kt2, (pv as Vector3).distance_to(p0)])
+		if samples.size() < 2:
+			continue
+		# 抛匣后离卡槽最远的那一帧 = 新手持匣抬起；从此开始显示。
+		var peak_t := -1.0
+		var peak_d := -1.0
+		for s in samples:
+			if float(s[1]) > peak_d:
+				peak_d = float(s[1])
+				peak_t = float(s[0])
+		if peak_t < 0.0 or peak_d < 0.02:
+			continue
+		# 再往前一点：最远点往往已是举起，提前到「开始抬起」——最远点之前距离开始明显增大的时刻。
+		var start_t := peak_t
+		for i in range(samples.size()):
+			if float(samples[i][0]) >= peak_t:
 				break
+			if float(samples[i][1]) >= 0.02:
+				start_t = float(samples[i][0])
+				break
+		if best < 0.0 or start_t < best:
+			best = start_t
 	return best
 
 
@@ -1664,8 +1681,9 @@ func _setup_arms() -> void:
 			_ik_bones.append(int(_arm[s][k]))
 
 
-## 物理帧：loco 刚写完姿势 → 记下手臂 / 手指的 loco 姿势，作为 IK 混合的底
-func _physics_process(_dt: float) -> void:
+## 由 player_controller 在 SoftLoco.apply_pose 之后于同一物理帧调用。
+## 先把当前（走跑/休息）肩臂旋转记进 _loco_cache，再解 IK；肩骨始终以这次缓存为底，不会累积。
+func apply_ik_after_loco() -> void:
 	if player and player.has_method("is_dead") and bool(player.call("is_dead")):
 		_ik_w = 0.0
 		return
@@ -1676,14 +1694,17 @@ func _physics_process(_dt: float) -> void:
 		return
 	for bi in _ik_bones:
 		_loco_cache[bi] = skeleton.get_bone_pose_rotation(bi)
-	# 走跑时 SoftLoco 在物理帧写手臂。必须在同一物理帧把 IK 写回去，
-	# 否则插值看到的是摆臂姿势，手会离开枪。
 	if _ik_w > 0.0 and not _last_pose.is_empty():
 		_pull_gun_into_reach(_last_pose)
 		# _pull_gun_into_reach 会再次对准准星，必须把开镜后坐补回去。
 		if player and bool(player.get("first_person")) and _ads_k >= 0.05:
 			_apply_ads_kick(cur_def(), _kick_xf(cur_def()))
 		_apply_ik(_last_pose, _ik_w)
+
+
+## 不再在此处解 IK：节点顺序可能早于或晚于 apply_pose，会把上一帧 IK 当底姿势把肩拧坏。
+func _physics_process(_dt: float) -> void:
+	return
 
 
 ## 我们手指在 rest 姿势下的几何弯曲角（与烘焙数据同一度量）
@@ -2038,25 +2059,13 @@ func _solve_arm(a: Dictionary, P: Vector3, pole: Vector3, hand_basis: Basis, sli
 	var l2: float = a["l2"]
 	var reach := (l1 + l2) * 0.999
 	var ua_local := Transform3D(Basis(_base_rot(ua)), skeleton.get_bone_pose_position(ua))
-	# 肩胛前伸：目标太远时转动锁骨（最多 SHOULDER_MAX 弧度），让肩头向目标靠
+	# 锁骨 / 肩膀保持走跑或休息底姿势，不再为够枪而转动。
+	# 枪械动画只叠加上臂随动 + 小臂及以下；拧锁骨会把胸肩网格拉成麻花。
 	var sh_par := skeleton.get_bone_parent(sh)
 	var par_g := skeleton.get_bone_global_pose(sh_par) if sh_par >= 0 else Transform3D()
 	var sh_base := Basis(_base_rot(sh))
+	_set_rot(sh, sh_base.get_rotation_quaternion(), w)
 	var sh_g := par_g * Transform3D(sh_base, skeleton.get_bone_pose_position(sh))
-	var A0 := (sh_g * ua_local).origin
-	if A0.distance_to(P) > reach * 0.85:
-		var v0 := A0 - sh_g.origin
-		var v1 := (P - sh_g.origin).normalized() * v0.length()
-		var ang := minf(v0.angle_to(v1), SHOULDER_MAX)
-		var axis := v0.cross(v1)
-		if axis.length_squared() > 1e-10 and ang > 1e-4:
-			var rot_g := Basis(axis.normalized(), ang)
-			var new_b := rot_g * sh_g.basis
-			var q := (par_g.basis.orthonormalized().inverse() * new_b.orthonormalized()).get_rotation_quaternion()
-			_set_rot(sh, q, w)
-			sh_g = skeleton.get_bone_global_pose(sh)
-	else:
-		_set_rot(sh, sh_base.get_rotation_quaternion(), w)
 	var ua_g := sh_g * ua_local
 	var A := ua_g.origin
 	var d := P - A
@@ -2120,6 +2129,38 @@ func _restore_loco() -> void:
 		skeleton.set_bone_pose_position(int(a["fa"]), skeleton.get_bone_rest(int(a["fa"])).origin)
 		skeleton.set_bone_pose_position(int(a["ha"]), skeleton.get_bone_rest(int(a["ha"])).origin)
 	_loco_cache.clear()
+
+
+## 测试：锁骨/上臂相对 rest 的扭转，以及左右肩高度差（持枪时肩不应拧坏）。
+func debug_shoulder_metrics() -> Dictionary:
+	var out := {
+		"L_sh": 0.0, "R_sh": 0.0, "L_ua": 0.0, "R_ua": 0.0,
+		"height_delta": 0.0, "ok": false,
+	}
+	if skeleton == null:
+		return out
+	var skx := skeleton.global_transform
+	var heights: Dictionary = {}
+	for s in ["L", "R"]:
+		for pair in [["sh", "Shoulder_a"], ["ua", "UpperArm_a"]]:
+			var bi := skeleton.find_bone("%s_%s" % [s, pair[1]])
+			if bi < 0:
+				continue
+			var now: Quaternion = skeleton.get_bone_pose_rotation(bi)
+			var rest: Quaternion = skeleton.get_bone_rest(bi).basis.get_rotation_quaternion()
+			out["%s_%s" % [s, pair[0]]] = now.angle_to(rest)
+		var shi := skeleton.find_bone("%s_Shoulder_a" % s)
+		if shi >= 0:
+			heights[s] = (skx * skeleton.get_bone_global_pose(shi).origin).y
+	if heights.has("L") and heights.has("R"):
+		out["height_delta"] = absf(float(heights["L"]) - float(heights["R"]))
+	# 走跑底姿势锁骨也会有几度生理活动；超过约 22° 或左右肩高低差过大视为拧坏。
+	out["ok"] = (
+		float(out["L_sh"]) < deg_to_rad(22.0)
+		and float(out["R_sh"]) < deg_to_rad(22.0)
+		and float(out["height_delta"]) < 0.055
+	)
+	return out
 
 
 ## 测试：手腕到素材目标的误差（米）

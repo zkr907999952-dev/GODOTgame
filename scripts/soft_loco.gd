@@ -47,7 +47,7 @@ var hold_hip_y: float = 0.0
 var last_soft_q: Dictionary = {}
 var last_hip_y: float = 0.0
 var last_clip_name: String = ""
-## 武器 IK 生效时不要再用走跑动画覆盖手臂 / 肩骨，避免开镜移动时手穿枪。
+## 武器 IK 是否生效（外部查询）。走跑仍写肩臂，IK 在同一物理帧覆写前臂/手。
 var weapon_ik: bool = false
 
 var _qa := Quaternion.IDENTITY
@@ -464,10 +464,11 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 		hip_y = _apply_loco_settle(final_q, hip_y, blend_u)
 
 	# Reset loco bones to rest (incl. scale), then apply — prevents dirty scale from breath.
-	# 持枪 IK 时保留上一帧手臂，交给 weapon_system 覆写，避免走跑动画把手当成腿一起摆。
+	# 持枪时也先写完整走跑姿势（含肩/臂），再由 player_controller 在同一物理帧
+	# 调用 weapon_system.apply_ik_after_loco：这样锁骨每帧都从解剖/走跑底姿势出发，
+	# 不再把上一帧 IK 的肩旋转累积进去（那会把肩膀拧变形）。
+	# weapon_ik 仍作为标志位保留，供外部查询。
 	for name in bone_idx.keys():
-		if weapon_ik and _is_arm_bone(name):
-			continue
 		var i: int = bone_idx[name]
 		skeleton.set_bone_pose_rotation(i, rest_local_q[name])
 		skeleton.set_bone_pose_position(i, rest_origin[name])
@@ -475,8 +476,6 @@ func apply_pose(fwd: float, side: float, mag: float, airborne: bool, sprint: boo
 
 	for name in final_q.keys():
 		if not bone_idx.has(name):
-			continue
-		if weapon_ik and _is_arm_bone(name):
 			continue
 		var soft_q: Quaternion = final_q[name]
 		var pose_q := _soft_to_godot_pose(name, soft_q)

@@ -2035,6 +2035,9 @@ func _physics_process(delta: float) -> void:
 		_loco.call("apply_pose", fwd, side, mag, airborne, sprinting, delta, actual_spd)
 		if _weapons and _weapons.has_method("is_armed"):
 			_loco.set("weapon_ik", bool(_weapons.call("is_armed")) and float(_weapons.get("_ik_w")) > 0.2)
+		# 走跑刚写完肩臂底姿势，立刻用持枪 IK 覆写，避免节点顺序导致 IK 被冲掉或肩旋转累积。
+		if _weapons and _weapons.has_method("apply_ik_after_loco"):
+			_weapons.call("apply_ik_after_loco")
 
 	# FP: stable stance eye (no head-bone bob); refresh after body yaw catch-up.
 	_update_fp_eye(delta, direction != Vector3.ZERO, sprinting, not on_floor)

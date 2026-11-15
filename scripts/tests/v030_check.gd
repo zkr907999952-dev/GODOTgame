@@ -48,8 +48,8 @@ func _run() -> void:
 		return
 
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.2.9\"") >= 0, "export version 0.2.9")
-	_ok(presets.find("version/code=11") >= 0, "versionCode 11")
+	_ok(presets.find("version/name=\"0.2.10\"") >= 0, "export version 0.2.10")
+	_ok(presets.find("version/code=12") >= 0, "versionCode 12")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 	_ok(presets.find("package/name=\"蒂法玉腹沙盒\"") >= 0, "visible name unchanged")
 
@@ -213,8 +213,8 @@ func _check_health_ui() -> void:
 	var num: Label = hud.find_child("HpNumber", true, false)
 	_ok(bar != null and num != null, "player HP bar and number exist")
 	if box:
-		# bottom-left anchors
-		_ok(is_equal_approx(box.anchor_top, 1.0) and is_equal_approx(box.anchor_left, 0.0), "player HP bar anchored bottom-left")
+		# bottom-center anchors (under weapon card)
+		_ok(is_equal_approx(box.anchor_top, 1.0) and is_equal_approx(box.anchor_left, 0.5) and is_equal_approx(box.anchor_right, 0.5), "player HP bar anchored bottom-center")
 	var world: Control = hud.find_child("WorldHealth", true, false)
 	_ok(world != null, "world/head health bar node exists")
 	if world:

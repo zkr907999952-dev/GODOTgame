@@ -31,6 +31,9 @@ const ANUS_REST := Vector3(0.0, 0.8969, -0.0021)
 # --- 公共状态（HUD 读写）
 var xray_enabled: bool = true
 var xray_amount: float = XRAY_DEFAULT
+var _xray_sphere_ab: Vector3 = Vector3.ZERO
+var _xray_sphere_r: float = 0.0
+var _xray_sphere_k: float = 1.0
 var show_organs: bool = true
 var interact_mode: String = "drag"
 var strike_force: float = 0.52
@@ -206,6 +209,26 @@ func set_fp_clip(eye_w: Vector3, radius: float) -> void:
 	for m in _skin_mats:
 		m.set_shader_parameter("fp_eye_w", eye_w)
 		m.set_shader_parameter("fp_clip_r", radius)
+
+
+## 弹道特写局部透视球（世界坐标）。radius<=0 关闭。不改动腹部透视开关。
+func set_xray_sphere_world(world_pos: Vector3, radius: float, amount: float = 1.0) -> void:
+	if radius <= 0.001:
+		clear_xray_sphere()
+		return
+	_xray_sphere_ab = _frame.affine_inverse() * world_pos
+	_xray_sphere_r = radius
+	_xray_sphere_k = clampf(amount, 0.0, 1.0)
+
+
+func clear_xray_sphere() -> void:
+	_xray_sphere_ab = Vector3.ZERO
+	_xray_sphere_r = 0.0
+	_xray_sphere_k = 1.0
+
+
+func has_xray_sphere() -> bool:
+	return _xray_sphere_r > 0.001
 
 
 func set_show_organs(on: bool) -> void:
@@ -1139,6 +1162,9 @@ func _push_uniforms() -> void:
 	var fpar := Vector4(tools.fist_bulge, tools.fist_spread, tools.fist_rise, tools.fist_lever)
 	for m in _skin_mats:
 		m.set_shader_parameter("xray", xr)
+		m.set_shader_parameter("xray_sphere_ab", _xray_sphere_ab)
+		m.set_shader_parameter("xray_sphere_r", _xray_sphere_r)
+		m.set_shader_parameter("xray_sphere_k", _xray_sphere_k)
 		m.set_shader_parameter("hole_center", _hole_c)
 		m.set_shader_parameter("hole_radius", _hole_r)
 		m.set_shader_parameter("fist_bulge", fb[0])

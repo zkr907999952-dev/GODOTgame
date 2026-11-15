@@ -89,9 +89,23 @@ float xray_hole_profile(vec3 l) {
 	return clamp(band * torso * front, 0.0, 1.0);
 }
 
+// 弹道特写局部透视球：ab-local 圆心 + 半径（0=关闭）。与腹部窗口独立，结束时必须清零。
+uniform vec3 xray_sphere_ab = vec3(0.0);
+uniform float xray_sphere_r = 0.0;
+uniform float xray_sphere_k = 1.0;
+
+float xray_sphere_hole(vec3 l) {
+	if (xray_sphere_r <= 0.001) return 0.0;
+	float d = distance(l, xray_sphere_ab);
+	float inner = xray_sphere_r * 0.70;
+	return (1.0 - smoothstep(inner, xray_sphere_r, d)) * clamp(xray_sphere_k, 0.0, 1.0);
+}
+
 float xray_hole(vec3 l) {
 	// 剖面与椭球取较大值：纹理可用时窗口更贴合体型，失败时椭球仍保证开孔。
-	return clamp(max(xray_hole_profile(l), xray_hole_analytic(l)) * xray, 0.0, 1.0);
+	// 特写局部球与腹部窗口取较大值，互不影响；半径为 0 时完全退回旧行为。
+	float base = clamp(max(xray_hole_profile(l), xray_hole_analytic(l)) * xray, 0.0, 1.0);
+	return clamp(max(base, xray_sphere_hole(l)), 0.0, 1.0);
 }
 
 float belly_mask(vec3 l) {

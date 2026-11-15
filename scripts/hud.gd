@@ -241,12 +241,13 @@ func _build_ui() -> void:
 ## 所有 HUD 控件都不拿键盘焦点：否则点过的按钮会吃掉空格 / 回车（ui_accept → 再次按下
 ## 按钮 → 面板开关），Tab（ui_focus_next）和方向键也会被 GUI 焦点导航吞掉。
 func _build_health_ui(root: Control) -> void:
-	# 玩家生命值：屏幕左下角，数字 + 动态颜色条（绿→黄→红），手机上放到摇杆上方。
+	# 玩家生命值：屏幕底端中央、武器信息卡下方，数字 + 动态颜色条（绿→黄→红）。
 	_hp_box = Control.new()
 	_hp_box.name = "PlayerHealth"
 	_hp_box.custom_minimum_size = Vector2(220, 52)
 	_hp_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_hp_box.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_hp_box.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_hp_box.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_hp_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	root.add_child(_hp_box)
 	var title := Label.new()
@@ -430,24 +431,32 @@ func _refresh_world_hp(delta: float) -> void:
 func _layout_health_ui(safe: Vector4, touch: bool) -> void:
 	if _hp_box == null:
 		return
-	_hp_box.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	# 底端中央、武器信息卡下方。不要再放左下，避免和摇杆重叠。
+	_hp_box.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_hp_box.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_hp_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	var left := safe.x + 16.0
-	var bottom := safe.w + 16.0
+	var bar_w := 200.0
+	var box_h := 52.0
 	if touch:
-		# 摇杆约占左下 128+32，血条放在摇杆上方，避免重叠。
-		bottom = safe.w + 32.0 + 128.0 + 16.0
-		_hp_num.add_theme_font_size_override("font_size", 22)
-		_hp_bar_bg.size = Vector2(180, 12)
-		_hp_bar.size.y = 12
+		_hp_num.add_theme_font_size_override("font_size", 20)
+		_hp_bar_bg.size = Vector2(180, 11)
+		_hp_bar.size.y = 11
+		bar_w = 180.0
+		box_h = 48.0
 	else:
-		_hp_num.add_theme_font_size_override("font_size", 26)
-		_hp_bar_bg.size = Vector2(200, 14)
-		_hp_bar.size.y = 14
-	_hp_box.offset_left = left
-	_hp_box.offset_right = left + 220.0
-	_hp_box.offset_top = -(bottom + 56.0)
+		_hp_num.add_theme_font_size_override("font_size", 24)
+		_hp_bar_bg.size = Vector2(200, 13)
+		_hp_bar.size.y = 13
+	var gap := 6.0
+	var bottom := safe.w + gap
+	_hp_box.offset_left = -bar_w * 0.5 - 10.0
+	_hp_box.offset_right = bar_w * 0.5 + 10.0
+	_hp_box.offset_top = -(bottom + box_h)
 	_hp_box.offset_bottom = -bottom
+	# 复活键跟在血条右侧，死亡时仍能点到。
+	if _hp_revive:
+		_hp_revive.position = Vector2(bar_w * 0.5 + 16.0, 8.0)
+		_hp_revive.custom_minimum_size = Vector2(80, 32)
 	_refresh_player_hp()
 
 
@@ -889,7 +898,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，肠道/子宫被命中时按概率慢动作跟随）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)

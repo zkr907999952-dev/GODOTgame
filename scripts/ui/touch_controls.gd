@@ -7,7 +7,7 @@ extends Control
 ##   · 双指 = 平移 + 捏合缩放，第二根手指落下会取消当前工具
 ## 角色控制（第一人称）模式：
 ##   · 左下虚拟摇杆（128px，外圈 ≥ 0.72 = 奔跑，径向死区 0.15）
-##   · 右下：跳跃 / 下蹲已对调；开火下移；武器键靠下向中间；新增瞄准键（默认切换）
+##   · 右下：跳跃 / 下蹲已对调；开火再下移；武器键再向左；瞄准在开火左上；新增瞄准键（默认切换）
 ##   · 左侧 FOV 竖条只在打开「摄像机」面板时显示
 ##   · 其余区域拖动 = 转视角（独立的触屏灵敏度）；第一人称下点画面不会触发工具
 ##   · 两种模式都有「切换」按钮（= Tab），贴在屏幕上边缘（安全区下方）
@@ -158,18 +158,19 @@ func buttons() -> Dictionary:
 	out["mode"] = [Rect2(Vector2(v.x * 0.5 - 56.0, top), Vector2(112, 44)), "切换·" + mode_txt]
 	if _fp():
 		# 下蹲与跳跃对调：跳跃占用原来的下蹲位（上），下蹲占用原来的跳跃位（右下）。
+		# 按玩家标注：下蹲略向右下靠角；武器再向左收到红圈；开火继续下移，上方留给划屏。
 		var crouch_txt := "匍匐" if str(player.call("get_stance")) == "prone" else "下蹲"
-		out["crouch"] = [Rect2(Vector2(x, y), Vector2(BTN, BTN)), crouch_txt]
+		out["crouch"] = [Rect2(Vector2(x + 8.0, y + 8.0), Vector2(BTN, BTN)), crouch_txt]
 		out["jump"] = [Rect2(Vector2(x, y - BTN - GAP), Vector2(BTN, BTN)), "跳跃"]
 		out["interact"] = [Rect2(Vector2(x, y - 2.0 * (BTN + GAP)), Vector2(BTN, BTN)), "互动"]
 		var x2 := x - BTN - GAP
-		# 武器键再向左收，避免和开火圆叠在一起，并让开火可以下移。
-		out["weapon"] = [Rect2(Vector2(x2 - 64.0, y), Vector2(BTN, BTN)), "武器"]
+		# 武器键再向左收到枪旁空位（红圈），轮盘仍从按下点拉选。
+		out["weapon"] = [Rect2(Vector2(x2 - 128.0, y), Vector2(BTN, BTN)), "武器"]
 		if _armed():
-			# 开火下移，上方留出划屏转视角的空间；瞄准在开火左侧。
-			var fire := Rect2(Vector2(x2 - 8.0, y - (BTN + 16.0) + 6.0), Vector2(BTN + 16.0, BTN + 16.0))
+			# 开火下移到武器与下蹲之间的空隙；瞄准保持在其左上方，不跟着掉下来以免和武器键重叠。
+			var fire := Rect2(Vector2(x2 - 8.0, y - 20.0), Vector2(BTN + 16.0, BTN + 16.0))
 			out["fire"] = [fire, "开火"]
-			out["ads"] = [Rect2(Vector2(fire.position.x - BTN - GAP - 10.0, fire.position.y + 8.0), Vector2(BTN, BTN)), "瞄准"]
+			out["ads"] = [Rect2(Vector2(fire.position.x - BTN - GAP - 10.0, y - (BTN + GAP) - 8.0), Vector2(BTN, BTN)), "瞄准"]
 			out["reload"] = [Rect2(Vector2(x2, y - 2.0 * (BTN + GAP) - 8.0), Vector2(BTN, BTN)), "换弹"]
 	return out
 
