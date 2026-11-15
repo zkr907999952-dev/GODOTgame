@@ -987,6 +987,20 @@ func get_skeleton() -> Skeleton3D:
 	return _find_skeleton(_body)
 
 
+func _cheek_weld_amount() -> float:
+	# 长枪抵肩时微微低头，让脸颊贴上枪托，而不是把枪抬到视线。手枪不加。
+	# 不用 weapon_armed()：那个还要求第一人称，观察模式也会低头抵肩。
+	if _weapons == null or not bool(_weapons.call("is_armed")):
+		return 0.0
+	var w = _weapons.call("cur_def") if _weapons.has_method("cur_def") else null
+	if w == null or str(w.category) == "pistol":
+		return 0.0
+	if first_person:
+		var ads_k := float(_weapons.get("_ads_k")) if _weapons else 0.0
+		return lerpf(0.28, 0.70, clampf(ads_k, 0.0, 1.0))
+	return 0.85
+
+
 ## 第三人称抵肩持枪空间：原点在右肩肩窝附近（不是眼位，避免枪托怼头/怼脸）。
 func shoulder_aim_transform() -> Transform3D:
 	var fwd := _body_forward()
@@ -1004,8 +1018,8 @@ func shoulder_aim_transform() -> Transform3D:
 			inward.y = 0.0
 			if inward.length_squared() > 1e-6:
 				origin += inward.normalized() * 0.02
-		# 略低于肩峰，贴在肩窝外侧，不要进到胸腔中线（否则长枪会贯穿躯干）
-		origin += Vector3(0.0, -0.02, 0.0) + fwd * 0.03
+		# 低于肩峰、贴在肩窝（上胸），不要抬到脸颊/额头；枪靠下来，头再微微下弓。
+		origin += Vector3(0.0, -0.06, 0.0) + fwd * 0.03
 	else:
 		origin = global_transform * (_body.transform * (_fp_eye_cur + Vector3(0.16, -0.08, 0.0)))
 	# 只略退后，让枪托落在肩窝，而不是落到背后
@@ -1808,6 +1822,8 @@ func _physics_process(delta: float) -> void:
 			sec2.call("clear_gaze")  # 插肚脐：低头看肚脐（网页 navelPoke 头颈姿势）
 		else:
 			sec2.call("set_gaze_target", _camera.global_position)
+	if sec2 and sec2.has_method("set_cheek_weld"):
+		sec2.call("set_cheek_weld", _cheek_weld_amount())
 	if _loco and _organs:
 		_loco.set("navel_t", _organs.call("navel_pose_t"))
 		_loco.set("navel_stir", _organs.get("navel_stir_off"))

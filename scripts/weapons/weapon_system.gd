@@ -29,6 +29,8 @@ const IK_FADE := 7.0
 ## 手臂 IK：手肘朝下 + 向外（相机空间）
 const POLE_R := Vector3(0.75, -1.0, 0.15)
 const POLE_L := Vector3(-0.75, -1.0, 0.15)
+## 左手在视模型空间的修正：动画手腕偏高，会穿出护木/机匣顶。略下移并靠近枪身。
+const LEFT_HAND_ADJUST := Vector3(0.0, -0.022, 0.012)
 const ARM_STRETCH_MAX := 1.28
 var finger_gain := 1.0
 const SHOULDER_MAX := 0.5
@@ -69,6 +71,7 @@ var hidden_by_mode: bool = false
 var _mag_ejected: bool = false
 ## 本轮换弹应在 state_t 到达该秒数时抛匣（与动画抛匣帧对齐）
 var _mag_eject_at: float = 0.0
+var _mag_insert_at: float = 0.0
 var _mag_visual_hidden: bool = false
 ## 手枪空仓挂机：弹匣打空后锁在后方，换弹结束必须关闭。不依赖 empty 动画（该片段 0 轨道）。
 var _slide_locked: bool = false
@@ -78,8 +81,9 @@ var _sight_cache_wid: String = ""
 var _sight_cache: PackedVector3Array = PackedVector3Array()
 ## 各枪在枪空间实测的瞄准轴线：机瞄孔/缺口中心 → 准星尖。不要用枪口高度兜底。
 const SIGHT_AXIS := {
-	"rifle": [Vector3(0.07267, 0.223769, 0.0), Vector3(0.493687, 0.23725, 0.0)],
-	"smg": [Vector3(-0.087915, 0.21736, 0.0), Vector3(0.134899, 0.214084, 0.0)],
+	# 步枪：照门是提把顶部横梁上的小孔，不是大方窗中心（0.224 会把整座机瞄留在准星上方）。
+	"rifle": [Vector3(0.07267, 0.2423, 0.0), Vector3(0.493687, 0.2404, 0.0)],
+	"smg": [Vector3(-0.087915, 0.22168, 0.0), Vector3(0.134899, 0.21632, 0.0)],
 	"pistol": [Vector3(0.01108, 0.13718, 0.0), Vector3(0.181321, 0.13718, 0.0)],
 	"shotgun": [Vector3(0.075169, 0.10401, 0.0), Vector3(0.634321, 0.103667, 0.0)],
 }
@@ -196,6 +200,34 @@ func ammo_of(id: String) -> Vector2i:
 	return ammo.get(id, Vector2i.ZERO)
 
 
+func _settings_node() -> Node:
+	if player:
+		var n := player.get_parent()
+		if n:
+			return n.get_node_or_null("GameSettings")
+	return null
+
+
+func infinite_reserve() -> bool:
+	var s := _settings_node()
+	return true if s == null else bool(s.get("infinite_reserve"))
+
+
+func has_reserve(id: String = "") -> bool:
+	if infinite_reserve():
+		return true
+	var wid := id if id != "" else current
+	return ammo_of(wid).y > 0
+
+
+func ammo_text(id: String = "") -> String:
+	var wid := id if id != "" else current
+	var a := ammo_of(wid)
+	if infinite_reserve():
+		return "%d / ∞" % a.x
+	return "%d / %d" % [a.x, a.y]
+
+
 func categories() -> PackedStringArray:
 	var out := PackedStringArray()
 	for w in defs:
@@ -278,13 +310,14 @@ func reload() -> bool:
 		return false
 	var a := ammo_of(current)
 	var cap := _capacity(w, a.x)
-	if a.x >= cap or a.y <= 0:
+	if a.x >= cap or not has_reserve(current):
 		return false
 	_reload_empty = a.x == 0
 	state = "reloading"
 	state_t = 0.0
 	ads = false
 	_mag_ejected = false
+	_mag_insert_at = 0.0
 	_restore_mag_visual()
 	reload_started.emit(current, _reload_empty)
 	sfx.emit("reload", current)
@@ -303,6 +336,7 @@ func reload() -> bool:
 		_clip_speed = _clips.length("reload") / maxf(0.05, state_len)
 		_gun_anim("reload", state_len)
 		_mag_eject_at = _detect_mag_eject_time(w, state_len)
+		_mag_insert_at = _detect_mag_insert_time(w, state_len, _mag_eject_at)
 	return true
 
 
@@ -444,7 +478,7 @@ func _try_fire(delta: float) -> void:
 			sfx.emit("dry", current)
 			if w.sfx_dry:
 				_play(w.sfx_dry)
-			if a.y > 0:
+			if has_reserve(current):
 				reload()
 		return
 	_trigger_used = true
@@ -622,9 +656,9 @@ func _hip_offset(w: WeaponDef) -> Vector3:
 	var y := -0.10 if _is_long_gun(w) else -0.072
 	var z := -0.11 if _is_long_gun(w) else -0.09
 	if w and str(w.category) == "shotgun":
-		# 霰弹腰射原来偏高偏近，略降低并向前伸出一点
+		# 腰射原先太靠后（贴身），再向前/向外伸出，并保持略低于步枪。
 		y = -0.155
-		z = -0.175
+		z = -0.24
 	return Vector3(w.view_offset.x + 0.02, w.view_offset.y + y, w.view_offset.z + z)
 
 
@@ -693,12 +727,10 @@ func _view_local(w: WeaponDef) -> Transform3D:
 
 
 func _tp_hold_adjust(w: WeaponDef) -> Transform3D:
-	# 观察模式附加偏移（相机空间：+Z 朝向持枪者，-Z 朝枪口方向）。
+	# 保留给调试；观察模式实际姿势在 _tp_view_xf。
 	if not _is_long_gun(w):
-		# 手枪：手臂接近伸直、枪身水平，略低于肩，不要过度后收
-		return Transform3D(Basis(Vector3.RIGHT, 0.04), Vector3(0.03, -0.05, -0.04))
-	# 步枪/冲锋枪/霰弹：后拉抵肩，枪口略低，不要过度前伸
-	return Transform3D(Basis(Vector3.RIGHT, -0.05), Vector3(0.12, 0.03, 0.06))
+		return Transform3D(Basis(Vector3.RIGHT, 0.04), Vector3(0.10, -0.10, 0.28))
+	return Transform3D(Basis(Vector3.RIGHT, -0.06), Vector3(0.04, -0.08, 0.04))
 
 
 func _stock_local(w: WeaponDef) -> Vector3:
@@ -722,27 +754,34 @@ func _stock_local(w: WeaponDef) -> Vector3:
 
 
 func _tp_view_xf(w: WeaponDef, pose: Dictionary) -> Transform3D:
-	# 不要把第一人称视模型偏移（髋射下移/开镜）带到观察模式——那会把枪托甩到胸前悬空。
-	# 直接把枪托放到右肩肩窝，枪管沿身体朝向，略低头。
+	# 不要把第一人称视模型偏移带到观察模式。
+	# 长枪：枪托落在肩窝（上胸高度），不要抬到脸/额头；手枪：伸到胸前，不要缩进身体。
 	var fwd: Vector3 = Vector3(0, 0, 1)
 	if player and player.has_method("_body_forward"):
 		fwd = player.call("_body_forward")
 	if fwd.length_squared() < 1e-6:
 		fwd = Vector3(0, 0, -1)
 	var up := Vector3.UP
+	var right := up.cross(fwd)
+	if right.length_squared() < 1e-8:
+		right = Vector3.RIGHT
+	right = right.normalized()
 	var pocket: Vector3
 	if player and player.has_method("shoulder_aim_transform"):
 		pocket = (player.call("shoulder_aim_transform") as Transform3D).origin
 	elif player:
-		pocket = player.global_position + Vector3(0, 1.35, 0)
+		pocket = player.global_position + Vector3(0, 1.28, 0) + right * 0.16
 	else:
 		pocket = Vector3.ZERO
-	# 步枪再往肩窝外侧一点点，略向前，让托底板贴肩而不是穿胸
+	var aim: Vector3
 	if _is_long_gun(w):
-		var right := up.cross(fwd).normalized()
-		pocket += right * 0.02 + fwd * 0.02
-	# 枪 +X = 前方，略俯
-	var aim := (fwd + up * -0.06).normalized()
+		# 略低于肩峰、稍向外，枪口微俯，抵在肩窝而不是贴脸
+		pocket += right * 0.03 + fwd * 0.02 + Vector3(0.0, -0.07, 0.0)
+		aim = (fwd + up * -0.08).normalized()
+	else:
+		# 手枪握把从肩窝向前伸出到胸前，略低于肩，避免缩进躯干
+		pocket += right * 0.10 + fwd * 0.28 + Vector3(0.0, -0.10, 0.0)
+		aim = (fwd + up * -0.03).normalized()
 	var gz := aim.cross(up)
 	if gz.length_squared() < 1e-8:
 		gz = Vector3.RIGHT
@@ -792,16 +831,19 @@ func _hide_mag_visual() -> void:
 	if gun == null:
 		return
 	var mag_n := gun.find_child("Magazine", true, false)
-	if mag_n is Node3D and (mag_n as Node3D).visible:
+	if mag_n is Node3D:
 		(mag_n as Node3D).visible = false
-		_mag_visual_hidden = true
+	_mag_visual_hidden = true
 
 
 func _restore_mag_visual() -> void:
-	if gun and _mag_visual_hidden:
+	if gun:
 		var mag_n := gun.find_child("Magazine", true, false)
 		if mag_n is Node3D:
 			(mag_n as Node3D).visible = true
+			# 动画可见性轨道可能把子网格关掉，插入时一并打开。
+			for c in mag_n.find_children("*", "GeometryInstance3D", true, false):
+				(c as GeometryInstance3D).visible = true
 	_mag_visual_hidden = false
 
 
@@ -823,6 +865,76 @@ func _detect_mag_eject_time(w: WeaponDef, dur: float) -> float:
 			return clampf(anim_t * (dur / an_len), 0.08, dur * 0.85)
 		return clampf(anim_t, 0.08, dur * 0.85)
 	return dur * 0.38
+
+
+func _detect_mag_insert_time(w: WeaponDef, dur: float, eject_at: float) -> float:
+	# 新弹匣开始插入（离开抛匣、回到卡槽）的时间。用于重新显示弹匣模型。
+	if w == null or w.shell_reload:
+		return 999.0
+	dur = maxf(dur, 0.05)
+	var anim_t := _scan_mag_insert_time()
+	if anim_t >= 0.0:
+		var an_len := 0.0
+		if gun_ap and gun_ap.has_animation("reload"):
+			an_len = gun_ap.get_animation("reload").length
+		if an_len <= 0.0 and _clips:
+			an_len = _clips.length("reload")
+		var t := anim_t
+		if an_len > 0.05:
+			t = anim_t * (dur / an_len)
+		# 必须晚于抛匣，且给插入动作留出可见时间
+		return clampf(t, eject_at + 0.06, dur * 0.92)
+	# 检测失败：抛匣后一小段就显示，不要等到 68% 才出现（那时插入动画已经演完）。
+	return clampf(eject_at + 0.10, dur * 0.28, dur * 0.62)
+
+
+func _scan_mag_insert_time() -> float:
+	# 抛匣之后：可见性重新为 true，或弹匣位置回到卡槽附近。
+	if gun_ap == null or not gun_ap.has_animation("reload"):
+		return -1.0
+	var an: Animation = gun_ap.get_animation("reload")
+	var eject_t := _scan_mag_throw_time()
+	var best := -1.0
+	for ti in an.get_track_count():
+		var typ := an.track_get_type(ti)
+		var path := String(an.track_get_path(ti))
+		var low := path.to_lower()
+		if "agazine" not in low and "/mag" not in low and not low.ends_with(":magazine"):
+			continue
+		if typ == Animation.TYPE_VALUE and "visible" in low:
+			var seen_hide := eject_t < 0.0
+			for ki in an.track_get_key_count(ti):
+				var t := an.track_get_key_time(ti, ki)
+				var v: Variant = an.track_get_key_value(ti, ki)
+				if v is bool and not v and (eject_t < 0.0 or t + 0.01 >= eject_t):
+					seen_hide = true
+				if seen_hide and v is bool and v and t > (eject_t if eject_t >= 0.0 else 0.0) + 0.02:
+					if best < 0.0 or t < best:
+						best = t
+			continue
+		if typ != Animation.TYPE_POSITION_3D and typ != Animation.TYPE_VALUE:
+			continue
+		if an.track_get_key_count(ti) < 3:
+			continue
+		var p0: Variant = an.track_get_key_value(ti, 0)
+		if not (p0 is Vector3):
+			continue
+		var away := false
+		for ki in range(1, an.track_get_key_count(ti)):
+			var pv: Variant = an.track_get_key_value(ti, ki)
+			if not (pv is Vector3):
+				continue
+			var t2 := an.track_get_key_time(ti, ki)
+			if eject_t >= 0.0 and t2 < eject_t - 0.01:
+				continue
+			var d: Vector3 = pv - p0
+			if d.length() >= 0.03:
+				away = true
+			elif away and d.length() <= 0.018:
+				if best < 0.0 or t2 < best:
+					best = t2
+				break
+	return best
 
 
 func _scan_mag_throw_time() -> float:
@@ -937,86 +1049,21 @@ func _mesh_verts_in_gun(mi: MeshInstance3D) -> PackedVector3Array:
 
 
 func _rear_aperture_from_verts(verts: PackedVector3Array, bone: Vector3) -> Vector3:
-	# 在照门 X 附近的 YZ 平面找被围住的空腔中心（机瞄孔 / 提把窗口），不要用骨骼原点（通常在窗沿或壳顶）。
+	# 提把顶部横梁上的照门孔（约低于顶面 7mm）。不用大方窗中心，也不用稀疏顶点灌水。
 	if verts.is_empty():
 		return Vector3.INF
-	var near: Array[Vector3] = []
 	var x0 := bone.x
+	var ymax := -1e9
 	for p in verts:
-		if absf(p.x - x0) <= 0.03 and p.y > bone.y - 0.04:
-			near.append(p)
-	if near.size() < 8:
+		if absf(p.x - x0) <= 0.03 and absf(p.z) <= 0.016:
+			ymax = maxf(ymax, p.y)
+	if ymax < -1e8:
 		return Vector3.INF
-	var y0 := 1e9
-	var y1 := -1e9
-	var z0 := 1e9
-	var z1 := -1e9
-	for p in near:
-		y0 = minf(y0, p.y)
-		y1 = maxf(y1, p.y)
-		z0 = minf(z0, p.z)
-		z1 = maxf(z1, p.z)
-	var step := 0.002
-	var ny := int(ceil((y1 - y0) / step)) + 3
-	var nz := int(ceil((z1 - z0) / step)) + 3
-	if ny < 6 or nz < 6 or ny * nz > 20000:
-		return Vector3.INF
-	var occ := PackedByteArray()
-	occ.resize(ny * nz)
-	for p in near:
-		var iy := int(round((p.y - y0) / step)) + 1
-		var iz := int(round((p.z - z0) / step)) + 1
-		if iy >= 0 and iy < ny and iz >= 0 and iz < nz:
-			occ[iy * nz + iz] = 1
-	# 从边界灌水，剩下的空格即孔洞
-	var seen := PackedByteArray()
-	seen.resize(ny * nz)
-	var q: Array[int] = []
-	for iy in ny:
-		for iz in nz:
-			if iy == 0 or iy == ny - 1 or iz == 0 or iz == nz - 1:
-				var id := iy * nz + iz
-				if occ[id] == 0 and seen[id] == 0:
-					seen[id] = 1
-					q.append(id)
-	var qi := 0
-	while qi < q.size():
-		var id: int = q[qi]
-		qi += 1
-		var iy := int(id / nz)
-		var iz := id - iy * nz
-		var dirs: Array[Vector2i] = [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]
-		for d in dirs:
-			var ay: int = iy + d.x
-			var az: int = iz + d.y
-			if ay < 0 or ay >= ny or az < 0 or az >= nz:
-				continue
-			var nid: int = ay * nz + az
-			if occ[nid] == 0 and seen[nid] == 0:
-				seen[nid] = 1
-				q.append(nid)
-	var sy := 0.0
-	var sz := 0.0
-	var n := 0
-	for iy in range(1, ny - 1):
-		for iz in range(1, nz - 1):
-			var id := iy * nz + iz
-			if occ[id] != 0 or seen[id] != 0:
-				continue
-			var y := y0 + float(iy - 1) * step
-			var z := z0 + float(iz - 1) * step
-			if absf(z) > 0.016:
-				continue
-			sy += y
-			sz += z
-			n += 1
-	if n < 4:
-		return Vector3.INF
-	return Vector3(x0, sy / float(n), sz / float(n))
+	return Vector3(x0, ymax - 0.007, 0.0)
 
 
 func _front_post_from_verts(verts: PackedVector3Array, bone: Vector3) -> Vector3:
-	# 准星尖：前准星附近最高且靠近中线的顶点平均，不要偏到塔座侧面。
+	# 准星尖：只用最高一簇顶点，避免把塔座侧面平均进来压低准星。
 	var ymax := -1e9
 	for p in verts:
 		if absf(p.x - bone.x) <= 0.035 and absf(p.z) <= 0.008:
@@ -1026,7 +1073,7 @@ func _front_post_from_verts(verts: PackedVector3Array, bone: Vector3) -> Vector3
 	var s := Vector3.ZERO
 	var n := 0
 	for p in verts:
-		if absf(p.x - bone.x) <= 0.035 and absf(p.z) <= 0.008 and p.y >= ymax - 0.004:
+		if absf(p.x - bone.x) <= 0.035 and absf(p.z) <= 0.008 and p.y >= ymax - 0.0015:
 			s += p
 			n += 1
 	if n <= 0:
@@ -1167,6 +1214,17 @@ func debug_mag_ejected() -> bool:
 
 func debug_mag_eject_at() -> float:
 	return _mag_eject_at
+
+
+func debug_mag_insert_at() -> float:
+	return _mag_insert_at
+
+
+func debug_mag_visible() -> bool:
+	if gun == null:
+		return false
+	var mag_n := gun.find_child("Magazine", true, false)
+	return mag_n is Node3D and (mag_n as Node3D).visible
 
 
 func debug_muzzle_ahead() -> float:
@@ -1365,8 +1423,11 @@ func _step_reload_eject() -> void:
 		return
 	if not _mag_ejected and state_t >= _mag_eject_at:
 		_try_eject_mag(w)
-	# 新弹匣装回后再显示模型，避免和刚抛出的物理弹匣重叠
-	if _mag_visual_hidden and state_t >= maxf(_mag_eject_at + 0.18, state_len * 0.68):
+	# 新弹匣开始插入时就显示模型（并每帧压过动画可见性轨道）。
+	var insert_at := _mag_insert_at if _mag_insert_at > 0.0 else maxf(_mag_eject_at + 0.10, state_len * 0.32)
+	if _mag_visual_hidden and state_t >= insert_at:
+		_restore_mag_visual()
+	elif (not _mag_visual_hidden) and _mag_ejected and state_t >= insert_at:
 		_restore_mag_visual()
 
 
@@ -1379,9 +1440,12 @@ func _step_reload() -> void:
 		if state_t >= state_len:
 			var a := ammo_of(current)
 			var cap := _capacity(w, a.x)
-			var take := mini(cap - a.x, a.y)
-			a.x += take
-			a.y -= take
+			if infinite_reserve():
+				a.x = cap
+			else:
+				var take := mini(cap - a.x, a.y)
+				a.x += take
+				a.y -= take
 			ammo[current] = a
 			state = "ready"
 			_clip_speed = 1.0
@@ -1398,10 +1462,11 @@ func _step_reload() -> void:
 		"start", "step", "end_req":
 			if _shell_phase == "step":
 				a2.x += 1
-				a2.y -= 1
+				if not infinite_reserve():
+					a2.y -= 1
 				ammo[current] = a2
 				ammo_changed.emit(current, a2.x, a2.y)
-			if _shell_phase != "end_req" and a2.x < w.mag_size and a2.y > 0:
+			if _shell_phase != "end_req" and a2.x < w.mag_size and has_reserve(current):
 				_shell_phase = "step"
 				state_t = 0.0
 				state_len = _clips.length("reload_step")
@@ -1589,8 +1654,7 @@ func _pull_gun_into_reach(pose: Dictionary) -> void:
 				continue
 			var a: Dictionary = _arm[s]
 			var h: Dictionary = pose[s]
-			var sem_cam := Basis(h["q"] as Quaternion)
-			var wrist_cam: Vector3 = (h["wrist"] as Vector3) + sem_cam.x * (float(h["flen"]) - float(a["flen"]))
+			var wrist_cam: Vector3 = _wrist_cam(s, h, a)
 			var want: Vector3 = view.global_transform * wrist_cam
 			var sh: Vector3 = skx * skeleton.get_bone_global_pose(int(a["sh"])).origin
 			var reach: float = (float(a["l1"]) + float(a["l2"])) * 0.88
@@ -1611,6 +1675,14 @@ func _pull_gun_into_reach(pose: Dictionary) -> void:
 		_seat_stock_on_shoulder(cur_def())
 
 
+func _wrist_cam(s: String, h: Dictionary, a: Dictionary) -> Vector3:
+	var sem_cam := Basis(h["q"] as Quaternion)
+	var wrist: Vector3 = (h["wrist"] as Vector3) + sem_cam.x * (float(h["flen"]) - float(a["flen"]))
+	if s == "L":
+		wrist += LEFT_HAND_ADJUST
+	return wrist
+
+
 func _apply_ik(pose: Dictionary, w: float) -> void:
 	if pose.is_empty() or skeleton == null or _arm.is_empty() or w <= 0.0:
 		return
@@ -1626,8 +1698,8 @@ func _apply_ik(pose: Dictionary, w: float) -> void:
 		var h: Dictionary = pose[s]
 		var sem_cam := Basis(h["q"] as Quaternion)
 		var sem_sk := (to_sk.basis * vx.basis * sem_cam).orthonormalized()
-		# 手腕：让「指根」对齐素材手的指根（我们的手掌更短）
-		var wrist_cam: Vector3 = (h["wrist"] as Vector3) + sem_cam.x * (float(h["flen"]) - float(a["flen"]))
+		# 手腕：让「指根」对齐素材手的指根（我们的手掌更短）；左手再略下调避免穿模。
+		var wrist_cam: Vector3 = _wrist_cam(s, h, a)
 		var P: Vector3 = to_sk * (vx * wrist_cam)
 		var pole_cam: Vector3 = POLE_R if s == "R" else POLE_L
 		# 用持枪空间（view）而不是环绕相机，否则观察模式下肘部会随观察角扭转。

@@ -38,6 +38,7 @@ eject = Vector3(0.16, 0.165, 0.02)
 shell = "5_56mm_Shell"
 flash_scale = 1.0
 view_offset = Vector3(-0.01, 0, 0.11)
+view_scale = 0.74
 ads_fov = 48.0
 muzzle_velocity = 850.0
 drag = 0.00022

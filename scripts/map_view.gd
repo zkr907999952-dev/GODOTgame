@@ -1,6 +1,7 @@
 extends Node3D
 ## 大地图俯视（移植网页 CityMapRig / CityMapPanel）：
-## 正上方俯视相机，左键拖动平移、滚轮缩放（高度 36–1600m，默认 120m）、左键单击选传送点。
+## 正上方俯视相机，左键/单指拖动平移、滚轮缩放（高度 36–1600m，默认 120m）、单击选传送点。
+## 手机：双指捏合缩放（间距变大 = 降低高度/放大），双指中点平移。
 ## 选点优先射线命中碰撞体（城市已建碰撞时），否则取 y=0 平面。
 
 signal marker_changed(marker: Variant)
@@ -24,6 +25,10 @@ var _player_mi: MeshInstance3D
 var _drag_on: bool = false
 var _drag_moved: bool = false
 var _drag_from: Vector2 = Vector2.ZERO
+## 触屏：index -> 逻辑坐标
+var _touches: Dictionary = {}
+var _pinch_dist: float = 0.0
+var _pinch_mid: Vector2 = Vector2.ZERO
 
 
 func _ready() -> void:
@@ -78,6 +83,8 @@ func open(center: Vector3, current_player: Vector3) -> void:
 	_prev_cam = get_viewport().get_camera_3d()
 	_cam.current = true
 	_drag_on = false
+	_touches.clear()
+	_pinch_dist = 0.0
 	_update_cam()
 
 
@@ -86,6 +93,8 @@ func close() -> void:
 		return
 	is_open = false
 	_drag_on = false
+	_touches.clear()
+	_pinch_dist = 0.0
 	_marker_mi.visible = false
 	_player_mi.visible = false
 	if _prev_cam and is_instance_valid(_prev_cam):
@@ -102,6 +111,14 @@ func set_marker(m: Variant) -> void:
 func zoom_steps(steps: float) -> void:
 	# 网页：h *= exp(deltaY * 0.0016)，一格滚轮 deltaY≈100
 	height = clampf(height * exp(-steps * 0.16), H_MIN, H_MAX)
+	_update_cam()
+
+
+func zoom_by(factor: float) -> void:
+	# factor < 1 = 放大（相机降低）；与观察模式捏合约定相同：旧间距 / 新间距。
+	if factor <= 1e-5:
+		return
+	height = clampf(height * factor, H_MIN, H_MAX)
 	_update_cam()
 
 
@@ -145,7 +162,100 @@ func handle_input(event: InputEvent) -> bool:
 			pan.y = clampf(pan.y, bounds.position.y, bounds.end.y)
 			_update_cam()
 		return true
+	if event is InputEventScreenTouch:
+		var st := event as InputEventScreenTouch
+		if st.pressed:
+			_touch_down(st.index, st.position)
+		else:
+			_touch_up(st.index, st.position)
+		return true
+	if event is InputEventScreenDrag:
+		var sd := event as InputEventScreenDrag
+		_touch_move(sd.index, sd.position, sd.relative)
+		return true
 	return event is InputEventMouse
+
+
+func _touch_pts() -> Array:
+	var ks: Array = _touches.keys()
+	ks.sort()
+	var pts: Array = []
+	for k in ks:
+		pts.append(_touches[k])
+	return pts
+
+
+func _touch_down(idx: int, p: Vector2) -> void:
+	_touches[idx] = p
+	var pts := _touch_pts()
+	if pts.size() >= 2:
+		_drag_on = false
+		_drag_moved = false
+		_pinch_mid = (pts[0] + pts[1]) * 0.5
+		_pinch_dist = pts[0].distance_to(pts[1])
+	else:
+		_drag_on = true
+		_drag_moved = false
+		_drag_from = p
+		_pinch_dist = 0.0
+
+
+func _touch_move(idx: int, p: Vector2, rel: Vector2) -> void:
+	_touches[idx] = p
+	var pts := _touch_pts()
+	if pts.size() >= 2:
+		var mid: Vector2 = (pts[0] + pts[1]) * 0.5
+		var dist: float = pts[0].distance_to(pts[1])
+		# 双指中点平移
+		if _pinch_dist > 0.0:
+			var dmid: Vector2 = mid - _pinch_mid
+			if dmid.length_squared() > 0.0:
+				_pan_by_pixels(dmid)
+		# 捏合缩放：间距变大 = 放大 = 降低高度
+		if _pinch_dist > 8.0 and dist > 8.0 and absf(dist - _pinch_dist) > 10.0:
+			zoom_by(_pinch_dist / dist)
+			_pinch_dist = dist
+		elif _pinch_dist <= 8.0:
+			_pinch_dist = dist
+		_pinch_mid = mid
+		_drag_on = false
+		return
+	if _drag_on:
+		if not _drag_moved and p.distance_to(_drag_from) > DRAG_PX:
+			_drag_moved = true
+		if _drag_moved:
+			_pan_by_pixels(rel)
+
+
+func _touch_up(idx: int, p: Vector2) -> void:
+	var was_pinch := _touches.size() >= 2
+	_touches.erase(idx)
+	var pts := _touch_pts()
+	if pts.size() >= 2:
+		_pinch_mid = (pts[0] + pts[1]) * 0.5
+		_pinch_dist = pts[0].distance_to(pts[1])
+		return
+	_pinch_dist = 0.0
+	if pts.size() == 1:
+		# 剩下单指：改从该指继续拖，不误判为单击选点
+		_drag_on = true
+		_drag_moved = true
+		_drag_from = pts[0]
+		return
+	if _drag_on:
+		_drag_on = false
+		if not _drag_moved and not was_pinch:
+			pick_at(p)
+
+
+func _pan_by_pixels(rel: Vector2) -> void:
+	var vp := get_viewport().get_visible_rect().size
+	var hv := _vis_half()
+	pan.x -= rel.x / maxf(1.0, vp.x) * hv.x * 2.0
+	pan.y -= rel.y / maxf(1.0, vp.y) * hv.y * 2.0
+	pan.x = clampf(pan.x, bounds.position.x, bounds.end.x)
+	pan.y = clampf(pan.y, bounds.position.y, bounds.end.y)
+	_update_cam()
 
 
 func pick_at(screen: Vector2) -> void:

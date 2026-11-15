@@ -135,7 +135,7 @@ func action_for_key(key: int, mode: String = "") -> String:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if map_view.is_open and event is InputEventMouse:
+	if map_view.is_open and (event is InputEventMouse or event is InputEventScreenTouch or event is InputEventScreenDrag):
 		if map_view.handle_input(event):
 			get_viewport().set_input_as_handled()
 		return

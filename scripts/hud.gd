@@ -31,6 +31,7 @@ var _chk_hair: CheckButton
 var _sens_slider: HSlider
 var _touch_sens_slider: HSlider
 var _chk_ads_toggle: CheckButton
+var _chk_infinite_reserve: CheckButton
 var _res_option: OptionButton
 var _cam_sens_slider: HSlider
 var _btn_fp: Button
@@ -429,7 +430,7 @@ func set_overhead(on: bool) -> void:
 	if _overhead_ui == null:
 		return
 	_overhead_ui.visible = on
-	for c in [_btn_settings, _btn_map, _btn_camera, _btn_interact, _status]:
+	for c in [_btn_settings, _btn_map, _btn_camera, _btn_interact, _btn_weapon, _status]:
 		if c:
 			c.visible = not on
 	if on:
@@ -611,6 +612,12 @@ func _build_settings_panel() -> PanelContainer:
 	_chk_ads_toggle.button_pressed = true
 	_chk_ads_toggle.toggled.connect(_on_ads_toggle_changed)
 	v.add_child(_chk_ads_toggle)
+
+	_chk_infinite_reserve = CheckButton.new()
+	_chk_infinite_reserve.text = "无限备弹（显示∞，仍需换弹）"
+	_chk_infinite_reserve.button_pressed = true
+	_chk_infinite_reserve.toggled.connect(_on_infinite_reserve_changed)
+	v.add_child(_chk_infinite_reserve)
 
 	var res_l := Label.new()
 	res_l.text = "画面分辨率"
@@ -1204,6 +1211,9 @@ func _sync_from_systems() -> void:
 		var tog: bool = bool(_player.ads_toggle)
 		_chk_ads_toggle.set_pressed_no_signal(tog)
 		_chk_ads_toggle.text = "举枪瞄准：切换（关=长按）" if tog else "举枪瞄准：长按（开=切换）"
+	var st := _settings()
+	if st and _chk_infinite_reserve:
+		_chk_infinite_reserve.set_pressed_no_signal(bool(st.get("infinite_reserve")))
 	if "first_person" in _player and _btn_fp:
 		_btn_fp.text = "第一人称" if bool(_player.first_person) else "第三人称"
 		_style_button(_btn_fp, bool(_player.first_person))
@@ -1419,6 +1429,14 @@ func _on_ads_toggle_changed(on: bool) -> void:
 		_player.call("set_ads_toggle", on)
 	if _chk_ads_toggle:
 		_chk_ads_toggle.text = "举枪瞄准：切换（关=长按）" if on else "举枪瞄准：长按（开=切换）"
+
+
+func _on_infinite_reserve_changed(on: bool) -> void:
+	var s := _settings()
+	if s and s.has_method("set_infinite_reserve"):
+		s.call("set_infinite_reserve", on)
+	if _wui:
+		_wui.call("refresh")
 
 
 func _sync_render_scale_ui() -> void:
@@ -1754,6 +1772,13 @@ func _bind_weapons() -> void:
 
 func toggle_weapon_panel() -> void:
 	_toggle_panel(PanelId.WEAPON)
+
+
+func should_hide_weapon_ui() -> bool:
+	# 打开地图菜单或俯视选点时不显示弹药 HUD / 武器界面。
+	if _overhead_ui and _overhead_ui.visible:
+		return true
+	return _open == PanelId.MAP
 
 
 func open_weapon_wheel(origin: Variant = null) -> void:

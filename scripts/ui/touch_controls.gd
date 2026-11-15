@@ -46,6 +46,7 @@ var _crouch_long: bool = false
 var _pressed_btn: Dictionary = {}  # id -> true（高亮）
 var _font: Font
 var _weapon_drag_moved: bool = false
+var _weapon_press_pos: Vector2 = Vector2.ZERO
 ## 最近一次真实 ScreenTouch 的时间戳；这段时间内忽略触摸模拟鼠标，避免同一指被处理两次。
 var _screen_touch_until: int = 0
 
@@ -255,6 +256,8 @@ func _on_down(idx: int, p: Vector2) -> void:
 	var bid := _hit_button(p)
 	if bid != "":
 		f["role"] = "btn:" + bid
+		if bid == "weapon":
+			_weapon_press_pos = p
 		_button(bid, true)
 		get_viewport().set_input_as_handled()
 		return
@@ -309,7 +312,7 @@ func _on_drag(idx: int, p: Vector2, rel: Vector2) -> void:
 		"tool":
 			player.call("touch_tool_drag", p)
 		"btn:weapon":
-			# 手指直接拖到轮盘格子上（轮盘以屏幕中心为圆心）
+			# 手指直接拖到轮盘格子上（轮盘以按下武器按钮的点击点为原点）
 			if hud and hud.has_method("weapon_wheel_point") and p.distance_to(f["start"]) > TAP_PX * 0.6:
 				f["moved"] = true
 				hud.call("weapon_wheel_point", p)
@@ -467,7 +470,7 @@ func _button(id: String, down: bool) -> void:
 			if hud == null:
 				pass
 			elif down:
-				hud.call("open_weapon_wheel", null)
+				hud.call("open_weapon_wheel", _weapon_press_pos)
 			elif bool(hud.call("is_wheel_open")):
 				hud.call("close_weapon_wheel", _weapon_drag_moved)
 				_weapon_drag_moved = false

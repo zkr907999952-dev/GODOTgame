@@ -72,11 +72,20 @@ func close(apply: bool = true) -> Variant:
 
 
 func center() -> Vector2:
+	# 拉选原点：打开时传入的点击点（手机武器按钮）；未传入则用屏幕中心。
+	if _origin != Vector2.ZERO or is_open:
+		return _origin
 	return size * 0.5
 
 
 func radius() -> float:
-	return clampf(minf(size.x, size.y) * 0.34, 120.0, 260.0)
+	var base := clampf(minf(size.x, size.y) * 0.34, 120.0, 260.0)
+	var o := center()
+	# 靠边缘打开时略缩小，避免格子大量出屏，但原点仍是点击点。
+	var room := minf(minf(o.x, size.x - o.x), minf(o.y, size.y - o.y)) - 8.0
+	if room > 40.0:
+		return clampf(minf(base, room + 40.0), 80.0, base)
+	return clampf(minf(base, 140.0), 80.0, base)
 
 
 ## 指针绝对位置（触屏 / 未捕获鼠标）
@@ -170,7 +179,7 @@ func _draw() -> void:
 			draw_texture_rect(w.icon, Rect2(box.get_center() - dsz * 0.5, dsz), false, Color(1, 1, 1, 0.95) if on else Color(0.85, 0.87, 0.9, 0.8))
 		_text(w.display_name.get_slice("（", 0), rc.position + Vector2(8, rc.size.y - 8), 12, Color(0.92, 0.93, 0.95))
 		var a: Vector2i = weapons.ammo_of(w.id)
-		var at := "%d/%d" % [a.x, a.y]
+		var at := str(weapons.call("ammo_text", w.id)) if weapons.has_method("ammo_text") else "%d/%d" % [a.x, a.y]
 		var aw := _font.get_string_size(at, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
 		_text(at, rc.end - Vector2(aw + 8, 8), 13, accent if a.x == 0 else Color(1, 1, 1))
 	# 中心：收枪 / 翻页

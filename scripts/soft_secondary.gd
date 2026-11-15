@@ -73,6 +73,8 @@ var body_look_on: bool = false
 var body_look_yaw: float = 0.0
 var body_look_pitch: float = 0.0
 var body_look_solved: Vector2 = Vector2.ZERO
+## 0..1：持长枪时脖子/头微微下弓，脸颊贴枪托。
+var cheek_weld: float = 0.0
 
 ## Display-mode gaze: head + eyes look at a world-space point (usually the active Camera3D).
 var gaze_want: bool = false
@@ -202,6 +204,10 @@ func set_breath_boost(v: float) -> void:
 	breath_boost = clampf(v, 0.0, 1.0)
 
 
+func set_cheek_weld(k: float) -> void:
+	cheek_weld = clampf(k, 0.0, 1.0)
+
+
 func set_body_look(yaw: float, pitch: float = 0.0) -> void:
 	body_look_on = true
 	body_look_yaw = yaw
@@ -257,6 +263,8 @@ func update(delta: float, sprint: bool = false) -> void:
 		_apply_body_look()
 	elif gaze_blend > 0.01 or gaze_eye_blend > 0.01 or gaze_neck_blend > 0.01:
 		_apply_gaze()
+	elif cheek_weld > 0.01:
+		_apply_cheek_weld_only()
 
 	_update_blink(d)
 	close_l = clampf(1.0 - eye_open_l * (1.0 - blink_amt), 0.0, 1.0)
@@ -437,10 +445,11 @@ func _update_gaze(d: float) -> void:
 func _apply_gaze() -> void:
 	if skeleton == null:
 		return
-	if gaze_neck_blend > 0.01:
-		_nudge_look_bone("C_Neck_a", gaze_neck_pitch * gaze_neck_blend, gaze_neck_yaw * gaze_neck_blend)
-	if gaze_blend > 0.01:
-		_nudge_look_bone("C_Head_a", gaze_head_pitch * gaze_blend, gaze_head_yaw * gaze_blend)
+	var weld := cheek_weld * 0.22
+	if gaze_neck_blend > 0.01 or weld > 0.002:
+		_nudge_look_bone("C_Neck_a", gaze_neck_pitch * gaze_neck_blend + weld * 0.55, gaze_neck_yaw * gaze_neck_blend)
+	if gaze_blend > 0.01 or weld > 0.002:
+		_nudge_look_bone("C_Head_a", gaze_head_pitch * gaze_blend + weld * 0.45, gaze_head_yaw * gaze_blend)
 	if gaze_eye_blend > 0.01:
 		_nudge_look_bone(eye_l, gaze_eye_pitch * gaze_eye_blend, gaze_eye_yaw * gaze_eye_blend)
 		_nudge_look_bone(eye_r, gaze_eye_pitch * gaze_eye_blend, gaze_eye_yaw * gaze_eye_blend)
@@ -469,8 +478,15 @@ func _apply_body_look() -> void:
 	yaw = clampf(yaw, -1.6, 1.6)
 	pitch = clampf(pitch, -1.25, 1.65)
 	body_look_solved = Vector2(yaw, pitch)
-	_nudge_look_bone("C_Neck_a", -pitch * 0.5, yaw * 0.52)
-	_nudge_look_bone("C_Head_a", -pitch * 0.5, yaw * 0.48)
+	var weld := cheek_weld * 0.22
+	_nudge_look_bone("C_Neck_a", -pitch * 0.5 + weld * 0.55, yaw * 0.52)
+	_nudge_look_bone("C_Head_a", -pitch * 0.5 + weld * 0.45, yaw * 0.48)
+
+
+func _apply_cheek_weld_only() -> void:
+	var weld := cheek_weld * 0.22
+	_nudge_look_bone("C_Neck_a", weld * 0.55, 0.0)
+	_nudge_look_bone("C_Head_a", weld * 0.45, 0.0)
 
 
 func _nudge_look_bone(name: String, pitch: float, yaw: float, from_rest: bool = false) -> void:

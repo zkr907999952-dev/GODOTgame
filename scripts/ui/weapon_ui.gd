@@ -145,7 +145,7 @@ func refresh() -> void:
 			var c: Dictionary = cards[id]
 			var a: Vector2i = weapons.ammo_of(id)
 			var lbl := c["ammo"] as Label
-			var txt := "%d / %d" % [a.x, a.y]
+			var txt := str(weapons.call("ammo_text", id)) if weapons.has_method("ammo_text") else "%d / %d" % [a.x, a.y]
 			if lbl.text != txt:
 				lbl.text = txt
 			var empty := a.x == 0
@@ -244,7 +244,8 @@ func _refresh_ammo_hud() -> void:
 	if ammo_box == null or weapons == null:
 		return
 	var w: Resource = weapons.cur_def()
-	var show: bool = w != null and weapons.state != "holstered" and not weapons.hidden_by_mode
+	var hide_ui := hud != null and hud.has_method("should_hide_weapon_ui") and bool(hud.call("should_hide_weapon_ui"))
+	var show: bool = w != null and weapons.state != "holstered" and not weapons.hidden_by_mode and not hide_ui
 	ammo_box.visible = show
 	if not show:
 		return
@@ -252,7 +253,7 @@ func _refresh_ammo_hud() -> void:
 	if _ammo_icon.texture != w.icon:
 		_ammo_icon.texture = w.icon
 	_set_text(_ammo_name, w.display_name.get_slice("（", 0))
-	_set_text(_ammo_num, "%d / %d" % [a.x, a.y])
+	_set_text(_ammo_num, str(weapons.call("ammo_text", w.id)) if weapons.has_method("ammo_text") else "%d / %d" % [a.x, a.y])
 	var col := Color(0.95, 0.45, 0.35) if a.x == 0 else (Color(1.0, 0.8, 0.5) if a.x <= maxi(1, w.mag_size / 4) else Color(1, 1, 1))
 	if _ammo_col != col:
 		_ammo_col = col
@@ -265,7 +266,8 @@ func _refresh_ammo_hud() -> void:
 			st = " · 取枪"
 		"holstering":
 			st = " · 收枪"
-	_set_text(_ammo_mode, MODE_NAMES.get(w.fire_mode, w.fire_mode) + st + ("" if a.x > 0 else ("  按 R 换弹" if a.y > 0 else "  没有备弹")))
+	var can_reload := a.y > 0 or (weapons.has_method("has_reserve") and bool(weapons.call("has_reserve", w.id)))
+	_set_text(_ammo_mode, MODE_NAMES.get(w.fire_mode, w.fire_mode) + st + ("" if a.x > 0 else ("  按 R 换弹" if can_reload else "  没有备弹")))
 
 
 var _ammo_col := Color(0, 0, 0, 0)

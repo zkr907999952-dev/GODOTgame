@@ -100,6 +100,10 @@ func _run() -> void:
 	hud = main.get_node("HUD")
 	game = main
 	ws = player.call("get_weapons")
+	var settings = main.get_node_or_null("GameSettings")
+	if settings:
+		# 只改内存，避免把测试值写入 user://settings.cfg
+		settings.set("infinite_reserve", false)
 	_ok(ws != null, "weapon system exists")
 	var ids: PackedStringArray = ws.call("weapon_ids")
 	_ok(ids.size() == 4 and ids[0] == "pistol" and ids[1] == "rifle", "4 data-driven defs loaded in order: %s" % [ids])

@@ -14,6 +14,8 @@ const TOUCH_LOOK_LEGACY_DEFAULT := 0.009
 var touch_look_sensitivity: float = TOUCH_LOOK_DEFAULT
 ## 举枪瞄准：true = 切换，false = 长按。手机默认切换。
 var ads_toggle: bool = true
+## 无限备弹：备弹显示为 ∞，弹匣打空后仍需换弹，换弹不消耗备弹。默认开启。
+var infinite_reserve: bool = true
 ## 3D 渲染分辨率倍率（0 = 按平台默认：手机 75%，PC 100%）。只缩放 3D，不影响 HUD 点击。
 var render_scale: float = 0.0
 
@@ -36,6 +38,7 @@ func load_cfg() -> void:
 		touch_raw = TOUCH_LOOK_DEFAULT
 	touch_look_sensitivity = clampf(touch_raw, 0.001, 0.04)
 	ads_toggle = bool(c.get_value("ads", "toggle", true))
+	infinite_reserve = bool(c.get_value("ammo", "infinite_reserve", true))
 	if c.has_section_key("graphics", "render_scale"):
 		render_scale = clampf(float(c.get_value("graphics", "render_scale", 0.0)), 0.0, 1.0)
 
@@ -48,6 +51,7 @@ func save_cfg() -> void:
 	c.set_value("look", "mouse", mouse_sensitivity)
 	c.set_value("look", "touch", touch_look_sensitivity)
 	c.set_value("ads", "toggle", ads_toggle)
+	c.set_value("ammo", "infinite_reserve", infinite_reserve)
 	c.set_value("graphics", "render_scale", render_scale)
 	c.save(PATH)
 	changed.emit()
@@ -88,6 +92,13 @@ func set_ads_toggle(on: bool) -> void:
 	if ads_toggle == on:
 		return
 	ads_toggle = on
+	save_cfg()
+
+
+func set_infinite_reserve(on: bool) -> void:
+	if infinite_reserve == on:
+		return
+	infinite_reserve = on
 	save_cfg()
 
 
