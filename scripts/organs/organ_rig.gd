@@ -1316,6 +1316,33 @@ func debug_window_on_belly(cam: Camera3D) -> Dictionary:
 	return out
 
 
+func debug_skin_xray_state() -> Dictionary:
+	## 真机排障：当前皮肤是否真的是 skin_xray，以及椭球开孔参数是否非零。
+	var out := {"shader": "", "fade": "", "xray": 0.0, "hole_c": Vector3.ZERO, "hole_r": Vector3.ZERO, "prof_n": 0, "mats": 0, "analytic": 0.0, "ok": false}
+	out["xray"] = effective_xray()
+	out["hole_c"] = _hole_c
+	out["hole_r"] = _hole_r
+	out["mats"] = _skin_mats.size()
+	if _skin_mats.size() > 0:
+		var m: ShaderMaterial = _skin_mats[0]
+		var sh: Shader = m.shader
+		out["shader"] = sh.resource_path if sh else ""
+		out["xray"] = float(m.get_shader_parameter("xray"))
+		var hc = m.get_shader_parameter("hole_center")
+		var hr = m.get_shader_parameter("hole_radius")
+		if hc is Vector3:
+			out["hole_c"] = hc
+		if hr is Vector3:
+			out["hole_r"] = hr
+		out["prof_n"] = int(m.get_shader_parameter("prof_n"))
+		if m.next_pass is ShaderMaterial and (m.next_pass as ShaderMaterial).shader:
+			out["fade"] = (m.next_pass as ShaderMaterial).shader.resource_path
+	var belly := Vector3(0.0, -0.02, 0.03)
+	out["analytic"] = debug_xray_hole(belly)
+	out["ok"] = out["shader"].ends_with("skin_xray.gdshader") and float(out["xray"]) > 0.05 and float(out["analytic"]) > 0.07 and (out["hole_r"] as Vector3).length() > 0.05
+	return out
+
+
 func debug_xray_hole(l: Vector3, xr: float = -1.0) -> float:
 	var x := effective_xray() if xr < 0.0 else xr
 	return clampf(maxf(_debug_hole_profile(l), _debug_hole_analytic(l)) * x, 0.0, 1.0)

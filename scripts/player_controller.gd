@@ -316,12 +316,28 @@ func pointer_variants(p: Vector2) -> Array[Vector2]:
 	var vp := get_viewport()
 	if vp:
 		var backing := Vector2(vp.size)
-		var vis := vp.get_visible_rect().size
-		if backing.x > 1.0 and vis.x > 1.0 and (absf(backing.x - vis.x) > 0.5 or absf(backing.y - vis.y) > 0.5):
+		var vr := vp.get_visible_rect()
+		var vis := vr.size
+		if backing.x > 1.0 and vis.x > 1.0:
+			# 逻辑 ↔ 物理 backing；visible_rect 可能有偏移（刘海/扩展拉伸）
 			add.call(Vector2(p.x * vis.x / backing.x, p.y * vis.y / backing.y))
+			add.call(Vector2(p.x * backing.x / vis.x, p.y * backing.y / vis.y))
+			var local := p - vr.position
+			add.call(local)
+			add.call(Vector2(local.x * backing.x / vis.x, local.y * backing.y / vis.y))
+			add.call(Vector2(p.x * backing.x / vis.x, p.y * backing.y / vis.y) + vr.position)
 		var xf := vp.get_final_transform()
 		add.call(xf * p)
 		add.call(xf.affine_inverse() * p)
+		var win := get_window()
+		if win and win.content_scale_factor > 0.0 and absf(win.content_scale_factor - 1.0) > 0.01:
+			add.call(p * win.content_scale_factor)
+			add.call(p / win.content_scale_factor)
+		# scaling_3d_scale 不应影响 project_ray 坐标系，但仍穷举，避免驱动/导出差异
+		var s3 := vp.scaling_3d_scale
+		if s3 > 0.05 and absf(s3 - 1.0) > 0.01:
+			add.call(p * s3)
+			add.call(p / s3)
 	return out
 
 
@@ -429,7 +445,8 @@ func _tap_near_limit() -> float:
 	var vp := get_viewport()
 	var backing := Vector2(vp.size) if vp else Vector2(1280, 720)
 	var vis := vp.get_visible_rect().size if vp else backing
-	return maxf(96.0, minf(minf(backing.x, backing.y), minf(vis.x, vis.y)) * 0.18)
+	# 真机还有刘海 / 导航条 / DPI 缩放误差，给更宽的肚脐近距兜底。
+	return maxf(140.0, minf(minf(backing.x, backing.y), minf(vis.x, vis.y)) * 0.28)
 
 
 func _try_begin_interact_near(screen: Vector2, variants: Array[Vector2]) -> bool:
@@ -1147,6 +1164,7 @@ func _calc_aabb(n: Node) -> AABB:
 var touch_active: bool = false
 ## 已确认的指针坐标解释（-1 = 自动尝试多种）
 var _ptr_mode: int = -1
+var _last_tool_begin: Dictionary = {}
 var touch_move: Vector2 = Vector2.ZERO  # 虚拟摇杆（x 右，y 下 = 后退），已去死区
 var touch_sprint: bool = false
 var touch_jump_req: bool = false
@@ -1184,7 +1202,20 @@ func touch_set_fov(v: float) -> void:
 func touch_tool_begin(screen: Vector2) -> bool:
 	if _interact_held:
 		_end_interact()
-	return _try_begin_interact(screen)
+	var ok := _try_begin_interact(screen)
+	_last_tool_begin = {
+		"ok": ok,
+		"screen": screen,
+		"ptr_mode": _ptr_mode,
+		"variants": pointer_variants(screen).size(),
+		"mode": str(_organs.get("interact_mode")) if _organs else "",
+		"held": _interact_held,
+	}
+	return ok
+
+
+func debug_last_tool_begin() -> Dictionary:
+	return _last_tool_begin
 
 
 func touch_tool_drag(screen: Vector2) -> void:

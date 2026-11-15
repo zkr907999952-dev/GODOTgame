@@ -96,6 +96,38 @@ func vp() -> Vector2:
 	return get_viewport_rect().size
 
 
+## 把 ScreenTouch / 模拟鼠标坐标统一到本控件所在的逻辑像素（content_scale 空间）。
+## 真机事件有时是窗口物理像素，按钮命中和点身体会整体错位。
+func _logical_pos(p: Vector2) -> Vector2:
+	var vis := get_viewport_rect()
+	var vp := get_viewport()
+	if vp == null:
+		return p
+	var backing := Vector2(vp.size)
+	if backing.x <= 1.0 or vis.size.x <= 1.0:
+		return p
+	# 已在逻辑矩形内（含少量越界）则原样使用
+	if p.x >= -20.0 and p.y >= -20.0 and p.x <= vis.size.x + 20.0 and p.y <= vis.size.y + 20.0:
+		# 若同时更像 backing（远超逻辑尺寸），仍转换
+		if backing.x > vis.size.x * 1.08 and (p.x > vis.size.x * 1.05 or p.y > vis.size.y * 1.05):
+			return Vector2(p.x * vis.size.x / backing.x, p.y * vis.size.y / backing.y)
+		return p
+	if backing.x > 1.0:
+		return Vector2(p.x * vis.size.x / backing.x, p.y * vis.size.y / backing.y)
+	return p
+
+
+func _logical_rel(rel: Vector2) -> Vector2:
+	var vis := get_viewport_rect().size
+	var vp := get_viewport()
+	if vp == null:
+		return rel
+	var backing := Vector2(vp.size)
+	if backing.x > vis.x * 1.08 and vis.x > 1.0:
+		return Vector2(rel.x * vis.x / backing.x, rel.y * vis.y / backing.y)
+	return rel
+
+
 func stick_center() -> Vector2:
 	return Vector2(safe.x + EDGE_X + STICK_SIZE * 0.5, vp().y - safe.w - EDGE_B - STICK_SIZE * 0.5)
 
@@ -167,13 +199,13 @@ func _input(event: InputEvent) -> void:
 		_screen_touch_until = Time.get_ticks_msec() + 120
 		var st := event as InputEventScreenTouch
 		if st.pressed:
-			_on_down(st.index, st.position)
+			_on_down(st.index, _logical_pos(st.position))
 		else:
-			_on_up(st.index, st.position)
+			_on_up(st.index, _logical_pos(st.position))
 	elif event is InputEventScreenDrag:
 		_screen_touch_until = Time.get_ticks_msec() + 120
 		var sd := event as InputEventScreenDrag
-		_on_drag(sd.index, sd.position, sd.relative)
+		_on_drag(sd.index, _logical_pos(sd.position), _logical_rel(sd.relative))
 	elif event is InputEventMouseButton and event.device == InputEvent.DEVICE_ID_EMULATION:
 		# 真机若同时派发 ScreenTouch 与模拟鼠标：模拟鼠标常晚一帧到达，
 		# 会把已经开始的单击工具结束并误判成双击环绕。刚收到 ScreenTouch 则忽略。
@@ -183,14 +215,14 @@ func _input(event: InputEvent) -> void:
 		if mb.button_index != MOUSE_BUTTON_LEFT:
 			return
 		if mb.pressed:
-			_on_down(0, mb.position)
+			_on_down(0, _logical_pos(mb.position))
 		else:
-			_on_up(0, mb.position)
+			_on_up(0, _logical_pos(mb.position))
 	elif event is InputEventMouseMotion and event.device == InputEvent.DEVICE_ID_EMULATION:
 		if Time.get_ticks_msec() < _screen_touch_until or not fingers.has(0):
 			return
 		var mm := event as InputEventMouseMotion
-		_on_drag(0, mm.position, mm.relative)
+		_on_drag(0, _logical_pos(mm.position), _logical_rel(mm.relative))
 
 
 func _on_down(idx: int, p: Vector2) -> void:

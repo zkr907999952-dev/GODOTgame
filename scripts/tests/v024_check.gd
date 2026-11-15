@@ -1,5 +1,5 @@
 extends SceneTree
-## 0.2.3 之后：不弓腰，改持枪坐标；机瞄略降低。
+## 0.2.4 持枪坐标不弓腰。开镜三点一线（0.2.5 起取消孔下偏）。
 ##   godot --headless --path . -s res://scripts/tests/v024_check.gd
 
 var main: Node
@@ -60,7 +60,7 @@ func _run() -> void:
 	var src := FileAccess.get_file_as_string("res://scripts/weapons/weapon_system.gd")
 	_ok(src.find("func _apply_aim_torso") < 0, "waist/spine look-follow removed")
 	_ok(src.find("C_Spine_a") < 0 or src.find("_pitch_hold_xf") >= 0, "hold is pitch-adjusted in view space")
-	_ok(src.find("ADS_HOLE_DOWN") >= 0, "ADS hole has downward bias")
+	_ok(src.find("ADS_HOLE_DOWN") < 0, "ADS downward hole bias removed")
 
 	# ---- ADS：孔略低于中心，准星尖叠在孔上
 	await _check_ads(Vector2i(1280, 720), 0.75, "desktop 16:9 75%")
@@ -146,16 +146,13 @@ func _check_ads(sz: Vector2i, scale: float, tag: String) -> void:
 	await _phys(2)
 	var parts: Dictionary = ws.call("debug_ads_parts")
 	print("v024: ADS ", tag, " parts=", parts)
-	var dy := float(parts.get("dy", 0.0))
+	var dy := absf(float(parts.get("dy", 999.0)))
 	var dx := absf(float(parts.get("dx", 999.0)))
 	var stack := float(parts.get("stack", 999.0))
-	var h: float = float(sz.y)
-	# 孔应在准星下方一点点（屏幕 +Y 向下），大约对应 5mm 下调，且十字仍在孔内
-	var min_dy := h * 0.004  # ~3 px at 720
-	var max_dy := h * 0.045  # ~32 px at 720
-	_ok(dy > min_dy and dy < max_dy, "ADS hole slightly below + (%s, dy=%.1f px, expect %.1f..%.1f)" % [tag, dy, min_dy, max_dy])
+	# 0.2.5：取消孔下偏，孔和准星尖都应落在屏幕中心 + 上
+	_ok(dy < 8.0, "ADS hole vertically on + (%s, dy=%.1f px)" % [tag, dy])
 	_ok(dx < 8.0, "ADS hole horizontally on + (%s, dx=%.1f px)" % [tag, dx])
-	_ok(stack < 12.0, "ADS front post stacked on hole (%s, stack=%.1f px)" % [tag, stack])
+	_ok(stack < 8.0, "ADS front post stacked on hole (%s, stack=%.1f px)" % [tag, stack])
 	ws.call("set_ads", false)
 	ws.set("_ads_k", 0.0)
 	if settings:

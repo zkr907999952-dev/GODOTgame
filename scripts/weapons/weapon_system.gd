@@ -70,10 +70,16 @@ var _mag_ejected: bool = false
 ## 手枪空仓挂机：弹匣打空后锁在后方，换弹结束必须关闭。不依赖 empty 动画（该片段 0 轨道）。
 var _slide_locked: bool = false
 ## 机瞄光学点缓存（照门孔 / 准星尖，不是骨骼原点）
-## 开镜：机瞄孔相对屏幕中心略向下（米，相机空间 +Y 向上），十字仍在孔内偏上。
-const ADS_HOLE_DOWN := 0.005
 var _sight_cache_id: int = -1
+var _sight_cache_wid: String = ""
 var _sight_cache: PackedVector3Array = PackedVector3Array()
+## 各枪在枪空间实测的瞄准轴线：机瞄孔/缺口中心 → 准星尖。不要用枪口高度兜底。
+const SIGHT_AXIS := {
+	"rifle": [Vector3(0.07267, 0.223769, 0.0), Vector3(0.493687, 0.23725, 0.0)],
+	"smg": [Vector3(-0.087915, 0.21736, 0.0), Vector3(0.134899, 0.214084, 0.0)],
+	"pistol": [Vector3(0.01108, 0.13718, 0.0), Vector3(0.181321, 0.13718, 0.0)],
+	"shotgun": [Vector3(0.075169, 0.10401, 0.0), Vector3(0.634321, 0.103667, 0.0)],
+}
 const PISTOL_SLIDE_CLOSED := Vector3(0.003878, 0.119461, 0.0)
 const PISTOL_SLIDE_OPEN := Vector3(-0.036122, 0.119461, 0.0)
 var _mag_meshes: Dictionary = {}  # id -> Mesh
@@ -355,6 +361,7 @@ func _finish_holster() -> void:
 func _load_weapon(id: String) -> void:
 	_unload_weapon()
 	_sight_cache_id = -1
+	_sight_cache_wid = ""
 	_sight_cache = PackedVector3Array()
 	var w: WeaponDef = get_def(id)
 	gun = w.scene.instantiate()
@@ -933,92 +940,102 @@ func _front_post_from_verts(verts: PackedVector3Array, bone: Vector3) -> Vector3
 
 
 func _sight_locals(w: WeaponDef) -> PackedVector3Array:
-	# 光学轴线 = 机瞄孔中心 → 准星尖。骨骼原点在提把/准星座上，比真实瞄准孔高/低几厘米。
-	var rear := Vector3(w.muzzle.x * 0.15, w.muzzle.y, 0.0) if w else Vector3.ZERO
-	var front := w.muzzle if w else Vector3.RIGHT
+	# 光学轴线 = 机瞄孔/缺口中心 → 准星尖。必须是真实瞄具点，不能用枪口或随便一个网格点，
+	# 否则把 have 转到相机 -Z 会把整枪拧斜。
+	var rear := Vector3.ZERO
+	var front := Vector3.RIGHT
+	var wid := str(w.id) if w else ""
+	if w and SIGHT_AXIS.has(wid):
+		var pair: Array = SIGHT_AXIS[wid]
+		rear = pair[0]
+		front = pair[1]
+	elif w:
+		rear = Vector3(w.muzzle.x * 0.15, w.muzzle.y, 0.0)
+		front = w.muzzle
 	if gun == null:
 		return PackedVector3Array([rear, front])
 	var gid := gun.get_instance_id()
-	if gid == _sight_cache_id and _sight_cache.size() == 2:
+	if gid == _sight_cache_id and _sight_cache_wid == wid and _sight_cache.size() == 2:
 		return _sight_cache
-	var sk: Skeleton3D = gun.find_child("Skeleton3D", true, false)
-	if sk:
-		var br := _bone_in_gun(sk, "RearSight")
-		var bf := _bone_in_gun(sk, "FrontSight")
-		if br != Vector3.INF:
-			rear = br
-		if bf != Vector3.INF:
-			front = bf
-	var sights: MeshInstance3D = gun.find_child("Sights_Mesh", true, false)
-	var verts := _mesh_verts_in_gun(sights) if sights else PackedVector3Array()
-	if verts.is_empty():
-		# 没有独立瞄具网格时，扫所有网格
-		for mi in gun.find_children("*", "MeshInstance3D", true, false):
-			verts.append_array(_mesh_verts_in_gun(mi))
-	if verts.size() > 0:
-		var hole := _rear_aperture_from_verts(verts, rear)
-		var post := _front_post_from_verts(verts, front)
-		if hole != Vector3.INF:
-			rear = hole
-		elif sk and sk.find_bone("RearSight") >= 0:
-			# AR-15 提把窗口中心大约比 RearSight 骨骼高 1.6cm
-			rear.y += 0.016
-		if post != Vector3.INF:
-			front = post
-		elif sk and sk.find_bone("FrontSight") >= 0:
-			front.y += 0.034
+	# 步枪仍可用提把网格精确到孔心（与表中数值一致，作校验/微调）
+	if wid == "rifle":
+		var sights: MeshInstance3D = gun.find_child("Sights_Mesh", true, false)
+		var verts := _mesh_verts_in_gun(sights) if sights else PackedVector3Array()
+		if verts.size() > 0:
+			var hole := _rear_aperture_from_verts(verts, rear)
+			var post := _front_post_from_verts(verts, front)
+			if hole != Vector3.INF:
+				rear = hole
+			if post != Vector3.INF:
+				front = post
 	_sight_cache_id = gid
+	_sight_cache_wid = wid
 	_sight_cache = PackedVector3Array([rear, front])
 	return _sight_cache
 
 
+func _quat_map_dir_no_roll(from_dir: Vector3, to_dir: Vector3, up: Vector3) -> Quaternion:
+	# 把 from 转到 to，只用偏航+俯仰（共同 up 参考），不引入横滚。
+	var f := from_dir.normalized()
+	var t := to_dir.normalized()
+	var r1 := up.cross(f)
+	if r1.length_squared() < 1e-10:
+		r1 = Vector3.RIGHT.cross(f)
+		if r1.length_squared() < 1e-10:
+			r1 = Vector3.FORWARD.cross(f)
+	r1 = r1.normalized()
+	var u1 := f.cross(r1).normalized()
+	var r2 := up.cross(t)
+	if r2.length_squared() < 1e-10:
+		r2 = Vector3.RIGHT.cross(t)
+		if r2.length_squared() < 1e-10:
+			r2 = Vector3.FORWARD.cross(t)
+	r2 = r2.normalized()
+	var u2 := t.cross(r2).normalized()
+	var B1 := Basis(r1, u1, f)
+	var B2 := Basis(r2, u2, t)
+	return (B2 * B1.transposed()).get_rotation_quaternion()
+
+
 func _align_iron_sights(w: WeaponDef) -> void:
-	# 开镜：机瞄孔与准星尖三点一线，落在屏幕中心的 + 上。必须在写入 gun.transform 之后调用。
-	# 旋转要绕照门孔，不能绕 view 原点，否则校正准星会把孔又带离准星。
+	# 开镜：瞄准轴线与相机中心射线重合（三点一线），枪身摆正不横滚、不低头看枪顶。
+	# 必须在写入 gun.transform 之后调用。旋转绕照门孔，只做偏航+俯仰，再绕瞄准轴去滚转。
 	if w == null or gun == null or camera == null or _ads_k < 0.05:
 		return
 	if view.get_parent() != camera:
 		return
 	var pts := _sight_locals(w)
 	var k := _ads_k
-	var down := ADS_HOLE_DOWN * k  # 孔略低于准星，十字仍在孔内偏上
 	var cam_inv := camera.global_transform.affine_inverse()
-	var r: Vector3 = cam_inv * gun.to_global(pts[0])
-	view.position.x -= r.x * k
-	view.position.y -= (r.y + down) * k
-	cam_inv = camera.global_transform.affine_inverse()
 	var rear_c: Vector3 = cam_inv * gun.to_global(pts[0])
 	var front_c: Vector3 = cam_inv * gun.to_global(pts[1])
 	var have: Vector3 = front_c - rear_c
-	if have.length_squared() > 1e-8:
-		var q := Quaternion(have.normalized(), Vector3(0, 0, -1))
-		if k < 0.999:
-			q = Quaternion.IDENTITY.slerp(q, k)
-		var R := Basis(q)
-		var xf := view.transform
-		var new_t := Transform3D(R * xf.basis, R * (xf.origin - rear_c) + rear_c)
-		view.transform = new_t
-	cam_inv = camera.global_transform.affine_inverse()
-	r = cam_inv * gun.to_global(pts[0])
+	if have.length_squared() < 1e-10:
+		return
+	var want := Vector3(0.0, 0.0, -1.0)
+	var q_axis := _quat_map_dir_no_roll(have, want, Vector3.UP)
+	var up_c: Vector3 = cam_inv.basis * gun.global_transform.basis.y
+	var up2: Vector3 = Basis(q_axis) * up_c
+	var q_roll := Quaternion.IDENTITY
+	var xy := Vector2(up2.x, up2.y)
+	if xy.length_squared() > 1e-10:
+		q_roll = Quaternion(want, -atan2(xy.x, xy.y))
+	var q: Quaternion = q_roll * q_axis
+	if k < 0.999:
+		q = Quaternion.IDENTITY.slerp(q, k)
+	var R := Basis(q)
+	var xf := view.transform
+	view.transform = Transform3D(R * xf.basis, R * (xf.origin - rear_c) + rear_c)
+	# 把孔放到相机中心射线上，并保持合理眼距（不要把机匣贴到镜头上）
+	var r: Vector3 = camera.global_transform.affine_inverse() * gun.to_global(pts[0])
 	view.position.x -= r.x * k
-	view.position.y -= (r.y + down) * k
+	view.position.y -= r.y * k
+	var z_goal := r.z
 	if r.z > -0.18:
-		view.position.z -= (r.z + 0.26) * k
-	# 最后再绕孔对齐一次，避免拉近距离后准星尖和孔在投影上分开
-	cam_inv = camera.global_transform.affine_inverse()
-	rear_c = cam_inv * gun.to_global(pts[0])
-	front_c = cam_inv * gun.to_global(pts[1])
-	have = front_c - rear_c
-	if have.length_squared() > 1e-8:
-		var q2 := Quaternion(have.normalized(), Vector3(0, 0, -1))
-		if k < 0.999:
-			q2 = Quaternion.IDENTITY.slerp(q2, k)
-		var R2 := Basis(q2)
-		var xf2 := view.transform
-		view.transform = Transform3D(R2 * xf2.basis, R2 * (xf2.origin - rear_c) + rear_c)
-	r = camera.global_transform.affine_inverse() * gun.to_global(pts[0])
-	view.position.x -= r.x * k
-	view.position.y -= (r.y + down) * k
+		z_goal = -0.26
+	elif r.z < -0.45:
+		z_goal = -0.45
+	view.position.z -= (r.z - z_goal) * k
 
 
 func debug_muzzle_ahead() -> float:
@@ -1440,6 +1457,10 @@ func _pull_gun_into_reach(pose: Dictionary) -> void:
 				shift = (want - sh).normalized() * extra
 		if worst <= 0.001:
 			break
+		if _ads_k > 0.5 and camera != null:
+			# 开镜只沿相机前后轴拉近，避免把已对准的瞄准轴拉开。
+			var cz := camera.global_transform.basis.z
+			shift = cz * shift.dot(cz)
 		view.global_position -= shift
 	if _ads_k > 0.05:
 		_align_iron_sights(cur_def())
@@ -1527,7 +1548,7 @@ func _aim_bone_chain_to(prefix: String, world_dir: Vector3, w: float) -> void:
 
 
 func debug_ads_parts() -> Dictionary:
-	var out := {"rear": 999.0, "front": 999.0, "rear_pt": Vector3.ZERO, "front_pt": Vector3.ZERO, "dy": 0.0, "stack": 999.0, "down_m": ADS_HOLE_DOWN}
+	var out := {"rear": 999.0, "front": 999.0, "rear_pt": Vector3.ZERO, "front_pt": Vector3.ZERO, "dy": 0.0, "dx": 0.0, "stack": 999.0, "axis_deg": 999.0, "roll_deg": 999.0}
 	if gun == null or camera == null:
 		return out
 	var w: WeaponDef = cur_def()
@@ -1537,7 +1558,8 @@ func debug_ads_parts() -> Dictionary:
 	out["rear_pt"] = pts[0]
 	out["front_pt"] = pts[1]
 	var vp := camera.get_viewport()
-	var c: Vector2 = Vector2(vp.get_visible_rect().size) * 0.5 if vp else Vector2.ZERO
+	# 3D 反投影使用视口像素（vp.size），不要用 content_scale 的 visible_rect，否则手机上会偏。
+	var c: Vector2 = Vector2(vp.size) * 0.5 if vp else Vector2.ZERO
 	var wr: Vector3 = gun.to_global(pts[0])
 	var wf: Vector3 = gun.to_global(pts[1])
 	if camera.is_position_behind(wr) or camera.is_position_behind(wf):
@@ -1546,16 +1568,22 @@ func debug_ads_parts() -> Dictionary:
 	var pf: Vector2 = camera.unproject_position(wf)
 	out["rear"] = pr.distance_to(c)
 	out["front"] = pf.distance_to(c)
-	out["dy"] = pr.y - c.y  # 屏幕 +Y 向下：正值 = 孔在准星下方
+	out["dy"] = pr.y - c.y
 	out["dx"] = pr.x - c.x
 	out["stack"] = pr.distance_to(pf)
+	var cam_inv := camera.global_transform.affine_inverse()
+	var axis: Vector3 = (cam_inv * wf) - (cam_inv * wr)
+	if axis.length_squared() > 1e-10:
+		out["axis_deg"] = rad_to_deg(axis.normalized().angle_to(Vector3(0.0, 0.0, -1.0)))
+	var up_c: Vector3 = cam_inv.basis * gun.global_transform.basis.y
+	out["roll_deg"] = rad_to_deg(atan2(up_c.x, up_c.y))
 	return out
 
 
 func debug_ads_error() -> float:
-	## 相对「略低于中心」目标的偏差：孔应在准星下方一点点，准星尖叠在孔上。
+	## 三点一线：孔和准星尖都应投影在屏幕中心 + 上。
 	var d := debug_ads_parts()
-	return maxf(absf(float(d.get("dx", 999.0))), absf(float(d.get("stack", 999.0))))
+	return maxf(float(d.get("rear", 999.0)), float(d.get("front", 999.0)))
 
 
 func debug_stock_vs_head() -> Dictionary:
