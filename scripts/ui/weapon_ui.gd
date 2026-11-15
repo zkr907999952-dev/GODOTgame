@@ -7,6 +7,7 @@ const MODE_NAMES := {"semi": "半自动", "auto": "全自动", "pump": "泵动",
 var hud: Node
 var weapons: Node
 var panel: PanelContainer
+var embed_root: Control
 var cards: Dictionary = {}  # id -> {btn, ammo}
 var ammo_box: PanelContainer
 var _ammo_icon: TextureRect
@@ -28,19 +29,26 @@ func build_panel() -> PanelContainer:
 	v.add_theme_constant_override("separation", 8)
 	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	panel.add_child(v)
-	var title := Label.new()
-	title.text = "武器"
-	title.add_theme_font_size_override("font_size", 17)
-	title.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
-	v.add_child(title)
+	_fill_menu(v)
+	return panel
+
+
+func build_into(v: Control) -> void:
+	embed_root = v
+	_fill_menu(v)
+
+
+func _fill_menu(v: Control) -> void:
+	hud.call("_section", v, "武器")
 	var hint := Label.new()
-	hint.text = "角色控制模式使用：1–9 选枪（再按收枪）· G 收枪 / 取枪 · 按住 Q 武器轮盘 · 滚轮切枪 · 左键射击 · R 换弹 · 右键开镜"
+	hint.text = "角色控制模式使用：1–9 选枪（再按收枪）· G 收枪 / 取枪 · 按住 Q 武器轮盘 · 滚轮切枪 · 左键射击 · R 换弹 · 右键开镜。观察模式可点击人物射击。"
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.custom_minimum_size = Vector2(200, 0)
 	hint.add_theme_font_size_override("font_size", 11)
 	hint.add_theme_color_override("font_color", Color(0.7, 0.74, 0.8))
 	v.add_child(hint)
 	_status = Label.new()
+	_status.name = "WeaponStatus"
 	_status.add_theme_font_size_override("font_size", 12)
 	_status.add_theme_color_override("font_color", Color(0.95, 0.9, 0.86))
 	v.add_child(_status)
@@ -54,14 +62,25 @@ func build_panel() -> PanelContainer:
 	hud.call("_style_button", b, false)
 	b.pressed.connect(_on_holster)
 	v.add_child(b)
-	return panel
+
+
+func _list() -> VBoxContainer:
+	if embed_root:
+		var l: Node = embed_root.find_child("WeaponList", true, false)
+		if l:
+			return l
+	if panel:
+		return panel.find_child("WeaponList", true, false)
+	return null
 
 
 ## 武器列表（按类别分组）；武器数据变化时重建
 func rebuild() -> void:
-	if panel == null or weapons == null:
+	if weapons == null:
 		return
-	var list: VBoxContainer = panel.find_child("WeaponList", true, false)
+	var list := _list()
+	if list == null:
+		return
 	for c in list.get_children():
 		c.queue_free()
 	cards.clear()

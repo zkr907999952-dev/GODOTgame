@@ -59,8 +59,8 @@ func _run() -> void:
 		return
 
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.2.10\"") >= 0 or presets.find("version/name=\"0.2.11\"") >= 0, "export version is 0.2.10 or 0.2.11")
-	_ok(presets.find("version/code=12") >= 0 or presets.find("version/code=13") >= 0, "versionCode is 12 or 13")
+	_ok(presets.find("version/name=\"0.2.10\"") >= 0 or presets.find("version/name=\"0.2.11\"") >= 0 or presets.find("version/name=\"0.2.12\"") >= 0 or presets.find("version/name=\"0.2.12\"") >= 0, "export version is 0.2.10 or 0.2.11")
+	_ok(presets.find("version/code=12") >= 0 or presets.find("version/code=13") >= 0 or presets.find("version/code=14") >= 0, "versionCode is 12 or 13")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 	_ok(presets.find("package/name=\"蒂法玉腹沙盒\"") >= 0, "visible name unchanged")
 
@@ -313,7 +313,12 @@ func _check_hud_layout() -> void:
 			var x2 := x - 64.0 - 12.0
 			var old_weapon_x := x2 - 64.0
 			var old_fire_y := y - (64.0 + 16.0) + 6.0
-			_ok(wr.position.x < old_weapon_x - 8.0, "weapon button x is left of 0.2.9 (now=%.1f old=%.1f)" % [wr.position.x, old_weapon_x])
+			# 0.2.12：武器与换弹对调，开火键仍保持 0.2.11 下移位置。
+			if btns.has("reload"):
+				var rr: Rect2 = btns["reload"][0]
+				_ok(wr.position.y < rr.position.y - 20.0, "武器 is above 换弹 after swap (w.y=%.1f r.y=%.1f)" % [wr.position.y, rr.position.y])
+				_ok(rr.position.x < wr.position.x - 40.0, "换弹 is to the left of 武器 after swap")
+				_ok(not wr.intersects(rr), "weapon and reload do not overlap")
 			_ok(fr.position.y > old_fire_y + 8.0, "fire button y is lower than 0.2.9 (now=%.1f old=%.1f)" % [fr.position.y, old_fire_y])
 			# 不互相重叠
 			_ok(not wr.intersects(fr), "weapon and fire do not overlap")

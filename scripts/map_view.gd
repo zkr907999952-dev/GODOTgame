@@ -31,6 +31,8 @@ var _pinch_dist: float = 0.0
 var _pinch_mid: Vector2 = Vector2.ZERO
 ## 刚收到 ScreenTouch 时忽略触摸模拟鼠标，避免同一指被当成「按下+单击选点」。
 var _screen_touch_until: int = 0
+## 最近一次有效指针（给测试 / 调试看走的是触摸还是 GUI）。
+var last_ingest: String = ""
 
 
 func _ready() -> void:
@@ -130,6 +132,61 @@ func _vis_half() -> Vector2:
 	return Vector2(half_h * vp.x / maxf(1.0, vp.y), half_h)
 
 
+## 把真机可能传来的物理像素换到逻辑像素（和 touch_controls 同一套判断）。
+func to_logical(p: Vector2) -> Vector2:
+	var vis := get_viewport().get_visible_rect()
+	var vp := get_viewport()
+	if vp == null:
+		return p
+	var backing := Vector2(vp.size)
+	if backing.x <= vis.size.x * 1.08 or vis.size.x <= 1.0:
+		return p
+	if p.x > vis.size.x + 24.0 or p.y > vis.size.y + 24.0:
+		return Vector2(p.x * vis.size.x / backing.x, p.y * vis.size.y / backing.y)
+	return p
+
+
+func to_logical_rel(rel: Vector2, pos: Vector2) -> Vector2:
+	var vis := get_viewport().get_visible_rect()
+	var vp := get_viewport()
+	if vp == null:
+		return rel
+	var backing := Vector2(vp.size)
+	if backing.x <= vis.size.x * 1.08 or vis.size.x <= 1.0:
+		return rel
+	if pos.x > vis.size.x + 24.0 or pos.y > vis.size.y + 24.0:
+		return Vector2(rel.x * vis.size.x / backing.x, rel.y * vis.size.y / backing.y)
+	return rel
+
+
+## GUI 捕捉层（HUD MapInputCatcher）把控件局部坐标转成视口坐标后再交给这里。
+## 这是手机上可靠的路径：全屏 STOP 控件走 _gui_input，不再依赖 _unhandled_input。
+func handle_gui_event(event: InputEvent, canvas_xform: Transform2D = Transform2D.IDENTITY) -> bool:
+	if not is_open:
+		return false
+	var ev := event
+	if event is InputEventMouse or event is InputEventScreenTouch or event is InputEventScreenDrag:
+		ev = event.duplicate()
+		if ev is InputEventMouse:
+			var m := ev as InputEventMouse
+			var gp: Vector2 = canvas_xform * m.position if canvas_xform != Transform2D.IDENTITY else m.position
+			m.position = to_logical(gp)
+			if ev is InputEventMouseMotion:
+				(ev as InputEventMouseMotion).relative = to_logical_rel((event as InputEventMouseMotion).relative, (event as InputEventMouse).position)
+		elif ev is InputEventScreenTouch:
+			var st := ev as InputEventScreenTouch
+			var gp2: Vector2 = canvas_xform * st.position if canvas_xform != Transform2D.IDENTITY else st.position
+			st.position = to_logical(gp2)
+		elif ev is InputEventScreenDrag:
+			var sd := ev as InputEventScreenDrag
+			var raw := sd.position
+			var gp3: Vector2 = canvas_xform * raw if canvas_xform != Transform2D.IDENTITY else raw
+			sd.position = to_logical(gp3)
+			sd.relative = to_logical_rel(sd.relative, raw)
+	last_ingest = "gui"
+	return handle_input(ev)
+
+
 ## 返回 true 表示事件已处理（打开时吞掉所有 3D 视图鼠标事件）
 func handle_input(event: InputEvent) -> bool:
 	if not is_open:
@@ -144,43 +201,43 @@ func handle_input(event: InputEvent) -> bool:
 			# 真机：ScreenTouch 之后常紧跟一条模拟鼠标，不能再开一轮拖/选点。
 			if mb.device == InputEvent.DEVICE_ID_EMULATION and Time.get_ticks_msec() < _screen_touch_until:
 				return true
+			var pos := to_logical(mb.position)
 			if mb.pressed:
 				_drag_on = true
 				_drag_moved = false
-				_drag_from = mb.position
+				_drag_from = pos
 			elif _drag_on:
 				_drag_on = false
 				if not _drag_moved:
-					pick_at(mb.position)
+					pick_at(pos)
 			return true
 		return true
 	if event is InputEventMouseMotion and _drag_on:
 		if event.device == InputEvent.DEVICE_ID_EMULATION and Time.get_ticks_msec() < _screen_touch_until:
 			return true
 		var mm := event as InputEventMouseMotion
-		if not _drag_moved and mm.position.distance_to(_drag_from) > DRAG_PX:
+		var pos := to_logical(mm.position)
+		var rel := to_logical_rel(mm.relative, mm.position)
+		if not _drag_moved and pos.distance_to(_drag_from) > DRAG_PX:
 			_drag_moved = true
 		if _drag_moved:
-			var vp := get_viewport().get_visible_rect().size
-			var hv := _vis_half()
-			pan.x -= mm.relative.x / maxf(1.0, vp.x) * hv.x * 2.0
-			pan.y -= mm.relative.y / maxf(1.0, vp.y) * hv.y * 2.0
-			pan.x = clampf(pan.x, bounds.position.x, bounds.end.x)
-			pan.y = clampf(pan.y, bounds.position.y, bounds.end.y)
-			_update_cam()
+			_pan_by_pixels(rel)
 		return true
 	if event is InputEventScreenTouch:
 		var st := event as InputEventScreenTouch
 		_screen_touch_until = Time.get_ticks_msec() + 160
+		var pos := to_logical(st.position)
 		if st.pressed:
-			_touch_down(st.index, st.position)
+			_touch_down(st.index, pos)
 		else:
-			_touch_up(st.index, st.position)
+			_touch_up(st.index, pos)
 		return true
 	if event is InputEventScreenDrag:
 		var sd := event as InputEventScreenDrag
 		_screen_touch_until = Time.get_ticks_msec() + 160
-		_touch_move(sd.index, sd.position, sd.relative)
+		var pos := to_logical(sd.position)
+		var rel := to_logical_rel(sd.relative, sd.position)
+		_touch_move(sd.index, pos, rel)
 		return true
 	return event is InputEventMouse
 

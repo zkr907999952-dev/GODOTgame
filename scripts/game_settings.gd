@@ -18,6 +18,9 @@ var ads_toggle: bool = true
 var infinite_reserve: bool = true
 ## 3D 渲染分辨率倍率（0 = 按平台默认：手机 75%，PC 100%）。只缩放 3D，不影响 HUD 点击。
 var render_scale: float = 0.0
+## 布娃娃受击力度（0.35..2.0）。1.0 = 0.2.12 默认，比 0.2.11 明显更强，但不会把尸体打飞出地图。
+const HIT_FORCE_DEFAULT := 1.0
+var hit_force: float = HIT_FORCE_DEFAULT
 
 
 func _ready() -> void:
@@ -41,6 +44,7 @@ func load_cfg() -> void:
 	infinite_reserve = bool(c.get_value("ammo", "infinite_reserve", true))
 	if c.has_section_key("graphics", "render_scale"):
 		render_scale = clampf(float(c.get_value("graphics", "render_scale", 0.0)), 0.0, 1.0)
+	hit_force = clampf(float(c.get_value("combat", "hit_force", HIT_FORCE_DEFAULT)), 0.35, 2.0)
 
 
 func save_cfg() -> void:
@@ -53,6 +57,7 @@ func save_cfg() -> void:
 	c.set_value("ads", "toggle", ads_toggle)
 	c.set_value("ammo", "infinite_reserve", infinite_reserve)
 	c.set_value("graphics", "render_scale", render_scale)
+	c.set_value("combat", "hit_force", hit_force)
 	c.save(PATH)
 	changed.emit()
 
@@ -99,6 +104,14 @@ func set_infinite_reserve(on: bool) -> void:
 	if infinite_reserve == on:
 		return
 	infinite_reserve = on
+	save_cfg()
+
+
+func set_hit_force(v: float) -> void:
+	v = clampf(v, 0.35, 2.0)
+	if is_equal_approx(hit_force, v):
+		return
+	hit_force = v
 	save_cfg()
 
 

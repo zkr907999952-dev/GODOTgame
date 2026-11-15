@@ -83,6 +83,8 @@ var _chk_touch: CheckButton
 var _chk_bullet_cam: CheckButton
 var _cam_chance_slider: HSlider
 var _cam_chance_value: Label
+var _hit_force_slider: HSlider
+var _hit_force_value: Label
 var _btn_sheet_close: Button
 var _safe: Vector4 = Vector4.ZERO  # 逻辑像素：左 上 右 下
 var _debug_safe: Variant = null
@@ -109,6 +111,7 @@ func setup(player: Node) -> void:
 	_player = player
 	_bind_weapons()
 	_sync_bullet_cam_ui()
+	_sync_hit_force_ui()
 	_sync_render_scale_ui()
 	if _touch:
 		_touch.call("setup", player, self, get_parent())
@@ -167,7 +170,9 @@ func _build_ui() -> void:
 
 	_btn_weapon = _make_chrome_button("武器")
 	_btn_weapon.pressed.connect(func(): _toggle_panel(PanelId.WEAPON))
-	right_bar.add_child(_btn_weapon)
+	# 武器菜单已并入「互动」，顶栏不再单独显示武器按钮。
+	_btn_weapon.visible = false
+	_btn_weapon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	_btn_camera = _make_chrome_button("摄像机")
 	_btn_camera.pressed.connect(func(): _toggle_panel(PanelId.CAMERA))
@@ -213,7 +218,12 @@ func _build_ui() -> void:
 	root.add_child(_panel_camera)
 	_wui = WeaponUIScript.new(self)
 	_panel_weapon = _wui.call("build_panel")
+	_panel_weapon.visible = false
+	_panel_weapon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(_panel_weapon)
+	var interact_body: Control = _panel_interact.find_child("InteractBody", true, false) if _panel_interact else null
+	if interact_body:
+		_wui.call("build_into", interact_body)
 	_wui.call("build_ammo_hud", root)
 	_build_health_ui(root)
 	_wrap_scroll(_panel_settings)
@@ -263,6 +273,7 @@ func _build_health_ui(root: Control) -> void:
 	_hp_num.name = "HpNumber"
 	_hp_num.text = "100"
 	_hp_num.position = Vector2(28, -4)
+	_hp_num.custom_minimum_size = Vector2(90, 32)
 	_hp_num.add_theme_font_size_override("font_size", 26)
 	_hp_num.add_theme_color_override("font_color", Color(0.55, 0.95, 0.45))
 	_hp_num.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -477,16 +488,25 @@ func _refresh_corpse_drag_btn() -> void:
 		return
 	_drag_btn.text = "放下" if dragging else "拖拽"
 	_style_button(_drag_btn, dragging)
+	# 触屏：拖拽键画在原开火键位置（touch_controls），这里不再叠一个准星上方的按钮。
+	if touch_ui:
+		_drag_btn.visible = false
+		_drag_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		return
+	var slot := Rect2()
+	if _touch and _touch.has_method("fire_slot_rect"):
+		slot = _touch.call("fire_slot_rect")
 	var vp := get_viewport().get_visible_rect().size
-	var pos := Vector2(vp.x * 0.5 - 46.0, vp.y * 0.5 - 86.0)
-	var cam := get_viewport().get_camera_3d()
-	if cam and grab_pt != Vector3.ZERO and not cam.is_position_behind(grab_pt):
-		var sp := cam.unproject_position(grab_pt)
-		pos = sp + Vector2(-46.0, -64.0)
-	pos.x = clampf(pos.x, 8.0, maxf(8.0, vp.x - 100.0))
-	pos.y = clampf(pos.y, 8.0, maxf(8.0, vp.y - 52.0))
+	var pos: Vector2
+	var sz := Vector2(80, 80)
+	if slot.size.x > 1.0:
+		pos = slot.position
+		sz = slot.size
+	else:
+		pos = Vector2(vp.x - _safe.z - 20.0 - 80.0 - 76.0, vp.y - _safe.w - 32.0 - 80.0 - 20.0)
 	_drag_btn.position = pos
-	_drag_btn.size = Vector2(92, 40)
+	_drag_btn.size = sz
+	_drag_btn.custom_minimum_size = sz
 
 
 func _layout_health_ui(safe: Vector4, touch: bool) -> void:
@@ -644,6 +664,12 @@ func _build_overhead_ui() -> Control:
 	ui.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.visible = false
+	var catcher := Control.new()
+	catcher.name = "MapInputCatcher"
+	catcher.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	catcher.mouse_filter = Control.MOUSE_FILTER_STOP
+	catcher.gui_input.connect(_on_map_catcher_gui)
+	ui.add_child(catcher)
 	var top := PanelContainer.new()
 	_style_panel(top)
 	top.set_anchors_preset(Control.PRESET_CENTER_TOP)
@@ -726,9 +752,11 @@ func set_overhead(on: bool) -> void:
 	if _overhead_ui == null:
 		return
 	_overhead_ui.visible = on
-	for c in [_btn_settings, _btn_map, _btn_camera, _btn_interact, _btn_weapon, _status]:
+	for c in [_btn_settings, _btn_map, _btn_camera, _btn_interact, _status]:
 		if c:
 			c.visible = not on
+	if _btn_weapon:
+		_btn_weapon.visible = false
 	if on:
 		_close_all_panels()
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -952,6 +980,26 @@ func _build_settings_panel() -> PanelContainer:
 	_cam_chance_slider.value_changed.connect(_on_bullet_cam_chance)
 	v.add_child(_cam_chance_slider)
 
+	var hf_row := HBoxContainer.new()
+	var hf_l := Label.new()
+	hf_l.text = "受击力度"
+	hf_l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hf_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	hf_row.add_child(hf_l)
+	_hit_force_value = Label.new()
+	_hit_force_value.text = "1.00"
+	_hit_force_value.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	hf_row.add_child(_hit_force_value)
+	v.add_child(hf_row)
+	_hit_force_slider = HSlider.new()
+	_hit_force_slider.min_value = 0.35
+	_hit_force_slider.max_value = 2.0
+	_hit_force_slider.step = 0.05
+	_hit_force_slider.value = 1.0
+	_hit_force_slider.custom_minimum_size = Vector2(220, 18)
+	_hit_force_slider.value_changed.connect(_on_hit_force_changed)
+	v.add_child(_hit_force_slider)
+
 	var help_chk := CheckButton.new()
 	help_chk.text = "显示本面板说明"
 	help_chk.button_pressed = true
@@ -959,7 +1007,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。受击力度调节子弹对布娃娃的撞击强弱。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)
@@ -978,6 +1026,7 @@ func _build_interact_panel() -> PanelContainer:
 	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	p.add_child(sc)
 	var v := VBoxContainer.new()
+	v.name = "InteractBody"
 	v.add_theme_constant_override("separation", 8)
 	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	sc.add_child(v)
@@ -2010,7 +2059,7 @@ func _apply_layout() -> void:
 	_btn_map.position = Vector2(sl + bw + 8.0, st)
 	var right_bar := _btn_camera.get_parent() as Control
 	right_bar.offset_right = -sr
-	right_bar.offset_left = -sr - (bw * 3.0 + 16.0)
+	right_bar.offset_left = -sr - (bw * 2.0 + 8.0)
 	right_bar.offset_top = st
 	right_bar.offset_bottom = st + bh
 	_status.position = Vector2(sl, st + bh + 8.0)
@@ -2095,7 +2144,8 @@ func _bind_weapons() -> void:
 
 
 func toggle_weapon_panel() -> void:
-	_toggle_panel(PanelId.WEAPON)
+	# 武器菜单已并入互动，不再单独打开顶栏武器面板。
+	_toggle_panel(PanelId.INTERACT)
 
 
 func should_hide_weapon_ui() -> bool:
@@ -2243,3 +2293,43 @@ func _on_bullet_cam_chance(v: float) -> void:
 	var s := _settings()
 	if s:
 		s.call("set_bullet_cam_chance", v / 100.0)
+
+
+func _on_map_catcher_gui(event: InputEvent) -> void:
+	# 手机可靠路径：全屏捕捉层走 GUI，而不是 _unhandled_input（真机触控经常到不了那里）。
+	var g := _game()
+	if g == null:
+		return
+	var mv: Node = g.get("map_view")
+	if mv == null or not bool(mv.get("is_open")):
+		return
+	if not (event is InputEventMouse or event is InputEventScreenTouch or event is InputEventScreenDrag):
+		return
+	var catcher: Control = _overhead_ui.find_child("MapInputCatcher", true, false) if _overhead_ui else null
+	var xf := catcher.get_global_transform_with_canvas() if catcher else Transform2D.IDENTITY
+	if mv.has_method("handle_gui_event"):
+		if bool(mv.call("handle_gui_event", event, xf)):
+			if catcher:
+				catcher.accept_event()
+	elif mv.has_method("handle_input"):
+		mv.call("handle_input", event)
+
+
+func _sync_hit_force_ui() -> void:
+	var s := _settings()
+	if s == null:
+		return
+	var v := clampf(float(s.get("hit_force")), 0.35, 2.0)
+	if _hit_force_slider:
+		_hit_force_slider.set_value_no_signal(v)
+	if _hit_force_value:
+		_hit_force_value.text = "%.2f" % v
+
+
+func _on_hit_force_changed(v: float) -> void:
+	var s := _settings()
+	if s:
+		s.call("set_hit_force", v)
+	if _hit_force_value:
+		_hit_force_value.text = "%.2f" % v
+

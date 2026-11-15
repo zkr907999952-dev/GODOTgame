@@ -126,10 +126,18 @@ void vertex() {
 	vec3 l = to_ab(wp);
 	v_l0 = l;
 	vec3 off = strike_offset(l) * strike_k + drag_offset(l) * organ_soft + dent_offset(l) * organ_soft + ball_tear(l);
-	if (is_gut) off += rod_offset(l + off);
-	if (is_uterus) {
+	// 腹部鼓包/搅动时，肠子和其它脏器跟着体表一起走（对照网页 FistPlay.deformColon + 肚皮 fist_offset）。
+	// 以前只在 contain 里当边界，脏器不会随腹部鼓起或左右搅动。
+	vec3 belly = organ_fist_offset(l);
+	if (is_gut) {
+		off += belly * 0.95;
+		off += rod_offset(l + off);
+	} else if (is_uterus) {
+		off += belly * 0.72;
 		off += uter_offset(l);
 		off += rod_offset(l + off) * 0.55;
+	} else {
+		off += belly * 0.62;
 	}
 	vec3 off_w = ab_dir_to_world(off);
 	wp += off_w;

@@ -219,6 +219,9 @@ func _ready() -> void:
 	_health = CharacterHealthScript.new()
 	_health.name = "Health"
 	add_child(_health)
+	# 控制角色默认 1000 血；分身仍是 100。
+	_health.max_hp = 1000.0
+	_health.reset(1000.0)
 	_health.died.connect(_on_character_died)
 	_health.revived.connect(_on_character_revived)
 	_health.hp_changed.connect(func(_h, _m): pass)
@@ -236,6 +239,9 @@ func _ready() -> void:
 	_corpse_drag.name = "CorpseDrag"
 	add_child(_corpse_drag)
 	_corpse_drag.call("setup", self, skel)
+	# 角色胶囊互相碰撞，并与布娃娃骨骼碰撞（Jolt 双向 OR：只需本侧 mask 含角色层）。
+	# 布娃娃骨骼自己的 mask 仍只含世界，避免骨骼互撞抖动。
+	collision_mask = 1 | 2
 	_col_layer_live = collision_layer
 	_col_mask_live = collision_mask
 	if _col.shape is CylinderShape3D:
@@ -266,7 +272,12 @@ func get_weapons() -> Node:
 
 ## 第一人称且持枪（左键射击、右键开镜、滚轮切枪；身体随视线转）
 func weapon_armed() -> bool:
-	return first_person and _weapons != null and bool(_weapons.call("is_armed"))
+	return first_person and weapon_drawn()
+
+
+## 任意视角下枪是否在手上（收枪 / 观察点击射击 / 捂腹判断用，不要求第一人称）
+func weapon_drawn() -> bool:
+	return _weapons != null and bool(_weapons.call("is_armed"))
 
 
 func get_organs() -> Node:
@@ -435,6 +446,8 @@ func _after_pose_feedback(delta: float) -> void:
 				skip.append(n)
 	if _hit_react:
 		_hit_react.call("apply_to_skeleton", delta, skip)
+		if _hit_react.has_method("apply_cover") and not weapon_drawn():
+			_hit_react.call("apply_cover", delta)
 	if _corpse_drag:
 		if _corpse_drag.call("is_dragging"):
 			_corpse_drag.call("apply_left_hand")
@@ -454,6 +467,137 @@ func _update_corpse_drag_aim() -> void:
 	var ex: Array[RID] = []
 	ex.append(get_rid())
 	_corpse_drag.call("update_aim", cam.global_position, -cam.global_transform.basis.z, ex)
+
+
+func _stomp_ragdolls(delta: float) -> void:
+	# 踩踏：角色胶囊（已与布娃娃碰撞）再给脚下的尸体一个向下/挤开的冲量，走上去会被物理挤开。
+	if is_dead() or input_locked:
+		return
+	var w3 := get_world_3d()
+	if w3 == null:
+		return
+	var feet := global_position + Vector3(0, 0.12, 0)
+	var sph := SphereShape3D.new()
+	sph.radius = 0.28
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = sph
+	q.transform = Transform3D(Basis.IDENTITY, feet)
+	q.collision_mask = 2
+	q.collide_with_areas = false
+	q.exclude = [get_rid()]
+	var hits := w3.direct_space_state.intersect_shape(q, 8)
+	if hits.is_empty():
+		return
+	var hv := Vector3(velocity.x, 0.0, velocity.z)
+	var seen := {}
+	for h in hits:
+		var col = h.get("collider")
+		if not (col is PhysicalBone3D):
+			continue
+		var host: Node = col
+		while host:
+			if host.has_method("is_dead") and host.has_method("get_ragdoll") and bool(host.call("is_dead")):
+				break
+			host = host.get_parent()
+		if host == null or host == self:
+			continue
+		# 正在拖这具尸体时不要再踩飞。
+		if _corpse_drag and _corpse_drag.call("is_dragging") and _corpse_drag.get("grabbed_body") == host:
+			continue
+		if seen.has(host):
+			continue
+		seen[host] = true
+		var rag: Node = host.call("get_ragdoll")
+		if rag == null or not rag.has_method("apply_stomp"):
+			continue
+		var at: Vector3 = (col as Node3D).global_position
+		var sideways := hv * 0.55
+		if sideways.length() < 0.4 and hv.length() > 0.2:
+			sideways = hv.normalized() * 0.4
+		var down := Vector3(0, -2.2 - minf(2.0, absf(velocity.y)), 0)
+		rag.call("apply_stomp", at, sideways + down)
+	# 踩在尸体上时不要把玩家顶起来飘在空中。
+	if not seen.is_empty() and velocity.y > 0.15 and is_on_floor():
+		velocity.y = 0.0
+
+
+## 观察模式：点击角色向该点射击（点击位置即弹道方向），可触发特写。拖视不像开火。
+func observe_tap_fire(screen: Vector2) -> bool:
+	if first_person or not weapon_drawn() or is_dead() or input_locked:
+		return false
+	if _weapons == null or not _weapons.has_method("fire_at_point"):
+		return false
+	var cam := get_camera()
+	if cam == null:
+		return false
+	var w3 := get_world_3d()
+	if w3 == null:
+		return false
+	var from := cam.project_ray_origin(screen)
+	var dir := cam.project_ray_normal(screen)
+	if dir.length_squared() < 1e-10:
+		return false
+	dir = dir.normalized()
+	var dest := from + dir * 80.0
+	var exclude: Array[RID] = []
+	_collect_collision_rids(self, exclude)
+	var space := w3.direct_space_state
+	var hit: Dictionary = {}
+	for _i in 5:
+		var q := PhysicsRayQueryParameters3D.create(from, dest, 1 | 2)
+		q.collide_with_areas = true
+		q.exclude = exclude
+		hit = space.intersect_ray(q)
+		if hit.is_empty():
+			break
+		var body := _wound_body_of(hit.get("collider") as Node)
+		if body == self:
+			exclude.append(hit["rid"])
+			from = hit["position"] + dir * 0.02
+			continue
+		if body != null:
+			return bool(_weapons.call("fire_at_point", hit["position"]))
+		# 先碰到地面 / 场景则不以该点当人物射击。
+		break
+	# 细射线错过胶囊时，用短半径扫一下屏幕点附近。
+	var shape := SphereShape3D.new()
+	shape.radius = 0.16
+	var sq := PhysicsShapeQueryParameters3D.new()
+	sq.shape = shape
+	sq.transform = Transform3D(Basis(), cam.project_ray_origin(screen) + dir * 1.2)
+	sq.motion = dir * 78.0
+	sq.collision_mask = 1 | 2
+	sq.collide_with_areas = true
+	sq.exclude = exclude
+	var rest := space.cast_motion(sq)
+	var travel := 1.2 + (rest[0] if rest.size() >= 1 else 0.0) * 78.0
+	sq.transform = Transform3D(Basis(), cam.project_ray_origin(screen) + dir * travel)
+	sq.motion = Vector3.ZERO
+	for rec in space.intersect_shape(sq, 8):
+		var body2 := _wound_body_of(rec.get("collider") as Node)
+		if body2 != null and body2 != self:
+			var pt: Vector3 = rec["collider"].global_position if rec.get("collider") else (cam.project_ray_origin(screen) + dir * travel)
+			if rec.get("collider") is Node3D:
+				pt = (rec["collider"] as Node3D).global_position
+			# 用屏幕射线打在身体上的最近点，保证弹道对准点击位置。
+			var aim := cam.project_ray_origin(screen) + dir * maxf(travel, 0.5)
+			return bool(_weapons.call("fire_at_point", aim))
+	return false
+
+
+func _collect_collision_rids(n: Node, out: Array[RID]) -> void:
+	if n is CollisionObject3D:
+		out.append((n as CollisionObject3D).get_rid())
+	for ch in n.get_children():
+		_collect_collision_rids(ch, out)
+
+
+func _wound_body_of(n: Node) -> Node:
+	while n:
+		if n.is_in_group("wound_body") or n.has_method("get_organs") or n.has_method("get_hp"):
+			return n
+		n = n.get_parent()
+	return null
 
 
 func get_camera() -> Camera3D:
@@ -1454,6 +1598,8 @@ var _last_interact_via_navel: bool = false
 var _last_tool_begin: Dictionary = {}
 var touch_move: Vector2 = Vector2.ZERO  # 虚拟摇杆（x 右，y 下 = 后退），已去死区
 var touch_sprint: bool = false
+var _observe_fire_from: Vector2 = Vector2(-999, -999)
+var _observe_fire_moved: bool = false
 var touch_jump_req: bool = false
 var _touch_interact: bool = false
 ## 手机划屏使用独立的 touch_look_sensitivity，不再跟随鼠标灵敏度。
@@ -1572,6 +1718,21 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 	if event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
 		var lb := event as InputEventMouseButton
+		# 观察模式持枪：单击人物开火，拖动不在这里处理（右键才环绕）。
+		if not first_person and weapon_drawn():
+			if lb.pressed:
+				_observe_fire_from = lb.position
+				_observe_fire_moved = false
+			else:
+				var moved := _observe_fire_moved or lb.position.distance_to(_observe_fire_from) > 14.0
+				if not moved and observe_tap_fire(lb.position):
+					get_viewport().set_input_as_handled()
+					_observe_fire_from = Vector2(-999, -999)
+					return
+			# 持枪观察时左键不再开始腹部互动，避免和射击抢手势。
+			if not _interact_held:
+				get_viewport().set_input_as_handled()
+				return
 		if lb.pressed:
 			if _try_begin_interact(_interact_point(lb.position)):
 				get_viewport().set_input_as_handled()
@@ -1591,6 +1752,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
+		if not first_person and weapon_drawn() and (mm.button_mask & MOUSE_BUTTON_MASK_LEFT) and _observe_fire_from.x > -900.0:
+			if mm.position.distance_to(_observe_fire_from) > 14.0:
+				_observe_fire_moved = true
 		if first_person:
 			if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 				_yaw -= mm.relative.x * mouse_sensitivity
@@ -2008,6 +2172,23 @@ func _physics_process(delta: float) -> void:
 		aiming = bool(_weapons.get("ads")) or float(_weapons.get("_ads_k")) > 0.35
 	if aiming:
 		sprinting = false
+	# 奔跑只允许在前方锥角内；横向跑改成走路或把侧向分量压掉。
+	if sprinting and wish_len > 1e-4:
+		var cam_fwd := basis_yaw * Vector3(0, 0, -1)
+		var ang := wish.angle_to(cam_fwd)
+		const SPRINT_CONE := 0.698  # 40 deg
+		if ang > 1.222:  # 70 deg：纯侧向/后退，不允许奔跑
+			sprinting = false
+		elif ang > SPRINT_CONE:
+			# 压掉侧向，只保留向前的分量再奔跑（必要时略转向输入）。
+			var fwd_amt := wish.dot(cam_fwd)
+			if fwd_amt > 0.12:
+				var flat := (cam_fwd * fwd_amt).normalized()
+				wish = flat
+				wish_len = minf(1.0, wish.length())
+				direction = wish
+			else:
+				sprinting = false
 	var speed := move_speed
 	match _stance:
 		"crouch":
@@ -2072,6 +2253,7 @@ func _physics_process(delta: float) -> void:
 	if on_floor and velocity.y <= 0.0:
 		_try_step_up(Vector3(velocity.x, 0.0, velocity.z) * delta)
 	move_and_slide()
+	_stomp_ragdolls(delta)
 	_fti_tick()
 	if is_on_floor():
 		_coyote = COYOTE_TIME

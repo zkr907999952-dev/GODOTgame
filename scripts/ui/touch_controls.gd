@@ -164,15 +164,14 @@ func buttons() -> Dictionary:
 		out["jump"] = [Rect2(Vector2(x, y - BTN - GAP), Vector2(BTN, BTN)), "跳跃"]
 		out["interact"] = [Rect2(Vector2(x, y - 2.0 * (BTN + GAP)), Vector2(BTN, BTN)), "互动"]
 		var x2 := x - BTN - GAP
-		# 武器键再向左收到枪旁空位（红圈），轮盘仍从按下点拉选。
-		out["weapon"] = [Rect2(Vector2(x2 - 128.0, y), Vector2(BTN, BTN)), "武器"]
+		# 0.2.12：武器 与 换弹 对调。开火键位置保持 0.2.11，收枪时该槽显示拖拽。
+		var fire := Rect2(Vector2(x2 - 8.0, y - 20.0), Vector2(BTN + 16.0, BTN + 16.0))
+		out["weapon"] = [Rect2(Vector2(x2, y - 2.0 * (BTN + GAP) - 8.0), Vector2(BTN, BTN)), "武器"]
 		if _armed():
-			# 开火下移到武器与下蹲之间的空隙；瞄准保持在其左上方，不跟着掉下来以免和武器键重叠。
-			var fire := Rect2(Vector2(x2 - 8.0, y - 20.0), Vector2(BTN + 16.0, BTN + 16.0))
 			out["fire"] = [fire, "开火"]
 			out["ads"] = [Rect2(Vector2(fire.position.x - BTN - GAP - 10.0, y - (BTN + GAP) - 8.0), Vector2(BTN, BTN)), "瞄准"]
-			out["reload"] = [Rect2(Vector2(x2, y - 2.0 * (BTN + GAP) - 8.0), Vector2(BTN, BTN)), "换弹"]
-			# 左侧中间另加一个开火键（与右侧开火同一把武器），不要挡住左下摇杆。
+			out["reload"] = [Rect2(Vector2(x2 - 128.0, y), Vector2(BTN, BTN)), "换弹"]
+			# 左侧中间开火键（与右侧开火同一把武器），不要挡住左下摇杆。
 			var fire_sz := Vector2(BTN + 16.0, BTN + 16.0)
 			var lx := safe.x + EDGE_X
 			var ly := v.y * 0.5 - fire_sz.y * 0.5
@@ -187,6 +186,8 @@ func buttons() -> Dictionary:
 				if zr.size.x > 1.0:
 					lx = maxf(lx, zr.end.x + GAP)
 			out["fire_left"] = [Rect2(Vector2(lx, ly), fire_sz), "开火"]
+		elif _drag_available():
+			out["drag"] = [fire, "放下" if _drag_holding() else "拖拽"]
 	return out
 
 
@@ -197,6 +198,36 @@ func _weapons() -> Node:
 func _armed() -> bool:
 	var w := _weapons()
 	return w != null and bool(w.call("is_armed"))
+
+
+func _drag_holding() -> bool:
+	if player and player.has_method("get_corpse_drag"):
+		var d = player.call("get_corpse_drag")
+		return d != null and bool(d.call("is_dragging"))
+	return false
+
+
+func _drag_available() -> bool:
+	if player == null or not player.has_method("get_corpse_drag"):
+		return false
+	var d = player.call("get_corpse_drag")
+	if d == null:
+		return false
+	return bool(d.call("is_dragging")) or bool(d.call("can_start"))
+
+
+func fire_slot_rect() -> Rect2:
+	# 给 HUD 对齐：原右侧开火键位置。
+	var b := buttons()
+	if b.has("fire"):
+		return b["fire"][0]
+	if b.has("drag"):
+		return b["drag"][0]
+	var v := vp()
+	var x := v.x - safe.z - EDGE_X - BTN
+	var y := v.y - safe.w - EDGE_B - BTN
+	var x2 := x - BTN - GAP
+	return Rect2(Vector2(x2 - 8.0, y - 20.0), Vector2(BTN + 16.0, BTN + 16.0))
 
 
 func zoom_visible() -> bool:
@@ -306,6 +337,9 @@ func _on_down(idx: int, p: Vector2) -> void:
 		_last_tap_t = -100000
 		f["role"] = "orbit"
 		player.call("touch_tool_end")
+	elif _armed():
+		# 观察模式持枪：单击人物开火，拖动不射击。不要开始腹部互动。
+		f["role"] = "obs_fire"
 	elif bool(player.call("touch_tool_begin", p)):
 		f["role"] = "tool"
 	else:
@@ -358,6 +392,15 @@ func _on_up(idx: int, p: Vector2) -> void:
 		return
 	# 短按且没怎么动 = 一次点按（用于双击环绕）。
 	# 含 role=none：单击没打中身体时也要记下，否则双击永远无法开始环绕。
+	if not _fp() and role == "obs_fire":
+		var dt2 := Time.get_ticks_msec() - int(f["t0"])
+		if dt2 < HOLD_MS and p.distance_to(f["start"]) < TAP_PX and player and player.has_method("observe_tap_fire"):
+			player.call("observe_tap_fire", p)
+		if dt2 < HOLD_MS and p.distance_to(f["start"]) < TAP_PX:
+			_last_tap_t = Time.get_ticks_msec()
+			_last_tap_pos = p
+		else:
+			_last_tap_t = -100000
 	if not _fp() and (role == "tool" or role == "orbit" or role == "none"):
 		var dt := Time.get_ticks_msec() - int(f["t0"])
 		if dt < HOLD_MS and p.distance_to(f["start"]) < TAP_PX:
@@ -512,6 +555,9 @@ func _button(id: String, down: bool) -> void:
 					w3.call("set_ads", not bool(w3.get("ads")))
 			else:
 				w3.call("set_ads", down)
+		"drag":
+			if down and player and player.has_method("toggle_corpse_drag"):
+				player.call("toggle_corpse_drag")
 		"crouch":
 			# 网页 CrouchHold：点按 = 蹲下 / 起身；长按 0.5s = 匍匐（切换）
 			if down:
@@ -554,7 +600,7 @@ func _draw() -> void:
 	var b := buttons()
 	for id in b.keys():
 		var r: Rect2 = b[id][0]
-		var on: bool = _pressed_btn.has(id) or (id == "crouch" and str(player.call("get_stance")) != "stand")
+		var on: bool = _pressed_btn.has(id) or (id == "crouch" and str(player.call("get_stance")) != "stand") or (id == "drag" and _drag_holding())
 		if id == "ads":
 			var wads := _weapons()
 			on = on or (wads != null and bool(wads.get("ads")))

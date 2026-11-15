@@ -59,8 +59,8 @@ func _run() -> void:
 		return
 
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.2.10\"") >= 0 or presets.find("version/name=\"0.2.11\"") >= 0, "export version is 0.2.10 or 0.2.11")
-	_ok(presets.find("version/code=12") >= 0 or presets.find("version/code=13") >= 0, "versionCode is 12 or 13")
+	_ok(presets.find("version/name=\"0.2.10\"") >= 0 or presets.find("version/name=\"0.2.11\"") >= 0 or presets.find("version/name=\"0.2.12\"") >= 0 or presets.find("version/name=\"0.2.12\"") >= 0, "export version is 0.2.10 or 0.2.11")
+	_ok(presets.find("version/code=12") >= 0 or presets.find("version/code=13") >= 0 or presets.find("version/code=14") >= 0, "versionCode is 12 or 13")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 	_ok(presets.find("package/name=\"蒂法玉腹沙盒\"") >= 0, "visible name unchanged")
 
@@ -107,7 +107,7 @@ func _check_strafe_port() -> void:
 	var d: Dictionary = loco.call("debug_sample_strafe")
 	_ok(bool(d.get("ok", false)), "strafe sample ok (left=%s right=%s hip=%.3f distinct=%s)" % [
 		d.get("left", ""), d.get("right", ""), float(d.get("hip_ang", 0.0)), d.get("distinct", false)])
-	_ok(str(d.get("run_left")) == "runLeft" and str(d.get("run_right")) == "runRight", "sprint side picks runLeft/runRight")
+	_ok(str(d.get("run_left")) == "walkLeft" and str(d.get("run_right")) == "walkRight", "sprint side no longer uses runLeft/runRight")
 	_ok(str(d.get("crouch_left")) == "crouchLeft" and str(d.get("crouch_right")) == "crouchRight", "crouch side picks crouchLeft/Right")
 	print("v032: strafe port = already in official project (identical Mixamo clips); verified distinct poses")
 
@@ -306,7 +306,7 @@ func _check_corpse_drag() -> void:
 	drag.call("physics_tick", 0.016)
 	_ok(not bool(drag.call("is_dragging")), "auto-drop when walking out of range")
 	_ok(str(drag.get("last_drop_reason")) == "range", "drop reason is range")
-	# 地上的尸体：站立够不着，蹲下折腰后可以
+	# 0.2.12：选择范围加长，站着也可以选中地上的尸体，抓住时再把手和点拉到臂长。
 	player.global_position = Vector3(chest.x + 0.2, 0.0, chest.z + 0.2)
 	player.velocity = Vector3.ZERO
 	if player.has_method("_set_stance"):
@@ -314,12 +314,12 @@ func _check_corpse_drag() -> void:
 	await _phys(8)
 	var floor_pt := Vector3(chest.x, 0.12, chest.z)
 	drag.call("debug_aim", c, "C_Spine_c", floor_pt)
-	_ok(not bool(drag.call("can_start")), "standing cannot start drag on a floor corpse")
+	_ok(bool(drag.call("can_start")), "standing can select a floor corpse with longer pick range")
 	player.call("_set_stance", "crouch")
 	await _phys(50)
 	await _frames(8)
 	drag.call("debug_aim", c, "C_Spine_c", floor_pt)
-	_ok(bool(drag.call("can_start")), "crouch lean can reach a floor corpse")
+	_ok(bool(drag.call("can_start")), "crouch lean can also reach a floor corpse")
 	player.call("_set_stance", "stand")
 	await _phys(4)
 	# 活人不能拖

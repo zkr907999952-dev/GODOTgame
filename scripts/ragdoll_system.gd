@@ -32,13 +32,13 @@ const BONES := [
 	{"name": "R_Foot_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 0.8, "radius": 0.04, "kind": "capsule", "child": "R_Toe_a", "hinge_lo": -25.0, "hinge_hi": 35.0},
 ]
 
-## 子弹冲量系数：乘以 ballistics 的 impulse(0..1)。步枪应能明显推动躯干/肢体，霰弹更重，手枪更轻。
-## 命中时再生成短寿命高速球体，用刚体碰撞推动尸体，比单独 apply_impulse 更有撞击感。
-const IMPULSE_SCALE := 8.5
-const SPHERE_RADIUS := 0.032
-const SPHERE_LIFE := 0.14
-const MAX_BONE_SPEED := 8.5
-const MAX_BONE_ANG := 18.0
+## 子弹冲量系数：乘以 ballistics 的 impulse(0..1)，再乘设置里的受击力度。
+## 0.2.12 默认比 0.2.11 更强，步枪/霰弹能明显推动尸体，但速度仍有上限，不会飞出地图。
+const IMPULSE_SCALE := 14.0
+const SPHERE_RADIUS := 0.036
+const SPHERE_LIFE := 0.16
+const MAX_BONE_SPEED := 14.0
+const MAX_BONE_ANG := 22.0
 
 var skeleton: Skeleton3D
 var simulator: PhysicalBoneSimulator3D
@@ -500,7 +500,7 @@ func apply_hit_impulse(impulse: Vector3, hit: Vector3 = Vector3.ZERO, collider: 
 	if pb == null:
 		return
 	# 球体承担主要撞击；这里只留一部分冲量，避免两者叠加把尸体打飞。
-	var residual := impulse * 0.42
+	var residual := impulse * 0.55
 	if hit == Vector3.ZERO:
 		pb.apply_central_impulse(residual)
 	else:
@@ -508,7 +508,7 @@ func apply_hit_impulse(impulse: Vector3, hit: Vector3 = Vector3.ZERO, collider: 
 	# 少量把冲量传给相邻躯干，避免单肢被拉开
 	var torso: PhysicalBone3D = bones.get("C_Spine_c", bones.get("C_Hip_a"))
 	if torso and torso != pb:
-		torso.apply_central_impulse(residual * 0.28)
+		torso.apply_central_impulse(residual * 0.34)
 	var dir := impulse.normalized() if impulse.length_squared() > 1e-8 else Vector3.FORWARD
 	var hit_p := hit if hit != Vector3.ZERO else pb.global_position
 	spawn_impact_sphere(hit_p, dir, impulse.length(), str(pb.bone_name))
@@ -520,10 +520,25 @@ func apply_hit_impulse(impulse: Vector3, hit: Vector3 = Vector3.ZERO, collider: 
 	_clamp_speeds()
 
 
+func hit_force_scale() -> float:
+	var st := _settings()
+	if st:
+		return clampf(float(st.get("hit_force")), 0.35, 2.0)
+	return 1.0
+
+
+func _settings() -> Node:
+	var n: Node = _host if _host else self
+	var tree := n.get_tree() if n else get_tree()
+	if tree == null:
+		return null
+	return tree.root.find_child("GameSettings", true, false)
+
+
 func impulse_from_ballistics(par: Dictionary, dir: Vector3) -> Vector3:
 	var imp := float(par.get("impulse", 0.5))
 	var cat := str(par.get("category", ""))
-	var scale := IMPULSE_SCALE
+	var scale := IMPULSE_SCALE * hit_force_scale()
 	if cat == "shotgun":
 		scale *= 0.85  # 单丸略收，8 丸合计仍明显重于步枪
 	elif cat == "pistol":
@@ -540,9 +555,10 @@ func spawn_impact_sphere(hit: Vector3, dir: Vector3, impulse_len: float, _bone: 
 	if not active or dir.length_squared() < 1e-8:
 		return null
 	dir = dir.normalized()
-	# 动量略高于旧版纯冲量，步枪/霰弹更明显，手枪仍克制。
-	var mass := clampf(0.10 + impulse_len * 0.012, 0.10, 0.22)
-	var speed := clampf(42.0 + impulse_len * 4.5, 48.0, 88.0)
+	# 球体质量和速度受设置「受击力度」影响；默认比 0.2.11 更重更快。
+	var hf := hit_force_scale()
+	var mass := clampf((0.16 + impulse_len * 0.016) * hf, 0.12, 0.42)
+	var speed := clampf((62.0 + impulse_len * 5.5) * (0.65 + 0.35 * hf), 58.0, 150.0)
 	var body := RigidBody3D.new()
 	body.name = "BulletImpactSphere"
 	body.mass = mass
@@ -617,6 +633,23 @@ func _clamp_speeds() -> void:
 		var w := b.angular_velocity
 		if w.length() > MAX_BONE_ANG:
 			b.angular_velocity = w.normalized() * MAX_BONE_ANG
+
+
+func apply_stomp(at: Vector3, push: Vector3) -> void:
+	if not active or push.length_squared() < 1e-8:
+		return
+	var pb := _closest_bone(at)
+	if pb == null:
+		return
+	var j := push
+	if j.length() > 2.8:
+		j = j.normalized() * 2.8
+	pb.apply_impulse(j, at - pb.global_position)
+	var torso: PhysicalBone3D = bones.get("C_Spine_c", bones.get("C_Hip_a"))
+	if torso and torso != pb:
+		torso.apply_central_impulse(j * 0.35)
+	_clamp_t = maxf(_clamp_t, 0.18)
+	_clamp_speeds()
 
 
 func _closest_bone(hit: Vector3) -> PhysicalBone3D:

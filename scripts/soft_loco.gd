@@ -151,10 +151,7 @@ func pick_clip(fwd: float, side: float, mag: float, airborne: bool, sprint: bool
 		if fwd >= 0.0:
 			return "run" if run else "walk"
 		return "runBack" if run and clips.has("runBack") else "walkBack"
-	if run:
-		if side >= 0.0:
-			return "runRight" if clips.has("runRight") else "walkRight"
-		return "runLeft" if clips.has("runLeft") else "walkLeft"
+	# 不能横向奔跑：侧向只用走路 strafing，不用 runLeft/runRight。
 	return "walkRight" if side >= 0.0 else "walkLeft"
 
 

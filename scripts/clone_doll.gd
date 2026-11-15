@@ -239,3 +239,5 @@ func _physics_process(delta: float) -> void:
 		if hit_react:
 			var skip := PackedStringArray(["L_Shoulder_a", "R_Shoulder_a"])
 			hit_react.call("apply_to_skeleton", delta, skip)
+			if hit_react.has_method("apply_cover"):
+				hit_react.call("apply_cover", delta)

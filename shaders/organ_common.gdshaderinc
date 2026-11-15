@@ -104,12 +104,12 @@ vec3 rod_offset(vec3 p) {
 			len = length(o);
 		}
 		// 附近肠袢被推开（软衰减），让通道随拳头移动时更明显
-		float infl = rad * 2.55 + 0.016;
+		float infl = rad * 2.9 + 0.02;
 		if (len < infl) {
-			float aw = 1.0 - smoothstep(want * 0.85, infl, len);
+			float aw = 1.0 - smoothstep(want * 0.8, infl, len);
 			aw = aw * aw * w;
 			vec3 nrm = len > 1e-5 ? o / len : vec3(1.0, 0.0, 0.0);
-			q += nrm * max(0.0, infl - len) * 0.38 * mixv * aw;
+			q += nrm * max(0.0, infl - len) * 0.52 * mixv * aw;
 		}
 	}
 	return q - p;

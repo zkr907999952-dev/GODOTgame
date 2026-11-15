@@ -9,7 +9,7 @@ height = 1.64
 
 [node name="Player" type="CharacterBody3D"]
 collision_layer = 2
-collision_mask = 1
+collision_mask = 3
 floor_stop_on_slope = true
 floor_max_angle = 0.785398
 script = ExtResource("1_script")

@@ -48,8 +48,8 @@ func _run() -> void:
 		return
 
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.2.10\"") >= 0 or presets.find("version/name=\"0.2.11\"") >= 0, "export version is 0.2.10 or 0.2.11")
-	_ok(presets.find("version/code=12") >= 0 or presets.find("version/code=13") >= 0, "versionCode is 12 or 13")
+	_ok(presets.find("version/name=\"0.2.10\"") >= 0 or presets.find("version/name=\"0.2.11\"") >= 0 or presets.find("version/name=\"0.2.12\"") >= 0 or presets.find("version/name=\"0.2.12\"") >= 0, "export version is 0.2.10 or 0.2.11")
+	_ok(presets.find("version/code=12") >= 0 or presets.find("version/code=13") >= 0 or presets.find("version/code=14") >= 0, "versionCode is 12 or 13")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 	_ok(presets.find("package/name=\"蒂法玉腹沙盒\"") >= 0, "visible name unchanged")
 
@@ -107,8 +107,8 @@ func _check_damage_table() -> void:
 
 
 func _check_independent_hp() -> void:
-	_ok(is_equal_approx(float(player.call("get_hp")), 100.0), "player starts at 100")
-	_ok(is_equal_approx(float(player.call("get_max_hp")), 100.0), "player max 100")
+	_ok(is_equal_approx(float(player.call("get_hp")), 1000.0), "player starts at 1000")
+	_ok(is_equal_approx(float(player.call("get_max_hp")), 1000.0), "player max 1000")
 	var msg: String = main.call("spawn_clone", player.global_position + Vector3(1.2, 0.0, 0.4))
 	print("v030: ", msg)
 	await _frames(8)
@@ -121,13 +121,13 @@ func _check_independent_hp() -> void:
 	_ok(is_equal_approx(float(c.call("get_hp")), 100.0), "clone starts at 100 independent")
 	c.call("apply_damage", 25.0, {"zone": "body"})
 	_ok(is_equal_approx(float(c.call("get_hp")), 75.0), "clone took 25, now 75")
-	_ok(is_equal_approx(float(player.call("get_hp")), 100.0), "player HP unchanged after clone damage")
+	_ok(is_equal_approx(float(player.call("get_hp")), 1000.0), "player HP unchanged after clone damage")
 	player.call("apply_damage", 10.0, {"zone": "body"})
-	_ok(is_equal_approx(float(player.call("get_hp")), 90.0), "player took 10, now 90")
+	_ok(is_equal_approx(float(player.call("get_hp")), 990.0), "player took 10, now 990")
 	_ok(is_equal_approx(float(c.call("get_hp")), 75.0), "clone HP unchanged after player damage")
 	# restore player for later death test
-	player.call("get_health").call("reset", 100.0)
-	_ok(is_equal_approx(float(player.call("get_hp")), 100.0), "player HP reset to 100")
+	player.call("get_health").call("reset", 1000.0)
+	_ok(is_equal_approx(float(player.call("get_hp")), 1000.0), "player HP reset to 1000")
 
 
 func _check_clone_ragdoll_and_impulse() -> void:
@@ -201,7 +201,7 @@ func _check_player_ragdoll() -> void:
 	await _phys(2)
 	await _frames(2)
 	_ok(not bool(player.call("is_dead")), "player revived")
-	_ok(is_equal_approx(float(player.call("get_hp")), 100.0), "player HP restored")
+	_ok(is_equal_approx(float(player.call("get_hp")), 1000.0), "player HP restored")
 	_ok(rag == null or not bool(rag.call("is_active")), "player ragdoll stopped after revive")
 	_ok(int(player.collision_layer) != 0, "player collision restored")
 

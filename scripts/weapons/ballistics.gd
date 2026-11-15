@@ -8,6 +8,8 @@ signal body_hit(info: Dictionary)
 signal organ_path(info: Dictionary)
 
 const PROJ_SCENE := preload("res://assets/weapons/shared/projectiles.scn")
+## 弹头网格在离摄像机这么远之后才绘制，避免第一人称贴脸巨大弹头。拖尾不受影响。
+const MESH_CAM_DIST := 0.85
 const MAX_LIVE := 64
 const MAX_DECALS := 48
 const STEP_MAX := 0.08  # 每子步最大行程（米），防止穿墙
@@ -360,6 +362,13 @@ func _ray(from: Vector3, to: Vector3, extra: Array = []) -> Dictionary:
 	return w3.direct_space_state.intersect_ray(q)
 
 
+func _mesh_far_enough(pos: Vector3) -> bool:
+	var cam := get_viewport().get_camera_3d() if get_viewport() else null
+	if cam == null:
+		return true
+	return cam.global_position.distance_to(pos) >= MESH_CAM_DIST
+
+
 func _place(p: Dictionary) -> void:
 	var n: MeshInstance3D = p.get("node")
 	if n == null or not is_instance_valid(n):
@@ -368,7 +377,7 @@ func _place(p: Dictionary) -> void:
 	var d := vel.normalized() if vel.length_squared() > 1e-6 else (p["dir"] as Vector3)
 	n.global_position = p["pos"]
 	_look_along(n, d)
-	n.visible = true
+	n.visible = _mesh_far_enough(p["pos"])
 	var tr: MeshInstance3D = p.get("tracer")
 	if tr and is_instance_valid(tr):
 		var len := clampf(vel.length() * 0.0025, 0.04, 0.55)
