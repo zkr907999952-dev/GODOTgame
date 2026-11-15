@@ -132,5 +132,26 @@ func _run() -> void:
 	await _frames(12)
 	await _mark_and_save("tp_pistol_hold.png", false)
 
+	# 更正的侧面，便于判断枪托是否贴进肩窝
+	if player.has_method("set_tp_view"):
+		var yaw2: float = float(player.get("_yaw")) if "_yaw" in player else 0.0
+		player.call("set_tp_view", yaw2 + 1.57, 0.05, 2.1, true)
+	for sid in ["rifle", "smg", "shotgun"]:
+		await _ready_gun(sid)
+		await _frames(12)
+		await _mark_and_save("tp_%s_side.png" % sid, false)
+
+	# 开镜后坐：开火后一帧，机瞄应略离开准星（后坐未被对准对消）
+	player.call("set_play_mode", 1)
+	_set_look_pitch(0.0)
+	await _ready_gun("rifle")
+	ws.call("set_ads", true)
+	ws.set("_ads_k", 1.0)
+	await _frames(16)
+	ws.set("trigger", true)
+	await _frames(2)
+	ws.set("trigger", false)
+	await _mark_and_save("fp_ads_rifle_recoil.png", true)
+
 	print("v027_shots: done dir=", out_dir)
 	quit(0)

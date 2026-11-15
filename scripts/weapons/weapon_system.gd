@@ -734,22 +734,39 @@ func _tp_hold_adjust(w: WeaponDef) -> Transform3D:
 
 
 func _stock_local(w: WeaponDef) -> Vector3:
-	# 枪托/握把在枪局部的位置（+X 朝枪口）。步枪用网格最小 X 当枪托。
+	# 枪托/握把在枪局部的位置（+X 朝枪口）。用枪空间 AABB 的最小 X 面中心，忽略闪光/阴影。
 	if w and not _is_long_gun(w):
 		return Vector3(0.0, 0.02, 0.0)
 	if gun:
 		var lo := 0.0
 		var found := false
+		var corners: Array[Vector3] = []
 		for mi in gun.find_children("*", "MeshInstance3D", true, false):
-			if mi.mesh == null:
+			if mi.mesh == null or not (mi as MeshInstance3D).visible:
+				continue
+			var n := String(mi.name).to_lower()
+			if "shadow" in n or "flash" in n or "muzzle" in n:
 				continue
 			var a: AABB = mi.mesh.get_aabb()
-			var p0: Vector3 = mi.transform * a.position
-			if not found or p0.x < lo:
-				lo = p0.x
-				found = true
+			var xf: Transform3D = gun.global_transform.affine_inverse() * mi.global_transform
+			for k in 8:
+				var p: Vector3 = xf * a.get_endpoint(k)
+				corners.append(p)
+				if not found or p.x < lo:
+					lo = p.x
+					found = true
 		if found:
-			return Vector3(lo + 0.02, 0.04, 0.0)
+			var ys := 0.0
+			var zs := 0.0
+			var c := 0
+			for p in corners:
+				if p.x <= lo + 0.03:
+					ys += p.y
+					zs += p.z
+					c += 1
+			var by := (ys / float(c)) if c > 0 else 0.04
+			var bz := (zs / float(c)) if c > 0 else 0.0
+			return Vector3(lo + 0.015, by, bz)
 	return Vector3(-0.18, 0.04, 0.0)
 
 
@@ -775,8 +792,8 @@ func _tp_view_xf(w: WeaponDef, pose: Dictionary) -> Transform3D:
 		pocket = Vector3.ZERO
 	var aim: Vector3
 	if _is_long_gun(w):
-		# 略低于肩峰、稍向外，枪口微俯，抵在肩窝而不是贴脸
-		pocket += right * 0.03 + fwd * 0.02 + Vector3(0.0, -0.07, 0.0)
+		# 向内收进肩窝（锁骨-三角肌内侧），不要挂在肩头外侧；枪口微俯。
+		pocket += right * -0.02 + fwd * -0.01 + Vector3(0.0, -0.02, 0.0)
 		aim = (fwd + up * -0.08).normalized()
 	else:
 		# 手枪握把从肩窝向前伸出到胸前，略低于肩，避免缩进躯干
@@ -790,7 +807,14 @@ func _tp_view_xf(w: WeaponDef, pose: Dictionary) -> Transform3D:
 	var want_gun := Transform3D(Basis(aim, gy, gz).orthonormalized(), Vector3.ZERO)
 	want_gun.origin = pocket - want_gun.basis * _stock_local(w)
 	var gun_local: Transform3D = pose["gun"] if pose and pose.has("gun") else Transform3D()
-	return want_gun * gun_local.affine_inverse()
+	var xf := want_gun * gun_local.affine_inverse()
+	# 与第一人称同样的视模型缩放，绕枪托/握把点缩放，避免托口离开肩窝。
+	var sc: float = w.view_scale if w else 1.0
+	if sc > 0.05 and absf(sc - 1.0) > 0.001:
+		xf.origin -= pocket
+		xf = Transform3D(xf.basis * sc, xf.origin * sc)
+		xf.origin += pocket
+	return xf
 
 
 func _apply_view_xf(local_xf: Transform3D, pose: Dictionary = {}) -> void:
@@ -1208,6 +1232,29 @@ func _seat_stock_on_shoulder(w: WeaponDef) -> void:
 		view.position.z += shift * _ads_k
 
 
+func _kick_xf(w: WeaponDef) -> Transform3D:
+	if w == null:
+		return Transform3D()
+	return Transform3D(Basis(Vector3.RIGHT, deg_to_rad(w.kick_rot) * _kick) * Basis(Vector3.UP, _sway.x) * Basis(Vector3.RIGHT, _sway.y), Vector3(0.0, 0.0, w.kick_back * _kick))
+
+
+func _apply_ads_kick(w: WeaponDef, kick_t: Transform3D) -> void:
+	# 开镜对准之后再施加视模型后坐：绕枪托（长枪）或握把（手枪）抬起，准星会短暂离开准心，枪托不离开肩窝。
+	if w == null or view == null or camera == null or gun == null:
+		return
+	if view.get_parent() != camera:
+		return
+	if _kick < 0.02 and kick_t.origin.length_squared() < 1e-8 and kick_t.basis.is_equal_approx(Basis()):
+		return
+	var pivot := Vector3.ZERO
+	if _is_long_gun(w):
+		pivot = camera.global_transform.affine_inverse() * gun.to_global(_stock_local(w))
+	else:
+		pivot = camera.global_transform.affine_inverse() * gun.to_global(Vector3(0.0, 0.02, 0.0))
+	var xf := view.transform
+	view.transform = Transform3D(kick_t.basis * xf.basis, kick_t.basis * (xf.origin - pivot) + pivot + kick_t.origin)
+
+
 func debug_mag_ejected() -> bool:
 	return _mag_ejected
 
@@ -1397,10 +1444,9 @@ func _process(delta: float) -> void:
 			_sway = _sway.lerp(Vector2(clampf(dq.y, -0.08, 0.08), clampf(dq.x, -0.08, 0.08)) * 0.8, 1.0 - exp(-10.0 * delta))
 		_prev_cam_basis = cb
 	_sway = _sway * exp(-6.0 * delta)
-	var kick_t := Transform3D()
-	if w:
-		kick_t = Transform3D(Basis(Vector3.RIGHT, deg_to_rad(w.kick_rot) * _kick) * Basis(Vector3.UP, _sway.x) * Basis(Vector3.RIGHT, _sway.y), Vector3(0.0, 0.0, w.kick_back * _kick))
-	var local_xf := _view_local(w) * kick_t * _loco_bob_xf(delta)
+	var kick_t := _kick_xf(w)
+	# 开镜对准会每帧把瞄准轴锁回准星，若把后坐写进基准姿势会被对消。髋射仍把后坐叠在视模型上。
+	var local_xf := _view_local(w) * (kick_t if _ads_k < 0.05 else Transform3D()) * _loco_bob_xf(delta)
 	var pose := _update_clip(delta)
 	if pose.is_empty():
 		return
@@ -1414,6 +1460,8 @@ func _process(delta: float) -> void:
 		_set_pistol_slide_open(true)
 	_sync_skel_interp()
 	_pull_gun_into_reach(pose)
+	if fp and _ads_k >= 0.05:
+		_apply_ads_kick(w, kick_t)
 	_apply_ik(pose, _ik_w)
 
 
@@ -1556,6 +1604,9 @@ func _physics_process(_dt: float) -> void:
 	# 否则插值看到的是摆臂姿势，手会离开枪。
 	if _ik_w > 0.0 and not _last_pose.is_empty():
 		_pull_gun_into_reach(_last_pose)
+		# _pull_gun_into_reach 会再次对准准星，必须把开镜后坐补回去。
+		if player and bool(player.get("first_person")) and _ads_k >= 0.05:
+			_apply_ads_kick(cur_def(), _kick_xf(cur_def()))
 		_apply_ik(_last_pose, _ik_w)
 
 
@@ -1830,6 +1881,20 @@ func debug_stock_vs_head() -> Dictionary:
 	out["d_sh"] = out["stock"].distance_to(out["shoulder"])
 	out["d_head"] = out["stock"].distance_to(out["head"])
 	out["ok"] = out["d_sh"] + 0.02 < out["d_head"]
+	var fwd := Vector3(0, 0, 1)
+	if player and player.has_method("_body_forward"):
+		fwd = player.call("_body_forward")
+	if fwd.length_squared() < 1e-8:
+		fwd = Vector3(0, 0, -1)
+	fwd = fwd.normalized()
+	var right := Vector3.UP.cross(fwd)
+	if right.length_squared() < 1e-8:
+		right = Vector3.RIGHT
+	right = right.normalized()
+	var delta: Vector3 = out["stock"] - out["shoulder"]
+	out["along_fwd"] = delta.dot(fwd)
+	out["along_right"] = delta.dot(right)
+	out["along_up"] = delta.y
 	return out
 
 

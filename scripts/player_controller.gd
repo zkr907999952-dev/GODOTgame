@@ -1012,18 +1012,16 @@ func shoulder_aim_transform() -> Transform3D:
 	var origin: Vector3
 	if sh is Vector3:
 		origin = sh
-		# 肩窝：略向内（胸侧）、略向下、略向前，枪托抵在这里而不是面颊
+		# 肩窝：向内收进胸侧三角肌内侧，略低于肩峰、略在肩关节前方。
 		if chest is Vector3:
 			var inward: Vector3 = chest - sh
 			inward.y = 0.0
 			if inward.length_squared() > 1e-6:
-				origin += inward.normalized() * 0.02
-		# 低于肩峰、贴在肩窝（上胸），不要抬到脸颊/额头；枪靠下来，头再微微下弓。
-		origin += Vector3(0.0, -0.06, 0.0) + fwd * 0.03
+				origin += inward.normalized() * 0.055
+		origin += Vector3(0.0, -0.05, 0.0) + fwd * 0.02
 	else:
 		origin = global_transform * (_body.transform * (_fp_eye_cur + Vector3(0.16, -0.08, 0.0)))
-	# 只略退后，让枪托落在肩窝，而不是落到背后
-	origin -= fwd * 0.03
+	# 不要再往外/往前推，枪托贴在肩窝而不是悬在身前。
 	return Transform3D(Basis.looking_at(fwd, up), origin)
 
 

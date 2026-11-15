@@ -1,5 +1,5 @@
 extends SceneTree
-## 0.2.6 后续修正（俯视双指缩放、地图隐藏武器 UI、轮盘原点、左手/观察手枪、
+## 0.2.7 检查（俯视双指缩放、地图隐藏武器 UI、轮盘原点、左手/观察手枪、
 ## 步枪略缩小、长枪开镜基线、霰弹腰射前伸、换弹显匣、无限备弹、抵肩低头）：
 ##   godot --headless --path . -s res://scripts/tests/v027_check.gd
 
@@ -60,8 +60,8 @@ func _run() -> void:
 
 	# version / package untouched
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.2.6\"") >= 0, "export version stays 0.2.6")
-	_ok(presets.find("version/code=8") >= 0, "versionCode stays 8")
+	_ok(presets.find("version/name=\"0.2.7\"") >= 0, "export version is 0.2.7")
+	_ok(presets.find("version/code=9") >= 0, "versionCode is 9")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 
 	# ---- J: infinite reserve default on, still reloads, shows ∞, does not consume
@@ -222,7 +222,10 @@ func _run() -> void:
 	var st: Dictionary = ws.call("debug_stock_vs_head")
 	print("v027: TP rifle ", st)
 	_ok(bool(st.get("ok", false)), "TP rifle stock closer to shoulder than head (d_sh=%.3f d_head=%.3f)" % [float(st.get("d_sh", 99)), float(st.get("d_head", 99))])
-	_ok(float(st.get("d_sh", 99)) < 0.28, "TP rifle stock near shoulder pocket (d=%.3f)" % float(st.get("d_sh", 99)))
+	_ok(float(st.get("d_sh", 99)) < 0.16, "TP rifle stock near shoulder pocket (d=%.3f)" % float(st.get("d_sh", 99)))
+	_ok(float(st.get("along_right", 99)) < 0.03, "TP rifle stock not outside shoulder (right=%.3f)" % float(st.get("along_right", 99)))
+	_ok(float(st.get("along_fwd", 99)) < 0.06, "TP rifle stock not forward of pocket (fwd=%.3f)" % float(st.get("along_fwd", 99)))
+	_ok(float(st.get("along_right", 99)) > -0.14, "TP rifle stock not through chest (right=%.3f)" % float(st.get("along_right", 99)))
 	# cheek weld should be engaged
 	var sec = player.call("get_secondary") if player.has_method("get_secondary") else null
 	if sec:
@@ -278,6 +281,43 @@ func _run() -> void:
 	ws.call("debug_finish_state")
 	await _frames(2)
 	settings.set("infinite_reserve", true)
+
+	# ---- TP shoulder seating on other long guns
+	for long_id in ["smg", "shotgun"]:
+		await _ready_gun(long_id)
+		player.call("set_play_mode", 0)
+		await _frames(10)
+		var lst: Dictionary = ws.call("debug_stock_vs_head")
+		print("v027: TP ", long_id, " ", lst)
+		_ok(float(lst.get("d_sh", 99)) < 0.16, "TP %s stock near pocket (d=%.3f)" % [long_id, float(lst.get("d_sh", 99))])
+		_ok(float(lst.get("along_right", 99)) < 0.03, "TP %s stock not outside shoulder (right=%.3f)" % [long_id, float(lst.get("along_right", 99))])
+		_ok(float(lst.get("along_fwd", 99)) < 0.06, "TP %s stock not forward of pocket (fwd=%.3f)" % [long_id, float(lst.get("along_fwd", 99))])
+		player.call("set_play_mode", 1)
+		await _frames(3)
+
+	# ---- ADS visual recoil is not cancelled by iron-sight alignment
+	await _ready_gun("rifle")
+	player.call("set_play_mode", 1)
+	await _frames(4)
+	ws.call("set_ads", true)
+	ws.set("_ads_k", 1.0)
+	await _frames(6)
+	var view: Node3D = ws.get("view")
+	var xf0: Transform3D = view.transform
+	ws.set("trigger", true)
+	await _frames(2)
+	ws.set("trigger", false)
+	var kick := float(ws.get("_kick"))
+	var rec: Vector2 = ws.get("recoil")
+	var dorigin := view.transform.origin - xf0.origin
+	var pitch := xf0.basis.get_rotation_quaternion().angle_to(view.transform.basis.get_rotation_quaternion())
+	print("v027: ADS recoil kick=", kick, " rec=", rec, " dorigin=", dorigin, " drot_deg=", rad_to_deg(pitch))
+	_ok(kick > 0.3, "ADS kick lives after shot (k=%.3f)" % kick)
+	_ok(rec.length() > 0.003, "ADS camera recoil applied (rec=%s)" % rec)
+	_ok(dorigin.length() > 0.004 or pitch > deg_to_rad(0.6), "ADS viewmodel kick survives alignment (d=%.4f deg=%.2f)" % [dorigin.length(), rad_to_deg(pitch)])
+	ws.call("set_ads", false)
+	ws.set("_ads_k", 0.0)
+	await _frames(2)
 
 	print("v027_check: fails=", fails)
 	quit(1 if fails > 0 else 0)
