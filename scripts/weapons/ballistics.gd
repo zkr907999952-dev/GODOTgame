@@ -263,7 +263,15 @@ func _on_body(p: Dictionary, body: Node, hp: Vector3, hn: Vector3, dir: Vector3,
 	p["cinfo"] = qinfo
 	qinfo["projectile"] = p
 	body_hit.emit(qinfo)
-	if bool(qinfo.get("gut", false)) or bool(qinfo.get("uterus", false)):
+	var organ_hit := bool(qinfo.get("gut", false)) or bool(qinfo.get("uterus", false))
+	var corpse := body.has_method("is_dead") and bool(body.call("is_dead"))
+	if organ_hit:
+		organ_path.emit(qinfo)
+	elif corpse and (bool(qinfo.get("hit", false)) or _is_torso_collider(col)):
+		# 尸体也可触发特写：命中腹部椭球或躯干骨、弹道能穿过身体。
+		qinfo["corpse_path"] = true
+		if qinfo.get("exit") == null:
+			qinfo["exit"] = _body_exit(body, hp, dir, qinfo)
 		organ_path.emit(qinfo)
 	if organs and organs.has_method("apply_ballistic_hit"):
 		organs.call("apply_ballistic_hit", hp - dir * 0.05, dir, par, qinfo)
@@ -316,6 +324,13 @@ func _body_exit(body: Node, entry: Vector3, dir: Vector3, qinfo: Dictionary) -> 
 		last = hit["position"]
 		p = last + dir * 0.012
 	return last + dir * 0.02
+
+
+func _is_torso_collider(col: Object) -> bool:
+	if col is PhysicalBone3D:
+		var n := str((col as PhysicalBone3D).bone_name)
+		return n.begins_with("C_Spine") or n.begins_with("C_Hip") or n.begins_with("C_Neck")
+	return false
 
 
 func _body_of(n: Object) -> Node:

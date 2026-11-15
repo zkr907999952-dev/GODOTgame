@@ -59,8 +59,8 @@ func _run() -> void:
 		return
 
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.2.10\"") >= 0, "export version 0.2.10")
-	_ok(presets.find("version/code=12") >= 0, "versionCode 12")
+	_ok(presets.find("version/name=\"0.2.10\"") >= 0 or presets.find("version/name=\"0.2.11\"") >= 0, "export version is 0.2.10 or 0.2.11")
+	_ok(presets.find("version/code=12") >= 0 or presets.find("version/code=13") >= 0, "versionCode is 12 or 13")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 
 	await _check_touch_and_wheel()
@@ -85,8 +85,8 @@ func _check_touch_and_wheel() -> void:
 	hud.call("open_weapon_wheel", tap)
 	await _frames(2)
 	var c: Vector2 = wheel.call("center")
-	_ok(c.distance_to(tap) < 2.0, "wheel center is press point (c=%s tap=%s)" % [c, tap])
-	_ok(c.distance_to(Vector2(640, 360)) > 80.0, "wheel is not parked at screen center")
+	_ok(c.distance_to(Vector2(640, 360)) < 8.0, "wheel center is screen center (c=%s tap=%s)" % [c, tap])
+	_ok(c.distance_to(tap) > 80.0, "wheel is not parked at the press point")
 	wheel.call("point_at", tap + Vector2(-40, -90))
 	_ok(int(wheel.get("hover")) >= 0, "hover from press origin (hover=%s)" % wheel.get("hover"))
 	hud.call("close_weapon_wheel", false)

@@ -44,10 +44,9 @@ func open(origin: Variant = null) -> void:
 	visible = true
 	hover = -1
 	_vec = Vector2.ZERO
-	if origin is Vector2 and (origin as Vector2) != Vector2.ZERO:
-		_origin = origin
-	else:
-		_origin = size * 0.5
+	# 轮盘始终出现在屏幕正中央，不再跟随武器按钮或手指按下点。
+	# origin 保留参数以免调用方报错，但不再作为绘制 / 拉选原点。
+	_origin = size * 0.5 if size.length() > 1.0 else Vector2.ZERO
 	# 打开时停在当前武器所在页
 	var ids: PackedStringArray = weapons.weapon_ids()
 	var ci := ids.find(weapons.current)
@@ -75,25 +74,26 @@ func close(apply: bool = true) -> Variant:
 
 
 func center() -> Vector2:
-	# 拉选与绘制共用同一原点：打开时传入的点击点（手机武器按钮）；键盘 Q 为屏幕中心。
-	if is_open or _origin != Vector2.ZERO:
-		return _origin
-	return size * 0.5
+	# 拉选与绘制共用屏幕中心。触屏按住拖动用 set_vec（相对按下点的位移）。
+	if size.length() > 1.0:
+		_origin = size * 0.5
+	return size * 0.5 if size.length() > 1.0 else _origin
 
 
 func radius() -> float:
-	var base := clampf(minf(size.x, size.y) * 0.34, 120.0, 260.0)
-	var o := center()
-	# 靠边缘打开时略缩小，避免格子大量出屏，但原点仍是点击点。
-	var room := minf(minf(o.x, size.x - o.x), minf(o.y, size.y - o.y)) - 8.0
-	if room > 40.0:
-		return clampf(minf(base, room + 40.0), 80.0, base)
-	return clampf(minf(base, 140.0), 80.0, base)
+	# 轮盘固定在正中央，用完整半径，不再因靠边缘打开而缩小。
+	return clampf(minf(size.x, size.y) * 0.34, 120.0, 260.0)
 
 
-## 指针绝对位置（触屏 / 未捕获鼠标）
+## 指针绝对位置（未捕获鼠标）：相对屏幕中心。
 func point_at(p: Vector2) -> void:
-	_vec = p - _origin
+	_vec = p - center()
+	_update_hover()
+
+
+## 触屏从按下点拖出的位移，作用在正中央的轮盘上（不是从按钮拉选）。
+func set_vec(v: Vector2) -> void:
+	_vec = v.limit_length(radius())
 	_update_hover()
 
 

@@ -2,6 +2,7 @@ extends Node
 class_name RagdollSystem
 ## Godot 4 PhysicalBoneSimulator3D 布娃娃：运行时按蒂法骨架生成胶囊 / 盒子碰撞，
 ## 死亡时启动模拟，尸体不despawn，子弹命中对对应骨骼施加冲量。
+## 关节角度在物理步后钳制（Jolt 下 Cone/Hinge 的 bias/softness 往往不生效，钳制才能真正挡住反曲）。
 
 ## 物理层：角色层 2 可被弹道（mask 1|2）打中；mask 只撞世界层 1，避免骨骼互撞抖动。
 ## Jolt 的碰撞是双向 OR，两边都不把对方层写进 mask，就不会自碰。
@@ -55,6 +56,7 @@ var _host: Node = null
 var _map_frozen: bool = false
 var _spheres: Array = []
 var _clamp_t: float = 0.0
+var _joint_limits: Array = []  # {name, parent, kind, axis, rest, lo, hi, swing, twist}
 
 
 func setup(skel: Skeleton3D, host: Node = null) -> bool:
@@ -73,9 +75,10 @@ func setup(skel: Skeleton3D, host: Node = null) -> bool:
 		var pb := _make_bone(def)
 		if pb:
 			bones[str(def["name"])] = pb
+	_build_joint_limits()
 	ready_ok = bones.size() >= 10
 	if ready_ok:
-		print("RagdollSystem: built ", bones.size(), " physical bones")
+		print("RagdollSystem: built ", bones.size(), " physical bones, joint limits=", _joint_limits.size())
 	else:
 		push_warning("RagdollSystem: failed to build physical bones")
 	return ready_ok
@@ -162,6 +165,275 @@ func _apply_joint_limits(pb: PhysicalBone3D, def: Dictionary) -> void:
 			pb.set("joint_constraints/angular_limit_upper", float(def.get("hinge_hi", 120.0)))
 			pb.set("joint_constraints/angular_limit_bias", 0.3)
 			pb.set("joint_constraints/angular_limit_relaxation", 1.0)
+
+
+func _parent_phys_name(bone_name: String) -> String:
+	if skeleton == null:
+		return ""
+	var i := skeleton.find_bone(bone_name)
+	while i >= 0:
+		var p := skeleton.get_bone_parent(i)
+		if p < 0:
+			return ""
+		var pn := skeleton.get_bone_name(p)
+		if bones.has(pn):
+			return pn
+		i = p
+	return ""
+
+
+func _bone_world(pb: PhysicalBone3D) -> Transform3D:
+	return pb.global_transform * pb.body_offset.affine_inverse()
+
+
+func _set_bone_world(pb: PhysicalBone3D, xf: Transform3D) -> void:
+	pb.global_transform = xf * pb.body_offset
+
+
+func _skel_bone_world(bone_name: String, use_rest: bool = true) -> Transform3D:
+	var i := skeleton.find_bone(bone_name)
+	if i < 0:
+		return Transform3D.IDENTITY
+	var local := skeleton.get_bone_global_rest(i) if use_rest else skeleton.get_bone_global_pose(i)
+	return skeleton.global_transform * local
+
+
+func _character_back_from(hip_xf: Transform3D) -> Vector3:
+	# 蒂法骨架局部 +Z 多为前向；取反作为身体后方，用于判断膝/肘屈曲方向。
+	var fwd := hip_xf.basis.z
+	if fwd.length_squared() < 1e-8:
+		fwd = Vector3.FORWARD
+	return -fwd.normalized()
+
+
+func _build_joint_limits() -> void:
+	# 必须用骨架绑定/当前姿势，而不是尚未进入模拟的 PhysicalBone 变换。
+	_joint_limits.clear()
+	if skeleton == null:
+		return
+	var hip_xf := _skel_bone_world("C_Hip_a")
+	if hip_xf == Transform3D.IDENTITY:
+		hip_xf = _skel_bone_world("C_Spine_a")
+	var back := _character_back_from(hip_xf)
+	for def in BONES:
+		var name := str(def["name"])
+		if not bones.has(name):
+			continue
+		var jt := int(def.get("joint", PhysicalBone3D.JOINT_TYPE_NONE))
+		if jt == PhysicalBone3D.JOINT_TYPE_NONE:
+			continue
+		var parent_n := _parent_phys_name(name)
+		if parent_n == "" or not bones.has(parent_n):
+			continue
+		var pw := _skel_bone_world(parent_n)
+		var cw := _skel_bone_world(name)
+		var py := pw.basis.y.normalized()
+		var cy := cw.basis.y.normalized()
+		var rec := {
+			"name": name,
+			"parent": parent_n,
+			"kind": "hinge" if jt == PhysicalBone3D.JOINT_TYPE_HINGE else "cone",
+			"axis": Vector3.RIGHT,
+			"rest": 0.0,
+			"lo": float(def.get("hinge_lo", 0.0)),
+			"hi": float(def.get("hinge_hi", 130.0)),
+			"swing": float(def.get("swing", 25.0)),
+			"twist": float(def.get("twist", 15.0)),
+		}
+		# 略放宽关节下限，允许极小的生理过伸，但膝关节绝不能明显反曲。
+		if rec["kind"] == "hinge" and (name.ends_with("Foreleg_a") or name.ends_with("Forearm_a")):
+			rec["lo"] = -8.0
+			rec["hi"] = 140.0 if name.ends_with("Forearm_a") else 135.0
+		var axis := py.cross(cy)
+		if axis.length_squared() < 0.0025:
+			# 近似伸直：用身体侧向或父骨 X 作为铰链轴。
+			axis = pw.basis.x
+			if absf(axis.dot(py)) > 0.85:
+				axis = pw.basis.z
+		axis = axis.normalized()
+		# 膝/肘：让屈曲（小腿向后、前臂向身体）为正角度。
+		if name.ends_with("Foreleg_a") or name.ends_with("Forearm_a"):
+			var flex := py.cross(back)
+			if flex.length_squared() > 1e-6:
+				flex = flex.normalized()
+				if axis.dot(flex) < 0.0:
+					axis = -axis
+		rec["axis"] = pw.basis.inverse() * axis
+		rec["rest"] = _hinge_angle_world(pw, cw, axis)
+		_joint_limits.append(rec)
+
+
+func _hinge_angle_world(pw: Transform3D, cw: Transform3D, axis_w: Vector3) -> float:
+	if axis_w.length_squared() < 1e-8:
+		return 0.0
+	axis_w = axis_w.normalized()
+	var py := (pw.basis.y - axis_w * pw.basis.y.dot(axis_w))
+	var cy := (cw.basis.y - axis_w * cw.basis.y.dot(axis_w))
+	if py.length_squared() < 1e-8 or cy.length_squared() < 1e-8:
+		return 0.0
+	py = py.normalized()
+	cy = cy.normalized()
+	return rad_to_deg(atan2(py.cross(cy).dot(axis_w), py.dot(cy)))
+
+
+func _limit_axis_world(rec: Dictionary, parent_pb: PhysicalBone3D) -> Vector3:
+	var pw := _bone_world(parent_pb)
+	var ax: Vector3 = rec.get("axis", Vector3.RIGHT)
+	var w := (pw.basis * ax)
+	if w.length_squared() < 1e-8:
+		w = pw.basis.x
+	return w.normalized()
+
+
+func _clamp_joint_angles() -> void:
+	if not active:
+		return
+	for rec in _joint_limits:
+		var pb: PhysicalBone3D = bones.get(str(rec["name"]))
+		var parent_pb: PhysicalBone3D = bones.get(str(rec["parent"]))
+		if pb == null or parent_pb == null or not is_instance_valid(pb) or not is_instance_valid(parent_pb):
+			continue
+		# 只钳制铰链（膝 / 肘 / 踝）。锥形关节（脊柱 / 髋 / 肩）在 Jolt 下
+		# 用错误的休息轴做逐步钳制会把躯干拧坏，因此只保留 PhysicalBone 自带限位。
+		if str(rec.get("kind", "cone")) == "hinge":
+			_clamp_hinge(rec, pb, parent_pb)
+
+
+func _clamp_hinge(rec: Dictionary, pb: PhysicalBone3D, parent_pb: PhysicalBone3D) -> void:
+	var axis_w := _limit_axis_world(rec, parent_pb)
+	var pw := _bone_world(parent_pb)
+	var cw := _bone_world(pb)
+	var ang := _hinge_angle_world(pw, cw, axis_w)
+	var rest := float(rec.get("rest", 0.0))
+	var lo := rest + float(rec.get("lo", 0.0))
+	var hi := rest + float(rec.get("hi", 130.0))
+	var clamped := clampf(ang, lo, hi)
+	if absf(clamped - ang) < 0.35:
+		# 靠近极限时去掉继续越界的角速度
+		var w := pb.angular_velocity
+		var wa := w.dot(axis_w)
+		if (ang <= lo + 1.0 and wa < 0.0) or (ang >= hi - 1.0 and wa > 0.0):
+			pb.angular_velocity = w - axis_w * wa
+		return
+	var delta := deg_to_rad(clamped - ang)
+	var rot := Basis(axis_w, delta)
+	var joint := cw.origin
+	var new_xf := Transform3D(rot * cw.basis, joint)
+	_set_bone_world(pb, new_xf)
+	var w2 := pb.angular_velocity
+	var wa2 := w2.dot(axis_w)
+	# 越界方向的角速度清掉；偏差很大时整骨刹住，避免下一物理步再次甩开。
+	if absf(clamped - ang) > 20.0:
+		pb.angular_velocity = Vector3.ZERO
+	elif (clamped <= lo + 0.01 and wa2 < 0.0) or (clamped >= hi - 0.01 and wa2 > 0.0):
+		pb.angular_velocity = (w2 - axis_w * wa2) * 0.35
+	else:
+		pb.angular_velocity = w2 * 0.5
+
+
+func _clamp_cone(rec: Dictionary, pb: PhysicalBone3D, parent_pb: PhysicalBone3D) -> void:
+	var pw := _bone_world(parent_pb)
+	var cw := _bone_world(pb)
+	var py := pw.basis.y.normalized()
+	var cy := cw.basis.y.normalized()
+	var swing := rad_to_deg(py.angle_to(cy))
+	var span := float(rec.get("swing", 25.0))
+	if swing > span + 0.5:
+		var axis := py.cross(cy)
+		if axis.length_squared() < 1e-8:
+			return
+		axis = axis.normalized()
+		var delta := deg_to_rad(span - swing)
+		var rot := Basis(axis, delta)
+		var new_xf := Transform3D(rot * cw.basis, cw.origin)
+		_set_bone_world(pb, new_xf)
+		if swing > span + 20.0:
+			pb.angular_velocity = Vector3.ZERO
+		else:
+			pb.angular_velocity *= 0.4
+	# 扭转：把子骨 X 投到垂直于子骨 Y 的平面，与父骨参考比较
+	cw = _bone_world(pb)
+	cy = cw.basis.y.normalized()
+	var px := (pw.basis.x - cy * pw.basis.x.dot(cy))
+	var cx := (cw.basis.x - cy * cw.basis.x.dot(cy))
+	if px.length_squared() < 1e-8 or cx.length_squared() < 1e-8:
+		return
+	px = px.normalized()
+	cx = cx.normalized()
+	var twist := rad_to_deg(atan2(px.cross(cx).dot(cy), px.dot(cx)))
+	var tspan := float(rec.get("twist", 15.0))
+	if absf(twist) > tspan + 0.5:
+		var tdelta := deg_to_rad(clampf(twist, -tspan, tspan) - twist)
+		var rot2 := Basis(cy, tdelta)
+		_set_bone_world(pb, Transform3D(rot2 * cw.basis, cw.origin))
+		pb.angular_velocity *= 0.6
+
+
+func debug_joint_angles() -> Dictionary:
+	var out := {"ok": true, "knees": {}, "elbows": {}, "other": {}, "worst": 0.0}
+	for rec in _joint_limits:
+		var pb: PhysicalBone3D = bones.get(str(rec["name"]))
+		var parent_pb: PhysicalBone3D = bones.get(str(rec["parent"]))
+		if pb == null or parent_pb == null or not is_instance_valid(pb) or not is_instance_valid(parent_pb):
+			continue
+		var name := str(rec["name"])
+		var info := {"name": name, "kind": rec.get("kind", ""), "angle": 0.0, "lo": 0.0, "hi": 0.0, "over": 0.0}
+		if str(rec.get("kind", "")) == "hinge":
+			var axis_w := _limit_axis_world(rec, parent_pb)
+			var ang := _hinge_angle_world(_bone_world(parent_pb), _bone_world(pb), axis_w)
+			var rest := float(rec.get("rest", 0.0))
+			var lo := rest + float(rec.get("lo", 0.0))
+			var hi := rest + float(rec.get("hi", 130.0))
+			info["angle"] = ang
+			info["rest"] = rest
+			info["lo"] = lo
+			info["hi"] = hi
+			var over := 0.0
+			if ang < lo:
+				over = lo - ang
+			elif ang > hi:
+				over = ang - hi
+			info["over"] = over
+			info["hyperextended"] = ang < lo - 1.0
+		else:
+			var py := _bone_world(parent_pb).basis.y.normalized()
+			var cy := _bone_world(pb).basis.y.normalized()
+			var swing := rad_to_deg(py.angle_to(cy))
+			info["angle"] = swing
+			info["hi"] = float(rec.get("swing", 25.0))
+			info["over"] = maxf(0.0, swing - float(rec.get("swing", 25.0)))
+		if float(info["over"]) >= float(out["worst"]):
+			out["worst"] = float(info["over"])
+			out["worst_name"] = name
+		if info["over"] > 2.5:
+			out["ok"] = false
+		if "Foreleg" in name:
+			out["knees"][name] = info
+		elif "Forearm" in name:
+			out["elbows"][name] = info
+		else:
+			out["other"][name] = info
+	return out
+
+
+func debug_force_knee_hyperextension(degrees: float = -80.0) -> void:
+	## 测试：把小腿绕铰链轴转到明显反曲的位置，随后应由钳制拉回。
+	for rec in _joint_limits:
+		var name := str(rec["name"])
+		if not name.ends_with("Foreleg_a"):
+			continue
+		var pb: PhysicalBone3D = bones.get(name)
+		var parent_pb: PhysicalBone3D = bones.get(str(rec["parent"]))
+		if pb == null or parent_pb == null:
+			continue
+		var axis_w := _limit_axis_world(rec, parent_pb)
+		var pw := _bone_world(parent_pb)
+		var cw := _bone_world(pb)
+		var ang := _hinge_angle_world(pw, cw, axis_w)
+		var target := float(rec.get("rest", 0.0)) + degrees
+		var rot := Basis(axis_w, deg_to_rad(target - ang))
+		_set_bone_world(pb, Transform3D(rot * cw.basis, cw.origin))
+		pb.angular_velocity = axis_w * deg_to_rad(-180.0)
 
 
 func start(impulse: Vector3 = Vector3.ZERO, hit: Vector3 = Vector3.ZERO, collider: Object = null) -> void:
@@ -311,6 +583,10 @@ func spawn_impact_sphere(hit: Vector3, dir: Vector3, impulse_len: float, _bone: 
 
 
 func _physics_process(delta: float) -> void:
+	if active:
+		_clamp_speeds()
+		_clamp_joint_angles()
+		_clamp_joint_angles()
 	if _spheres.is_empty() and _clamp_t <= 0.0:
 		return
 	var keep: Array = []

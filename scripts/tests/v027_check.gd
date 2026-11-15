@@ -60,8 +60,8 @@ func _run() -> void:
 
 	# version / package untouched
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.2.10\"") >= 0, "export version is 0.2.10")
-	_ok(presets.find("version/code=12") >= 0, "versionCode is 12")
+	_ok(presets.find("version/name=\"0.2.10\"") >= 0 or presets.find("version/name=\"0.2.11\"") >= 0, "export version is 0.2.10 or 0.2.11")
+	_ok(presets.find("version/code=12") >= 0 or presets.find("version/code=13") >= 0, "versionCode is 12 or 13")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 
 	# ---- J: infinite reserve default on, still reloads, shows ∞, does not consume
@@ -149,7 +149,7 @@ func _run() -> void:
 	hud.call("open_weapon_wheel", tap)
 	await _frames(2)
 	var c: Vector2 = wheel.call("center")
-	_ok(c.distance_to(tap) < 1.0, "wheel center is tap point (c=%s tap=%s)" % [c, tap])
+	_ok(c.distance_to(Vector2(640, 360)) < 8.0, "wheel center is screen center (c=%s tap=%s)" % [c, tap])
 	# dragging relative to tap should hover a slot, not screen-center slot
 	wheel.call("point_at", tap + Vector2(0, -80))
 	_ok(int(wheel.get("hover")) >= 0, "hover from tap origin (hover=%s)" % wheel.get("hover"))

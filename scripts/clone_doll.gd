@@ -196,9 +196,17 @@ func _find_skeleton(n: Node) -> Skeleton3D:
 
 
 func _sync_from_source() -> void:
-	if not is_instance_valid(source_player) or is_dead():
+	if not is_instance_valid(source_player):
 		return
 	var src_org: Node = source_player.call("get_organs")
+	if is_dead():
+		# 死后仍跟随全局透视 / 脏器可见性，否则布娃娃尸体透视会掉。
+		if src_org and organs:
+			organs.set("xray_enabled", src_org.get("xray_enabled"))
+			organs.set("xray_amount", src_org.get("xray_amount"))
+			if organs.get("show_organs") != src_org.get("show_organs") and organs.has_method("set_show_organs"):
+				organs.call("set_show_organs", bool(src_org.get("show_organs")))
+		return
 	if src_org and organs:
 		organs.call("copy_settings_from", src_org)
 	var ssec: RefCounted = source_player.call("get_secondary")
@@ -210,6 +218,7 @@ func _sync_from_source() -> void:
 
 func _physics_process(delta: float) -> void:
 	if is_dead():
+		_sync_from_source()
 		if loco:
 			loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, delta, 0.0)
 		return

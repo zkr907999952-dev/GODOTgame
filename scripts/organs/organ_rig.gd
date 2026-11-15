@@ -805,6 +805,13 @@ func _process(delta: float) -> void:
 	step(delta)
 
 
+func _physics_process(_delta: float) -> void:
+	# 物理步之后再刷新一次，保证尸体透视窗跟上布娃娃骨骼。
+	if ready_ok and frozen:
+		_update_frame()
+		_push_uniforms()
+
+
 func step(delta: float) -> void:
 	if not ready_ok:
 		return
@@ -1083,11 +1090,34 @@ func _skel_world_xf() -> Transform3D:
 	return itp
 
 
+func _spine_world_from_ragdoll() -> Variant:
+	## 布娃娃模拟时 get_bone_global_pose 可能尚未含 PhysicalBone 修改，透视窗会停在死前站姿。
+	if _skel == null:
+		return null
+	var sim := _skel.get_node_or_null("PhysicalBoneSimulator3D")
+	if sim == null or not (sim.has_method("is_simulating_physics") and bool(sim.call("is_simulating_physics"))):
+		return null
+	var pb = sim.get_node_or_null("PhysicalBone_C_Spine_a")
+	if pb == null:
+		pb = sim.get_node_or_null("PhysicalBone_C_Hip_a")
+	if not (pb is PhysicalBone3D) or not is_instance_valid(pb):
+		return null
+	var body: PhysicalBone3D = pb
+	return body.global_transform * body.body_offset.affine_inverse()
+
+
 func _update_frame() -> void:
 	if _skel == null or _spine_i < 0:
 		return
 	# 用插值后的骨架变换：物理插值开启时与渲染出的皮肤一致（透视窗口 / 互动不抖）
-	var m := _skel_world_xf() * _skel.get_bone_global_pose(_spine_i) * _skel.get_bone_global_rest(_spine_i).affine_inverse()
+	# 布娃娃尸体优先用物理骨世界变换，让透视窗口和脏器判定跟着身体走。
+	var bone_world: Transform3D
+	var rd = _spine_world_from_ragdoll()
+	if rd is Transform3D:
+		bone_world = rd
+	else:
+		bone_world = _skel_world_xf() * _skel.get_bone_global_pose(_spine_i)
+	var m := bone_world * _skel.get_bone_global_rest(_spine_i).affine_inverse()
 	var o := m * _navel_rest
 	var right := (m.basis * Vector3.RIGHT).normalized()
 	var up := (m.basis * Vector3.UP).normalized()

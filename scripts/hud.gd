@@ -1585,24 +1585,42 @@ func _org() -> Node:
 
 
 func _on_xray_toggled(on: bool) -> void:
+	var g := _game()
+	if g and g.has_method("apply_xray_enabled"):
+		g.call("apply_xray_enabled", on)
+		return
 	var o := _org()
 	if o:
 		o.call("set_xray_enabled", on)
 
 
 func _on_xray_amount(v: float) -> void:
-	var o := _org()
-	if o:
-		o.call("set_xray_amount", v)
-		if v > 0.001 and not bool(o.get("xray_enabled")):
-			o.call("set_xray_enabled", true)
+	var g := _game()
+	if g and g.has_method("apply_xray_amount"):
+		g.call("apply_xray_amount", v)
+		var o0 := _org()
+		if o0 and v > 0.001 and not bool(o0.get("xray_enabled")):
+			if g.has_method("apply_xray_enabled"):
+				g.call("apply_xray_enabled", true)
 			if _chk_xray:
 				_chk_xray.set_pressed_no_signal(true)
+	else:
+		var o := _org()
+		if o:
+			o.call("set_xray_amount", v)
+			if v > 0.001 and not bool(o.get("xray_enabled")):
+				o.call("set_xray_enabled", true)
+				if _chk_xray:
+					_chk_xray.set_pressed_no_signal(true)
 	if _xray_value:
 		_xray_value.text = "%.2f" % v
 
 
 func _on_organs_toggled(on: bool) -> void:
+	var g := _game()
+	if g and g.has_method("apply_show_organs"):
+		g.call("apply_show_organs", on)
+		return
 	var o := _org()
 	if o:
 		o.call("set_show_organs", on)
@@ -2096,8 +2114,8 @@ func _to_wheel_local(p: Vector2) -> Vector2:
 
 func open_weapon_wheel(origin: Variant = null) -> void:
 	if wheel and not _ui_hidden:
-		var loc: Variant = _to_wheel_local(origin) if origin is Vector2 else origin
-		wheel.call("open", loc)
+		# 轮盘固定在屏幕中央。origin 忽略（兼容旧的按钮按下点调用）。
+		wheel.call("open", null)
 
 
 func close_weapon_wheel(apply: bool = true) -> Variant:
@@ -2111,6 +2129,11 @@ func is_wheel_open() -> bool:
 func weapon_wheel_point(p: Vector2) -> void:
 	if wheel:
 		wheel.call("point_at", _to_wheel_local(p))
+
+
+func weapon_wheel_drag(rel_from_press: Vector2) -> void:
+	if wheel and wheel.has_method("set_vec"):
+		wheel.call("set_vec", rel_from_press)
 
 
 ## 手机菜单：从按钮上按下后拖动应滚动面板，只有几乎没移动的单击才触发按钮。

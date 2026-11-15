@@ -7,7 +7,7 @@ extends Control
 ##   · 双指 = 平移 + 捏合缩放，第二根手指落下会取消当前工具
 ## 角色控制（第一人称）模式：
 ##   · 左下虚拟摇杆（128px，外圈 ≥ 0.72 = 奔跑，径向死区 0.15）
-##   · 右下：跳跃 / 下蹲已对调；开火再下移；武器键再向左；瞄准在开火左上；新增瞄准键（默认切换）
+##   · 右下：跳跃 / 下蹲已对调；开火再下移；武器键再向左；瞄准在开火左上；左侧中间另有一个开火键
 ##   · 左侧 FOV 竖条只在打开「摄像机」面板时显示
 ##   · 其余区域拖动 = 转视角（独立的触屏灵敏度）；第一人称下点画面不会触发工具
 ##   · 两种模式都有「切换」按钮（= Tab），贴在屏幕上边缘（安全区下方）
@@ -172,6 +172,21 @@ func buttons() -> Dictionary:
 			out["fire"] = [fire, "开火"]
 			out["ads"] = [Rect2(Vector2(fire.position.x - BTN - GAP - 10.0, y - (BTN + GAP) - 8.0), Vector2(BTN, BTN)), "瞄准"]
 			out["reload"] = [Rect2(Vector2(x2, y - 2.0 * (BTN + GAP) - 8.0), Vector2(BTN, BTN)), "换弹"]
+			# 左侧中间另加一个开火键（与右侧开火同一把武器），不要挡住左下摇杆。
+			var fire_sz := Vector2(BTN + 16.0, BTN + 16.0)
+			var lx := safe.x + EDGE_X
+			var ly := v.y * 0.5 - fire_sz.y * 0.5
+			var stick_top := stick_center().y - STICK_SIZE * 0.5
+			if ly + fire_sz.y + GAP > stick_top:
+				ly = stick_top - fire_sz.y - GAP
+			if ly < safe.y + 56.0:
+				ly = safe.y + 56.0
+			# 摄像机缩放条打开时，把左开火键挪到竖条右侧，避免重叠。
+			if zoom_visible():
+				var zr := zoom_rect()
+				if zr.size.x > 1.0:
+					lx = maxf(lx, zr.end.x + GAP)
+			out["fire_left"] = [Rect2(Vector2(lx, ly), fire_sz), "开火"]
 	return out
 
 
@@ -258,11 +273,8 @@ func _on_down(idx: int, p: Vector2) -> void:
 	if bid != "":
 		f["role"] = "btn:" + bid
 		if bid == "weapon":
-			# 轮盘拉选原点 = 实际按下点（按钮中心作兜底），不要用屏幕中心。
-			var wr: Rect2 = (buttons().get("weapon", [Rect2()])[0] as Rect2)
-			_weapon_press_pos = p if p != Vector2.ZERO else wr.get_center()
-			if _weapon_press_pos == Vector2.ZERO:
-				_weapon_press_pos = wr.get_center()
+			# 轮盘画在屏幕中央；记下按下点，拖动位移作用在中心轮盘上。
+			_weapon_press_pos = p
 		_button(bid, true)
 		get_viewport().set_input_as_handled()
 		return
@@ -317,11 +329,14 @@ func _on_drag(idx: int, p: Vector2, rel: Vector2) -> void:
 		"tool":
 			player.call("touch_tool_drag", p)
 		"btn:weapon":
-			# 手指直接拖到轮盘格子上（轮盘以按下武器按钮的点击点为原点）
-			if hud and hud.has_method("weapon_wheel_point") and p.distance_to(f["start"]) > TAP_PX * 0.6:
+			# 相对按下点的位移拉选正中央的轮盘，而不是从按钮位置展开。
+			if hud and p.distance_to(f["start"]) > TAP_PX * 0.6:
 				f["moved"] = true
-				hud.call("weapon_wheel_point", p)
-		"btn:fire":
+				if hud.has_method("weapon_wheel_drag"):
+					hud.call("weapon_wheel_drag", p - f["start"])
+				elif hud.has_method("weapon_wheel_point"):
+					hud.call("weapon_wheel_point", p)
+		"btn:fire", "btn:fire_left":
 			player.call("touch_look", rel)
 		"orbit":
 			player.call("touch_orbit", rel)
@@ -475,14 +490,15 @@ func _button(id: String, down: bool) -> void:
 			if hud == null:
 				pass
 			elif down:
-				hud.call("open_weapon_wheel", _weapon_press_pos)
+				hud.call("open_weapon_wheel")
 			elif bool(hud.call("is_wheel_open")):
 				hud.call("close_weapon_wheel", _weapon_drag_moved)
 				_weapon_drag_moved = false
-		"fire":
+		"fire", "fire_left":
 			var w := _weapons()
 			if w:
-				w.call("set_trigger", down)
+				# 任一开火键按住即开火；松开其中一个时，另一个仍按着则继续射击。
+				w.call("set_trigger", _pressed_btn.has("fire") or _pressed_btn.has("fire_left"))
 		"reload":
 			var w2 := _weapons()
 			if w2 and down:

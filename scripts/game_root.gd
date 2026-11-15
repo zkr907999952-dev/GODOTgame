@@ -180,9 +180,7 @@ func run_action(action: String, key: int = 0) -> void:
 		"hide_ui":
 			_hud.call("toggle_ui_hidden")
 		"xray":
-			var org: Node = _player.call("get_organs")
-			if org:
-				org.call("toggle_xray")
+			toggle_xray()
 		"breath":
 			var sec: RefCounted = _player.call("get_secondary")
 			if sec:
@@ -372,6 +370,50 @@ func clone_count() -> int:
 
 func get_clones() -> Array:
 	return _clones_root.get_children().filter(func(c): return not c.is_queued_for_deletion())
+
+
+func all_organ_rigs() -> Array:
+	var out: Array = []
+	if _player and _player.has_method("get_organs"):
+		var po: Node = _player.call("get_organs")
+		if po:
+			out.append(po)
+	for c in get_clones():
+		if c and c.has_method("get_organs"):
+			var co: Node = c.call("get_organs")
+			if co:
+				out.append(co)
+	return out
+
+
+func apply_xray_enabled(on: bool) -> void:
+	for o in all_organ_rigs():
+		if o and o.has_method("set_xray_enabled"):
+			o.call("set_xray_enabled", on)
+
+
+func apply_xray_amount(v: float) -> void:
+	for o in all_organ_rigs():
+		if o and o.has_method("set_xray_amount"):
+			o.call("set_xray_amount", v)
+
+
+func apply_show_organs(on: bool) -> void:
+	for o in all_organ_rigs():
+		if o and o.has_method("set_show_organs"):
+			o.call("set_show_organs", on)
+
+
+func toggle_xray() -> void:
+	var org: Node = _player.call("get_organs") if _player and _player.has_method("get_organs") else null
+	if org == null:
+		return
+	org.call("toggle_xray")
+	# 尸体分身不再从本体逐帧同步，这里把透视开关同步到所有脏器（含布娃娃尸体）。
+	apply_xray_enabled(bool(org.get("xray_enabled")))
+	apply_xray_amount(float(org.get("xray_amount")))
+	if org.get("show_organs") != null:
+		apply_show_organs(bool(org.get("show_organs")))
 
 
 ## 视线（当前相机中心射线）所指的地面位置；没打到东西就取前方 3m 再向下找地面。

@@ -6,10 +6,11 @@ extends Node3D
 signal started
 signal finished
 
-const SLOW := 0.08
-const WALL_MAX := 3.2
-const FLY_SPEED := 8.5  # 特写里弹头在空气中的视速（米/秒，墙钟）
-const PARK_SEC := 1.15
+const SLOW := 0.045  # 比 0.2.10 的 0.08 更慢
+const WALL_MAX := 16.0  # 只作故障兜底，须覆盖跟随 + 穿过 + 4 秒停留
+const FLY_SPEED := 4.0  # 特写里弹头在空气中的视速（米/秒，墙钟）；比 0.2.10 的 8.5 更慢
+const PARK_PASS_MIN := 0.55  # 体内穿过最短墙钟
+const HOLD_SEC := 4.0  # 穿过后在环绕受击点停留的墙钟秒数
 const COOLDOWN_SEC := 0.9
 const SPHERE_R := 0.16
 const SMOKE_FADE := 0.75
@@ -37,6 +38,7 @@ var _dir: Vector3
 var _t: float = 0.0
 var _wall: float = 0.0
 var _park_t: float = 0.0
+var _hold_t: float = 0.0
 var _phase: String = "idle"
 var _saved_scale: float = 1.0
 var _organs: Node
@@ -122,8 +124,16 @@ func consider(info: Dictionary, projectile: Dictionary = {}) -> bool:
 			return false
 	var gut := bool(info.get("gut", false))
 	var ut := bool(info.get("uterus", false))
+	var body = info.get("body")
+	var corpse := false
+	if body != null and body is Node and (body as Node).has_method("is_dead"):
+		corpse = bool(body.call("is_dead"))
+	var corpse_path := bool(info.get("corpse_path", false)) or (corpse and bool(info.get("hit", false)))
 	if not gut and not ut:
-		return false
+		if corpse_path:
+			last_reason.append("corpse")
+		else:
+			return false
 	if gut:
 		last_reason.append("gut")
 	if ut:
@@ -163,6 +173,7 @@ func _start(info: Dictionary, projectile: Dictionary) -> void:
 	_t = 0.0
 	_wall = 0.0
 	_park_t = 0.0
+	_hold_t = 0.0
 	_phase = "follow"
 	debug_phase = "follow"
 	_skip_dt = true
@@ -208,10 +219,28 @@ func _process(dt: float) -> void:
 		if not _cam.current:
 			_cam.current = true
 		return
+	_tick(wall)
+
+
+## 测试：按墙钟推进特写（不受单帧 0.05 上限影响，内部仍分步）。
+func debug_advance(wall_sec: float) -> void:
+	if _skip_dt:
+		_skip_dt = false
+		_place_follow(_muzzle)
+	var left := wall_sec
+	while playing and left > 1e-6:
+		var step := minf(left, 0.05)
+		_tick(step)
+		left -= step
+
+
+func _tick(wall: float) -> void:
+	if not playing:
+		return
 	_wall += wall
 	if _phase == "follow":
 		var span := maxf(0.15, _muzzle.distance_to(_entry))
-		var dur := maxf(0.28, span / FLY_SPEED)
+		var dur := maxf(0.40, span / FLY_SPEED)
 		_t = minf(1.0, _t + wall / dur)
 		var pos := _muzzle.lerp(_entry, _t)
 		_place_bullet(pos, _dir)
@@ -222,20 +251,33 @@ func _process(dt: float) -> void:
 			_enter_park()
 	elif _phase == "park":
 		_park_t += wall
-		# 弹头在体内继续走完短通道，相机不再跟随。
+		# 弹头在体内走完通道，相机停在受击点环绕；穿过后再进入 4 秒停留。
 		var in_span := maxf(0.08, _entry.distance_to(_exit))
-		var in_u := clampf(_park_t / maxf(0.35, in_span / 0.55), 0.0, 1.0)
+		var pass_dur := maxf(PARK_PASS_MIN, in_span / 0.28)
+		var in_u := clampf(_park_t / pass_dur, 0.0, 1.0)
 		var bpos := _entry.lerp(_exit + _dir * 0.04, in_u)
 		_place_bullet(bpos, _dir)
 		_push_smoke(bpos, wall)
 		_set_sphere(_entry.lerp(bpos, 0.45))
 		_place_park(_park_t)
-		if _park_t >= PARK_SEC or _wall >= WALL_MAX:
+		if in_u >= 1.0:
+			_enter_hold()
+	elif _phase == "hold":
+		_hold_t += wall
+		_place_park(_park_t + _hold_t)
+		if _hold_t >= HOLD_SEC:
 			_stop()
 	if playing and not _cam.current:
 		_cam.current = true
+	# 故障兜底：不应在正常的跟随 + 穿过 + 4 秒停留之前切断。
 	if _wall >= WALL_MAX and playing:
 		_stop()
+
+
+func _enter_hold() -> void:
+	_phase = "hold"
+	debug_phase = "hold"
+	_hold_t = 0.0
 
 
 func _enter_park() -> void:
