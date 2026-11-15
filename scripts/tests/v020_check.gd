@@ -50,12 +50,12 @@ func _run() -> void:
 
 	# ---- 灵敏度分离
 	_ok(is_equal_approx(float(player.get("mouse_sensitivity")), 0.0025), "PC mouse default 0.0025")
-	_ok(is_equal_approx(float(player.get("touch_look_sensitivity")), 0.009), "mobile swipe default 0.009")
+	_ok(is_equal_approx(float(player.get("touch_look_sensitivity")), 0.014), "mobile swipe default 0.014")
 	_ok(bool(player.get("ads_toggle")), "ADS default toggle")
 	var yaw0: float = player.get("_yaw")
 	player.call("touch_look", Vector2(100, 0))
 	var dyaw := absf(float(player.get("_yaw")) - yaw0)
-	_ok(dyaw > 0.7 and dyaw < 1.2, "touch look uses mobile default (Δ=%.3f)" % dyaw)
+	_ok(dyaw > 1.1 and dyaw < 1.7, "touch look uses mobile default (Δ=%.3f)" % dyaw)
 	player.set("mouse_sensitivity", 0.01)
 	yaw0 = player.get("_yaw")
 	player.call("touch_look", Vector2(100, 0))

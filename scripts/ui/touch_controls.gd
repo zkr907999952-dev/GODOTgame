@@ -98,33 +98,46 @@ func vp() -> Vector2:
 
 ## 把 ScreenTouch / 模拟鼠标坐标统一到本控件所在的逻辑像素（content_scale 空间）。
 ## 真机事件有时是窗口物理像素，按钮命中和点身体会整体错位。
-func _logical_pos(p: Vector2) -> Vector2:
+## 划屏增量必须和位置用同一套换算：不能只因为 backing 更大就把 relative 一律缩小，
+## 否则事件已经是逻辑像素时灵敏度会再被压低一截。
+func _pos_is_backing(p: Vector2) -> bool:
 	var vis := get_viewport_rect()
 	var vp := get_viewport()
 	if vp == null:
-		return p
+		return false
 	var backing := Vector2(vp.size)
-	if backing.x <= 1.0 or vis.size.x <= 1.0:
-		return p
-	# 已在逻辑矩形内（含少量越界）则原样使用
-	if p.x >= -20.0 and p.y >= -20.0 and p.x <= vis.size.x + 20.0 and p.y <= vis.size.y + 20.0:
-		# 若同时更像 backing（远超逻辑尺寸），仍转换
-		if backing.x > vis.size.x * 1.08 and (p.x > vis.size.x * 1.05 or p.y > vis.size.y * 1.05):
-			return Vector2(p.x * vis.size.x / backing.x, p.y * vis.size.y / backing.y)
-		return p
-	if backing.x > 1.0:
-		return Vector2(p.x * vis.size.x / backing.x, p.y * vis.size.y / backing.y)
-	return p
+	if backing.x <= vis.size.x * 1.08 or vis.size.x <= 1.0:
+		return false
+	# 超出逻辑矩形，一定是物理像素
+	if p.x > vis.size.x + 24.0 or p.y > vis.size.y + 24.0:
+		return true
+	# 落在逻辑矩形内时不能单靠位置判断（左上角的物理坐标也会落在里面）。
+	# 只有明显更接近 backing 尺度时才当物理像素。
+	return false
 
 
-func _logical_rel(rel: Vector2) -> Vector2:
-	var vis := get_viewport_rect().size
+func _to_logical(p: Vector2) -> Vector2:
+	var vis := get_viewport_rect()
 	var vp := get_viewport()
-	if vp == null:
-		return rel
+	if vp == null or not _pos_is_backing(p):
+		return p
 	var backing := Vector2(vp.size)
-	if backing.x > vis.x * 1.08 and vis.x > 1.0:
-		return Vector2(rel.x * vis.x / backing.x, rel.y * vis.y / backing.y)
+	return Vector2(p.x * vis.size.x / backing.x, p.y * vis.size.y / backing.y)
+
+
+func _logical_pos(p: Vector2) -> Vector2:
+	return _to_logical(p)
+
+
+func _logical_rel(rel: Vector2, pos: Vector2 = Vector2.ZERO) -> Vector2:
+	# 只有位置本身是物理像素、被换算过时，才按同样比例缩放增量。
+	if pos != Vector2.ZERO and _pos_is_backing(pos):
+		var vis := get_viewport_rect().size
+		var vp := get_viewport()
+		if vp:
+			var backing := Vector2(vp.size)
+			if backing.x > 1.0 and vis.x > 1.0:
+				return Vector2(rel.x * vis.x / backing.x, rel.y * vis.y / backing.y)
 	return rel
 
 
@@ -205,7 +218,7 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventScreenDrag:
 		_screen_touch_until = Time.get_ticks_msec() + 120
 		var sd := event as InputEventScreenDrag
-		_on_drag(sd.index, _logical_pos(sd.position), _logical_rel(sd.relative))
+		_on_drag(sd.index, _logical_pos(sd.position), _logical_rel(sd.relative, sd.position))
 	elif event is InputEventMouseButton and event.device == InputEvent.DEVICE_ID_EMULATION:
 		# 真机若同时派发 ScreenTouch 与模拟鼠标：模拟鼠标常晚一帧到达，
 		# 会把已经开始的单击工具结束并误判成双击环绕。刚收到 ScreenTouch 则忽略。
@@ -222,7 +235,7 @@ func _input(event: InputEvent) -> void:
 		if Time.get_ticks_msec() < _screen_touch_until or not fingers.has(0):
 			return
 		var mm := event as InputEventMouseMotion
-		_on_drag(0, _logical_pos(mm.position), _logical_rel(mm.relative))
+		_on_drag(0, _logical_pos(mm.position), _logical_rel(mm.relative, mm.position))
 
 
 func _on_down(idx: int, p: Vector2) -> void:

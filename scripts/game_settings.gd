@@ -9,7 +9,9 @@ var bullet_cam_chance: float = 0.20  # 0..1
 ## PC 鼠标视角灵敏度（弧度 / 像素）。默认保持原值。
 var mouse_sensitivity: float = 0.0025
 ## 手机划屏视角灵敏度（弧度 / 像素）。默认明显高于鼠标，接近主流手机 FPS。
-var touch_look_sensitivity: float = 0.009
+const TOUCH_LOOK_DEFAULT := 0.014
+const TOUCH_LOOK_LEGACY_DEFAULT := 0.009
+var touch_look_sensitivity: float = TOUCH_LOOK_DEFAULT
 ## 举枪瞄准：true = 切换，false = 长按。手机默认切换。
 var ads_toggle: bool = true
 ## 3D 渲染分辨率倍率（0 = 按平台默认：手机 75%，PC 100%）。只缩放 3D，不影响 HUD 点击。
@@ -28,7 +30,11 @@ func load_cfg() -> void:
 	bullet_cam_enabled = bool(c.get_value("bullet_cam", "enabled", true))
 	bullet_cam_chance = clampf(float(c.get_value("bullet_cam", "chance", 0.20)), 0.0, 1.0)
 	mouse_sensitivity = clampf(float(c.get_value("look", "mouse", 0.0025)), 0.0005, 0.02)
-	touch_look_sensitivity = clampf(float(c.get_value("look", "touch", 0.009)), 0.001, 0.04)
+	var touch_raw := float(c.get_value("look", "touch", TOUCH_LOOK_DEFAULT))
+	# 旧默认 0.009 在真机上偏钝；未手动改过的存档跟到新默认。
+	if is_equal_approx(touch_raw, TOUCH_LOOK_LEGACY_DEFAULT):
+		touch_raw = TOUCH_LOOK_DEFAULT
+	touch_look_sensitivity = clampf(touch_raw, 0.001, 0.04)
 	ads_toggle = bool(c.get_value("ads", "toggle", true))
 	if c.has_section_key("graphics", "render_scale"):
 		render_scale = clampf(float(c.get_value("graphics", "render_scale", 0.0)), 0.0, 1.0)

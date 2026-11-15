@@ -1041,11 +1041,21 @@ func fist_deform_debug() -> Dictionary:
 	}
 
 
+func _skel_world_xf() -> Transform3D:
+	# 真机上 get_global_transform_interpolated() 偶发停在旧位置或接近单位矩阵，
+	# 透视窗口就会钉在世界某个固定点、不跟人物走。离当前变换过远时改用即时变换。
+	var live := _skel.global_transform
+	var itp := _skel.get_global_transform_interpolated()
+	if itp.origin.distance_squared_to(live.origin) > 0.25:
+		return live
+	return itp
+
+
 func _update_frame() -> void:
 	if _skel == null or _spine_i < 0:
 		return
 	# 用插值后的骨架变换：物理插值开启时与渲染出的皮肤一致（透视窗口 / 互动不抖）
-	var m := _skel.get_global_transform_interpolated() * _skel.get_bone_global_pose(_spine_i) * _skel.get_bone_global_rest(_spine_i).affine_inverse()
+	var m := _skel_world_xf() * _skel.get_bone_global_pose(_spine_i) * _skel.get_bone_global_rest(_spine_i).affine_inverse()
 	var o := m * _navel_rest
 	var right := (m.basis * Vector3.RIGHT).normalized()
 	var up := (m.basis * Vector3.UP).normalized()
@@ -1614,7 +1624,7 @@ func _build_organs() -> bool:
 		mi.skin = skin
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mi.layers = 1 | ORGAN_LIGHT_LAYER
-		mi.extra_cull_margin = 0.2
+		mi.extra_cull_margin = 0.5
 		mi.set_meta("organ_group", "gut" if is_gut else "pelvis")
 		mi.set_meta("organ_material", matname)
 		mi.set_meta("is_uterus", bool(mat.get_shader_parameter("is_uterus")))

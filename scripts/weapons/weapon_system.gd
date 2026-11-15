@@ -67,6 +67,9 @@ var _fire_t: float = 99.0
 var hidden_by_mode: bool = false
 ## 换弹时是否已抛出弹匣（每轮一次）
 var _mag_ejected: bool = false
+## 本轮换弹应在 state_t 到达该秒数时抛匣（与动画抛匣帧对齐）
+var _mag_eject_at: float = 0.0
+var _mag_visual_hidden: bool = false
 ## 手枪空仓挂机：弹匣打空后锁在后方，换弹结束必须关闭。不依赖 empty 动画（该片段 0 轨道）。
 var _slide_locked: bool = false
 ## 机瞄光学点缓存（照门孔 / 准星尖，不是骨骼原点）
@@ -282,7 +285,7 @@ func reload() -> bool:
 	state_t = 0.0
 	ads = false
 	_mag_ejected = false
-	_try_eject_mag(w)
+	_restore_mag_visual()
 	reload_started.emit(current, _reload_empty)
 	sfx.emit("reload", current)
 	if w.sfx_reload:
@@ -291,6 +294,7 @@ func reload() -> bool:
 		_shell_phase = "start"
 		state_len = maxf(0.05, _clips.length("reload_start"))
 		_play_clip("reload_start", false)
+		_mag_eject_at = 999.0
 	else:
 		_shell_phase = ""
 		var base: float = w.reload_time if w.reload_time > 0.0 else _clips.length("reload")
@@ -298,6 +302,7 @@ func reload() -> bool:
 		_play_clip("reload", false)
 		_clip_speed = _clips.length("reload") / maxf(0.05, state_len)
 		_gun_anim("reload", state_len)
+		_mag_eject_at = _detect_mag_eject_time(w, state_len)
 	return true
 
 
@@ -616,6 +621,10 @@ func _hip_offset(w: WeaponDef) -> Vector3:
 	# 相机看向 -Z：Z 更负 = 更远离镜头，Y 更负 = 更低。步枪再略降，避免枪口顶到脸前。
 	var y := -0.10 if _is_long_gun(w) else -0.072
 	var z := -0.11 if _is_long_gun(w) else -0.09
+	if w and str(w.category) == "shotgun":
+		# 霰弹腰射原来偏高偏近，略降低并向前伸出一点
+		y = -0.155
+		z = -0.175
 	return Vector3(w.view_offset.x + 0.02, w.view_offset.y + y, w.view_offset.z + z)
 
 
@@ -776,6 +785,94 @@ func _try_eject_mag(w: WeaponDef) -> void:
 	var body_vel: Vector3 = player.get("velocity") if player else Vector3.ZERO
 	casings.call("eject_mag", kind, xf, body_vel)
 	_mag_ejected = true
+	_hide_mag_visual()
+
+
+func _hide_mag_visual() -> void:
+	if gun == null:
+		return
+	var mag_n := gun.find_child("Magazine", true, false)
+	if mag_n is Node3D and (mag_n as Node3D).visible:
+		(mag_n as Node3D).visible = false
+		_mag_visual_hidden = true
+
+
+func _restore_mag_visual() -> void:
+	if gun and _mag_visual_hidden:
+		var mag_n := gun.find_child("Magazine", true, false)
+		if mag_n is Node3D:
+			(mag_n as Node3D).visible = true
+	_mag_visual_hidden = false
+
+
+func _detect_mag_eject_time(w: WeaponDef, dur: float) -> float:
+	# 返回本轮 state_t 到达多少秒时抛出空匣，与换弹动画抛匣帧对齐。
+	if w == null or w.shell_reload:
+		return 999.0
+	dur = maxf(dur, 0.05)
+	if w.mag_eject_frac > 0.0:
+		return dur * clampf(w.mag_eject_frac, 0.08, 0.85)
+	var anim_t := _scan_mag_throw_time()
+	if anim_t >= 0.0:
+		var an_len := 0.0
+		if gun_ap and gun_ap.has_animation("reload"):
+			an_len = gun_ap.get_animation("reload").length
+		if an_len <= 0.0 and _clips:
+			an_len = _clips.length("reload")
+		if an_len > 0.05:
+			return clampf(anim_t * (dur / an_len), 0.08, dur * 0.85)
+		return clampf(anim_t, 0.08, dur * 0.85)
+	return dur * 0.38
+
+
+func _scan_mag_throw_time() -> float:
+	# 在枪械 reload 动画里找弹匣被甩出的时间：方法轨道，或 Magazine 位姿首次明显下落。
+	if gun_ap == null or not gun_ap.has_animation("reload"):
+		return -1.0
+	var an: Animation = gun_ap.get_animation("reload")
+	var best := -1.0
+	for ti in an.get_track_count():
+		var typ := an.track_get_type(ti)
+		if typ == Animation.TYPE_METHOD:
+			for ki in an.track_get_key_count(ti):
+				var nm := String(an.method_track_get_name(ti, ki)).to_lower()
+				if "eject" in nm or "drop" in nm or "mag" in nm or "throw" in nm:
+					var t := an.track_get_key_time(ti, ki)
+					if best < 0.0 or t < best:
+						best = t
+			continue
+		var path := String(an.track_get_path(ti))
+		var low := path.to_lower()
+		if "agazine" not in low and "/mag" not in low and not low.ends_with(":magazine"):
+			continue
+		if typ == Animation.TYPE_VALUE and "visible" in low:
+			for ki in an.track_get_key_count(ti):
+				var v: Variant = an.track_get_key_value(ti, ki)
+				if v is bool and not v:
+					var t2 := an.track_get_key_time(ti, ki)
+					if best < 0.0 or t2 < best:
+						best = t2
+			continue
+		if typ != Animation.TYPE_POSITION_3D and typ != Animation.TYPE_VALUE:
+			continue
+		if an.track_get_key_count(ti) < 2:
+			continue
+		var p0: Variant = an.track_get_key_value(ti, 0)
+		if not (p0 is Vector3):
+			continue
+		var base_p: Vector3 = p0
+		for ki in range(1, an.track_get_key_count(ti)):
+			var pv: Variant = an.track_get_key_value(ti, ki)
+			if not (pv is Vector3):
+				continue
+			var d: Vector3 = pv - base_p
+			# 弹匣被抽出/抛出：离开卡槽超过约 2cm，通常向下或向外
+			if d.length() >= 0.02 and (d.y < -0.012 or d.length() >= 0.04):
+				var t3 := an.track_get_key_time(ti, ki)
+				if best < 0.0 or t3 < best:
+					best = t3
+				break
+	return best
 
 
 func _finish_gun_reload_anim() -> void:
@@ -1030,12 +1127,46 @@ func _align_iron_sights(w: WeaponDef) -> void:
 	var r: Vector3 = camera.global_transform.affine_inverse() * gun.to_global(pts[0])
 	view.position.x -= r.x * k
 	view.position.y -= r.y * k
+	# 长枪眼距收紧：原先可把机瞄推到 0.45m 外，枪托离开肩膀、手臂被拉直。手枪保持原眼距。
 	var z_goal := r.z
-	if r.z > -0.18:
-		z_goal = -0.26
-	elif r.z < -0.45:
-		z_goal = -0.45
+	var z_near := -0.16 if _is_long_gun(w) else -0.18
+	var z_far := -0.24 if _is_long_gun(w) else -0.45
+	var z_def := -0.20 if _is_long_gun(w) else -0.26
+	if r.z > z_near:
+		z_goal = z_def
+	elif r.z < z_far:
+		z_goal = z_far
 	view.position.z -= (r.z - z_goal) * k
+	if _is_long_gun(w):
+		_seat_stock_on_shoulder(w)
+
+
+func _seat_stock_on_shoulder(w: WeaponDef) -> void:
+	# 开镜后只沿相机前后轴把枪托拉回肩窝，不破坏已对准的瞄准轴和屏幕中心。
+	if not _is_long_gun(w) or gun == null or camera == null or view == null:
+		return
+	if view.get_parent() != camera or _ads_k < 0.05:
+		return
+	var stock_c: Vector3 = camera.global_transform.affine_inverse() * gun.to_global(_stock_local(w))
+	# 肩窝大约在镜头稍后、略低：相机空间 Z≈0（镜头平面附近）
+	var want_z := 0.02
+	var shift := want_z - stock_c.z
+	var pts := _sight_locals(w)
+	var rear_c: Vector3 = camera.global_transform.affine_inverse() * gun.to_global(pts[0])
+	# 照门至少留 14cm 眼距，避免机匣贴到镜头上
+	if rear_c.z + shift > -0.14:
+		shift = -0.14 - rear_c.z
+	# 只拉回，不要再往前推
+	if shift > 0.0:
+		view.position.z += shift * _ads_k
+
+
+func debug_mag_ejected() -> bool:
+	return _mag_ejected
+
+
+func debug_mag_eject_at() -> float:
+	return _mag_eject_at
 
 
 func debug_muzzle_ahead() -> float:
@@ -1146,6 +1277,7 @@ func _process(delta: float) -> void:
 			if state_t >= state_len:
 				_finish_holster()
 		"reloading":
+			_step_reload_eject()
 			_step_reload()
 	if fp:
 		_try_fire(delta)
@@ -1227,6 +1359,17 @@ func _process(delta: float) -> void:
 	_apply_ik(pose, _ik_w)
 
 
+func _step_reload_eject() -> void:
+	var w: WeaponDef = cur_def()
+	if w == null or w.shell_reload:
+		return
+	if not _mag_ejected and state_t >= _mag_eject_at:
+		_try_eject_mag(w)
+	# 新弹匣装回后再显示模型，避免和刚抛出的物理弹匣重叠
+	if _mag_visual_hidden and state_t >= maxf(_mag_eject_at + 0.18, state_len * 0.68):
+		_restore_mag_visual()
+
+
 func _step_reload() -> void:
 	var w: WeaponDef = cur_def()
 	if w == null:
@@ -1244,6 +1387,7 @@ func _step_reload() -> void:
 			_clip_speed = 1.0
 			ammo_changed.emit(current, a.x, a.y)
 			reloaded.emit(current)
+			_restore_mag_visual()
 			_finish_gun_reload_anim()
 		return
 	# 霰弹：开始 → 逐发 → 结束
@@ -1464,6 +1608,7 @@ func _pull_gun_into_reach(pose: Dictionary) -> void:
 		view.global_position -= shift
 	if _ads_k > 0.05:
 		_align_iron_sights(cur_def())
+		_seat_stock_on_shoulder(cur_def())
 
 
 func _apply_ik(pose: Dictionary, w: float) -> void:
@@ -1577,6 +1722,16 @@ func debug_ads_parts() -> Dictionary:
 		out["axis_deg"] = rad_to_deg(axis.normalized().angle_to(Vector3(0.0, 0.0, -1.0)))
 	var up_c: Vector3 = cam_inv.basis * gun.global_transform.basis.y
 	out["roll_deg"] = rad_to_deg(atan2(up_c.x, up_c.y))
+	var stock_w: Vector3 = gun.to_global(_stock_local(w))
+	var stock_c: Vector3 = cam_inv * stock_w
+	out["stock_cam_z"] = stock_c.z
+	out["rear_cam_z"] = (cam_inv * wr).z
+	out["d_shoulder"] = 99.0
+	if skeleton:
+		var sh_i := skeleton.find_bone("R_Shoulder_a")
+		if sh_i >= 0:
+			var sh: Vector3 = skeleton.global_transform * skeleton.get_bone_global_pose(sh_i).origin
+			out["d_shoulder"] = stock_w.distance_to(sh)
 	return out
 
 

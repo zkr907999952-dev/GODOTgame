@@ -18,7 +18,7 @@ enum GameMode { DISPLAY, CONTROL }
 @export var jump_velocity: float = 6.0
 @export var gravity: float = 20.0
 @export var mouse_sensitivity: float = 0.0025
-@export var touch_look_sensitivity: float = 0.009
+@export var touch_look_sensitivity: float = 0.014
 ## 举枪瞄准：true=切换，false=长按。手机默认切换；PC 右键同样遵守。
 var ads_toggle: bool = true
 ## 最近一次请求的屏幕方向（测试 / 调试）
@@ -392,6 +392,18 @@ func _try_begin_interact(screen: Vector2) -> bool:
 		var pref: Vector2 = variants[_ptr_mode]
 		variants.remove_at(_ptr_mode)
 		variants.insert(0, pref)
+	var mode := str(_organs.get("interact_mode"))
+	if mode == "" or mode == "none":
+		mode = "drag"
+	var is_tool := mode == "fist" or mode == "bayonet" or mode == "navel"
+	# 不要取第一个命中的解释：错误的坐标空间偶尔也会擦到身体，锁定后点击会整体错位。
+	# 在所有候选里选距离最近的那一发。
+	var best_i := -1
+	var best_score := INF
+	var best_rig: Node = null
+	var best_hit: Variant = null
+	var best_origin := Vector3.ZERO
+	var best_dir := Vector3.ZERO
 	for i in variants.size():
 		var p: Vector2 = variants[i]
 		var origin: Vector3 = _camera.project_ray_origin(p)
@@ -399,32 +411,41 @@ func _try_begin_interact(screen: Vector2) -> bool:
 		var rig := pick_interact_rig(origin, dir)
 		if rig == null:
 			continue
-		var mode := str(_organs.get("interact_mode"))
-		if mode == "" or mode == "none":
-			mode = "drag"
-		if mode == "fist" or mode == "bayonet" or mode == "navel":
-			if rig.get("interact_mode") != mode:
-				rig.call("copy_settings_from", _organs)
-			var cam_fwd := -_camera.global_transform.basis.z
-			var ok := bool(rig.call("tool_begin", origin, dir, cam_fwd))
-			if not ok:
+		var score: float = float(rig.call("ray_pick_distance", origin, dir))
+		var hit: Variant = null
+		if not is_tool:
+			hit = rig.call("ray_hit_belly", origin, dir)
+			if hit == null:
 				continue
-			_interact_target = rig
+			if hit is Vector3:
+				score = origin.distance_to(hit)
+		if score < best_score:
+			best_score = score
+			best_i = i
+			best_rig = rig
+			best_hit = hit
+			best_origin = origin
+			best_dir = dir
+	if best_i >= 0 and best_rig != null:
+		if is_tool:
+			if best_rig.get("interact_mode") != mode:
+				best_rig.call("copy_settings_from", _organs)
+			var cam_fwd := -_camera.global_transform.basis.z
+			if not bool(best_rig.call("tool_begin", best_origin, best_dir, cam_fwd)):
+				return _try_begin_interact_near(screen, variants)
+			_interact_target = best_rig
 			_interact_held = true
 			_interact_screen = screen
-			_ptr_mode = i if _ptr_mode < 0 else _ptr_mode
+			_ptr_mode = best_i if _ptr_mode < 0 else _ptr_mode
 			return true
-		var hit: Variant = rig.call("ray_hit_belly", origin, dir)
-		if hit == null:
-			continue
-		_interact_target = rig
+		_interact_target = best_rig
 		if mode == "strike":
-			rig.call("strike_at", hit)
+			best_rig.call("strike_at", best_hit)
 		elif mode == "drag":
-			rig.call("begin_drag", hit)
+			best_rig.call("begin_drag", best_hit)
 			_interact_held = true
 			_interact_screen = screen
-		_ptr_mode = i if _ptr_mode < 0 else _ptr_mode
+		_ptr_mode = best_i if _ptr_mode < 0 else _ptr_mode
 		return true
 	# 精确射线都未命中：用肚脐的屏幕投影做近距兜底，避免坐标空间再换算一次就打空。
 	return _try_begin_interact_near(screen, variants)
@@ -934,6 +955,9 @@ func apply_saved_look_settings() -> void:
 		return
 	mouse_sensitivity = clampf(float(s.get("mouse_sensitivity")), 0.0005, 0.02)
 	touch_look_sensitivity = clampf(float(s.get("touch_look_sensitivity")), 0.001, 0.04)
+	# 与 GameSettings 同步后再校正一次（旧默认 0.009）
+	if is_equal_approx(touch_look_sensitivity, 0.009):
+		touch_look_sensitivity = 0.014
 	ads_toggle = bool(s.get("ads_toggle"))
 
 

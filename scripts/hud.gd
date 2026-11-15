@@ -599,9 +599,9 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(ts_row)
 	_touch_sens_slider = HSlider.new()
 	_touch_sens_slider.min_value = 0.002
-	_touch_sens_slider.max_value = 0.02
+	_touch_sens_slider.max_value = 0.04
 	_touch_sens_slider.step = 0.0005
-	_touch_sens_slider.value = 0.009
+	_touch_sens_slider.value = 0.014
 	_touch_sens_slider.custom_minimum_size = Vector2(220, 18)
 	_touch_sens_slider.value_changed.connect(_on_touch_sens_changed)
 	v.add_child(_touch_sens_slider)

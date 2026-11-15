@@ -258,7 +258,7 @@ tools/bake_tifa_skinned.py
 - 城市首次进入会为大量网格生成 trimesh，加载稍慢；树叶无碰撞。城市里走/跑速度与房间相同（网页城市里是 5.8× / 11×，未移植）。
 - 蠕动参数不保存（项目目前所有设置都不持久化）。
 - 动画为关键帧程序化驱动；已移植头发 Verlet / 眨眼 / 呼吸、腹部透视与脏器（拖拽 / 打击 / 蠕动）。拳头、刺刀、肚脐互动和网页的肠道血量变色、彭腹仍未移植。
-- 脏器网格是运行时从 `assets/organs/organs_mesh.bin` 读取的（非 Godot 资源）。若以后导出游戏，需要在导出预设的「要导出的非资源文件」里加 `assets/organs/*.bin, assets/organs/*.json`。重新烘焙：`/workspace/tools/blender/blender --background --python tools/bake_organs.py`。
+- 脏器网格是运行时从 `assets/organs/organs_mesh.bin` 读取的（非 Godot 资源）。导出预设的「要导出的非资源文件」已包含 `assets/organs/*.bin, assets/organs/*.json`，否则安卓包里没有内脏数据。重新烘焙：`/workspace/tools/blender/blender --background --python tools/bake_organs.py`。
 - 第一人称低头时胸部会挡住大部分腹部，透视效果在镜子里或第三人称更容易看到。
 - 网页的腹部软笼没有完整移植：拖拽 / 打击在着色器里做顶点位移（皮肤 + 脏器），法线不重算。
 - 下蹲为**切换** Ctrl/C（0.7s 过渡）；匍匐为 Z 切换；圆柱碰撞体近似网页（站 1.64 / 蹲 0.94 / 匍 0.42），底边贴地。

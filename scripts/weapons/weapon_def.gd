@@ -66,4 +66,6 @@ class_name WeaponDef
 @export var penetration: float = 0.0
 ## 霰弹泵动抛壳延迟（秒）；0 = 开火立刻抛
 @export var eject_delay: float = 0.0
+## 空弹匣抛出时机（占换弹时长 0..1）。0 = 按换弹动画自动检测，失败则用 0.38
+@export var mag_eject_frac: float = 0.0
 
