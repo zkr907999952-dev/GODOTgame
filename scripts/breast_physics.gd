@@ -44,6 +44,7 @@ var _spine_i: int = -1
 var _sides: Array = []  # Array[Dictionary]
 var _acc: float = 0.0
 var _inited: bool = false
+var _pending_impulse: Vector3 = Vector3.ZERO
 
 
 func setup(skel: Skeleton3D) -> bool:
@@ -88,6 +89,7 @@ func setup(skel: Skeleton3D) -> bool:
 
 func reset() -> void:
 	_inited = false
+	_pending_impulse = Vector3.ZERO
 	_yaw_vel = 0.0
 	_pitch_vel = 0.0
 	_yaw_f = 0.0
@@ -101,6 +103,8 @@ func reset() -> void:
 		skeleton.set_bone_pose_position(i, s["rest_o"])
 		s["disp"] = Vector3.ZERO
 		s["tilt"] = Vector3.ZERO
+		s["v"] = Vector3.ZERO
+		s["tv"] = Vector3.ZERO
 
 
 ## 每帧由 player_controller 写入观察相机角速度（网页同样限幅 ±12 / ±8 rad/s）。
@@ -161,6 +165,9 @@ func update(delta: float) -> void:
 			s0["tv"] = Vector3.ZERO
 		_inited = true
 		_acc = 0.0
+		if _pending_impulse.length_squared() > 0.0:
+			_add_impulse(_pending_impulse)
+			_pending_impulse = Vector3.ZERO
 	var dt := clampf(delta, 0.0, 0.1)
 	_update_view_offset(dt)
 	_acc += dt
@@ -267,7 +274,25 @@ func debug_state() -> Dictionary:
 	return out
 
 
-## 调试 / 校验：给两侧主体一个速度冲量（模拟落地 / 急停）。
-func debug_kick(vel: Vector3) -> void:
+## 给两侧主体一个速度冲量（开火后坐 / 落地 / 急停）。未完成首帧初始化时会延后到下一帧。
+func apply_impulse(vel: Vector3) -> void:
+	if vel.length_squared() < 1e-10:
+		return
+	if not enabled or strength <= 0.001:
+		return
+	if not _inited or _sides.is_empty():
+		_pending_impulse += vel
+		return
+	_add_impulse(vel)
+
+
+func _add_impulse(vel: Vector3) -> void:
 	for s in _sides:
 		s["v"] = (s["v"] as Vector3) + vel
+		# 乳尖分一点冲量，开镜/腰射刚开火时甩动更明显。
+		s["tv"] = (s["tv"] as Vector3) + vel * 0.35
+
+
+## 调试 / 校验：同 apply_impulse（保留旧名给现有测试用）。
+func debug_kick(vel: Vector3) -> void:
+	apply_impulse(vel)

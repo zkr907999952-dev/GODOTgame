@@ -75,6 +75,9 @@ var body_look_pitch: float = 0.0
 var body_look_solved: Vector2 = Vector2.ZERO
 ## 0..1：持长枪时脖子/头微微下弓，脸颊贴枪托。
 var cheek_weld: float = 0.0
+## 开火身体后坐：胸椎/肩的后仰与微转（弧度），指数回正。不驱动相机，以免破坏开镜基线。
+var fire_recoil_pitch: float = 0.0
+var fire_recoil_yaw: float = 0.0
 
 ## Display-mode gaze: head + eyes look at a world-space point (usually the active Camera3D).
 var gaze_want: bool = false
@@ -208,6 +211,51 @@ func set_cheek_weld(k: float) -> void:
 	cheek_weld = clampf(k, 0.0, 1.0)
 
 
+func apply_fire_recoil(pitch: float, yaw: float = 0.0) -> void:
+	# 累加胸椎后坐并限幅，避免全自动连射把身子折到极限。
+	fire_recoil_pitch = clampf(fire_recoil_pitch + pitch, -deg_to_rad(14.0), deg_to_rad(14.0))
+	fire_recoil_yaw = clampf(fire_recoil_yaw + yaw, -deg_to_rad(6.0), deg_to_rad(6.0))
+
+
+func debug_fire_recoil() -> Vector2:
+	return Vector2(fire_recoil_pitch, fire_recoil_yaw)
+
+
+func _step_fire_recoil(d: float) -> void:
+	var rr := 9.0
+	fire_recoil_pitch *= exp(-rr * d)
+	fire_recoil_yaw *= exp(-rr * d)
+	if absf(fire_recoil_pitch) < 1e-5:
+		fire_recoil_pitch = 0.0
+	if absf(fire_recoil_yaw) < 1e-5:
+		fire_recoil_yaw = 0.0
+
+
+func _apply_fire_recoil() -> void:
+	if skeleton == null:
+		return
+	if absf(fire_recoil_pitch) < 1e-5 and absf(fire_recoil_yaw) < 1e-5:
+		return
+	# 软骨架 +Z 向前：绕 X 正转 = 上身向后仰。权重沿胸椎分配，肩头略带一点。
+	_rotate_bone_local("C_Spine_b", fire_recoil_pitch * 0.22, fire_recoil_yaw * 0.20)
+	_rotate_bone_local("C_Spine_c", fire_recoil_pitch * 0.40, fire_recoil_yaw * 0.45)
+	_rotate_bone_local("C_Spine_d", fire_recoil_pitch * 0.38, fire_recoil_yaw * 0.35)
+	_rotate_bone_local("L_Shoulder_a", fire_recoil_pitch * 0.10, 0.0)
+	_rotate_bone_local("R_Shoulder_a", fire_recoil_pitch * 0.10, 0.0)
+
+
+func _rotate_bone_local(name: String, pitch: float, yaw: float) -> void:
+	if not bone_i.has(name):
+		return
+	if absf(pitch) < 1e-6 and absf(yaw) < 1e-6:
+		return
+	var i: int = bone_i[name]
+	# 在本帧 loco + 呼吸姿势上叠加，SoftLoco 每帧重置，不会积分漂移。
+	var base_q := skeleton.get_bone_pose_rotation(i)
+	var add := _quat_euler_yxz(pitch, yaw, 0.0)
+	skeleton.set_bone_pose_rotation(i, (_soft_delta(name, add) * base_q).normalized())
+
+
 func set_body_look(yaw: float, pitch: float = 0.0) -> void:
 	body_look_on = true
 	body_look_yaw = yaw
@@ -265,6 +313,10 @@ func update(delta: float, sprint: bool = false) -> void:
 		_apply_gaze()
 	elif cheek_weld > 0.01:
 		_apply_cheek_weld_only()
+
+	# 开火身体后坐要在乳摇积分之前写入胸椎，锚点加速度才能带动乳房。
+	_step_fire_recoil(d)
+	_apply_fire_recoil()
 
 	_update_blink(d)
 	close_l = clampf(1.0 - eye_open_l * (1.0 - blink_amt), 0.0, 1.0)

@@ -533,6 +533,63 @@ func _fire_once(w: WeaponDef) -> void:
 		_slide_locked = true
 		_set_pistol_slide_open(true)
 	_eject_shell(w)
+	_apply_character_shot_recoil(w)
+
+
+func _body_recoil_scale(w: WeaponDef) -> float:
+	# 霰弹/步枪更强，冲锋枪次之，手枪最轻（不直接用 recoil_pitch，手枪相机后坐大但身体应最轻）。
+	if w == null:
+		return 0.55
+	match str(w.category):
+		"shotgun":
+			return 1.0
+		"rifle":
+			return 0.78
+		"smg":
+			return 0.45
+		"pistol":
+			return 0.28
+		_:
+			return 0.55
+
+
+func _apply_character_shot_recoil(w: WeaponDef) -> void:
+	# 角色身体后坐 + 乳摇冲量。与相机 recoil / 视模型 _kick 独立，开镜基线不受身体后坐影响。
+	if player == null or w == null:
+		return
+	var scale := _body_recoil_scale(w) * (0.7 if ads else 1.0)
+	var sec: Variant = player.call("get_secondary") if player.has_method("get_secondary") else null
+	if sec and sec.has_method("apply_fire_recoil"):
+		var pitch := deg_to_rad(8.0) * scale
+		var yaw := deg_to_rad(randf_range(-2.2, 2.2)) * scale
+		sec.call("apply_fire_recoil", pitch, yaw)
+	var br: Variant = sec.get("breasts") if sec else null
+	if br and br.has_method("apply_impulse"):
+		var fwd := Vector3(0, 0, 1)
+		if player.has_method("_body_forward"):
+			fwd = player.call("_body_forward")
+		if fwd.length_squared() < 1e-8:
+			fwd = Vector3(0, 0, -1)
+		fwd = fwd.normalized()
+		var right := Vector3.UP.cross(fwd)
+		if right.length_squared() < 1e-8:
+			right = Vector3.RIGHT
+		right = right.normalized()
+		var st: float = float(br.get("strength")) if br.get("strength") != null else 0.5
+		# 默认强度 0.5 → 增益 1.0；关闭乳摇时 apply_impulse 内部会直接返回。
+		var gain := st / 0.5
+		var vel: Vector3 = (-fwd * 0.85 + Vector3.UP * 0.55 + right * randf_range(-0.28, 0.28)) * (1.15 * scale * gain)
+		br.call("apply_impulse", vel)
+
+
+func debug_fire_once() -> bool:
+	var w: WeaponDef = cur_def()
+	if w == null:
+		return false
+	if ammo_of(current).x <= 0:
+		return false
+	_fire_once(w)
+	return true
 
 
 func _spread_dir(fwd: Vector3, ang: float) -> Vector3:
