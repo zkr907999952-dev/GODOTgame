@@ -310,7 +310,7 @@ func _check_drag_palm_and_pull() -> void:
 		# 先让 loco 写底姿势，再解抓取 IK（与游戏同一顺序的简化）
 		if player.get("loco") or true:
 			ws.call("apply_left_hand_grab", target)
-		await _frames(1)
+		# t27u：抓取 IK 写完立即测量（原先等一帧，是否刚好有物理帧把走跑底姿势写回取决于帧时序，结果不稳定）。
 		var palm := _palm_normal(skel)
 		var want := (target - sh).normalized()
 		var align := absf(palm.dot(want)) if palm != Vector3.ZERO else 0.0

@@ -447,16 +447,135 @@ func _cover_arm(side: String, target: Vector3, w: float) -> void:
 		if eh > elbow_h_max:
 			elbow_pos -= up * (eh - elbow_h_max)
 			elbow_pos = p0 + (elbow_pos - p0).normalized() * l1
-	var plane_n := (elbow_pos - p0).cross(want - p0)
-	if plane_n.length_squared() < 1e-8:
-		plane_n = right * side_sign
-	plane_n = plane_n.normalized()
-	if plane_n.dot(right * side_sign + fwd * 0.15) < 0.0:
-		plane_n = -plane_n
-	_set_bone_y_roll(ua, elbow_pos - p0, plane_n, w)
-	var fa_now: Vector3 = (sk * skeleton.get_bone_global_pose(fa)).origin
-	_set_bone_y_roll(fa, want - fa_now, plane_n, w)
+	# t27u：按解剖肘关节铰链摆臂。旧做法用「肘平面法线」决定上臂滚转，右臂法线符号反了，
+	# 肘关节向后反折。现在从 rest 姿势求出「屈肘时前臂朝身体前方转」的铰链轴，
+	# 让上臂的铰链轴对准 (上臂方向 × 前臂方向)，屈肘方向永远是自然方向。
+	_pose_cover_arm_hinged(ua, fa, side, p0, elbow_pos, want, fwd, w)
 	_set_cover_hand(ha, side, want, fwd, right, up, w)
+	_share_forearm_twist(fa, ha, w)
+
+
+func _rest_forward_s(fwd_world: Vector3) -> Vector3:
+	## rest 姿势下身体前向（骨架空间），符号与当前身体前向一致。
+	var lu := skeleton.find_bone("L_UpperArm_a")
+	var ru := skeleton.find_bone("R_UpperArm_a")
+	var hp := skeleton.find_bone("C_Hip_a")
+	var sp := skeleton.find_bone("C_Spine_c")
+	var fs := (skeleton.global_transform.basis.inverse() * fwd_world).normalized()
+	if lu < 0 or ru < 0 or hp < 0 or sp < 0:
+		return fs
+	var r := skeleton.get_bone_global_rest(ru).origin - skeleton.get_bone_global_rest(lu).origin
+	var u := skeleton.get_bone_global_rest(sp).origin - skeleton.get_bone_global_rest(hp).origin
+	var f := u.cross(r)
+	if f.length_squared() < 1e-8:
+		return fs
+	f = f.normalized()
+	return f if f.dot(fs) >= 0.0 else -f
+
+
+func _elbow_hinge_local(ua: int, fa: int, fwd_world: Vector3) -> Vector3:
+	## 上臂局部坐标下的屈肘铰链轴：绕它正向旋转 = 前臂朝身体前方屈曲。
+	var ua_rest := skeleton.get_bone_global_rest(ua)
+	var arm := skeleton.get_bone_global_rest(fa).origin - ua_rest.origin
+	var h := arm.normalized().cross(_rest_forward_s(fwd_world))
+	if h.length_squared() < 1e-8:
+		return Vector3.RIGHT
+	return (ua_rest.basis.orthonormalized().inverse() * h).normalized()
+
+
+func _pose_cover_arm_hinged(ua: int, fa: int, side: String, p0: Vector3, elbow: Vector3, want: Vector3, fwd: Vector3, w: float) -> void:
+	var sk_inv := skeleton.global_transform.affine_inverse()
+	var U := (sk_inv.basis * (elbow - p0)).normalized()
+	var V := (sk_inv.basis * (want - elbow)).normalized()
+	if not U.is_finite() or not V.is_finite() or U.length_squared() < 0.5:
+		return
+	var a_loc := skeleton.get_bone_rest(fa).origin.normalized()
+	var h_loc := _elbow_hinge_local(ua, fa, fwd)
+	h_loc = (h_loc - a_loc * h_loc.dot(a_loc)).normalized()
+	var h_s := U.cross(V)
+	if h_s.length_squared() < 1e-6:
+		# 几乎伸直：保持当前铰链朝向
+		h_s = skeleton.get_bone_global_pose(ua).basis.orthonormalized() * h_loc
+	h_s = (h_s - U * h_s.dot(U)).normalized()
+	var Lm := Basis(a_loc, h_loc, a_loc.cross(h_loc)).orthonormalized()
+	var Wm := Basis(U, h_s, U.cross(h_s)).orthonormalized()
+	var B := (Wm * Lm.inverse()).orthonormalized()
+	var par := skeleton.get_bone_parent(ua)
+	var par_b := skeleton.get_bone_global_pose(par).basis.orthonormalized() if par >= 0 else Basis.IDENTITY
+	var q := (par_b.inverse() * B).get_rotation_quaternion()
+	if w < 0.999:
+		q = skeleton.get_bone_pose_rotation(ua).slerp(q, clampf(w, 0.0, 1.0))
+	skeleton.set_bone_pose_rotation(ua, q)
+	# 前臂：在上臂 rest 关系上绕铰链转出屈肘角，再做一次很小的残差校正。
+	var Bn := skeleton.get_bone_global_pose(ua).basis.orthonormalized()
+	var fa_rest_rel := skeleton.get_bone_rest(fa).basis.orthonormalized()
+	var ha_i := skeleton.find_bone("%s_Hand_a" % side)
+	var c_loc := skeleton.get_bone_rest(ha_i).origin.normalized() if ha_i >= 0 else Vector3.UP
+	var F := Bn * fa_rest_rel
+	var cur := (F * c_loc).normalized()
+	var hinge_now := (Bn * h_loc).normalized()
+	# 绕铰链把前臂从当前方向转到目标方向（屈曲为正）
+	var cur_p := (cur - hinge_now * cur.dot(hinge_now)).normalized()
+	var V_p := (V - hinge_now * V.dot(hinge_now)).normalized()
+	var ang := atan2(cur_p.cross(V_p).dot(hinge_now), cur_p.dot(V_p))
+	F = Basis(hinge_now, ang) * F
+	var cur2 := (F * c_loc).normalized()
+	if cur2.dot(V) < 0.99999:
+		F = Basis(Quaternion(cur2, V)) * F
+	var qf := (Bn.inverse() * F.orthonormalized()).get_rotation_quaternion()
+	if w < 0.999:
+		qf = skeleton.get_bone_pose_rotation(fa).slerp(qf, clampf(w, 0.0, 1.0))
+	skeleton.set_bone_pose_rotation(fa, qf)
+
+
+func _share_forearm_twist(fa: int, ha: int, w: float) -> void:
+	## 手掌朝向所需的绕前臂轴扭转分一半给前臂，避免手腕拧成麻花。
+	if fa < 0 or ha < 0 or w <= 0.0:
+		return
+	var ax := skeleton.get_bone_rest(ha).origin.normalized()
+	var hq := skeleton.get_bone_pose_rotation(ha)
+	var proj := Vector3(hq.x, hq.y, hq.z).project(ax)
+	var tw := Quaternion(proj.x, proj.y, proj.z, hq.w).normalized()
+	var half := Quaternion.IDENTITY.slerp(tw, 0.5)
+	skeleton.set_bone_pose_rotation(fa, skeleton.get_bone_pose_rotation(fa) * half)
+	skeleton.set_bone_pose_rotation(ha, (half.inverse() * hq).normalized())
+
+
+## 测试：肘关节是否按自然方向屈曲（>0 自然，<0 反折），以及掌心是否朝向皮肤。
+func cover_joint_debug() -> Dictionary:
+	var out := {}
+	if skeleton == null:
+		return out
+	var fr := _torso_frame()
+	var fwd: Vector3 = fr["fwd"]
+	var skx := skeleton.global_transform
+	var skin := _skin_cover_point(cover_point) if cover_point != Vector3.ZERO else Vector3.ZERO
+	for side in ["L", "R"]:
+		var ua := skeleton.find_bone("%s_UpperArm_a" % side)
+		var fa := skeleton.find_bone("%s_Forearm_a" % side)
+		var ha := skeleton.find_bone("%s_Hand_a" % side)
+		var mi := skeleton.find_bone("%s_Middle_a" % side)
+		var ii := skeleton.find_bone("%s_Index_a" % side)
+		var pi := skeleton.find_bone("%s_Pinky_a" % side)
+		if ua < 0 or fa < 0 or ha < 0 or mi < 0 or ii < 0 or pi < 0:
+			continue
+		var p0 := skx * skeleton.get_bone_global_pose(ua).origin
+		var p1 := skx * skeleton.get_bone_global_pose(fa).origin
+		var p2 := skx * skeleton.get_bone_global_pose(ha).origin
+		var U := (p1 - p0).normalized()
+		var V := (p2 - p1).normalized()
+		var h_now := skx.basis * (skeleton.get_bone_global_pose(ua).basis.orthonormalized() * _elbow_hinge_local(ua, fa, fwd))
+		out[side + "_flex_deg"] = rad_to_deg(U.angle_to(V))
+		out[side + "_hinge"] = U.cross(V).normalized().dot(h_now.normalized()) if U.cross(V).length() > 1e-4 else 1.0
+		var f: Vector3 = skeleton.get_bone_global_pose(mi).origin - skeleton.get_bone_global_pose(ha).origin
+		var tt: Vector3 = skeleton.get_bone_global_pose(ii).origin - skeleton.get_bone_global_pose(pi).origin
+		var n := (skx.basis * f.cross(tt)).normalized()
+		var palm := n if side == "L" else -n
+		out[side + "_palm_in"] = palm.dot(-fwd)
+		var pc := (p2 + skx * skeleton.get_bone_global_pose(mi).origin) * 0.5
+		out[side + "_palm_to_skin"] = palm.dot((skin - pc).normalized()) if skin != Vector3.ZERO else 0.0
+		out[side + "_palm_center"] = pc
+	return out
 
 
 func _solve_cover_elbow(p0: Vector3, want: Vector3, l1: float, l2: float, pole: Vector3) -> Vector3:
@@ -605,7 +724,10 @@ func _set_cover_hand(ha: int, side: String, want: Vector3, fwd: Vector3, right: 
 	if fingers.length_squared() < 1e-8:
 		fingers = -up
 	fingers = fingers.normalized()
-	var sem_w := Basis(fingers, palm.cross(fingers), palm).orthonormalized()
+	# 手的语义 Z（指根×拇指方向）：左手 = 掌心方向，右手 = 手背方向（镜像）。
+	# 旧代码两只手都把 Z 当掌心，右手因此用手背捂肚子。
+	var sem_z := palm if side == "L" else -palm
+	var sem_w := Basis(fingers, sem_z.cross(fingers), sem_z).orthonormalized()
 	# SEM 在骨架空间写入手骨
 	var sk_inv := skeleton.global_transform.affine_inverse()
 	var sem_s := (sk_inv.basis * sem_w).orthonormalized()

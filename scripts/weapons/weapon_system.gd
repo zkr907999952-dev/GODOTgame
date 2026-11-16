@@ -113,6 +113,10 @@ var _flash_t: float = 0.0
 var _clips: ArmClips
 var _clip: String = ""
 var _clip_t: float = 0.0
+## t27u 泵动上膛：每次开火后左手拉动泵动前托（Forearm 骨）；枪动画由本系统逐帧 seek，与左手 IK 同一帧。
+var _pump_t: float = -1.0
+var _pump_dur: float = 0.0
+var _pump_bone_cache: Dictionary = {}
 var _clip_loop: bool = true
 var _prev_pose: Dictionary = {}
 var _blend: float = 1.0
@@ -652,7 +656,10 @@ func _fire_once(w: WeaponDef) -> void:
 	_fire_t = 0.0
 	if _clips.has("fire_aim" if ads else "fire"):
 		_play_clip("fire_aim" if ads else "fire", false, true)
-	_gun_anim("fire", (60.0 / w.rpm) if w.fire_mode == "auto" else 0.0)
+	if w.fire_mode == "pump" and gun_ap and gun_ap.has_animation("fire"):
+		_start_pump(w)
+	else:
+		_gun_anim("fire", (60.0 / w.rpm) if w.fire_mode == "auto" else 0.0)
 	if a.x == 0 and str(w.category) == "pistol":
 		_slide_locked = true
 		_set_pistol_slide_open(true)
@@ -770,6 +777,10 @@ func _build_flash() -> void:
 
 func _eject_shell(w: WeaponDef) -> void:
 	var delay := w.eject_delay if w.eject_delay > 0.0 else (0.32 if w.fire_mode == "pump" else 0.0)
+	if w.fire_mode == "pump" and _pump_t >= 0.0:
+		var back_u := _pump_back_u()
+		if back_u > 0.0:
+			delay = back_u * _pump_dur
 	if delay > 0.0:
 		_eject_q.append({"t": delay, "id": w.id})
 	else:
@@ -855,6 +866,50 @@ func _ads_offset(w: WeaponDef) -> Vector3:
 	return Vector3(w.view_offset.x + extra.x, w.view_offset.y + y + extra.y, w.view_offset.z + z + extra.z)
 
 
+## t27u：走跑/跳跃时身体（肩膀）上下左右晃动，枪要跟着一起动，而不是钉在镜头前让手臂来回拉。
+## 取两肩根部在「去掉俯仰的镜头坐标」里的位置，减去其慢速均值，只保留晃动/起跳落地的瞬时部分，
+## 叠加到视模型上（与 IK 手同一变换、同一帧）。
+const BODY_FOLLOW_K := 0.9
+const BODY_FOLLOW_TAU := 0.7
+const BODY_FOLLOW_MAX := 0.07
+var _bf_ref := Vector3.ZERO
+var _bf_has := false
+var debug_body_follow := Vector3.ZERO
+
+
+func _body_follow_offset(delta: float) -> Vector3:
+	debug_body_follow = Vector3.ZERO
+	if not (player and bool(player.get("first_person"))) or camera == null or skeleton == null or _arm.is_empty():
+		_bf_has = false
+		return Vector3.ZERO
+	var inv := camera.global_transform.affine_inverse()
+	var skx := _skel_xf()
+	var acc := Vector3.ZERO
+	var n := 0
+	for sd in ["R", "L"]:
+		var a: Dictionary = _arm.get(sd, {})
+		if a.is_empty():
+			continue
+		acc += inv * (skx * skeleton.get_bone_global_pose(int(a["ua"])).origin)
+		n += 1
+	if n == 0:
+		return Vector3.ZERO
+	var u := _look_up_angle()
+	var lvl: Vector3 = Basis(Vector3.RIGHT, u) * (acc / float(n))
+	if not lvl.is_finite():
+		return Vector3.ZERO
+	if not _bf_has:
+		_bf_ref = lvl
+		_bf_has = true
+	_bf_ref = _bf_ref.lerp(lvl, 1.0 - exp(-delta / BODY_FOLLOW_TAU))
+	var d := (lvl - _bf_ref) * BODY_FOLLOW_K * (1.0 - 0.6 * _ads_k)
+	if d.length() > BODY_FOLLOW_MAX:
+		d = d.normalized() * BODY_FOLLOW_MAX
+	var out: Vector3 = Basis(Vector3.RIGHT, -u) * d
+	debug_body_follow = out
+	return out
+
+
 func _loco_bob_xf(delta: float) -> Transform3D:
 	var sp := 0.0
 	if player:
@@ -905,7 +960,7 @@ func _waist_world() -> Vector3:
 		i = skeleton.find_bone("C_Hip_a")
 	if i < 0:
 		return camera.global_position + Vector3(0.0, -0.48, 0.0) if camera else Vector3.ZERO
-	return skeleton.global_transform * skeleton.get_bone_global_pose(i).origin
+	return _skel_xf() * skeleton.get_bone_global_pose(i).origin
 
 
 func _pitch_hold_xf() -> Transform3D:
@@ -929,12 +984,52 @@ func _shoulder_pivot_xf(xf: Transform3D, gl: Transform3D, w: WeaponDef) -> Trans
 	# 推导：水平时枪托在相机空间为 s；俯仰 u 后世界里枪托不动 => 相机空间里在 Rx(-u)*s。
 	if not (player and bool(player.get("first_person"))) or camera == null:
 		return xf
+	var u := _look_up_angle()
+	if w and not _is_long_gun(w):
+		# t27u 手枪：旋转中心 = 右肩（上臂肩关节），双臂伸直绕肩画弧。肩膀不随低头/抬头转，
+		# 当前相机空间里的肩位 S_now 已是 Rx(-u)*S_level，所以平移量 = S_now - S_level。
+		var sh := _pistol_shoulder_cam()
+		if sh.is_finite() and sh != Vector3.ZERO:
+			var level: Vector3 = Basis(Vector3.RIGHT, u) * sh
+			return Transform3D(xf.basis, xf.origin + sh - level)
 	var s: Vector3 = xf * (gl * _stock_local(w))
 	if not s.is_finite():
 		return xf
-	var u := _look_up_angle()
 	var moved: Vector3 = Basis(Vector3.RIGHT, -u) * s
 	return Transform3D(xf.basis, xf.origin + moved - s)
+
+
+## 手枪俯仰枢轴：左右肩关节（上臂根部）中点偏右手侧，在相机局部坐标。没有骨架时返回 0。
+func _pistol_shoulder_cam() -> Vector3:
+	if skeleton == null or camera == null or _arm.is_empty():
+		return Vector3.ZERO
+	var skx := _skel_xf()
+	var inv := camera.global_transform.affine_inverse()
+	var pts: Array[Vector3] = []
+	for sd in ["R", "L"]:
+		var a: Dictionary = _arm.get(sd, {})
+		if a.is_empty():
+			continue
+		# 用走跑底姿势里的上臂根部（IK 不转锁骨，肩点就是身体上的固定点）。
+		pts.append(inv * (skx * skeleton.get_bone_global_pose(int(a["ua"])).origin))
+	if pts.is_empty():
+		return Vector3.ZERO
+	if pts.size() == 1:
+		return pts[0]
+	# 双手握枪：两肩之间偏右（持枪手）0.65。
+	return pts[1].lerp(pts[0], 0.65)
+
+
+## 自检（t27u）：当前武器俯仰枢轴（世界坐标）。
+func debug_pitch_pivot() -> Vector3:
+	var w: WeaponDef = cur_def()
+	if w and not _is_long_gun(w) and camera:
+		var sh := _pistol_shoulder_cam()
+		if sh != Vector3.ZERO:
+			return camera.global_transform * sh
+	if gun and w:
+		return gun.to_global(_stock_local(w))
+	return Vector3.ZERO
 
 
 ## 枪口应汇聚的瞄准点（世界）。第一人称：准心射线命中点（夹在 2–60m，未命中取 30m）。
@@ -1017,6 +1112,10 @@ func _view_local(w: WeaponDef, pose: Dictionary = {}) -> Transform3D:
 		if hip > 0.001:
 			var tgt: Vector3 = camera.global_transform.affine_inverse() * _center_aim_point()
 			var piv: Vector3 = xf * (gl * _stock_local(w))
+			if not _is_long_gun(w):
+				var shp := _pistol_shoulder_cam()
+				if shp != Vector3.ZERO and shp.is_finite():
+					piv = shp
 			xf = _converge_about(xf, gl, w, tgt, piv, hip)
 	return xf
 
@@ -1132,7 +1231,7 @@ func _tp_aim_point(fwd: Vector3, pocket: Vector3) -> Vector3:
 	if skeleton:
 		var hi := skeleton.find_bone("C_Head_a")
 		if hi >= 0:
-			eye = skeleton.global_transform * skeleton.get_bone_global_pose(hi).origin
+			eye = _skel_xf() * skeleton.get_bone_global_pose(hi).origin
 	var fallback := eye + fwd * 20.0
 	if camera == null:
 		return fallback
@@ -1377,6 +1476,133 @@ func _scan_mag_throw_time() -> float:
 	return best
 
 
+func _start_pump(w: WeaponDef) -> void:
+	var an := gun_ap.get_animation("fire")
+	if an == null or an.length <= 0.05:
+		return
+	# 上膛必须在下一发之前完成：时长不超过射击间隔的 92%。
+	var interval := 60.0 / maxf(w.rpm, 1.0)
+	_pump_dur = minf(an.length, interval * 0.92)
+	_pump_t = 0.0
+	gun_ap.stop()
+	gun_ap.play("fire")
+	gun_ap.speed_scale = 0.0
+	gun_ap.seek(0.0, true)
+
+
+func _step_pump(delta: float) -> void:
+	if _pump_t < 0.0 or gun_ap == null or not gun_ap.has_animation("fire"):
+		return
+	var an := gun_ap.get_animation("fire")
+	_pump_t += delta
+	var u := clampf(_pump_t / maxf(_pump_dur, 0.05), 0.0, 1.0)
+	if gun_ap.current_animation != "fire":
+		gun_ap.play("fire")
+	gun_ap.speed_scale = 0.0
+	gun_ap.seek(u * an.length, true)
+	if u >= 1.0:
+		_pump_t = -1.0
+
+
+func _pump_bone() -> Dictionary:
+	## 泵动前托骨（霰弹 Forearm / Pump）：{sk, i}
+	if gun == null:
+		return {}
+	var key := current
+	if _pump_bone_cache.has(key):
+		var c: Dictionary = _pump_bone_cache[key]
+		if c.is_empty() or is_instance_valid(c.get("sk")):
+			return c
+	var out := {}
+	for n in gun.find_children("*", "Skeleton3D", true, false):
+		var sk := n as Skeleton3D
+		for nm in ["Forearm", "Pump", "pump", "Forend", "ForeEnd"]:
+			var bi := sk.find_bone(nm)
+			if bi >= 0:
+				out = {"sk": sk, "i": bi}
+				break
+		if not out.is_empty():
+			break
+	_pump_bone_cache[key] = out
+	return out
+
+
+func _pump_offset_gun() -> Vector3:
+	## 泵动前托相对静止位的位移（枪局部坐标）。非泵动武器 / 无骨骼返回 0。
+	var w: WeaponDef = cur_def()
+	if w == null or w.fire_mode != "pump" or gun == null:
+		return Vector3.ZERO
+	var pb := _pump_bone()
+	if pb.is_empty():
+		return Vector3.ZERO
+	var sk: Skeleton3D = pb["sk"]
+	var bi: int = pb["i"]
+	var to_gun := gun.global_transform.affine_inverse() * sk.global_transform
+	var cur := to_gun * sk.get_bone_global_pose(bi).origin
+	var rest := to_gun * sk.get_bone_global_rest(bi).origin
+	var d := cur - rest
+	return d if d.is_finite() else Vector3.ZERO
+
+
+func _pump_back_u() -> float:
+	## fire 动画里泵动前托离静止位最远的归一化时刻（抛壳时刻）。
+	if gun_ap == null or not gun_ap.has_animation("fire"):
+		return -1.0
+	var pb := _pump_bone()
+	if pb.is_empty():
+		return -1.0
+	var an := gun_ap.get_animation("fire")
+	var sk: Skeleton3D = pb["sk"]
+	var path := String(gun_ap.get_node(gun_ap.root_node).get_path_to(sk)) + ":" + sk.get_bone_name(int(pb["i"]))
+	var ti := an.find_track(NodePath(path), Animation.TYPE_POSITION_3D)
+	if ti < 0:
+		return -1.0
+	var p0: Vector3 = an.position_track_interpolate(ti, 0.0)
+	var best_t := -1.0
+	var best_d := 0.0
+	var t := 0.0
+	while t <= an.length:
+		var d := an.position_track_interpolate(ti, t).distance_to(p0)
+		if d > best_d:
+			best_d = d
+			best_t = t
+		t += 1.0 / 60.0
+	return best_t / an.length if best_t > 0.0 else -1.0
+
+
+## 自检（t27u）：泵动状态、前托位移（米，世界尺度）、左手掌心到（随前托移动的）握持点距离。
+func debug_pump() -> Dictionary:
+	var out := {"active": _pump_t >= 0.0, "u": (_pump_t / _pump_dur) if (_pump_t >= 0.0 and _pump_dur > 0.0) else 0.0, "pump_m": 0.0, "palm_to_pump": 99.0, "back_u": _pump_back_u(), "dur": _pump_dur}
+	if gun == null:
+		return out
+	var sc := gun.global_transform.basis.get_scale().x
+	out["pump_m"] = _pump_offset_gun().length() * sc
+	var info := _foregrip_info()
+	if info.is_empty() or skeleton == null or _arm.is_empty():
+		return out
+	var want_g: Vector3 = (info["attach"] as Vector3) + _pump_offset_gun()
+	var want_w: Vector3 = gun.global_transform * want_g
+	var palm_w := _palm_world("L")
+	out["palm_to_pump"] = palm_w.distance_to(want_w) - PALM_GAP
+	return out
+
+
+func _palm_world(s: String) -> Vector3:
+	var a: Dictionary = _arm.get(s, {})
+	if a.is_empty():
+		return Vector3.ZERO
+	var hi := int(a.get("ha", -1))
+	if hi < 0:
+		return Vector3.ZERO
+	var hx := _skel_xf() * skeleton.get_bone_global_pose(hi)
+	var mid := hx.origin
+	# 掌心 ≈ 手骨与中指根之间
+	var mi := skeleton.find_bone(s + "_Middle_a")
+	if mi >= 0:
+		mid = (hx.origin + (_skel_xf() * skeleton.get_bone_global_pose(mi)).origin) * 0.5
+	return mid
+
+
 func _sync_gun_reload_anim() -> void:
 	# 用手部 clip 的归一化进度驱动枪械 AnimationPlayer，避免两套时钟漂移造成手和枪不同步。
 	if gun_ap == null or _clips == null:
@@ -1413,7 +1639,7 @@ func debug_reload_sync() -> Dictionary:
 		if li < 0:
 			li = skeleton.find_bone("L_Hand")
 		if mag_n is Node3D and li >= 0 and (mag_n as Node3D).visible:
-			var hand := skeleton.global_transform * skeleton.get_bone_global_pose(li)
+			var hand := _skel_xf() * skeleton.get_bone_global_pose(li)
 			left_to_mag = hand.origin.distance_to((mag_n as Node3D).global_position)
 	return {
 		"state": state,
@@ -1738,7 +1964,7 @@ func debug_hand_to_gun() -> Dictionary:
 	for s in ["R", "L"]:
 		if not _arm.has(s):
 			continue
-		var hand: Vector3 = skeleton.global_transform * skeleton.get_bone_global_pose(int(_arm[s]["ha"])).origin
+		var hand: Vector3 = _skel_xf() * skeleton.get_bone_global_pose(int(_arm[s]["ha"])).origin
 		var best := 99.0
 		for mi in meshes:
 			var m := mi as MeshInstance3D
@@ -1772,7 +1998,10 @@ func _update_clip(delta: float) -> Dictionary:
 			pass
 	_clip_t += delta * _clip_speed
 	if state == "reloading":
+		_pump_t = -1.0
 		_sync_gun_reload_anim()
+	else:
+		_step_pump(delta)
 	var pose := _clips.sample(_clip, _clip_t, _clip_loop)
 	if _blend < 1.0:
 		_blend = minf(1.0, _blend + delta / BLEND_T)
@@ -1872,7 +2101,7 @@ func _process(delta: float) -> void:
 	if pose.is_empty():
 		return
 	_step_left_grip_weight(delta)
-	var local_xf := _view_local(w, pose) * (kick_t if _ads_k < 0.05 else Transform3D()) * _loco_bob_xf(delta)
+	var local_xf := Transform3D(Basis(), _body_follow_offset(delta)) * _view_local(w, pose) * (kick_t if _ads_k < 0.05 else Transform3D()) * _loco_bob_xf(delta)
 	if gun:
 		gun.transform = pose["gun"]
 	_apply_view_xf(local_xf, pose)
@@ -2040,7 +2269,7 @@ func left_hand_world() -> Vector3:
 	var i := skeleton.find_bone("L_Hand_a")
 	if i < 0:
 		return Vector3.ZERO
-	return (skeleton.global_transform * skeleton.get_bone_global_pose(i)).origin
+	return (_skel_xf() * skeleton.get_bone_global_pose(i)).origin
 
 
 func grab_palm_sem(world_target: Vector3, shoulder_world: Vector3) -> Basis:
@@ -2072,7 +2301,7 @@ func apply_left_hand_grab(world_target: Vector3) -> void:
 		var bi := int(a[k])
 		if bi >= 0 and not _loco_cache.has(bi):
 			_loco_cache[bi] = skeleton.get_bone_pose_rotation(bi)
-	var sk_xf := skeleton.global_transform
+	var sk_xf := _skel_xf()
 	var to_sk := sk_xf.affine_inverse()
 	var P: Vector3 = to_sk * world_target
 	# 肘向外（角色左侧）并略向下，避免前臂翻拧。
@@ -2147,14 +2376,28 @@ func _set_rot(bi: int, q: Quaternion, w: float) -> void:
 	skeleton.set_bone_pose_rotation(bi, _base_rot(bi).slerp(q, w) if w < 0.999 else q)
 
 
+## 渲染时骨架所在的世界变换（物理插值后的）。t27u：以前第一人称持枪时把骨架插值关掉，
+## 结果身体按物理帧跳动、镜头和枪按插值平滑移动——走路/跳跃时两者每帧错开最多一个物理步，
+## 手臂在「跳动的身体」和「平滑的枪」之间来回拉，看起来手晃、穿模、有虚影。
+## 现在骨架保持插值，IK 目标换算也用同一个插值变换，手、身体、枪在同一帧同一变换下绘制。
+func _skel_xf() -> Transform3D:
+	if skeleton == null:
+		return Transform3D()
+	var live := skeleton.global_transform
+	if Engine.is_in_physics_frame() or not skeleton.is_physics_interpolated_and_enabled():
+		return live
+	var itp := skeleton.get_global_transform_interpolated()
+	# 真机偶发返回旧值/单位矩阵：离即时变换过远时退回即时变换（同 organ_rig._skel_world_xf）。
+	if not itp.origin.is_finite() or itp.origin.distance_squared_to(live.origin) > 0.25:
+		return live
+	return itp
+
+
 func _sync_skel_interp() -> void:
-	# 持枪第一人称：关闭骨架物理插值，让 _process 里写的 IK 立刻画出来，
-	# 与挂在「插值关闭」的镜头上的枪同步。观察模式 / 收枪后恢复继承。
+	# t27u：骨架始终继承物理插值（与镜头使用同一插值公式），不再在持枪第一人称时关闭。
 	if skeleton == null:
 		return
-	var fp := bool(player.get("first_person")) if player else false
-	var want_off := fp and is_armed() and _ik_w > 0.05
-	var mode := Node.PHYSICS_INTERPOLATION_MODE_OFF if want_off else Node.PHYSICS_INTERPOLATION_MODE_INHERIT
+	var mode := Node.PHYSICS_INTERPOLATION_MODE_INHERIT
 	if skeleton.physics_interpolation_mode != mode:
 		skeleton.physics_interpolation_mode = mode
 
@@ -2164,7 +2407,7 @@ func debug_spine_bow() -> Dictionary:
 	var out := {"lean": 0.0, "spine_a": 0.0, "spine_b": 0.0, "spine_c": 0.0, "ok": false}
 	if skeleton == null:
 		return out
-	var skx := skeleton.global_transform
+	var skx := _skel_xf()
 	var ia := skeleton.find_bone("C_Spine_a")
 	var ic := skeleton.find_bone("C_Spine_c")
 	var ih := skeleton.find_bone("C_Hip_a")
@@ -2198,7 +2441,7 @@ func _pull_gun_into_reach(pose: Dictionary) -> void:
 		return
 	if view.get_parent() != camera:
 		return
-	var skx := skeleton.global_transform
+	var skx := _skel_xf()
 	var pulled := false
 	debug_last_pull = 0.0
 	for _pass in 2:
@@ -2481,7 +2724,8 @@ func _left_grip_pose(a: Dictionary) -> Dictionary:
 	var n: Vector3 = info["n"]
 	var f: Vector3 = info["f"]
 	var flen: float = float(a.get("flen", 0.09))
-	var palm: Vector3 = (info["attach"] as Vector3) - n * (PALM_GAP / sc)
+	# 泵动：掌心跟着前托一起前后滑（同一帧的枪骨姿势）。
+	var palm: Vector3 = (info["attach"] as Vector3) + _pump_offset_gun() - n * (PALM_GAP / sc)
 	var wrist_g: Vector3 = palm - f * (flen * 0.5 / sc)
 	var gxf: Transform3D = gun.transform
 	var sem_g := Basis(f, n.cross(f), n)
@@ -2535,7 +2779,7 @@ func _apply_ik(pose: Dictionary, w: float) -> void:
 	_ik_dirty = true
 	# 视模型挂在插值关闭的相机上；必须用当前（非插值）骨架变换，
 	# 否则俯仰时枪已经跟上镜头，手还留在上一物理帧的插值姿势上。
-	var sk_xf := skeleton.global_transform
+	var sk_xf := _skel_xf()
 	var to_sk := sk_xf.affine_inverse()
 	var vx := view.global_transform
 	var barrel := (to_sk.basis * (vx.basis * (pose["gun"] as Transform3D).basis * Vector3.RIGHT)).normalized()
@@ -2607,7 +2851,7 @@ func _aim_bone_chain_to(prefix: String, world_dir: Vector3, w: float) -> void:
 	if world_dir.length_squared() < 1e-8:
 		return
 	world_dir = world_dir.normalized()
-	var sk_xf := skeleton.global_transform
+	var sk_xf := _skel_xf()
 	for j in ["a", "b"]:
 		var bi := skeleton.find_bone("%s_%s" % [prefix, j])
 		if bi < 0:
@@ -2672,7 +2916,7 @@ func debug_ads_parts() -> Dictionary:
 	if skeleton:
 		var sh_i := skeleton.find_bone("R_Shoulder_a")
 		if sh_i >= 0:
-			var sh: Vector3 = skeleton.global_transform * skeleton.get_bone_global_pose(sh_i).origin
+			var sh: Vector3 = _skel_xf() * skeleton.get_bone_global_pose(sh_i).origin
 			out["d_shoulder"] = stock_w.distance_to(sh)
 	return out
 
@@ -2760,7 +3004,7 @@ func debug_stock_vs_head() -> Dictionary:
 	out["stock"] = gun.to_global(_stock_local(w))
 	var sh_i := skeleton.find_bone("R_Shoulder_a")
 	var hd_i := skeleton.find_bone("C_Head_a")
-	var skx := skeleton.global_transform
+	var skx := _skel_xf()
 	if sh_i >= 0:
 		out["shoulder"] = skx * skeleton.get_bone_global_pose(sh_i).origin
 	if hd_i >= 0:
@@ -2814,7 +3058,7 @@ func debug_thumb_slide() -> Dictionary:
 	if gun == null or skeleton == null:
 		return out
 	var slide := (gun.global_transform.basis * Vector3.RIGHT).normalized()
-	var skx := skeleton.global_transform
+	var skx := _skel_xf()
 	for s in ["R", "L"]:
 		var a := skeleton.find_bone("%s_Thumb_a" % s)
 		var b := skeleton.find_bone("%s_Thumb_b" % s)
@@ -2836,20 +3080,52 @@ const RGRIP_CURL := [0.85, 1.05, 0.75]
 var _slide_max := 0.42
 var _grab_solving := false
 ## 第一人称长枪：肩膀在镜头后下方约 0.3–0.6m（为不露出自己身体），开镜时手臂需要更长才能握到护木。
+## t27u：t25u 的伸长把「前臂→手」骨的位置也按倍数放大，手骨被推离前臂末端近 20cm，
+## 手腕/手掌皮肤被拉长，看起来像左手手指被拉长。现在：
+##  - 前臂、手、手指骨长度永远保持原样（只旋转，不缩放不位移）；
+##  - 第一人称长枪（肩膀在镜头后下方、画面外）需要的额外长度只加在上臂上（画面外），
+##    总长倍数沿用 t25u 的腰射 1.42 / 开镜 1.80 上限，再不够才沿护木后滑；
+##  - 观察模式 / 手枪 / 其它持枪：总长最多 1.05（轻微），其余由 _pull_gun_into_reach 把枪挪近。
 const ARM_STRETCH_FP_HIP := 1.42
 const ARM_STRETCH_FP_ADS := 1.80
+const ARM_STRETCH_ARMED := 1.05
 
 
 func _stretch_max_for(left_grip: bool) -> float:
-	var fp := bool(player.get("first_person")) if player else false
-	# 只在持长枪时放宽；空手抓取/拖拽等仍用原手臂长度。
-	if not fp or not _is_long_gun(cur_def()) or not is_armed() or _grab_solving:
+	# 空手抓取/拖拽保持原手臂上限。
+	if _grab_solving or not is_armed():
 		return ARM_STRETCH_MAX
+	var fp := bool(player.get("first_person")) if player else false
+	if not fp or not _is_long_gun(cur_def()):
+		return ARM_STRETCH_ARMED
 	var k := clampf(_ads_k, 0.0, 1.0)
 	var m := lerpf(ARM_STRETCH_FP_HIP, ARM_STRETCH_FP_ADS, k)
 	if not left_grip:
-		m = lerpf(ARM_STRETCH_MAX, m, 0.6)
+		m = lerpf(ARM_STRETCH_ARMED, m, 0.6)
 	return m
+
+
+## 自检（t27u）：上一帧左右手臂的伸长倍数（1 = 原长）。
+func debug_arm_stretch() -> Dictionary:
+	var out := {}
+	for s in ["L", "R"]:
+		var a: Dictionary = _arm.get(s, {})
+		out[s] = float(a.get("last_stretch", 1.0))
+		out[s + "_ua"] = float(a.get("last_ua_k", 1.0))
+		# 前臂/手骨的实际长度比（应恒为 1）
+		if not a.is_empty() and skeleton:
+			var ha := int(a["ha"])
+			out[s + "_fa_len"] = skeleton.get_bone_pose_position(ha).length() / maxf(skeleton.get_bone_rest(ha).origin.length(), 1e-5)
+	# 手指骨位移比（应恒为 1）
+	var worst := 1.0
+	for bi in _finger_bones:
+		var r := skeleton.get_bone_rest(bi).origin.length()
+		if r > 1e-5:
+			var k := skeleton.get_bone_pose_position(bi).length() / r
+			if absf(k - 1.0) > absf(worst - 1.0):
+				worst = k
+	out["finger_len"] = worst
+	return out
 
 
 func _solve_arm(a: Dictionary, P: Vector3, pole: Vector3, hand_basis: Basis, slide_axis: Vector3, w: float) -> void:
@@ -2885,8 +3161,11 @@ func _solve_arm(a: Dictionary, P: Vector3, pole: Vector3, hand_basis: Basis, sli
 		d = P - A
 		reach /= smax
 	var stretch := clampf(d.length() / reach, 1.0, smax)
-	l1 *= stretch
-	l2 *= stretch
+	a["last_stretch"] = stretch
+	# 额外长度全部给上臂：l1' = stretch·(l1+l2) − l2；前臂 l2 不变。
+	var ua_k := maxf(1.0, (stretch * (l1 + l2) - l2) / maxf(l1, 1e-4))
+	a["last_ua_k"] = ua_k
+	l1 *= ua_k
 	var dist := clampf(d.length(), 0.02, (l1 + l2) * 0.999)
 	var dir := d.normalized()
 	var ca := (l1 * l1 - l2 * l2 + dist * dist) / (2.0 * dist)
@@ -2915,12 +3194,12 @@ func _solve_arm(a: Dictionary, P: Vector3, pole: Vector3, hand_basis: Basis, sli
 	var share := Quaternion.IDENTITY.slerp(twist, 0.55)
 	fa_new = fa_new * Basis(share)
 	_set_rot(fa, (ua_new.inverse() * fa_new).get_rotation_quaternion(), w)
-	if stretch > 1.0001:
-		skeleton.set_bone_pose_position(fa, skeleton.get_bone_rest(fa).origin * stretch)
-		skeleton.set_bone_pose_position(ha, skeleton.get_bone_rest(ha).origin * stretch)
+	# 只移动前臂骨的起点（= 上臂变长）；手骨位置保持 rest，手/手指比例不变。
+	if ua_k > 1.0001:
+		skeleton.set_bone_pose_position(fa, skeleton.get_bone_rest(fa).origin * ua_k)
 	else:
 		skeleton.set_bone_pose_position(fa, skeleton.get_bone_rest(fa).origin)
-		skeleton.set_bone_pose_position(ha, skeleton.get_bone_rest(ha).origin)
+	skeleton.set_bone_pose_position(ha, skeleton.get_bone_rest(ha).origin)
 	_set_rot(ha, (share.inverse() * hand_local).normalized(), w)
 
 
@@ -2945,7 +3224,7 @@ func debug_shoulder_metrics() -> Dictionary:
 	}
 	if skeleton == null:
 		return out
-	var skx := skeleton.global_transform
+	var skx := _skel_xf()
 	var heights: Dictionary = {}
 	for s in ["L", "R"]:
 		for pair in [["sh", "Shoulder_a"], ["ua", "UpperArm_a"]]:
@@ -2979,7 +3258,7 @@ func debug_left_grip() -> Dictionary:
 	var info := _foregrip_info()
 	if info.is_empty():
 		return out
-	var skx := skeleton.global_transform
+	var skx := _skel_xf()
 	var hi := skeleton.find_bone("L_Hand_a")
 	var mi := skeleton.find_bone("L_Middle_a")
 	if hi < 0 or mi < 0:
@@ -3061,7 +3340,7 @@ func debug_stock_pivot() -> Dictionary:
 	var w: WeaponDef = cur_def()
 	if w == null or gun == null or skeleton == null:
 		return out
-	var skx := skeleton.global_transform
+	var skx := _skel_xf()
 	out["stock"] = gun.to_global(_stock_local(w))
 	for nm in ["R_Shoulder_a", "R_UpperArm_a", "L_Hand_a", "R_Hand_a"]:
 		var bi := skeleton.find_bone(nm)
@@ -3085,6 +3364,6 @@ func debug_hand_error() -> Dictionary:
 		var h: Dictionary = _last_pose[s]
 		var wrist_cam: Vector3 = _wrist_cam(s, h, a)
 		var want := vx * wrist_cam
-		var got := skeleton.global_transform * skeleton.get_bone_global_pose(int(a["ha"])).origin
+		var got := _skel_xf() * skeleton.get_bone_global_pose(int(a["ha"])).origin
 		out[s] = want.distance_to(got)
 	return out
