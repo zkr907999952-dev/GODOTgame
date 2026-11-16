@@ -344,4 +344,3 @@ func _aim_bone(bi: int, from: Vector3, to: Vector3, w: float) -> void:
 	var q := Quaternion(local_axis, ang)
 	var now := skeleton.get_bone_pose_rotation(bi)
 	skeleton.set_bone_pose_rotation(bi, (now * q).normalized())
-
