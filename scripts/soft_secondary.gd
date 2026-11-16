@@ -526,14 +526,9 @@ func _apply_gaze() -> void:
 
 
 func _apply_aim_waist(cam_pitch: float) -> void:
-	# 上一版把俯仰分到腰/胸多节，腹部会折进网格穿模。现在不再弯腰分节，
-	# 只在腰部 C_Spine_a 做一次整体俯身，上半身连同肩一起绕腰转动。不转锁骨，也不转 C_Spine_b/c/d。
-	var down := clampf(-cam_pitch, 0.0, 1.55)
-	var up := clampf(cam_pitch, 0.0, 0.85)
-	if down < 0.02 and up < 0.02:
-		return
-	var lean := clampf(down * 0.50, 0.0, 0.48) - clampf(up * 0.16, 0.0, 0.18)
-	_nudge_look_bone("C_Spine_a", lean, 0.0)
+	# 不再弯腰：俯视时不转动腰/胸/锁骨，避免第一人称穿模看见自己的身体。
+	# 武器俯仰仍由 weapon_system._waist_aim_xf 跟随视线，与躯干姿态无关。
+	return
 
 
 func debug_aim_waist() -> Dictionary:

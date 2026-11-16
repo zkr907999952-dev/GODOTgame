@@ -101,7 +101,7 @@ func _view_xform() -> Transform3D:
 
 
 func hold_world() -> Vector3:
-	# 抓取时记在第一人称视点空间里的点；转视角时跟着视线走，手把尸体拉过去。
+	# 上古卷轴式：持握点记在视点（手前方）局部空间。转视角时点跟着走，尸体被拉过去。
 	var p := aimed_point
 	if _has_hold:
 		p = _view_xform() * _hold_local
@@ -288,7 +288,9 @@ func apply_left_hand() -> void:
 
 
 func _reach_goal() -> Vector3:
-	# 手能伸到的最远点：超过臂长时停在臂长处，尸体要被拉到这里才算抓住。
+	# 伸手目标就是当前持握点（已跟视角/手走）。没有持握记录时才退回抓取点。
+	if _has_hold:
+		return hold_world()
 	var sh := shoulder_world()
 	var hand := left_hand_world()
 	var pt := current_grab_point()
@@ -318,7 +320,9 @@ func _tick_reach(delta: float, pt: Vector3) -> void:
 	var d := current_grab_point().distance_to(goal)
 	if d <= REACH_SNAP or _reach_t >= REACH_MAX:
 		reaching = false
-		capture_hold(goal if d <= 0.35 else current_grab_point().lerp(goal, 0.7))
+		# 不要用世界固定的骨头位置覆盖持握点，否则转视角时拖拽点不会跟着走。
+		if not _has_hold:
+			capture_hold(goal if d <= 0.35 else current_grab_point().lerp(goal, 0.7))
 		_sync_anchor(hold_world())
 
 
@@ -378,16 +382,17 @@ func _begin() -> bool:
 	grabbed_bone = bname
 	grabbed_pb = pb
 	_local_grab = pb.to_local(aimed_point)
-	_has_hold = false
 	dragging = true
 	reaching = true
 	_reach_t = 0.0
+	# 一开始就把抓取点锁在视线/手前空间，旋转视角会立刻带动拖拽点。
+	capture_hold(aimed_point)
 	last_drop_reason = ""
 	last_toggle_ok = true
 	toggle_count += 1
 	_add_exceptions(rag)
 	apply_left_hand()
-	_sync_anchor(_reach_hand_target())
+	_sync_anchor(hold_world())
 	# 不创建 PinJoint3D：Jolt + PhysicalBone3D 上约束会把尸体弹飞。
 	return true
 

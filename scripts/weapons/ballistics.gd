@@ -31,6 +31,9 @@ var next_hit_owner: bool = false
 ## 同一扣扳机发出的多弹头共用 shot_id，特写时一起飞。
 var next_shot_id: int = 0
 var _shot_seq: int = 0
+## 同一 shot_id 的全部弹头（含已结束的），供霰弹特写在部分弹头已回收后仍能成组跟随。
+var _shot_groups: Dictionary = {}
+var _shot_hit_owner: bool = false
 var last_hit: Dictionary = {}
 var last_body: Dictionary = {}
 var last_organ: Dictionary = {}
@@ -126,11 +129,44 @@ func live_projectiles() -> Array:
 func begin_shot() -> int:
 	_shot_seq += 1
 	next_shot_id = _shot_seq
+	_shot_hit_owner = hit_owner or next_hit_owner
+	if not _shot_groups.has(next_shot_id):
+		_shot_groups[next_shot_id] = []
+	# 只保留最近若干组，避免字典无限增长。
+	if _shot_groups.size() > 16:
+		var keys: Array = _shot_groups.keys()
+		keys.sort()
+		for i in range(keys.size() - 16):
+			_shot_groups.erase(keys[i])
 	return next_shot_id
 
 
 func end_shot() -> void:
 	next_shot_id = 0
+	next_hit_owner = false
+	_shot_hit_owner = false
+
+
+func projectiles_for_shot(sid: int) -> Array:
+	if sid == 0:
+		return []
+	var out: Array = _shot_groups.get(sid, [])
+	return out if out is Array else []
+
+
+func best_shot_cluster() -> Array:
+	# 优先最新的、数量最多的一组（霰弹特写不要被上一发残留的单发散弹带走）。
+	var best: Array = []
+	var best_id := 0
+	for k in _shot_groups.keys():
+		var g = _shot_groups[k]
+		if not (g is Array):
+			continue
+		var sid := int(k)
+		if (g as Array).size() > best.size() or ((g as Array).size() == best.size() and sid > best_id):
+			best = g
+			best_id = sid
+	return best
 
 
 func clear_all() -> void:
@@ -170,12 +206,18 @@ func fire_projectile(origin: Vector3, dir: Vector3, weapon_id: String, w: Resour
 		"hit_body": false,
 		"cinfo": {},
 		"cinematic": false,
-		"hit_owner": hit_owner or next_hit_owner,
+		"hit_owner": hit_owner or next_hit_owner or _shot_hit_owner,
 		"shot_id": next_shot_id,
 		"ballistics": self,
 	}
-	next_hit_owner = false
+	# 整组霰弹共用 next_hit_owner；单发（没有 begin_shot）仍在此清掉。
+	if next_shot_id == 0:
+		next_hit_owner = false
 	_live.append(rec)
+	if rec["shot_id"] != 0:
+		if not _shot_groups.has(rec["shot_id"]):
+			_shot_groups[rec["shot_id"]] = []
+		(_shot_groups[rec["shot_id"]] as Array).append(rec)
 	while _live.size() > MAX_LIVE:
 		_end(_live[0], false)
 	return rec
@@ -610,14 +652,43 @@ func look_along(n: Node3D, d: Vector3) -> void:
 
 func _end(p: Dictionary, leave_spent: bool, at: Vector3 = Vector3.ZERO, dir: Vector3 = Vector3.FORWARD) -> void:
 	_live.erase(p)
-	var n: MeshInstance3D = p.get("node")
-	if leave_spent and n and is_instance_valid(n):
-		n.global_position = at - dir * 0.004
-		look_along(n, dir)
-		n.visible = true
-		_spent.append({"n": n, "t": 2.0})
-		p["node"] = null
+	# 不再把弹头/霰弹黑球留在命中点：那会在空中悬浮成小黑点。火花仍由 _spawn_decal 负责。
+	# leave_spent 参数保留，以免旧调用点报错，但视觉网格一律回收。
+	if leave_spent:
+		pass
+	if at.is_finite():
+		p["end_at"] = at
+	if dir.is_finite() and dir.length_squared() > 1e-10:
+		p["end_dir"] = dir
 	_park(p)
+
+
+func spent_visible_count() -> int:
+	var n := 0
+	for s in _spent:
+		var mi = s.get("n") if s is Dictionary else null
+		if mi is MeshInstance3D and is_instance_valid(mi) and (mi as MeshInstance3D).visible:
+			n += 1
+	return n
+
+
+func lingering_visible_shot_meshes() -> Array:
+	# 测试：飞行结束后仍可见的弹头/弹丸网格（不含弹痕贴花、火花）。
+	var out: Array = []
+	for s in _spent:
+		var mi = s.get("n") if s is Dictionary else null
+		if mi is MeshInstance3D and is_instance_valid(mi) and (mi as MeshInstance3D).visible:
+			out.append(mi)
+	for p in _live:
+		if not (p is Dictionary):
+			continue
+		var rec: Dictionary = p
+		if float(rec.get("age", 0.0)) < 1.6:
+			continue
+		var mi2: MeshInstance3D = rec.get("node")
+		if mi2 and is_instance_valid(mi2) and mi2.visible:
+			out.append(mi2)
+	return out
 
 
 func _park(p: Dictionary) -> void:

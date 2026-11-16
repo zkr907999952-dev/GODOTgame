@@ -105,7 +105,7 @@ func _run() -> void:
 		print("v024: pitch ", deg, "deg look_up=", ws.call("_look_up_angle") if ws.has_method("_look_up_angle") else "?", " hands=", he, " to_gun=", hg, " bowΔ=", dbow)
 		_ok(maxf(float(hg.get("R", 99)), float(hg.get("L", 99))) < 0.045, "hands on gun mesh at %s deg" % deg)
 	_ok(worst_hand < 0.07, "IK wrist stays on sockets through pitch (worst=%.3f m at %s deg)" % [worst_hand, worst_at])
-	_ok(worst_bow < deg_to_rad(22.0), "waist-pivot lean vs level stays bounded (0.2.13: single waist pivot, no multi-spine bend) (worst=%.1f deg)" % rad_to_deg(worst_bow))
+	_ok(worst_bow < deg_to_rad(10.0), "looking down does not lean the waist/spine (no torso bend, worst=%.1f deg)" % rad_to_deg(worst_bow))
 
 	# 走跑手不离枪
 	_set_look_pitch(-0.15)

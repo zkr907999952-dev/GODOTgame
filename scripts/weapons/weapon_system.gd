@@ -30,7 +30,7 @@ const IK_FADE := 7.0
 const POLE_R := Vector3(0.75, -1.0, 0.15)
 const POLE_L := Vector3(-0.75, -1.0, 0.15)
 ## 左手在视模型空间的修正：动画手腕偏高，会穿出护木/机匣顶。略下移并靠近枪身。
-const LEFT_HAND_ADJUST := Vector3(0.0, -0.030, 0.018)
+const LEFT_HAND_ADJUST := Vector3(0.0, -0.012, 0.006)
 ## 右手略向握把靠拢、下移，掌心贴握把而不是悬空。
 const RIGHT_HAND_ADJUST := Vector3(0.006, -0.012, 0.008)
 ## 把动画手腕往真实握持点拉近的混合量。
@@ -615,7 +615,13 @@ func _fire_once(w: WeaponDef) -> void:
 	ammo_changed.emit(current, a.x, a.y)
 	var origin := _origin_override if _has_origin_override else camera.global_position
 	var fwd := _aim_override if _has_aim_override else -camera.global_transform.basis.z
-	var spread := 0.0 if _has_aim_override else deg_to_rad((w.spread_deg * (0.35 if ads else 1.0)) + spread_extra)
+	var spread := deg_to_rad((w.spread_deg * (0.35 if ads else 1.0)) + spread_extra)
+	if _has_aim_override:
+		# 观察点击：步枪等走精确射线；霰弹仍保留自身散布，才能看出多弹头特写与分叉拖尾。
+		if str(w.category) == "shotgun":
+			spread = deg_to_rad(w.spread_deg * 0.9)
+		else:
+			spread = 0.0
 	if ballistics and ballistics.has_method("begin_shot"):
 		ballistics.call("begin_shot")
 	for i in maxi(1, w.pellets):
@@ -1250,6 +1256,55 @@ func _scan_mag_throw_time() -> float:
 	return best
 
 
+func _sync_gun_reload_anim() -> void:
+	# 用手部 clip 的归一化进度驱动枪械 AnimationPlayer，避免两套时钟漂移造成手和枪不同步。
+	if gun_ap == null or _clips == null:
+		return
+	if not gun_ap.has_animation("reload"):
+		return
+	var an := gun_ap.get_animation("reload")
+	if an == null or an.length <= 0.05:
+		return
+	var clip_len := _clips.length("reload")
+	if clip_len <= 0.05:
+		return
+	var u := clampf(_clip_t / clip_len, 0.0, 1.0)
+	if gun_ap.current_animation != "reload":
+		gun_ap.play("reload")
+	gun_ap.speed_scale = 0.0
+	gun_ap.seek(u * an.length, true)
+
+
+func debug_reload_sync() -> Dictionary:
+	var clip_len := _clips.length("reload") if _clips else 0.0
+	var gun_t := 0.0
+	var gun_len := 0.0
+	if gun_ap and gun_ap.has_animation("reload"):
+		gun_len = gun_ap.get_animation("reload").length
+		if gun_ap.current_animation == "reload" or state == "reloading":
+			gun_t = gun_ap.current_animation_position
+	var u_clip := _clip_t / clip_len if clip_len > 0.05 else 0.0
+	var u_gun := gun_t / gun_len if gun_len > 0.05 else 0.0
+	var left_to_mag := 99.0
+	if gun and skeleton:
+		var mag_n := gun.find_child("Magazine", true, false)
+		var li := skeleton.find_bone("L_Hand_a")
+		if li < 0:
+			li = skeleton.find_bone("L_Hand")
+		if mag_n is Node3D and li >= 0 and (mag_n as Node3D).visible:
+			var hand := skeleton.global_transform * skeleton.get_bone_global_pose(li)
+			left_to_mag = hand.origin.distance_to((mag_n as Node3D).global_position)
+	return {
+		"state": state,
+		"clip_u": u_clip,
+		"gun_u": u_gun,
+		"sync_err": absf(u_clip - u_gun),
+		"left_to_mag": left_to_mag,
+		"state_u": (state_t / state_len) if state_len > 0.05 else 0.0,
+		"mag_hidden": _mag_visual_hidden,
+	}
+
+
 func _finish_gun_reload_anim() -> void:
 	# 换弹结束必须关闩。AnimationPlayer.stop() 默认回到第 0 帧，
 	# 而手枪 reload 的第 0 帧正是空仓挂机（滑套后坐），会把刚上好的弹又锁在后面。
@@ -1595,6 +1650,8 @@ func _update_clip(delta: float) -> Dictionary:
 		_:
 			pass
 	_clip_t += delta * _clip_speed
+	if state == "reloading":
+		_sync_gun_reload_anim()
 	var pose := _clips.sample(_clip, _clip_t, _clip_loop)
 	if _blend < 1.0:
 		_blend = minf(1.0, _blend + delta / BLEND_T)
@@ -2095,13 +2152,48 @@ func _grip_target_x(s: String) -> float:
 		# 手枪：右手握把；左手包在右手前侧，不伸到套筒前面。
 		return ext.x + L * (0.02 if s == "R" else 0.10)
 	if str(w.category) == "shotgun":
-		return ext.x + L * (0.20 if s == "R" else 0.50)
-	return ext.x + L * (0.17 if s == "R" else 0.44)
+		# 左手更靠前，落在泵动护木上，避开机匣/弹仓穿模。
+		return ext.x + L * (0.20 if s == "R" else 0.58)
+	# 步枪左手略前移到护木，不要停在弹匣井里。
+	return ext.x + L * (0.17 if s == "R" else 0.52)
 
 
 func _grip_anchor_gun(s: String) -> Vector3:
 	# 兼容：返回枪局部的握持参考点（x 为握持位置，y/z 为枪轴附近）。
 	return Vector3(_grip_target_x(s), 0.0, 0.0)
+
+
+func _foregrip_gun() -> Vector3:
+	# 左手应落在护木 / 泵动前托：沿枪 X 取该处网格包围盒，掌心托在管身下缘，不要穿进机匣中线。
+	var x := _grip_target_x("L")
+	var y_lo := 1e9
+	var y_hi := -1e9
+	var z_lo := 1e9
+	var z_hi := -1e9
+	var found := false
+	if gun:
+		for mi in gun.find_children("*", "MeshInstance3D", true, false):
+			if (mi as MeshInstance3D).mesh == null:
+				continue
+			var n := String(mi.name).to_lower()
+			if "shadow" in n or "flash" in n or "muzzle" in n or "magazine" in n or n.ends_with("mag"):
+				continue
+			var a: AABB = (mi as MeshInstance3D).mesh.get_aabb()
+			var xf: Transform3D = gun.global_transform.affine_inverse() * (mi as MeshInstance3D).global_transform
+			for k in 8:
+				var q: Vector3 = xf * a.get_endpoint(k)
+				if q.x > x - 0.07 and q.x < x + 0.07:
+					found = true
+					y_lo = minf(y_lo, q.y)
+					y_hi = maxf(y_hi, q.y)
+					z_lo = minf(z_lo, q.z)
+					z_hi = maxf(z_hi, q.z)
+	if not found:
+		return Vector3(x, 0.0, 0.0)
+	# 托在护木下缘稍上方，Z 取截面中心。
+	var y := lerpf(y_lo, y_hi, 0.28)
+	var z := (z_lo + z_hi) * 0.5
+	return Vector3(x, y, z)
 
 
 func _wrist_cam(s: String, h: Dictionary, a: Dictionary) -> Vector3:
@@ -2111,19 +2203,22 @@ func _wrist_cam(s: String, h: Dictionary, a: Dictionary) -> Vector3:
 		wrist += _left_hand_adjust()
 	else:
 		wrist += RIGHT_HAND_ADJUST
-	# 把动画手腕沿枪身拉到真实握持位置（右手握把、左手护木），让手掌落在枪上而不是悬空或搭在枪托上。
-	if gun and view and GRIP_BLEND > 0.0 and gun.get_parent() == view:
+	# 换弹时手要跟弹匣/拉机柄动画走，不要再把手腕硬拉回护木导致手脚不同步。
+	var grip_ok := gun and view and GRIP_BLEND > 0.0 and gun.get_parent() == view
+	if state == "reloading" or state == "drawing" or state == "holstering":
+		grip_ok = false
+	if grip_ok:
 		var gxf: Transform3D = gun.transform  # view 局部
 		var wg: Vector3 = gxf.affine_inverse() * wrist
 		if wg.is_finite():
-			var tx := _grip_target_x(s)
 			var want := wg
-			want.x = lerpf(wg.x, tx, GRIP_BLEND * 1.7 if GRIP_BLEND * 1.7 < 0.95 else 0.95)
-			# 左手往枪身中线下方靠，托住护木；右手略下移贴握把。
 			if s == "L":
-				want.z = lerpf(wg.z, 0.0, GRIP_BLEND * 0.5)
-				want.y -= 0.006
+				var attach := _foregrip_gun()
+				var b := clampf(GRIP_BLEND * 1.55, 0.0, 0.88)
+				want = wg.lerp(attach, b)
 			else:
+				var tx := _grip_target_x(s)
+				want.x = lerpf(wg.x, tx, clampf(GRIP_BLEND * 1.6, 0.0, 0.90))
 				want.y -= 0.004
 			wrist = gxf * want
 	return wrist

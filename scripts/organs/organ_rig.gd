@@ -224,6 +224,29 @@ func set_xray_sphere_world(world_pos: Vector3, radius: float, amount: float = 1.
 	_xray_sphere_k = clampf(amount, 0.0, 1.0)
 
 
+func xray_sphere_amount() -> float:
+	return _xray_sphere_k
+
+
+func xray_sphere_radius_ab() -> float:
+	return _xray_sphere_r
+
+
+func debug_xray_skin_alpha_center() -> float:
+	# 与 skin_xray_fade 中心透明度对齐：用于确认皮肤轮廓还在。
+	var hole := clampf(_xray_sphere_k, 0.0, 1.0)
+	if hole < 0.012:
+		return 1.0
+	var f := clampf((hole - 0.012) / (1.0 - 0.012), 0.0, 1.0)
+	# fade 层：mix(0.96, 0.32, pow(f, 0.72))
+	var fade := lerpf(0.96, 0.32, pow(f, 0.72))
+	if hole > 0.06:
+		pass
+	else:
+		fade *= clampf((hole - 0.012) / (0.06 - 0.012), 0.0, 1.0)
+	return fade
+
+
 func clear_xray_sphere() -> void:
 	_xray_sphere_ab = Vector3.ZERO
 	_xray_sphere_r = 0.0
@@ -738,8 +761,9 @@ func debug_strike_displacement(local_p: Vector3) -> float:
 	return (q - local_p).length()
 
 
-func set_cinematic_jello(world_entry: Vector3, world_exit: Vector3, world_dir: Vector3, progress: float, radius: float = 0.016, settle: float = 0.0) -> void:
+func set_cinematic_jello(world_entry: Vector3, world_exit: Vector3, world_dir: Vector3, progress: float, radius: float = 0.011, settle: float = 0.0, strength: float = 0.38) -> void:
 	# 从世界空间写入特写果冻通道。progress=0 刚入体，1 已穿出；settle 在停留阶段 0→1。
+	# 强度默认 0.38（8018f6e 为 1.0 / 半径 0.016），减轻气球般鼓胀，仍保留通道挤开与回弹。
 	if not world_entry.is_finite() or not world_dir.is_finite():
 		return
 	_update_frame()
@@ -763,7 +787,7 @@ func set_cinematic_jello(world_entry: Vector3, world_exit: Vector3, world_dir: V
 		"d": d,
 		"reach": reach,
 		"rad": maxf(radius, 0.007),
-		"strength": 1.0,
+		"strength": clampf(strength, 0.0, 1.0),
 		"settle": clampf(settle, 0.0, 1.0),
 		"age": age,
 		"tot": tot,
@@ -798,6 +822,7 @@ func jello_debug() -> Dictionary:
 		"settle": float(_jello.get("settle", 0.0)),
 		"age": float(_jello.get("age", 0.0)),
 		"rad": float(_jello.get("rad", 0.0)),
+		"strength": float(_jello.get("strength", 0.0)),
 		"ball_travel": _ball_travel,
 		"a": _jello.get("a", Vector3.ZERO),
 		"d": _jello.get("d", Vector3.ZERO),
@@ -815,10 +840,10 @@ func debug_jello_displacement(local_p: Vector3) -> float:
 		return 0.0
 	d = d.normalized()
 	var reach := float(_jello.get("reach", 0.0))
-	var rad := maxf(float(_jello.get("rad", 0.016)), 0.007)
+	var rad := maxf(float(_jello.get("rad", 0.011)), 0.007)
 	var settle := clampf(float(_jello.get("settle", 0.0)), 0.0, 1.0)
 	var age := float(_jello.get("age", 0.0))
-	var strength := float(_jello.get("strength", 1.0))
+	var strength := float(_jello.get("strength", 0.38))
 	var v: Vector3 = local_p - a
 	var s := v.dot(d)
 	if s < -rad * 0.8 or s > reach + rad * 1.15:
@@ -826,18 +851,18 @@ func debug_jello_displacement(local_p: Vector3) -> float:
 	var t := clampf(s, 0.0, maxf(reach, 0.0))
 	var radial: Vector3 = v - d * t
 	var dist := radial.length()
-	var infl := rad * (4.6 + (1.0 - settle) * 2.2)
+	var infl := rad * (3.2 + (1.0 - settle) * 1.2)
 	if dist > infl:
 		return 0.0
 	var nrm := radial / dist if dist > 1e-5 else Vector3(1, 0, 0)
-	var shaft := exp(-dist * dist / (rad * rad * 7.5))
-	var tip := exp(-((s - reach) * (s - reach)) / (rad * rad * 5.0))
-	var wob := 1.0 + (1.0 - settle) * 0.22 * sin(age * 8.5 + dist * 26.0 + s * 14.0)
-	wob += settle * 0.08 * sin(age * 3.4 + s * 9.0)
-	var live := 1.0 - settle * 0.62
+	var shaft := exp(-dist * dist / (rad * rad * 10.0))
+	var tip := exp(-((s - reach) * (s - reach)) / (rad * rad * 6.5))
+	var wob := 1.0 + (1.0 - settle) * 0.10 * sin(age * 7.2 + dist * 20.0 + s * 11.0)
+	wob += settle * 0.04 * sin(age * 3.1 + s * 8.0)
+	var live := 1.0 - settle * 0.55
 	var k := strength * shaft * live * wob
-	var o: Vector3 = nrm * (rad * 2.8 * k + rad * 3.6 * tip * (1.0 - settle) * strength)
-	o += d * tip * rad * 1.1 * (1.0 - settle) * strength
+	var o: Vector3 = nrm * (rad * 1.05 * k + rad * 1.15 * tip * (1.0 - settle) * strength)
+	o += d * tip * rad * 0.35 * (1.0 - settle) * strength
 	return o.length()
 
 

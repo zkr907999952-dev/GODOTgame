@@ -194,19 +194,19 @@ vec3 jello_offset(vec3 l) {
 	float t = clamp(s, 0.0, max(reach, 0.0));
 	vec3 radial = v - d * t;
 	float dist = length(radial);
-	float infl = rad * (4.6 + (1.0 - settle) * 2.2);
+	float infl = rad * (3.2 + (1.0 - settle) * 1.2);
 	if (dist > infl) return vec3(0.0);
 	vec3 nrm = dist > 1e-5 ? radial / dist : vec3(1.0, 0.0, 0.0);
-	float shaft = exp(-dist * dist / (rad * rad * 7.5));
-	float tip = exp(-((s - reach) * (s - reach)) / (rad * rad * 5.0));
-	// 慢动作果冻摆动：穿过时更明显，停留阶段逐渐衰减，但仍在缓慢移动。
-	float wob = 1.0 + (1.0 - settle) * 0.22 * sin(age * 8.5 + dist * 26.0 + s * 14.0);
-	wob += settle * 0.08 * sin(age * 3.4 + s * 9.0);
-	float live = 1.0 - settle * 0.62;
+	float shaft = exp(-dist * dist / (rad * rad * 10.0));
+	float tip = exp(-((s - reach) * (s - reach)) / (rad * rad * 6.5));
+	// 慢动作果冻摆动：穿过时轻柔起伏，停留阶段缓慢回弹，避免气球般鼓胀。
+	float wob = 1.0 + (1.0 - settle) * 0.10 * sin(age * 7.2 + dist * 20.0 + s * 11.0);
+	wob += settle * 0.04 * sin(age * 3.1 + s * 8.0);
+	float live = 1.0 - settle * 0.55;
 	float k = strength * shaft * live * wob;
-	vec3 o = nrm * (rad * 2.8 * k + rad * 3.6 * tip * (1.0 - settle) * strength);
+	vec3 o = nrm * (rad * 1.05 * k + rad * 1.15 * tip * (1.0 - settle) * strength);
 	// 尖端再沿弹道把组织轻轻推开，像弹头挤过去。
-	o += d * tip * rad * 1.1 * (1.0 - settle) * strength;
+	o += d * tip * rad * 0.35 * (1.0 - settle) * strength;
 	return o;
 }
 

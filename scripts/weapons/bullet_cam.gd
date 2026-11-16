@@ -13,6 +13,10 @@ const PARK_PASS_MIN := 0.55  # 体内穿过最短墙钟
 const HOLD_SEC := 4.0  # 穿过后在环绕受击点停留的墙钟秒数
 const COOLDOWN_SEC := 0.9
 const SPHERE_R := 0.36  # 特写透视范围加大，绕射时仍能看见弹道与脏器
+## 透视强度（不是半径）：留一点皮肤轮廓，脏器仍可见。原先 0.95 会把皮肤完全挖空。
+const XRAY_K := 0.48
+const JELLO_RAD := 0.011
+const JELLO_STRENGTH := 0.38
 const ORBIT_SPEED := 0.32  # 比 0.2.12 的 0.55 更慢
 const SMOKE_FADE := 0.75
 const SMOKE_DELAY := 0.05
@@ -210,7 +214,7 @@ func _start(info: Dictionary, projectile: Dictionary) -> void:
 			_organs.call("set_show_organs", true)
 		# 用局部球透视，不打开全身透视窗；结束时清球并恢复原状态。
 		if _organs.has_method("set_xray_sphere_world"):
-			_organs.call("set_xray_sphere_world", _muzzle, SPHERE_R, 0.95)
+			_organs.call("set_xray_sphere_world", _muzzle, SPHERE_R, XRAY_K)
 	_bullet = projectile
 	_pellets = _collect_pellets(projectile)
 	if not _bullet.is_empty():
@@ -365,6 +369,10 @@ func xray_sphere_radius() -> float:
 	return SPHERE_R
 
 
+func cinematic_xray_amount() -> float:
+	return XRAY_K
+
+
 func _collect_pellets(lead: Dictionary) -> Array:
 	var out: Array = []
 	var sid := int(lead.get("shot_id", 0)) if not lead.is_empty() else 0
@@ -373,14 +381,29 @@ func _collect_pellets(lead: Dictionary) -> Array:
 		var ws: Node = player.call("get_weapons")
 		if ws:
 			bal = ws.get("ballistics")
-	if bal and bal.has_method("live_projectiles"):
-		for p in bal.call("live_projectiles"):
-			if not (p is Dictionary):
-				continue
-			var rec: Dictionary = p
-			if sid != 0 and int(rec.get("shot_id", 0)) == sid:
-				rec["cinematic"] = true
-				out.append(rec)
+	var group: Array = []
+	if bal and sid != 0 and bal.has_method("projectiles_for_shot"):
+		var got = bal.call("projectiles_for_shot", sid)
+		if got is Array:
+			group = got
+	# 若 lead 是上一发残留的单发，改用当前最大/最新的弹组（观察后再开霰弹特写）。
+	if group.size() <= 1 and bal and bal.has_method("best_shot_cluster"):
+		var alt = bal.call("best_shot_cluster")
+		if alt is Array and alt.size() > group.size():
+			group = alt
+			if not group.is_empty() and group[0] is Dictionary:
+				sid = int((group[0] as Dictionary).get("shot_id", sid))
+	if group.is_empty() and bal and bal.has_method("live_projectiles"):
+		group = bal.call("live_projectiles")
+	for p in group:
+		if not (p is Dictionary):
+			continue
+		var rec: Dictionary = p
+		if sid != 0 and int(rec.get("shot_id", 0)) != sid:
+			continue
+		rec["cinematic"] = true
+		if rec not in out:
+			out.append(rec)
 	if out.is_empty() and not lead.is_empty():
 		lead["cinematic"] = true
 		out.append(lead)
@@ -501,7 +524,7 @@ func _orient_projectile(n: Node3D, d: Vector3) -> void:
 
 func _set_sphere(pos: Vector3) -> void:
 	if _organs and is_instance_valid(_organs) and _organs.has_method("set_xray_sphere_world"):
-		_organs.call("set_xray_sphere_world", pos, SPHERE_R, 0.95)
+		_organs.call("set_xray_sphere_world", pos, SPHERE_R, XRAY_K)
 
 
 func _update_burst_lock() -> void:
@@ -709,7 +732,7 @@ func _update_organ_jello(progress: float, settle: float, wall: float) -> void:
 	if _organs == null or not is_instance_valid(_organs):
 		return
 	if _organs.has_method("set_cinematic_jello"):
-		_organs.call("set_cinematic_jello", _entry, _exit, _dir, clampf(progress, 0.0, 1.0), 0.016, clampf(settle, 0.0, 1.0))
+		_organs.call("set_cinematic_jello", _entry, _exit, _dir, clampf(progress, 0.0, 1.0), JELLO_RAD, clampf(settle, 0.0, 1.0), JELLO_STRENGTH)
 	if wall > 0.0 and _organs.has_method("advance_cinematic_jello"):
 		_organs.call("advance_cinematic_jello", wall)
 

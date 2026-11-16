@@ -252,7 +252,8 @@ func _check_waist_pivot_and_grip() -> void:
 	var hold_err := hold0.distance_to(hold1)
 	var pv: Dictionary = ws.call("debug_waist_pivot") if ws.has_method("debug_waist_pivot") else {}
 	var eye_err := float(pv.get("eye_pivot_err", 0.0))
-	_ok(hold_err < 0.22 and hold_err < eye_err * 0.6, "look-down pivots around the waist, not the eye (waist err=%.3f m, eye-pivot would be %.3f m)" % [hold_err, eye_err])
+	# 躯干已不再弯腰，腰部枢轴只作用于枪；残差会比「连同腰折」时略大，但仍应明显优于绕眼旋转。
+	_ok(hold_err < eye_err * 0.55 and hold_err < 0.50, "look-down weapon still orbits nearer the waist than the eye (waist err=%.3f m, eye-pivot would be %.3f m)" % [hold_err, eye_err])
 
 	# 手应约束在枪上
 	var hg: Dictionary = ws.call("debug_hand_to_gun") if ws.has_method("debug_hand_to_gun") else {}
