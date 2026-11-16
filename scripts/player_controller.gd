@@ -27,6 +27,7 @@ enum GameMode { DISPLAY, CONTROL }
 @export var touch_look_sensitivity: float = 0.014
 ## 举枪瞄准：true=切换，false=长按。手机默认切换；PC 右键同样遵守。
 var ads_toggle: bool = true
+var _rmb_drag_owned: bool = false
 ## 最近一次请求的屏幕方向（测试 / 调试）
 var screen_orientation_request: String = "sensor"
 @export var min_pitch: float = -1.55  # ≈ ±89° like web FP_PITCH_LIM
@@ -517,19 +518,39 @@ func _stomp_ragdolls(delta: float) -> void:
 		if rag == null or not rag.has_method("apply_stomp"):
 			continue
 		var at: Vector3 = (col as Node3D).global_position
-		var sideways := hv * 1.6
-		if sideways.length() < 1.2:
+		var sideways := hv * 2.8
+		if sideways.length() < 2.2:
 			# 即使站着不动，踩上去也要能把尸体挤开一点。
 			var away: Vector3 = at - global_position
 			away.y = 0.0
 			if away.length_squared() < 1e-6:
 				away = Vector3.RIGHT
-			sideways = away.normalized() * maxf(sideways.length(), 1.6)
-		var down := Vector3(0, -6.5 - minf(5.0, absf(velocity.y) * 2.0), 0)
+			sideways = away.normalized() * maxf(sideways.length(), 2.6)
+		var down := Vector3(0, -8.5 - minf(6.0, absf(velocity.y) * 2.0), 0)
 		rag.call("apply_stomp", at, sideways + down)
-	# 踩在尸体上时不要把玩家顶起来飘在空中。
-	if not seen.is_empty() and velocity.y > 0.15 and is_on_floor():
+	# 踩在尸体上时取消布娃娃对角色的向上反推，避免把人弹飞。
+	_cancel_ragdoll_launch(not seen.is_empty())
+
+
+func _cancel_ragdoll_launch(stomping: bool = false) -> void:
+	# 只抑制布娃娃反推，活着的角色胶囊互撞不在这里处理，以免两个人一起被弹开。
+	var hit_bone := stomping
+	for i in get_slide_collision_count():
+		var c := get_slide_collision(i)
+		if c == null:
+			continue
+		var col = c.get_collider()
+		if col is PhysicalBone3D:
+			hit_bone = true
+			# 把向上的分离速度清掉，水平速度保留。
+			var n: Vector3 = c.get_normal()
+			if n.y > 0.35 and velocity.y > 0.0:
+				velocity.y = 0.0
+	if hit_bone and velocity.y > 0.0:
 		velocity.y = 0.0
+	if hit_bone and is_on_floor():
+		# 贴地踩尸，不要被挤离地面。
+		velocity.y = minf(velocity.y, 0.0)
 
 
 ## 观察模式：在点击位置沿视线垂直向内打一发（与互动同一套屏幕坐标），可触发特写。
@@ -1157,6 +1178,8 @@ func _process(delta: float) -> void:
 	# 在面板上松开按键时收不到 release → 以实际按键状态为准。
 	if _rmb_down and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
 		_rmb_down = false
+	if _rmb_drag_owned and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		set_rmb_corpse_drag(false)
 	if _mmb_down and not Input.is_mouse_button_pressed(MOUSE_BUTTON_MIDDLE):
 		_mmb_down = false
 	if is_dead() and _ragdoll:
@@ -1291,6 +1314,34 @@ func set_touch_look_sensitivity(v: float) -> void:
 	var s := _game_settings()
 	if s and s.has_method("set_touch_look_sensitivity"):
 		s.call("set_touch_look_sensitivity", touch_look_sensitivity)
+
+
+func ads_is_toggle() -> bool:
+	# 手机/触屏界面：点按切换瞄准；电脑：按住瞄准、松开取消。
+	if get_parent():
+		var hud := get_parent().get_node_or_null("HUD")
+		if hud and bool(hud.get("touch_ui")):
+			return true
+	if OS.has_feature("mobile") or OS.has_feature("android") or OS.get_name() == "Android":
+		return true
+	return false
+
+
+func set_rmb_corpse_drag(pressed: bool) -> bool:
+	# 电脑：按住右键拖尸体，松开放下。与 E 切换共存；右键只放下由它自己开始的拖拽。
+	if _corpse_drag == null:
+		return false
+	if pressed:
+		if bool(_corpse_drag.call("is_dragging")) or bool(_corpse_drag.get("reaching")):
+			return true
+		var ok := bool(_corpse_drag.call("try_begin"))
+		_rmb_drag_owned = ok
+		return ok
+	if _rmb_drag_owned:
+		if bool(_corpse_drag.call("is_dragging")) or bool(_corpse_drag.get("reaching")):
+			_corpse_drag.call("drop", "rmb")
+		_rmb_drag_owned = false
+	return true
 
 
 func set_ads_toggle(on: bool) -> void:
@@ -1684,7 +1735,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		var wb := event as InputEventMouseButton
 		if wb.button_index == MOUSE_BUTTON_LEFT and not wb.pressed:
 			_weapons.call("set_trigger", false)
-		if wb.button_index == MOUSE_BUTTON_RIGHT and not wb.pressed and not ads_toggle:
+		if wb.button_index == MOUSE_BUTTON_RIGHT and not wb.pressed and not ads_is_toggle():
 			_weapons.call("set_ads", false)
 		if weapon_armed() and (Input.mouse_mode == Input.MOUSE_MODE_CAPTURED or touch_active):
 			if wb.button_index == MOUSE_BUTTON_LEFT:
@@ -1692,7 +1743,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 				return
 			if wb.button_index == MOUSE_BUTTON_RIGHT:
-				if ads_toggle:
+				if ads_is_toggle():
 					if wb.pressed:
 						_weapons.call("set_ads", not bool(_weapons.get("ads")))
 				else:
@@ -1758,6 +1809,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 	elif event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
+		# 电脑第一人称收枪后：按住右键拖尸体，松开放下（与 E 切换共存）。
+		if first_person and mb.button_index == MOUSE_BUTTON_RIGHT and not weapon_drawn():
+			set_rmb_corpse_drag(mb.pressed)
+			get_viewport().set_input_as_handled()
+			return
 		var wheel := mb.button_index == MOUSE_BUTTON_WHEEL_UP or mb.button_index == MOUSE_BUTTON_WHEEL_DOWN
 		if wheel:
 			if not mb.pressed:

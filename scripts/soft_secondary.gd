@@ -525,9 +525,53 @@ func _apply_gaze() -> void:
 		_nudge_look_bone(eye_r, gaze_eye_pitch * gaze_eye_blend, gaze_eye_yaw * gaze_eye_blend)
 
 
+func _apply_aim_waist(cam_pitch: float) -> void:
+	# cam_pitch 与相机 _pitch 相同：负值 = 低头。把俯仰分到腰/胸椎，使持枪上半身跟着瞄准。
+	var down := clampf(-cam_pitch, 0.0, 1.55)
+	var up := clampf(cam_pitch, 0.0, 0.9)
+	if down < 0.03 and up < 0.03:
+		return
+	# 低头前屈（正 pitch 经测试会把胸椎向前送）；抬头只做很小的后仰。
+	var lean := down * 0.92 - up * 0.22
+	_nudge_look_bone("C_Spine_a", lean * 0.24, 0.0)
+	_nudge_look_bone("C_Spine_b", lean * 0.34, 0.0)
+	_nudge_look_bone("C_Spine_c", lean * 0.30, 0.0)
+	_nudge_look_bone("C_Spine_d", lean * 0.12, 0.0)
+
+
+func debug_aim_waist() -> Dictionary:
+	# 测试：弯腰后胸/肩相对髋的前后位置。
+	var out := {"pitch": body_look_pitch, "chest_fwd": 0.0, "ok": skeleton != null}
+	if skeleton == null:
+		return out
+	var sk := skeleton.global_transform
+	var hip_i := skeleton.find_bone("C_Hip_a")
+	var chest_i := skeleton.find_bone("C_Spine_c")
+	if chest_i < 0:
+		chest_i = skeleton.find_bone("C_Spine_d")
+	if hip_i < 0 or chest_i < 0:
+		return out
+	var hip: Vector3 = (sk * skeleton.get_bone_global_pose(hip_i)).origin
+	var chest: Vector3 = (sk * skeleton.get_bone_global_pose(chest_i)).origin
+	var body := skeleton.get_parent()
+	var fwd := Vector3.FORWARD
+	if body is Node3D:
+		fwd = (body as Node3D).global_transform.basis.z
+	fwd.y = 0.0
+	if fwd.length_squared() > 1e-8:
+		fwd = fwd.normalized()
+	out["chest_fwd"] = (chest - hip).dot(fwd)
+	out["chest"] = chest
+	out["hip"] = hip
+	return out
+
+
 func _apply_body_look() -> void:
 	if not body_look_on or skeleton == null:
 		return
+	# 先按相机俯仰弯腰，让上半身跟着瞄准方向；再在弯腰后的颈骨坐标系里分解头颈转向。
+	# 不旋转锁骨，避免 0.2.10 的肩扭转回归。
+	_apply_aim_waist(body_look_pitch)
 	# Web setBodyLook splits (-pitch, yaw) between neck/head as local deltas. That
 	# only matches the camera while the neck chain is at its standing rest; crouch /
 	# prone poses lean the spine + bend the neck, so a fixed delta looked at the floor.

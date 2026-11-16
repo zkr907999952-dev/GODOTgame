@@ -185,6 +185,21 @@ func toggle() -> bool:
 	return _begin()
 
 
+func try_begin() -> bool:
+	## 按住式开始拖拽：已在拖则保持，不切换放下。范围只用于开始选择。
+	last_toggle_ok = false
+	if dragging or reaching:
+		last_toggle_ok = true
+		return true
+	if not is_holstered():
+		last_drop_reason = "armed"
+		return false
+	if not can_start():
+		last_drop_reason = "out_of_range" if is_instance_valid(aimed_body) else "no_target"
+		return false
+	return _begin()
+
+
 func debug_aim(body: Node, bone_name: String, hit: Vector3 = Vector3.ZERO) -> void:
 	aimed_body = body
 	aimed_bone = bone_name

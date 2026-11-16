@@ -28,6 +28,9 @@ var exclude: Array[RID] = []
 var hit_owner: bool = false
 ## 下一发弹头是否忽略对发射者的排除（由 fire_along_ray 在生成前设置）。
 var next_hit_owner: bool = false
+## 同一扣扳机发出的多弹头共用 shot_id，特写时一起飞。
+var next_shot_id: int = 0
+var _shot_seq: int = 0
 var last_hit: Dictionary = {}
 var last_body: Dictionary = {}
 var last_organ: Dictionary = {}
@@ -120,6 +123,16 @@ func live_projectiles() -> Array:
 	return _live
 
 
+func begin_shot() -> int:
+	_shot_seq += 1
+	next_shot_id = _shot_seq
+	return next_shot_id
+
+
+func end_shot() -> void:
+	next_shot_id = 0
+
+
 func clear_all() -> void:
 	for p in _live:
 		_park(p)
@@ -158,6 +171,8 @@ func fire_projectile(origin: Vector3, dir: Vector3, weapon_id: String, w: Resour
 		"cinfo": {},
 		"cinematic": false,
 		"hit_owner": hit_owner or next_hit_owner,
+		"shot_id": next_shot_id,
+		"ballistics": self,
 	}
 	next_hit_owner = false
 	_live.append(rec)

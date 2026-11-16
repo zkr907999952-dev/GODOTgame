@@ -552,7 +552,7 @@ func _button(id: String, down: bool) -> void:
 			var w3 := _weapons()
 			if w3 == null:
 				pass
-			elif player and bool(player.get("ads_toggle")):
+			elif player and ((player.has_method("ads_is_toggle") and bool(player.call("ads_is_toggle"))) or (not player.has_method("ads_is_toggle") and bool(player.get("ads_toggle")))):
 				if down:
 					w3.call("set_ads", not bool(w3.get("ads")))
 			else:
@@ -633,10 +633,7 @@ func _draw() -> void:
 			var ty := zr.position.y + zr.size.y * (1.0 - t)
 			draw_circle(Vector2(zr.get_center().x, clampf(ty, zr.position.y + 10.0, zr.end.y - 10.0)), 10.0, fg)
 			_text_center("%d°" % int(round(float(player.get("fp_fov")))), Vector2(zr.get_center().x, zr.end.y + 12.0), 11, Color(0.8, 0.82, 0.86, 0.8))
-		# 准星（网页 FP 十字）
-		var cc := vp() * 0.5
-		draw_line(cc - Vector2(8, 0), cc + Vector2(8, 0), Color(1, 1, 1, 0.7), 1.0)
-		draw_line(cc - Vector2(0, 8), cc + Vector2(0, 8), Color(1, 1, 1, 0.7), 1.0)
+		# 准星改由 HUD Reticle 统一绘制（空手白点 / 髋射十字 / 开镜隐藏）。
 
 
 func _box(bg: Color, border: Color, radius: float) -> StyleBoxFlat:

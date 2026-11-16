@@ -294,31 +294,55 @@ func _torso_frame() -> Dictionary:
 	if sp_i >= 0:
 		var sp: Vector3 = (sk * skeleton.get_bone_global_pose(sp_i)).origin
 		up = (sp - hip).normalized() if sp.distance_to(hip) > 0.04 else Vector3.UP
-	var fwd := Vector3.FORWARD
+	# 左右必须以左右肩的世界位置为准，不能单靠腹壁帧的 +X（轴反了就会双手交叉/反手）。
+	var lsh_i := skeleton.find_bone("L_UpperArm_a")
+	var rsh_i := skeleton.find_bone("R_UpperArm_a")
 	var right := Vector3.RIGHT
-	# 与腹壁/皮肤投影同一套前向，避免身体 +Z 与脏器帧不一致把左右手弄反。
-	var used_org := false
-	if _host and _host.has_method("get_organs"):
-		var org: Node = _host.call("get_organs")
-		if org and org.has_method("abdomen_frame"):
-			var fr: Transform3D = org.call("abdomen_frame")
-			fwd = fr.basis.z
-			right = fr.basis.x
-			up = fr.basis.y
-			used_org = true
-	if not used_org:
+	if lsh_i >= 0 and rsh_i >= 0:
+		var lsh: Vector3 = (sk * skeleton.get_bone_global_pose(lsh_i)).origin
+		var rsh: Vector3 = (sk * skeleton.get_bone_global_pose(rsh_i)).origin
+		right = rsh - lsh
+		right = right - up * right.dot(up)
+	if right.length_squared() < 1e-6:
 		var body := skeleton.get_parent()
 		if body is Node3D:
-			fwd = (body as Node3D).global_transform.basis.z
-	fwd = (fwd - up * fwd.dot(up))
-	if fwd.length_squared() < 1e-6:
-		fwd = Vector3.FORWARD
-	fwd = fwd.normalized()
-	right = up.cross(fwd)
+			right = (body as Node3D).global_transform.basis.x
+		right = right - up * right.dot(up)
 	if right.length_squared() < 1e-6:
 		right = Vector3.RIGHT
 	right = right.normalized()
+	var fwd := up.cross(right)
+	# 前向尽量与腹壁 +Z / 身体 +Z 同侧，手按在肚子前面。
+	var hint := Vector3.ZERO
+	if _host and _host.has_method("get_organs"):
+		var org: Node = _host.call("get_organs")
+		if org and org.has_method("abdomen_frame"):
+			hint = (org.call("abdomen_frame") as Transform3D).basis.z
+	if hint.length_squared() < 1e-8:
+		var body2 := skeleton.get_parent()
+		if body2 is Node3D:
+			hint = (body2 as Node3D).global_transform.basis.z
+	hint = hint - up * hint.dot(up)
+	if fwd.length_squared() < 1e-8:
+		fwd = hint if hint.length_squared() > 1e-8 else Vector3.FORWARD
+	fwd = fwd.normalized()
+	if hint.length_squared() > 1e-8 and fwd.dot(hint.normalized()) < 0.0:
+		fwd = -fwd
+		right = -right
+	right = up.cross(fwd)
+	if right.length_squared() < 1e-8:
+		right = Vector3.RIGHT
+	right = right.normalized()
 	fwd = right.cross(up).normalized()
+	# 再核对一次：右肩应落在 +right 一侧。
+	if lsh_i >= 0 and rsh_i >= 0:
+		var l2: Vector3 = (sk * skeleton.get_bone_global_pose(lsh_i)).origin
+		var r2: Vector3 = (sk * skeleton.get_bone_global_pose(rsh_i)).origin
+		if (r2 - hip).dot(right) < (l2 - hip).dot(right):
+			right = -right
+			fwd = -fwd
+			right = up.cross(fwd).normalized()
+			fwd = right.cross(up).normalized()
 	return {"hip": hip, "up": up, "fwd": fwd, "right": right}
 
 
@@ -381,72 +405,81 @@ func _cover_arm(side: String, target: Vector3, w: float) -> void:
 	var fwd: Vector3 = fr["fwd"]
 	var right: Vector3 = fr["right"]
 	var up: Vector3 = fr["up"]
-	# 目标已是皮肤点。左手略偏左稍低，右手略偏右叠在上面，两手不交叉。
+	var hip: Vector3 = fr["hip"]
+	# 手按在受击皮肤两侧：左手明确在左、右手在右，中间留缝，互不交叉。
 	var side_sign := -1.0 if side == "L" else 1.0
 	var goal := _skin_cover_point(target)
-	goal += right * (0.075 * side_sign)
-	goal += up * (-0.016 if side == "L" else 0.028)
-	goal += fwd * 0.014
-	var hip: Vector3 = fr["hip"]
+	goal += right * (0.115 * side_sign)
+	goal += up * (-0.024 if side == "L" else 0.022)
+	goal += fwd * 0.020
+	# 不允许手越过身体中线太多。
+	var mid := _skin_cover_point(target)
+	if (goal - mid).dot(right) * side_sign < 0.06:
+		goal += right * side_sign * (0.06 - (goal - mid).dot(right) * side_sign)
 	var span := l1 + l2 - 0.02
 	if p0.distance_to(goal) > span:
 		goal = p0 + (goal - p0).normalized() * span
-	# 两骨解析：肘必须在「自己这一侧」的体外，绕过肚子，禁止走对侧或体内捷径。
 	var want := goal
 	var to_goal := want - p0
 	var dist := clampf(to_goal.length(), 0.08, span)
 	want = p0 + to_goal.normalized() * dist
-	var dir := (want - p0).normalized()
-	var x := clampf((dist * dist + l1 * l1 - l2 * l2) / (2.0 * dist * l1), -1.0, 1.0)
-	var elbow_ang := acos(x)
-	var along := p0 + dir * (cos(elbow_ang) * l1)
-	# 肘向自己一侧向外、略向前、明显低于胸口，绕过肚子而不是端肩。
-	var pole := (right * side_sign * 1.15 + fwd * 0.32 - up * 0.55).normalized()
-	var nrm := dir.cross(pole)
-	if nrm.length_squared() < 1e-8:
-		nrm = (right * side_sign).cross(dir)
-	if nrm.length_squared() < 1e-8:
-		nrm = Vector3.RIGHT
-	nrm = nrm.normalized()
-	# 肘落在自己身体外侧且略向前的那一侧（左手肘在左，右手肘在右）。
-	if nrm.dot(right * side_sign + fwd * 0.2 - up * 0.15) < 0.0:
-		nrm = -nrm
-	var elbow_pos := along + nrm * sin(elbow_ang) * l1
-	# 把肘推到躯干圆柱外，并压到手位略上方，避免前臂弦穿过肚子或肘抬到胸口。
-	var elbow_h_max := (want - hip).dot(up) + 0.10
-	for _k in 3:
-		var rel2 := elbow_pos - (hip + up * 0.18)
+	# 肘的自然位置：向自己一侧撑开、略向前、低于肩，绕过肚子而不是抄近道穿胸。
+	var pole := (right * side_sign * 1.35 + fwd * 0.22 - up * 0.42)
+	var elbow_pos := _solve_cover_elbow(p0, want, l1, l2, pole)
+	var elbow_h_max := (want - hip).dot(up) + 0.08
+	for _k in 4:
+		var rel2 := elbow_pos - (hip + up * 0.16)
 		var rad2 := rel2 - up * rel2.dot(up)
-		var need := 0.28
+		var need := 0.34
 		if rad2.length() < need:
 			var push := (rad2.normalized() if rad2.length_squared() > 1e-6 else right * side_sign)
-			# 不要把左肘推到右侧（或反过来）
-			if push.dot(right * side_sign) < 0.0:
-				push = right * side_sign
+			if push.dot(right * side_sign) < 0.15:
+				push = (push + right * side_sign).normalized()
 			elbow_pos += push * (need - rad2.length())
 			elbow_pos = p0 + (elbow_pos - p0).normalized() * l1
-		if (elbow_pos - hip).dot(fwd) < 0.06:
-			elbow_pos += fwd * (0.06 - (elbow_pos - hip).dot(fwd))
+		if (elbow_pos - hip).dot(fwd) < 0.08:
+			elbow_pos += fwd * (0.08 - (elbow_pos - hip).dot(fwd))
 			elbow_pos = p0 + (elbow_pos - p0).normalized() * l1
-		# 肘必须留在自己一侧
-		if (elbow_pos - hip).dot(right) * side_sign < 0.10:
-			elbow_pos += right * side_sign * (0.10 - (elbow_pos - hip).dot(right) * side_sign)
+		if (elbow_pos - hip).dot(right) * side_sign < 0.16:
+			elbow_pos += right * side_sign * (0.16 - (elbow_pos - hip).dot(right) * side_sign)
 			elbow_pos = p0 + (elbow_pos - p0).normalized() * l1
 		var eh := (elbow_pos - hip).dot(up)
 		if eh > elbow_h_max:
 			elbow_pos -= up * (eh - elbow_h_max)
 			elbow_pos = p0 + (elbow_pos - p0).normalized() * l1
-	# 用肘平面定扭转，避免从垂手最短旋转把上臂拧穿胸口；再把手掌转向腹壁。
 	var plane_n := (elbow_pos - p0).cross(want - p0)
 	if plane_n.length_squared() < 1e-8:
 		plane_n = right * side_sign
 	plane_n = plane_n.normalized()
-	if plane_n.dot(right * side_sign + fwd * 0.2) < 0.0:
+	if plane_n.dot(right * side_sign + fwd * 0.15) < 0.0:
 		plane_n = -plane_n
 	_set_bone_y_roll(ua, elbow_pos - p0, plane_n, w)
 	var fa_now: Vector3 = (sk * skeleton.get_bone_global_pose(fa)).origin
 	_set_bone_y_roll(fa, want - fa_now, plane_n, w)
 	_set_cover_hand(ha, side, want, fwd, right, up, w)
+
+
+func _solve_cover_elbow(p0: Vector3, want: Vector3, l1: float, l2: float, pole: Vector3) -> Vector3:
+	var to := want - p0
+	var dist := clampf(to.length(), 0.08, l1 + l2 - 0.02)
+	var dir := (want - p0)
+	if dir.length_squared() < 1e-10:
+		dir = pole if pole.length_squared() > 1e-10 else Vector3.RIGHT
+	dir = dir.normalized()
+	var x := clampf((dist * dist + l1 * l1 - l2 * l2) / maxf(2.0 * dist * l1, 1e-5), -1.0, 1.0)
+	var elbow_ang := acos(x)
+	var along := p0 + dir * (cos(elbow_ang) * l1)
+	var nrm := dir.cross(pole)
+	if nrm.length_squared() < 1e-8:
+		nrm = dir.cross(Vector3.UP)
+	if nrm.length_squared() < 1e-8:
+		nrm = Vector3.RIGHT
+	# pole 落在 dir 的垂直平面上的分量，指向撑开一侧。
+	var lateral := pole - dir * pole.dot(dir)
+	if lateral.length_squared() < 1e-8:
+		lateral = nrm.cross(dir)
+	lateral = lateral.normalized()
+	return along + lateral * sin(elbow_ang) * l1
 
 
 func cover_debug() -> Dictionary:
@@ -478,7 +511,7 @@ func cover_debug() -> Dictionary:
 	var rside := (rh - hip).dot(rightv)
 	out["L_side"] = lside
 	out["R_side"] = rside
-	out["hands_crossed"] = lside > rside + 0.055
+	out["hands_crossed"] = lside > rside + 0.04
 	return out
 
 
@@ -497,7 +530,7 @@ func _segment_hits_torso(a: Vector3, b: Vector3, fr: Dictionary, _radius: float)
 		var radial := rel - up * along
 		var depth := radial.dot(fwd)
 		# 钻进腹柱中心，或跑到背后穿过身体。
-		if radial.length() < 0.09 or (depth < -0.02 and radial.length() < 0.16):
+		if radial.length() < 0.10 or (depth < -0.01 and radial.length() < 0.18):
 			return true
 	return false
 

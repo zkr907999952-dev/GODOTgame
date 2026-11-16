@@ -16,6 +16,8 @@ var touch_look_sensitivity: float = TOUCH_LOOK_DEFAULT
 var ads_toggle: bool = true
 ## 无限备弹：备弹显示为 ∞，弹匣打空后仍需换弹，换弹不消耗备弹。默认开启。
 var infinite_reserve: bool = true
+## 武器无需换弹：弹匣不会打空，开火不必做换弹动作。与无限备弹独立。
+var no_reload: bool = false
 ## 3D 渲染分辨率倍率（0 = 按平台默认：手机 75%，PC 100%）。只缩放 3D，不影响 HUD 点击。
 var render_scale: float = 0.0
 ## 布娃娃受击力度（0.35..2.0）。1.0 = 0.2.12 默认，比 0.2.11 明显更强，但不会把尸体打飞出地图。
@@ -45,6 +47,7 @@ func load_cfg() -> void:
 	touch_look_sensitivity = clampf(touch_raw, 0.001, 0.04)
 	ads_toggle = bool(c.get_value("ads", "toggle", true))
 	infinite_reserve = bool(c.get_value("ammo", "infinite_reserve", true))
+	no_reload = bool(c.get_value("ammo", "no_reload", false))
 	if c.has_section_key("graphics", "render_scale"):
 		render_scale = clampf(float(c.get_value("graphics", "render_scale", 0.0)), 0.0, 1.0)
 	hit_force = clampf(float(c.get_value("combat", "hit_force", HIT_FORCE_DEFAULT)), 0.35, 2.0)
@@ -60,6 +63,7 @@ func save_cfg() -> void:
 	c.set_value("look", "touch", touch_look_sensitivity)
 	c.set_value("ads", "toggle", ads_toggle)
 	c.set_value("ammo", "infinite_reserve", infinite_reserve)
+	c.set_value("ammo", "no_reload", no_reload)
 	c.set_value("graphics", "render_scale", render_scale)
 	c.set_value("combat", "hit_force", hit_force)
 	c.set_value("combat", "pull_force", pull_force)
@@ -109,6 +113,13 @@ func set_infinite_reserve(on: bool) -> void:
 	if infinite_reserve == on:
 		return
 	infinite_reserve = on
+	save_cfg()
+
+
+func set_no_reload(on: bool) -> void:
+	if no_reload == on:
+		return
+	no_reload = on
 	save_cfg()
 
 
