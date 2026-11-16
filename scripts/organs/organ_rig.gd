@@ -753,6 +753,30 @@ func abdomen_frame() -> Transform3D:
 
 
 ## 射线 vs 腹部椭球（ab-local），命中返回世界坐标点，否则返回 null
+## 把世界点投到腹壁皮肤（椭球外表面）上。体内的内脏点会沿前向或径向推到腹前表面。
+func project_skin(world_p: Vector3) -> Vector3:
+	_update_frame()
+	var ab: Vector3 = _frame.affine_inverse() * world_p
+	var c := _ellipsoid_c
+	var r := _ellipsoid_r
+	# 腹前表面：在相近的左右/高度上取椭球 +Z 一侧，避免捂到体内或后腰。
+	var qx := (ab.x - c.x) / maxf(r.x, 1e-4)
+	var qy := (ab.y - c.y) / maxf(r.y, 1e-4)
+	qx = clampf(qx, -0.85, 0.85)
+	qy = clampf(qy, -0.85, 0.85)
+	var rem := 1.0 - qx * qx - qy * qy
+	var qz := sqrt(maxf(rem, 0.04))
+	var skin_ab := Vector3(c.x + qx * r.x, c.y + qy * r.y, c.z + qz * r.z)
+	# 再沿法线向外 1.2cm，让手按在表皮而不是贴进网格。
+	var n_ab := _ellipsoid_normal(skin_ab)
+	if n_ab.dot(Vector3(0, 0, 1)) < 0.0:
+		n_ab.z = absf(n_ab.z)
+		if n_ab.length_squared() > 1e-8:
+			n_ab = n_ab.normalized()
+	var world: Vector3 = _frame * (skin_ab + n_ab * 0.012)
+	return world
+
+
 func ray_hit_belly(origin: Vector3, dir: Vector3) -> Variant:
 	_update_frame()
 	var inv := _frame.affine_inverse()

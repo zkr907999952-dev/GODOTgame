@@ -688,27 +688,59 @@ const HAIR_BACK_MARGIN := 0.035
 const HAIR_TORSO_HALF_X := 0.17
 
 
+func _hair_sphere_push(p: Vector3, center: Vector3, radius: float) -> Vector3:
+	var dv := p - center
+	var d := dv.length()
+	if d < radius and radius > 1e-5:
+		if d < 1e-6:
+			dv = Vector3.UP
+			d = 1.0
+		return center + dv * (radius / d)
+	return p
+
+
 func _hair_body_collide(p: Vector3, nm: String, ref: String, bp: Vector3, bq: Quaternion) -> Vector3:
+	# 头颅 / 颈部：布娃娃躺下后世界轴约束会失效，必须用当前头骨球把头发顶出头皮。
+	if skeleton:
+		var sk_xf := skeleton.global_transform
+		for rec in [["C_Head_a", 0.115], ["C_Neck_a", 0.075]]:
+			var bi := int(bone_i.get(str(rec[0]), -1)) if bone_i.has(str(rec[0])) else skeleton.find_bone(str(rec[0]))
+			if bi < 0:
+				continue
+			var c: Vector3 = (sk_xf * skeleton.get_bone_global_pose(bi)).origin
+			p = _hair_sphere_push(p, c, float(rec[1]))
+		# 胸腔椭圆柱（当前脊柱姿态），防止发丝钻进躯干。
+		for bn in ["C_Spine_d", "C_Spine_c", "C_Spine_a"]:
+			if not bone_i.has(bn):
+				continue
+			var g := sk_xf * skeleton.get_bone_global_pose(int(bone_i[bn]))
+			var local: Vector3 = g.affine_inverse() * p
+			var hx := 0.15 if corpse_mode else HAIR_TORSO_HALF_X
+			var hz := 0.11 if corpse_mode else 0.10
+			var q := Vector3(local.x / hx, 0.0, local.z / hz)
+			# 只推开钻进躯干中段的点，不要把垂在背后的长发整体弹开。
+			if q.length_squared() < 1.0 and absf(local.y) < 0.16:
+				var n := q if q.length_squared() > 1e-8 else Vector3(0, 0, -1)
+				n = n.normalized()
+				local.x = n.x * hx
+				local.z = n.z * hz
+				p = g * local
+			break
 	var l := bq.inverse() * (p - bp)
-	var lr: Vector3 = (rest_pos[nm] as Vector3) - (rest_pos[ref] as Vector3)
-	# 只管垂在背后的发段（静止时在参考骨后方）
-	if lr.z > -0.02:
-		return p
-	var back_z := lr.z + HAIR_BACK_MARGIN
-	if absf(l.x) < HAIR_TORSO_HALF_X and l.z > back_z:
-		# 越过背面：沿 z 推回背后；靠近侧边的推得少一点（自然搭在肩侧）
-		var edge := smoothstep(HAIR_TORSO_HALF_X * 0.7, HAIR_TORSO_HALF_X, absf(l.x))
-		l.z = lerpf(back_z, l.z, edge)
-	p = bp + bq * l
+	var lr: Vector3 = (rest_pos[nm] as Vector3) - (rest_pos[ref] as Vector3) if rest_pos.has(nm) and rest_pos.has(ref) else Vector3(0, 0, -0.1)
+	# 活体：垂在背后的发段不要绕到胸前。布娃娃则始终做躯干碰撞（上面已做）。
+	if not corpse_mode and lr.z <= -0.02:
+		var back_z := lr.z + HAIR_BACK_MARGIN
+		if absf(l.x) < HAIR_TORSO_HALF_X and l.z > back_z:
+			var edge := smoothstep(HAIR_TORSO_HALF_X * 0.7, HAIR_TORSO_HALF_X, absf(l.x))
+			l.z = lerpf(back_z, l.z, edge)
+			p = bp + bq * l
 	# 乳房球：*_Breast_b_Phy 在乳头附近（跟随乳摇），球心往胸腔里收 4.5cm。
 	for bn in ["L_Breast_b_Phy", "R_Breast_b_Phy"]:
 		if not bone_i.has(bn):
 			continue
-		var c := skeleton.get_bone_global_pose(bone_i[bn]).origin - (bq * Vector3(0.0, 0.0, 0.045))
-		var dv := p - c
-		var r := 0.068
-		if dv.length() < r:
-			p = c + dv.normalized() * r
+		var c2 := skeleton.get_bone_global_pose(bone_i[bn]).origin - (bq * Vector3(0.0, 0.0, 0.045))
+		p = _hair_sphere_push(p, c2, 0.072 if corpse_mode else 0.068)
 	return p
 
 
@@ -825,7 +857,8 @@ func _step_hair(d: float) -> void:
 			p.y = to.y - 0.1
 		if p.z > to.z + 0.03:
 			p.z = to.z + 0.03
-		if p.y < neck_cut:
+		# 世界轴颈部圆柱只适用于站立活体；布娃娃改走头骨/颈椎球碰撞。
+		if (not corpse_mode) and p.y < neck_cut:
 			var cx := p.x
 			var cz := p.z - 0.03
 			var rad: float = sqrt((cx) * (cx) + (cz) * (cz))
@@ -837,9 +870,12 @@ func _step_hair(d: float) -> void:
 					p.z = to.z
 		if has_body_frame:
 			p = _hair_body_collide(p, i_nm, body_ref, body_p, body_q)
+		elif corpse_mode:
+			p = _hair_body_collide(p, i_nm, root_name, rp, rq)
 		hair_p[k3] = p
 
-	for _iter in 3:
+	var iters := 5 if corpse_mode else 3
+	for _iter in iters:
 		hair_p[0] = rp
 		for k4 in range(1, n):
 			if _hair_pinned(k4):
@@ -851,8 +887,11 @@ func _step_hair(d: float) -> void:
 			var lenv := maxf(from.length(), 1e-8)
 			var rest_l: float = hair_len[k4] if hair_len[k4] > 0.0 else lenv
 			hair_p[k4] = b - from * (((lenv - rest_l) / lenv) * 0.85)
-			if has_body_frame and k4 >= 3:
-				hair_p[k4] = _hair_body_collide(hair_p[k4], hair_names[k4], body_ref, body_p, body_q)
+			if (has_body_frame and k4 >= 3) or (corpse_mode and k4 >= 2):
+				var cref := body_ref if has_body_frame else root_name
+				var cp := body_p if has_body_frame else rp
+				var cq := body_q if has_body_frame else rq
+				hair_p[k4] = _hair_body_collide(hair_p[k4], hair_names[k4], cref, cp, cq)
 
 	for k5 in n:
 		var nm: String = hair_names[k5]

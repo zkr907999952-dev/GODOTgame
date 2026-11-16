@@ -35,6 +35,15 @@ const PELLETS := {
 }
 
 
+## 从命中字典里取第一个真正的 Vector3（键存在但为 null 时不能用 Dictionary.get 的默认值）。
+static func vec3_of(info: Dictionary, keys: Array, fallback: Vector3 = Vector3.ZERO) -> Vector3:
+	for k in keys:
+		var v = info.get(k) if info.has(k) else null
+		if v is Vector3:
+			return v
+	return fallback
+
+
 static func category_of(weapon_id: String, w: Resource = null) -> String:
 	if w and "category" in w and str(w.category) != "":
 		return str(w.category)

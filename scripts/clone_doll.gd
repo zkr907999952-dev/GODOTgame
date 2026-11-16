@@ -11,6 +11,7 @@ const CharacterLookScript := preload("res://scripts/character_look.gd")
 const CharacterHealthScript := preload("res://scripts/character_health.gd")
 const RagdollSystemScript := preload("res://scripts/ragdoll_system.gd")
 const HitReactionScript := preload("res://scripts/hit_reaction.gd")
+const CombatDamage := preload("res://scripts/combat_damage.gd")
 const CHAR_LIGHT_LAYER := 1 << 17
 const SEC_SYNC := ["hair_enabled", "hair_damp", "hair_inertia", "hair_gravity", "hair_wind", "blink_enabled", "breath_enabled", "breath_amp", "breath_speed"]
 
@@ -171,8 +172,12 @@ func _on_character_died(info: Dictionary) -> void:
 		for c in body_hit.get_children():
 			if c is CollisionShape3D:
 				(c as CollisionShape3D).disabled = true
-	var dir: Vector3 = info.get("dir", Vector3.FORWARD)
-	var hit: Vector3 = info.get("entry", info.get("hit", Vector3.ZERO))
+	var dir: Vector3 = CombatDamage.vec3_of(info, ["dir"], Vector3.FORWARD)
+	if dir.length_squared() < 1e-8:
+		dir = Vector3.FORWARD
+	else:
+		dir = dir.normalized()
+	var hit: Vector3 = CombatDamage.vec3_of(info, ["entry", "hit", "pos"], Vector3.ZERO)
 	var par: Dictionary = info.get("par", {})
 	var col = info.get("collider")
 	var imp := Vector3.ZERO

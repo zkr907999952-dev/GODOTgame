@@ -91,6 +91,8 @@ var _cam_chance_slider: HSlider
 var _cam_chance_value: Label
 var _hit_force_slider: HSlider
 var _hit_force_value: Label
+var _pull_force_slider: HSlider
+var _pull_force_value: Label
 var _btn_sheet_close: Button
 var _safe: Vector4 = Vector4.ZERO  # 逻辑像素：左 上 右 下
 var _debug_safe: Variant = null
@@ -118,6 +120,7 @@ func setup(player: Node) -> void:
 	_bind_weapons()
 	_sync_bullet_cam_ui()
 	_sync_hit_force_ui()
+	_sync_pull_force_ui()
 	_sync_render_scale_ui()
 	if _touch:
 		_touch.call("setup", player, self, get_parent())
@@ -1122,6 +1125,26 @@ func _build_settings_panel() -> PanelContainer:
 	_hit_force_slider.value_changed.connect(_on_hit_force_changed)
 	v.add_child(_hit_force_slider)
 
+	var pf_row := HBoxContainer.new()
+	var pf_l := Label.new()
+	pf_l.text = "拉扯力度"
+	pf_l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pf_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	pf_row.add_child(pf_l)
+	_pull_force_value = Label.new()
+	_pull_force_value.text = "1.00"
+	_pull_force_value.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	pf_row.add_child(_pull_force_value)
+	v.add_child(pf_row)
+	_pull_force_slider = HSlider.new()
+	_pull_force_slider.min_value = 0.35
+	_pull_force_slider.max_value = 2.5
+	_pull_force_slider.step = 0.05
+	_pull_force_slider.value = 1.0
+	_pull_force_slider.custom_minimum_size = Vector2(220, 18)
+	_pull_force_slider.value_changed.connect(_on_pull_force_changed)
+	v.add_child(_pull_force_slider)
+
 	var help_chk := CheckButton.new()
 	help_chk.text = "显示本面板说明"
 	help_chk.button_pressed = true
@@ -1129,7 +1152,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。受击力度调节子弹对布娃娃的撞击强弱。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。受击力度调节子弹对布娃娃的撞击强弱。拉扯力度调节拖拽尸体时的拉力。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)
@@ -1757,6 +1780,9 @@ func _sync_from_systems() -> void:
 				_breast_slider.set_value_no_signal(float(br.get("strength")))
 			if _breast_value:
 				_breast_value.text = "%.2f" % float(br.get("strength"))
+	_sync_bullet_cam_ui()
+	_sync_hit_force_ui()
+	_sync_pull_force_ui()
 
 
 func _org() -> Node:
@@ -2484,4 +2510,23 @@ func _on_hit_force_changed(v: float) -> void:
 		s.call("set_hit_force", v)
 	if _hit_force_value:
 		_hit_force_value.text = "%.2f" % v
+
+
+func _sync_pull_force_ui() -> void:
+	var s := _settings()
+	if s == null:
+		return
+	var v := clampf(float(s.get("pull_force")), 0.35, 2.5)
+	if _pull_force_slider:
+		_pull_force_slider.set_value_no_signal(v)
+	if _pull_force_value:
+		_pull_force_value.text = "%.2f" % v
+
+
+func _on_pull_force_changed(v: float) -> void:
+	var s := _settings()
+	if s:
+		s.call("set_pull_force", v)
+	if _pull_force_value:
+		_pull_force_value.text = "%.2f" % v
 

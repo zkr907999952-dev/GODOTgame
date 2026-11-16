@@ -8,6 +8,7 @@ const CharacterHealthScript = preload("res://scripts/character_health.gd")
 const RagdollSystemScript = preload("res://scripts/ragdoll_system.gd")
 const HitReactionScript = preload("res://scripts/hit_reaction.gd")
 const CorpseDragScript = preload("res://scripts/corpse_drag.gd")
+const CombatDamage := preload("res://scripts/combat_damage.gd")
 ## 角色控制器：展示互动 / 角色控制 双模式 + SoftLoco 网页 loco 动画驱动 Skeleton3D。
 ## Web loco bind: mesh faces +Z; Godot move uses -Z forward → visual Body needs π yaw offset.
 const BODY_YAW_OFFSET := PI
@@ -381,8 +382,12 @@ func _on_character_died(info: Dictionary) -> void:
 	velocity = Vector3.ZERO
 	if _weapons and _weapons.has_method("holster") and bool(_weapons.call("is_armed")):
 		_weapons.call("holster")
-	var dir: Vector3 = info.get("dir", Vector3.FORWARD)
-	var hit: Vector3 = info.get("entry", info.get("hit", Vector3.ZERO))
+	var dir: Vector3 = CombatDamage.vec3_of(info, ["dir"], Vector3.FORWARD)
+	if dir.length_squared() < 1e-8:
+		dir = Vector3.FORWARD
+	else:
+		dir = dir.normalized()
+	var hit: Vector3 = CombatDamage.vec3_of(info, ["entry", "hit", "pos"], Vector3.ZERO)
 	var par: Dictionary = info.get("par", {})
 	var col = info.get("collider")
 	var imp := Vector3.ZERO
@@ -544,8 +549,9 @@ func observe_tap_fire(screen: Vector2) -> bool:
 	if dir.length_squared() < 1e-10:
 		return false
 	dir = dir.normalized()
+	# 观察模式要能打中角色本体（第一人称排除自己，避免从相机里打到自己的胶囊）。
 	if _weapons.has_method("fire_along_ray"):
-		return bool(_weapons.call("fire_along_ray", from, dir))
+		return bool(_weapons.call("fire_along_ray", from, dir, true))
 	if _weapons.has_method("fire_at_point"):
 		return bool(_weapons.call("fire_at_point", from + dir * 8.0))
 	return false

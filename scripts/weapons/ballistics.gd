@@ -24,6 +24,10 @@ const BALL := {
 }
 
 var exclude: Array[RID] = []
+## 观察模式点击射击时为 true：弹道可以命中玩家本体。
+var hit_owner: bool = false
+## 下一发弹头是否忽略对发射者的排除（由 fire_along_ray 在生成前设置）。
+var next_hit_owner: bool = false
 var last_hit: Dictionary = {}
 var last_body: Dictionary = {}
 var last_organ: Dictionary = {}
@@ -132,6 +136,8 @@ func fire_projectile(origin: Vector3, dir: Vector3, weapon_id: String, w: Resour
 	var par := params_of(weapon_id, w)
 	for k in extra.keys():
 		par[k] = extra[k]
+	if not origin.is_finite() or not dir.is_finite() or dir.length_squared() < 1e-10:
+		return {}
 	var d := dir.normalized()
 	var pos := origin + d * 0.04
 	var pr := _make_visual(str(par["proj"]), float(par["scale"]))
@@ -151,7 +157,9 @@ func fire_projectile(origin: Vector3, dir: Vector3, weapon_id: String, w: Resour
 		"hit_body": false,
 		"cinfo": {},
 		"cinematic": false,
+		"hit_owner": hit_owner or next_hit_owner,
 	}
+	next_hit_owner = false
 	_live.append(rec)
 	while _live.size() > MAX_LIVE:
 		_end(_live[0], false)
@@ -217,8 +225,23 @@ func _step(p: Dictionary, dt: float) -> bool:
 			remain = 0.0
 			break
 		var from: Vector3 = p["pos"]
+		if not from.is_finite() or not travel.is_finite():
+			_end(p, false)
+			return false
+		# 超远弹道直接结束，避免非法 look_at / 精度炸掉错误。
+		if from.distance_squared_to(p.get("origin", from)) > 400.0 * 400.0:
+			_end(p, false)
+			return false
 		var to := from + travel
+		var allow_owner := bool(p.get("hit_owner", false))
+		var saved_owner := hit_owner
+		hit_owner = allow_owner
 		var hitd := _ray(from, to, p.get("skip", []))
+		var chit := _character_segment_hit(from, to, p.get("skip", []), p.get("skip_bodies", []))
+		hit_owner = saved_owner
+		if not chit.is_empty():
+			if hitd.is_empty() or from.distance_to(chit["position"]) + 0.0005 < from.distance_to(hitd["position"]):
+				hitd = chit
 		if hitd.is_empty():
 			p["pos"] = to
 			p["vel"] = vel2
@@ -253,12 +276,14 @@ func _on_body(p: Dictionary, body: Node, hp: Vector3, hn: Vector3, dir: Vector3,
 	qinfo["organs"] = organs
 	qinfo["weapon_id"] = p["id"]
 	qinfo["par"] = par
-	qinfo["entry"] = qinfo.get("entry", hp)
-	qinfo["normal"] = hn
+	qinfo["entry"] = _as_vec3(qinfo.get("entry"), hp)
+	qinfo["normal"] = _as_vec3(qinfo.get("normal"), hn)
+	if qinfo.get("exit") != null and not (qinfo.get("exit") is Vector3):
+		qinfo["exit"] = null
 	qinfo["speed"] = speed
 	qinfo["dir"] = dir
 	qinfo["collider"] = col
-	qinfo["origin"] = p.get("origin", hp)
+	qinfo["origin"] = _as_vec3(p.get("origin"), hp)
 	last_body = qinfo
 	last_organ = qinfo
 	p["hit_body"] = true
@@ -272,27 +297,32 @@ func _on_body(p: Dictionary, body: Node, hp: Vector3, hn: Vector3, dir: Vector3,
 	elif corpse and (bool(qinfo.get("hit", false)) or _is_torso_collider(col)):
 		# 尸体也可触发特写：命中腹部椭球或躯干骨、弹道能穿过身体。
 		qinfo["corpse_path"] = true
-		if qinfo.get("exit") == null:
+		if not (qinfo.get("exit") is Vector3):
 			qinfo["exit"] = _body_exit(body, hp, dir, qinfo)
 		organ_path.emit(qinfo)
-	if organs and organs.has_method("apply_ballistic_hit"):
-		organs.call("apply_ballistic_hit", hp - dir * 0.05, dir, par, qinfo)
-	hit.emit(hp, hn, body, str(p["id"]))
-	_apply_combat_hit(p, body, hp, dir, col, qinfo)
-	# 肉体必须贯穿：先结算伤口，弹头沿原方向继续，绝不把网格停在入弹皮肤上。
-	# 特写期间由 bullet_cam 摆放弹头，这里只记下出口，不冻结在入射点。
+	# 特写：腹部受击特效等到可见弹头网格真正碰到人体再播，不要在逻辑命中/开镜时就出现。
 	if p.get("cinematic", false):
-		if qinfo.get("exit") != null:
-			# 让特写路径能走到出口以外
-			pass
+		p["pending_impact"] = {"body": body, "hp": hp, "dir": dir, "par": par, "qinfo": qinfo, "col": col, "organs": organs}
+		p["ballistics"] = self
+		p["impact_applied"] = false
 		_place(p)
 		return true
+	_commit_impact(p, body, hp, dir, col, par, qinfo, organs)
 	var exit_p := _body_exit(body, hp, dir, qinfo)
 	# 同一具身体不再二次拦截（角色胶囊往往比腹截面大，出口后还会再撞上）
-	var skip: Array = p.get("skip", [])
+	var skip: Array = []
+	var prev_skip = p.get("skip")
+	if prev_skip is Array:
+		skip = (prev_skip as Array).duplicate()
 	if body is CollisionObject3D:
 		skip.append((body as CollisionObject3D).get_rid())
 	p["skip"] = skip
+	var skip_bodies: Array = []
+	var prev_bodies = p.get("skip_bodies")
+	if prev_bodies is Array:
+		skip_bodies = (prev_bodies as Array).duplicate()
+	skip_bodies.append(body)
+	p["skip_bodies"] = skip_bodies
 	var residual := clampf(0.32 + float(par.get("overpen", 0.3)) * 0.45, 0.18, 0.85)
 	if qinfo.get("thick") != null:
 		residual *= clampf(1.0 - float(qinfo["thick"]) * 0.7, 0.18, 1.0)
@@ -346,13 +376,115 @@ func _body_of(n: Object) -> Node:
 	return null
 
 
+func _character_segment_hit(from: Vector3, to: Vector3, extra: Array = [], skip_bodies: Array = []) -> Dictionary:
+	# 物理胶囊以外：腹壁椭球 + 皮肤网格包围盒，保证观察点击打在可视身体上也能命中。
+	var tree := get_tree()
+	if tree == null or not from.is_finite() or not to.is_finite():
+		return {}
+	var delta := to - from
+	var seglen := delta.length()
+	if seglen < 1e-5:
+		return {}
+	var dir := delta / seglen
+	var best: Dictionary = {}
+	var best_t := seglen
+	for n in tree.get_nodes_in_group("wound_body"):
+		if n == null or not is_instance_valid(n) or n in skip_bodies:
+			continue
+		if n is CollisionObject3D:
+			var rid: RID = (n as CollisionObject3D).get_rid()
+			if (not hit_owner and rid in exclude) or rid in extra:
+				continue
+		# 分身的 BodyHit 圆柱也被排除列表盖住时跳过（观察模式 hit_owner 时仍可打到本体）
+		var blocked := false
+		if (not hit_owner) and n.get("body_hit") is CollisionObject3D:
+			var br: RID = (n.get("body_hit") as CollisionObject3D).get_rid()
+			if br in exclude or br in extra:
+				blocked = true
+		# 即使圆柱在排除里，观察模式仍要用网格/腹壁（hit_owner 时 exclude 已空）
+		var organs: Node = n.call("get_organs") if n.has_method("get_organs") else null
+		if organs and organs.has_method("ray_hit_belly"):
+			var hp = organs.call("ray_hit_belly", from, dir)
+			if hp is Vector3 and (hp as Vector3).is_finite():
+				var t: float = ((hp as Vector3) - from).dot(dir)
+				if t > 0.002 and t <= best_t:
+					var nrm := -dir
+					if organs.has_method("project_skin"):
+						var skin = organs.call("project_skin", hp)
+						if skin is Vector3:
+							var nn: Vector3 = (skin - (n.global_position if n is Node3D else hp))
+							# 用入射方向的反方向即可
+							nrm = -dir
+					best_t = t
+					best = {"position": from + dir * t, "normal": nrm, "collider": n}
+		if blocked:
+			if not best.is_empty() and best.get("collider") == n:
+				pass
+		# 皮肤网格 AABB（可见身体，不含头发/眼睛/武器/独立脏器展示）
+		if n is Node3D:
+			for mi in n.find_children("*", "MeshInstance3D", true, false):
+				var mesh: MeshInstance3D = mi
+				if mesh == null or mesh.mesh == null or not mesh.visible:
+					continue
+				var low := mesh.name.to_lower()
+				if "hair" in low or "eye" in low or "weapon" in low or "gun" in low:
+					continue
+				if "intestine" in low or "uterus" in low or "organ" in low or "colon" in low:
+					continue
+				var xf := mesh.global_transform
+				var aabb: AABB = mesh.get_aabb().grow(0.02)
+				var inv := xf.affine_inverse()
+				var ro: Vector3 = inv * from
+				var rd: Vector3 = (inv.basis * dir)
+				if rd.length_squared() < 1e-12:
+					continue
+				rd = rd.normalized()
+				var ht := _aabb_ray_t(aabb, ro, rd, seglen)
+				if ht < 0.0:
+					continue
+				var world_p: Vector3 = xf * (ro + rd * ht)
+				var t2 := (world_p - from).dot(dir)
+				if t2 > 0.002 and t2 <= best_t:
+					best_t = t2
+					var nrm2 := (xf.basis * aabb.get_center() - world_p)
+					# 更稳：用射线反方向作法线
+					best = {"position": from + dir * t2, "normal": -dir, "collider": n}
+	return best
+
+
+func _aabb_ray_t(aabb: AABB, ro: Vector3, rd: Vector3, max_t: float) -> float:
+	var tmin := 0.0
+	var tmax := max_t
+	for i in 3:
+		var o := ro[i]
+		var d := rd[i]
+		var mn := aabb.position[i]
+		var mx := aabb.end[i]
+		if absf(d) < 1e-8:
+			if o < mn or o > mx:
+				return -1.0
+			continue
+		var t1 := (mn - o) / d
+		var t2 := (mx - o) / d
+		if t1 > t2:
+			var tmp := t1
+			t1 = t2
+			t2 = tmp
+		tmin = maxf(tmin, t1)
+		tmax = minf(tmax, t2)
+		if tmax < tmin:
+			return -1.0
+	return tmin if tmin <= max_t and tmin >= 0.0 else -1.0
+
+
 func _ray(from: Vector3, to: Vector3, extra: Array = []) -> Dictionary:
 	var w3 := _world()
-	if w3 == null:
+	if w3 == null or not from.is_finite() or not to.is_finite() or from.distance_squared_to(to) < 1e-12:
 		return {}
 	var q := PhysicsRayQueryParameters3D.create(from, to)
 	var ex: Array[RID] = []
-	ex.assign(exclude)
+	if not hit_owner:
+		ex.assign(exclude)
 	for r in extra:
 		if r is RID:
 			ex.append(r)
@@ -387,9 +519,65 @@ func _place(p: Dictionary) -> void:
 		tr.scale = Vector3(len, 1, 1)
 
 
+func _as_vec3(v, fallback: Vector3) -> Vector3:
+	if v is Vector3 and (v as Vector3).is_finite():
+		return v
+	return fallback
+
+
+func safe_basis_looking_at(dir: Vector3, up: Vector3 = Vector3.UP) -> Basis:
+	if not dir.is_finite() or dir.length_squared() < 1e-10:
+		return Basis.IDENTITY
+	dir = dir.normalized()
+	var u := up
+	if not u.is_finite() or u.length_squared() < 1e-10:
+		u = Vector3.UP
+	u = u.normalized()
+	if absf(dir.dot(u)) > 0.94:
+		u = Vector3.FORWARD if absf(dir.dot(Vector3.UP)) > 0.94 else Vector3.UP
+	return Basis.looking_at(dir, u)
+
+
+func _commit_impact(p: Dictionary, body: Node, hp: Vector3, dir: Vector3, col: Object, par: Dictionary, qinfo: Dictionary, organs: Node) -> void:
+	if p.get("impact_applied", false):
+		return
+	p["impact_applied"] = true
+	p["pending_impact"] = {}
+	if is_instance_valid(organs) and organs.has_method("apply_ballistic_hit"):
+		organs.call("apply_ballistic_hit", hp - dir * 0.05, dir, par, qinfo)
+	hit.emit(hp, _as_vec3(qinfo.get("normal"), -dir if dir.length_squared() > 1e-8 else Vector3.UP), body, str(p.get("id", "")))
+	_apply_combat_hit(p, body, hp, dir, col, qinfo)
+
+
+func apply_deferred_impact(p: Dictionary) -> void:
+	if p == null or p.is_empty() or p.get("impact_applied", false):
+		return
+	var rec = p.get("pending_impact")
+	if not (rec is Dictionary) or rec.is_empty():
+		return
+	var body = rec.get("body")
+	var qinfo: Dictionary = rec.get("qinfo", {})
+	if not (qinfo is Dictionary):
+		qinfo = {}
+	var hp: Vector3 = _as_vec3(rec.get("hp"), _as_vec3(qinfo.get("entry"), Vector3.ZERO))
+	var dir: Vector3 = _as_vec3(rec.get("dir"), _as_vec3(qinfo.get("dir"), Vector3.FORWARD))
+	if dir.length_squared() < 1e-8:
+		dir = Vector3.FORWARD
+	else:
+		dir = dir.normalized()
+	var par: Dictionary = rec.get("par", {})
+	if not (par is Dictionary):
+		par = {}
+	var col = rec.get("col")
+	var organs = rec.get("organs")
+	if organs == null and body != null and is_instance_valid(body) and body.has_method("get_organs"):
+		organs = body.call("get_organs")
+	_commit_impact(p, body, hp, dir, col, par, qinfo, organs)
+
+
 func look_along(n: Node3D, d: Vector3) -> void:
 	# 弹头网格沿 +X 向前
-	if d.length_squared() < 1e-10:
+	if n == null or not d.is_finite() or d.length_squared() < 1e-10:
 		return
 	d = d.normalized()
 	var up := Vector3.UP
@@ -503,8 +691,10 @@ func _spawn_decal(p: Vector3, n: Vector3, spark: bool) -> void:
 	mi.material_override = _decal_mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_host_add(mi)
-	var up := Vector3.UP if absf(n.dot(Vector3.UP)) < 0.95 else Vector3.FORWARD
-	mi.global_transform = Transform3D(Basis.looking_at(-n, up), p + n * 0.003)
+	if not p.is_finite() or not n.is_finite() or n.length_squared() < 1e-10:
+		n = Vector3.UP
+	var face := -n if n.length_squared() > 1e-10 else Vector3.FORWARD
+	mi.global_transform = Transform3D(safe_basis_looking_at(face, Vector3.UP), p + n.normalized() * 0.003)
 	_decals.append(mi)
 	while _decals.size() > MAX_DECALS:
 		var o: Node = _decals.pop_front()

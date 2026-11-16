@@ -554,14 +554,18 @@ func fire_at_point(world_point: Vector3) -> bool:
 	return fire_along_ray(origin, dir.normalized())
 
 
-func fire_along_ray(origin: Vector3, dir: Vector3) -> bool:
+func fire_along_ray(origin: Vector3, dir: Vector3, hit_owner: bool = false) -> bool:
 	var w: WeaponDef = cur_def()
 	if w == null or not is_armed():
 		return false
 	if ammo_of(current).x <= 0:
 		return false
-	if dir.length_squared() < 1e-8:
+	if not origin.is_finite() or not dir.is_finite() or dir.length_squared() < 1e-8:
 		return false
+	# 把「可命中本体」记在即将生成的弹头上，不能只在本函数里改全局开关：
+	# _fire_once 只负责生成弹头，真正的扫掠在之后的物理帧，那时全局开关早已被清掉。
+	if hit_owner and ballistics:
+		ballistics.set("next_hit_owner", true)
 	_aim_override = dir.normalized()
 	_has_aim_override = true
 	_origin_override = origin
@@ -571,6 +575,8 @@ func fire_along_ray(origin: Vector3, dir: Vector3) -> bool:
 	_aim_override = Vector3.ZERO
 	_has_origin_override = false
 	_origin_override = Vector3.ZERO
+	if ballistics:
+		ballistics.set("next_hit_owner", false)
 	return true
 
 
@@ -1788,9 +1794,29 @@ func left_hand_world() -> Vector3:
 	return (skeleton.global_transform * skeleton.get_bone_global_pose(i)).origin
 
 
+func grab_palm_sem(world_target: Vector3, shoulder_world: Vector3) -> Basis:
+	## 左手抓取的 SEM 约定：X=指向，Z=掌心法线（指向抓取点），与持枪 sem 一致。
+	## 不用 looking_at（它把 -Z 对准目标，手掌会翻/拧）。
+	var palm := world_target - shoulder_world
+	if palm.length_squared() < 1e-8:
+		palm = Vector3.FORWARD
+	palm = palm.normalized()
+	var fingers := Vector3.UP
+	if absf(fingers.dot(palm)) > 0.82:
+		fingers = Vector3.RIGHT
+	fingers = (fingers - palm * fingers.dot(palm)).normalized()
+	if fingers.length_squared() < 1e-8:
+		fingers = Vector3.RIGHT
+		fingers = (fingers - palm * fingers.dot(palm)).normalized()
+	# 稍微让指尖向内勾，掌心正对抓点。
+	return Basis(fingers, palm.cross(fingers), palm).orthonormalized()
+
+
 func apply_left_hand_grab(world_target: Vector3) -> void:
 	## 左手伸向拖拽点。不转锁骨，只解上臂/前臂/手，与持枪 IK 同一套求解器。
 	if skeleton == null or not _arm.has("L"):
+		return
+	if not world_target.is_finite():
 		return
 	var a: Dictionary = _arm["L"]
 	for k in ["sh", "ua", "fa", "ha"]:
@@ -1800,18 +1826,12 @@ func apply_left_hand_grab(world_target: Vector3) -> void:
 	var sk_xf := skeleton.global_transform
 	var to_sk := sk_xf.affine_inverse()
 	var P: Vector3 = to_sk * world_target
-	var pole := (to_sk.basis * Vector3(-0.55, -1.0, 0.2)).normalized()
+	# 肘向外（角色左侧）并略向下，避免前臂翻拧。
+	var pole := (to_sk.basis * Vector3(-0.75, -0.55, 0.15)).normalized()
 	var ua_i := int(a["ua"])
 	var sh_w: Vector3 = sk_xf * skeleton.get_bone_global_pose(ua_i).origin
-	var dir := world_target - sh_w
-	if dir.length_squared() < 1e-8:
-		dir = -sk_xf.basis.z
-	dir = dir.normalized()
-	var up := Vector3.UP
-	if absf(dir.dot(up)) > 0.92:
-		up = Vector3.RIGHT
-	var hand_world := Basis.looking_at(dir, up)
-	var hand_sk := (to_sk.basis * hand_world).orthonormalized()
+	var sem_world := grab_palm_sem(world_target, sh_w)
+	var hand_sk := (to_sk.basis * sem_world).orthonormalized()
 	_solve_arm(a, P, pole, hand_sk, Vector3.ZERO, 1.0)
 
 

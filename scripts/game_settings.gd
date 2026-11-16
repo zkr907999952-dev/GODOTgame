@@ -21,6 +21,9 @@ var render_scale: float = 0.0
 ## 布娃娃受击力度（0.35..2.0）。1.0 = 0.2.12 默认，比 0.2.11 明显更强，但不会把尸体打飞出地图。
 const HIT_FORCE_DEFAULT := 1.0
 var hit_force: float = HIT_FORCE_DEFAULT
+## 尸体拖拽拉扯力度（0.35..2.5）。1.0 = 加强后的默认拉力，可在设置里再调。
+const PULL_FORCE_DEFAULT := 1.0
+var pull_force: float = PULL_FORCE_DEFAULT
 
 
 func _ready() -> void:
@@ -45,6 +48,7 @@ func load_cfg() -> void:
 	if c.has_section_key("graphics", "render_scale"):
 		render_scale = clampf(float(c.get_value("graphics", "render_scale", 0.0)), 0.0, 1.0)
 	hit_force = clampf(float(c.get_value("combat", "hit_force", HIT_FORCE_DEFAULT)), 0.35, 2.0)
+	pull_force = clampf(float(c.get_value("combat", "pull_force", PULL_FORCE_DEFAULT)), 0.35, 2.5)
 
 
 func save_cfg() -> void:
@@ -58,6 +62,7 @@ func save_cfg() -> void:
 	c.set_value("ammo", "infinite_reserve", infinite_reserve)
 	c.set_value("graphics", "render_scale", render_scale)
 	c.set_value("combat", "hit_force", hit_force)
+	c.set_value("combat", "pull_force", pull_force)
 	c.save(PATH)
 	changed.emit()
 
@@ -112,6 +117,14 @@ func set_hit_force(v: float) -> void:
 	if is_equal_approx(hit_force, v):
 		return
 	hit_force = v
+	save_cfg()
+
+
+func set_pull_force(v: float) -> void:
+	v = clampf(v, 0.35, 2.5)
+	if is_equal_approx(pull_force, v):
+		return
+	pull_force = v
 	save_cfg()
 
 

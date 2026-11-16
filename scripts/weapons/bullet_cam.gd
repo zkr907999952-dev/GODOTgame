@@ -156,17 +156,17 @@ func _start(info: Dictionary, projectile: Dictionary) -> void:
 	if _dir.length_squared() < 1e-8:
 		_dir = Vector3.FORWARD
 	_dir = _dir.normalized()
-	_entry = info.get("entry", info.get("pos", Vector3.ZERO))
+	_entry = _as_vec3(info.get("entry"), _as_vec3(info.get("pos"), Vector3.ZERO))
 	var exit_v = info.get("exit")
-	if exit_v is Vector3:
+	if exit_v is Vector3 and (exit_v as Vector3).is_finite():
 		_exit = exit_v
 	else:
 		_exit = _entry + _dir * 0.28
 	# 从枪口开始跟随：优先弹头/查询里的 origin，否则从入射点往回退一段。
 	var muz = info.get("origin", info.get("muzzle", null))
-	if muz is Vector3 and (_entry - muz).length() > 0.05:
+	if muz is Vector3 and (muz as Vector3).is_finite() and (_entry - muz).length() > 0.05:
 		_muzzle = muz
-	elif not projectile.is_empty() and projectile.get("origin") is Vector3:
+	elif not projectile.is_empty() and projectile.get("origin") is Vector3 and (projectile["origin"] as Vector3).is_finite():
 		_muzzle = projectile["origin"]
 	else:
 		_muzzle = _entry - _dir * 0.85
@@ -284,6 +284,8 @@ func _enter_park() -> void:
 	_phase = "park"
 	debug_phase = "park"
 	_park_t = 0.0
+	# 可见弹头刚到达体表：这时才播出腹部受击特效。
+	_flush_impact()
 	var up := Vector3.UP
 	if absf(_dir.dot(up)) > 0.9:
 		up = Vector3.RIGHT
@@ -294,13 +296,18 @@ func _enter_park() -> void:
 
 
 func _place_follow(pos: Vector3) -> void:
+	if not pos.is_finite() or not _dir.is_finite() or _dir.length_squared() < 1e-10:
+		return
 	var up := Vector3.UP
 	if absf(_dir.dot(up)) > 0.9:
 		up = Vector3.RIGHT
-	var side := _dir.cross(up).normalized()
+	var side := _dir.cross(up)
+	if side.length_squared() < 1e-8:
+		side = Vector3.RIGHT
+	side = side.normalized()
 	up = side.cross(_dir).normalized()
 	var eye := pos - _dir * 0.14 + up * 0.05 + side * 0.035
-	_cam.global_transform = Transform3D(Basis.looking_at(_dir, up), eye)
+	_cam.global_transform = Transform3D(_safe_looking_at(_dir, up), eye)
 
 
 func _place_park(t: float) -> void:
@@ -310,9 +317,9 @@ func _place_park(t: float) -> void:
 	var rot := Basis(up, ang)
 	var eye: Vector3 = _entry + rot * rel
 	var look := (_entry - eye)
-	if look.length_squared() < 1e-8:
-		look = _dir
-	_cam.global_transform = Transform3D(Basis.looking_at(look.normalized(), up), eye)
+	if not look.is_finite() or look.length_squared() < 1e-8:
+		look = _dir if _dir.length_squared() > 1e-8 else Vector3.FORWARD
+	_cam.global_transform = Transform3D(_safe_looking_at(look.normalized(), up), eye)
 
 
 func _place_bullet(pos: Vector3, dir: Vector3) -> void:
@@ -382,6 +389,8 @@ func _stop() -> void:
 			if _organs.has_method("set_show_organs") and _prev_xray.has("show"):
 				_organs.call("set_show_organs", bool(_prev_xray["show"]))
 	_prev_xray.clear()
+	# 跳过或结束特写时，若还没播受击特效，现在补上，避免伤口丢失。
+	_flush_impact()
 	if not _bullet.is_empty():
 		_bullet["cinematic"] = false
 	_bullet = {}
@@ -395,6 +404,37 @@ func _stop() -> void:
 		if c:
 			c.current = true
 	finished.emit()
+
+
+func _as_vec3(v, fallback: Vector3) -> Vector3:
+	if v is Vector3 and (v as Vector3).is_finite():
+		return v
+	return fallback
+
+
+func _safe_looking_at(dir: Vector3, up: Vector3 = Vector3.UP) -> Basis:
+	if not dir.is_finite() or dir.length_squared() < 1e-10:
+		return Basis.IDENTITY
+	dir = dir.normalized()
+	var u := up
+	if not u.is_finite() or u.length_squared() < 1e-10:
+		u = Vector3.UP
+	u = u.normalized()
+	if absf(dir.dot(u)) > 0.94:
+		u = Vector3.FORWARD if absf(dir.dot(Vector3.UP)) > 0.94 else Vector3.UP
+	return Basis.looking_at(dir, u)
+
+
+func _flush_impact() -> void:
+	if _bullet.is_empty():
+		return
+	if _bullet.get("impact_applied", false):
+		return
+	if not (_bullet.get("pending_impact") is Dictionary):
+		return
+	var bal = _bullet.get("ballistics")
+	if bal and is_instance_valid(bal) and bal.has_method("apply_deferred_impact"):
+		bal.call("apply_deferred_impact", _bullet)
 
 
 func _build_smoke() -> void:

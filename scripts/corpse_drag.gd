@@ -254,7 +254,8 @@ func physics_tick(delta: float) -> void:
 		return
 	var hold := hold_world()
 	_sync_anchor(hold)
-	_pull_toward(hold, pt, 36.0, 12.0, 2.4)
+	var pr := pull_params()
+	_pull_toward(hold, pt, float(pr["k"]), float(pr["damp"]), float(pr["max_j"]))
 
 
 func apply_left_hand() -> void:
@@ -297,12 +298,37 @@ func _tick_reach(delta: float, pt: Vector3) -> void:
 	var goal := _reach_goal()
 	_sync_anchor(goal)
 	# 选择距离可以比对长，但抓住前先把点和手拉到重合。拉得更紧，避免一直停在伸出阶段。
-	_pull_toward(goal, pt, 80.0, 16.0, 7.0)
+	var pr := pull_params()
+	_pull_toward(goal, pt, float(pr["k_reach"]), float(pr["damp_reach"]), float(pr["max_j_reach"]))
 	var d := current_grab_point().distance_to(goal)
 	if d <= REACH_SNAP or _reach_t >= REACH_MAX:
 		reaching = false
 		capture_hold(goal if d <= 0.35 else current_grab_point().lerp(goal, 0.7))
 		_sync_anchor(hold_world())
+
+
+func pull_force_scale() -> float:
+	if player and player.get_tree():
+		var st: Node = player.get_tree().root.get_node_or_null("Main/GameSettings")
+		if st == null:
+			st = player.get_tree().root.find_child("GameSettings", true, false)
+		if st and st.get("pull_force") != null:
+			return clampf(float(st.get("pull_force")), 0.35, 2.5)
+	return 1.0
+
+
+## 默认拉力已比 0.2.12 明显加大；再乘设置里的「拉扯力度」。
+func pull_params() -> Dictionary:
+	var s := pull_force_scale()
+	return {
+		"k": 95.0 * s,
+		"damp": 16.0,
+		"max_j": 11.0 * s,
+		"k_reach": 140.0 * s,
+		"damp_reach": 18.0,
+		"max_j_reach": 16.0 * s,
+		"scale": s,
+	}
 
 
 func _pull_toward(hold: Vector3, pt: Vector3, k: float, damp: float, max_j: float) -> void:
