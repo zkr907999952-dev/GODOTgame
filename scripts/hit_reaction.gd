@@ -615,4 +615,3 @@ func _aim_bone(bi: int, from: Vector3, to: Vector3, w: float) -> void:
 	if par >= 0:
 		par_b = skeleton.get_bone_global_pose(par).basis.orthonormalized()
 	skeleton.set_bone_pose_rotation(bi, (par_b.inverse() * new_b).get_rotation_quaternion())
-
