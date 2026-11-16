@@ -3,8 +3,8 @@ extends SceneTree
 ## 俯仰以肩/枪托为轴；只有霰弹才触发多弹头特写，其它武器单发跟随；射击后无悬浮黑点。
 ##   godot --headless --path . -s res://scripts/tests/v040_check.gd
 
-const VERSION_NAME := "0.2.12"
-const VERSION_CODE := 14
+const VERSION_NAME := "0.2.13"
+const VERSION_CODE := 15
 
 var main: Node
 var player: Node
