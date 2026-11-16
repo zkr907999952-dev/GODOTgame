@@ -526,21 +526,18 @@ func _apply_gaze() -> void:
 
 
 func _apply_aim_waist(cam_pitch: float) -> void:
-	# cam_pitch 与相机 _pitch 相同：负值 = 低头。把俯仰分到腰/胸椎，使持枪上半身跟着瞄准。
+	# 上一版把俯仰分到腰/胸多节，腹部会折进网格穿模。现在不再弯腰分节，
+	# 只在腰部 C_Spine_a 做一次整体俯身，上半身连同肩一起绕腰转动。不转锁骨，也不转 C_Spine_b/c/d。
 	var down := clampf(-cam_pitch, 0.0, 1.55)
-	var up := clampf(cam_pitch, 0.0, 0.9)
-	if down < 0.03 and up < 0.03:
+	var up := clampf(cam_pitch, 0.0, 0.85)
+	if down < 0.02 and up < 0.02:
 		return
-	# 低头前屈（正 pitch 经测试会把胸椎向前送）；抬头只做很小的后仰。
-	var lean := down * 0.92 - up * 0.22
-	_nudge_look_bone("C_Spine_a", lean * 0.24, 0.0)
-	_nudge_look_bone("C_Spine_b", lean * 0.34, 0.0)
-	_nudge_look_bone("C_Spine_c", lean * 0.30, 0.0)
-	_nudge_look_bone("C_Spine_d", lean * 0.12, 0.0)
+	var lean := clampf(down * 0.50, 0.0, 0.48) - clampf(up * 0.16, 0.0, 0.18)
+	_nudge_look_bone("C_Spine_a", lean, 0.0)
 
 
 func debug_aim_waist() -> Dictionary:
-	# 测试：弯腰后胸/肩相对髋的前后位置。
+	# 测试：胸/肩相对髋的前后位置。腰部整体俯身后，低头时胸会随上半身前移，但不应再被多节折弯。
 	var out := {"pitch": body_look_pitch, "chest_fwd": 0.0, "ok": skeleton != null}
 	if skeleton == null:
 		return out
@@ -569,8 +566,7 @@ func debug_aim_waist() -> Dictionary:
 func _apply_body_look() -> void:
 	if not body_look_on or skeleton == null:
 		return
-	# 先按相机俯仰弯腰，让上半身跟着瞄准方向；再在弯腰后的颈骨坐标系里分解头颈转向。
-	# 不旋转锁骨，避免 0.2.10 的肩扭转回归。
+	# 只在腰部整体俯身（不弯折胸腹多节，避免穿模）。头颈仍按镜头转向。不旋转锁骨，避免 0.2.10 的肩扭转回归。
 	_apply_aim_waist(body_look_pitch)
 	# Web setBodyLook splits (-pitch, yaw) between neck/head as local deltas. That
 	# only matches the camera while the neck chain is at its standing rest; crouch /

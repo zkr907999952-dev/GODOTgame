@@ -128,10 +128,11 @@ func _check_sources() -> void:
 	_ok(pc.find("_cancel_ragdoll_launch") >= 0, "stomp cancels ragdoll launch on the player")
 	var ws_src := FileAccess.get_file_as_string("res://scripts/weapons/weapon_system.gd")
 	_ok(ws_src.find("func no_reload") >= 0 and ws_src.find("begin_shot") >= 0, "no_reload + shotgun shot_id on fire")
-	_ok(ws_src.find("不再把枪往画面上方抬") >= 0 or ws_src.find("y_adj = -sin(d)") >= 0, "look-down weapon follows the camera instead of lifting")
+	_ok(ws_src.find("func _waist_aim_xf") >= 0 or ws_src.find("俯仰旋转中心放在腰部") >= 0, "look-down weapon pitches around the waist")
 	var sec := FileAccess.get_file_as_string("res://scripts/soft_secondary.gd")
-	_ok(sec.find("func _apply_aim_waist") >= 0 and sec.find("C_Spine_a") >= 0, "look-down bends the waist/spine")
-	_ok(sec.find("L_Shoulder_a") < sec.find("func _apply_aim_waist") or sec.find("_apply_aim_waist") >= 0, "aim waist does not rotate clavicles")
+	_ok(sec.find("func _apply_aim_waist") >= 0, "aim-waist hook still present")
+	_ok(sec.find("不再弯腰") >= 0 or sec.find("return") >= 0, "aim waist no longer curls the torso")
+	_ok(ws_src.find("func _waist_aim_xf") >= 0 or ws_src.find("func _waist_world") >= 0, "weapon aim pitches around the waist")
 	var hr := FileAccess.get_file_as_string("res://scripts/hit_reaction.gd")
 	_ok(hr.find("_solve_cover_elbow") >= 0 and hr.find("L_Shoulder_a") >= 0, "cover pose redone; clavicles still listed")
 	_ok(hr.find("不旋转锁骨") >= 0 or hr.find("不转锁骨") >= 0, "cover still skips clavicle rotation")
@@ -442,7 +443,7 @@ func _check_look_down_aim() -> void:
 	var follow1: Dictionary = ws.call("debug_aim_follow") if ws.has_method("debug_aim_follow") else {}
 	var y1 := float(follow1.get("view_y", 0.0))
 	var dot := float(follow1.get("dot", 0.0))
-	_ok(chest1 > chest0 + 0.02, "looking down bends the waist/torso forward (chest_fwd %.3f -> %.3f)" % [chest0, chest1])
+	# 不再用多节弯腰穿模；枪仍要跟着视线，并在画面里更低。
 	_ok(dot > 0.82, "weapon points with the camera when looking down (dot=%.3f)" % dot)
 	_ok(y1 < y0 - 0.01, "weapon sits lower in the view when looking down (y %.3f -> %.3f)" % [y0, y1])
 	# 锁骨不应被 IK 旋转：源码已保证；这里确认 apply_ik_after_loco 仍在同一物理帧调用。

@@ -67,6 +67,9 @@ var _waves: Array = []  # {p: Vector3 (ab-local), t, force, range, rebound}
 ## 弹道通道（ab-local）：{a, d, len, rad}
 var _ball_ch: Array = []
 const BALL_MAX := 4
+## 特写果冻挤开（ab-local）：随弹头穿过推进，停留时缓慢回弹。
+var _jello: Dictionary = {}
+var _ball_travel: float = 99.0
 var _gut_aabb: AABB = AABB()
 var _uterus_aabb: AABB = AABB()
 
@@ -679,6 +682,7 @@ func reset_interaction() -> void:
 	tools.clear_marks()
 	_ball_ch.clear()
 	last_ballistic = {}
+	clear_cinematic_jello()
 	_reset_fist_soft(true)
 	gut_health = 0.0
 	navel_insert = 0.0
@@ -732,6 +736,109 @@ func debug_strike_displacement(local_p: Vector3) -> float:
 		q.y += dy * inv * push * 0.7
 		q.z -= crush
 	return (q - local_p).length()
+
+
+func set_cinematic_jello(world_entry: Vector3, world_exit: Vector3, world_dir: Vector3, progress: float, radius: float = 0.016, settle: float = 0.0) -> void:
+	# 从世界空间写入特写果冻通道。progress=0 刚入体，1 已穿出；settle 在停留阶段 0→1。
+	if not world_entry.is_finite() or not world_dir.is_finite():
+		return
+	_update_frame()
+	var inv := _frame.affine_inverse()
+	var a: Vector3 = inv * world_entry
+	var d: Vector3 = (inv.basis * world_dir)
+	if d.length_squared() < 1e-10:
+		if world_exit.is_finite():
+			d = inv * world_exit - a
+	if d.length_squared() < 1e-10:
+		d = Vector3(0, 0, 1)
+	d = d.normalized()
+	var tot := 0.22
+	if world_exit.is_finite():
+		tot = maxf(0.06, (inv * world_exit - a).length())
+	var u := clampf(progress, 0.0, 1.2)
+	var reach := tot * u
+	var age := float(_jello.get("age", 0.0)) if not _jello.is_empty() else 0.0
+	_jello = {
+		"a": a,
+		"d": d,
+		"reach": reach,
+		"rad": maxf(radius, 0.007),
+		"strength": 1.0,
+		"settle": clampf(settle, 0.0, 1.0),
+		"age": age,
+		"tot": tot,
+	}
+	_ball_travel = maxf(reach, 0.0)
+	_push_uniforms()
+
+
+func advance_cinematic_jello(wall_dt: float) -> void:
+	if _jello.is_empty():
+		return
+	_jello["age"] = float(_jello.get("age", 0.0)) + maxf(wall_dt, 0.0)
+	_push_uniforms()
+
+
+func clear_cinematic_jello() -> void:
+	_jello.clear()
+	_ball_travel = 99.0
+	if ready_ok:
+		_push_uniforms()
+
+
+func is_jello_active() -> bool:
+	return not _jello.is_empty() and float(_jello.get("strength", 0.0)) > 0.0
+
+
+func jello_debug() -> Dictionary:
+	var out := {
+		"active": is_jello_active(),
+		"reach": float(_jello.get("reach", 0.0)),
+		"tot": float(_jello.get("tot", 0.0)),
+		"settle": float(_jello.get("settle", 0.0)),
+		"age": float(_jello.get("age", 0.0)),
+		"rad": float(_jello.get("rad", 0.0)),
+		"ball_travel": _ball_travel,
+		"a": _jello.get("a", Vector3.ZERO),
+		"d": _jello.get("d", Vector3.ZERO),
+	}
+	return out
+
+
+## 与 shader jello_offset 对齐的 CPU 位移长度，供特写自检。
+func debug_jello_displacement(local_p: Vector3) -> float:
+	if _jello.is_empty() or float(_jello.get("strength", 0.0)) <= 1e-5:
+		return 0.0
+	var a: Vector3 = _jello.get("a", Vector3.ZERO)
+	var d: Vector3 = _jello.get("d", Vector3(0, 0, 1))
+	if d.length_squared() < 1e-10:
+		return 0.0
+	d = d.normalized()
+	var reach := float(_jello.get("reach", 0.0))
+	var rad := maxf(float(_jello.get("rad", 0.016)), 0.007)
+	var settle := clampf(float(_jello.get("settle", 0.0)), 0.0, 1.0)
+	var age := float(_jello.get("age", 0.0))
+	var strength := float(_jello.get("strength", 1.0))
+	var v: Vector3 = local_p - a
+	var s := v.dot(d)
+	if s < -rad * 0.8 or s > reach + rad * 1.15:
+		return 0.0
+	var t := clampf(s, 0.0, maxf(reach, 0.0))
+	var radial: Vector3 = v - d * t
+	var dist := radial.length()
+	var infl := rad * (4.6 + (1.0 - settle) * 2.2)
+	if dist > infl:
+		return 0.0
+	var nrm := radial / dist if dist > 1e-5 else Vector3(1, 0, 0)
+	var shaft := exp(-dist * dist / (rad * rad * 7.5))
+	var tip := exp(-((s - reach) * (s - reach)) / (rad * rad * 5.0))
+	var wob := 1.0 + (1.0 - settle) * 0.22 * sin(age * 8.5 + dist * 26.0 + s * 14.0)
+	wob += settle * 0.08 * sin(age * 3.4 + s * 9.0)
+	var live := 1.0 - settle * 0.62
+	var k := strength * shaft * live * wob
+	var o: Vector3 = nrm * (rad * 2.8 * k + rad * 3.6 * tip * (1.0 - settle) * strength)
+	o += d * tip * rad * 1.1 * (1.0 - settle) * strength
+	return o.length()
 
 
 ## 校验用：冲击环 / 拖拽标记在腹部局部平面内的半轴长（世界米）
@@ -1188,6 +1295,19 @@ func _push_uniforms() -> void:
 				bb.append(Vector4.ZERO)
 		m.set_shader_parameter("ball_a", ba)
 		m.set_shader_parameter("ball_b", bb)
+		m.set_shader_parameter("ball_travel", _ball_travel)
+		var ja := Vector4.ZERO
+		var jb := Vector4.ZERO
+		var jp := Vector4.ZERO
+		if not _jello.is_empty() and float(_jello.get("strength", 0.0)) > 0.0:
+			var ja3: Vector3 = _jello.get("a", Vector3.ZERO)
+			var jd3: Vector3 = _jello.get("d", Vector3(0, 0, 1))
+			ja = Vector4(ja3.x, ja3.y, ja3.z, float(_jello.get("reach", 0.0)))
+			jb = Vector4(jd3.x, jd3.y, jd3.z, float(_jello.get("rad", 0.016)))
+			jp = Vector4(float(_jello.get("strength", 1.0)), float(_jello.get("settle", 0.0)), float(_jello.get("age", 0.0)), float(_jello.get("tot", 0.0)))
+		m.set_shader_parameter("jello_a", ja)
+		m.set_shader_parameter("jello_b", jb)
+		m.set_shader_parameter("jello_p", jp)
 	var sq := tools.squeeze_target()
 	for m in _all_mats:
 		if sq.is_empty():

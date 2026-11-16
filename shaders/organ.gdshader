@@ -1,5 +1,5 @@
 // 体内脏器（大肠/小肠/子宫/膀胱/卵巢…）：湿润、微透光的粉红组织。
-// 顶点：肠蠕动（网页 GutPeristalsis）+ 击腹冲击波（BellyStrike，仅肠）+ 拖拽软组织位移（organs soft=0.82）。
+// 顶点：肠蠕动（网页 GutPeristalsis）+ 击腹冲击波（BellyStrike，仅肠）+ 拖拽软组织位移（organs soft=0.82）+ 特写果冻挤开。
 shader_type spatial;
 render_mode cull_disabled, depth_draw_opaque, diffuse_burley, specular_schlick_ggx, shadows_disabled;
 
@@ -125,7 +125,7 @@ void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
 	v_l0 = l;
-	vec3 off = strike_offset(l) * strike_k + drag_offset(l) * organ_soft + dent_offset(l) * organ_soft + ball_tear(l);
+	vec3 off = strike_offset(l) * strike_k + drag_offset(l) * organ_soft + dent_offset(l) * organ_soft + ball_tear(l) + jello_offset(l);
 	// 腹部鼓包/搅动时，肠子和其它脏器跟着体表一起走（对照网页 FistPlay.deformColon + 肚皮 fist_offset）。
 	// 以前只在 contain 里当边界，脏器不会随腹部鼓起或左右搅动。
 	vec3 belly = organ_fist_offset(l);

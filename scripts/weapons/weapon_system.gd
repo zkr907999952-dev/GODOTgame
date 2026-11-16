@@ -30,7 +30,15 @@ const IK_FADE := 7.0
 const POLE_R := Vector3(0.75, -1.0, 0.15)
 const POLE_L := Vector3(-0.75, -1.0, 0.15)
 ## 左手在视模型空间的修正：动画手腕偏高，会穿出护木/机匣顶。略下移并靠近枪身。
-const LEFT_HAND_ADJUST := Vector3(0.0, -0.022, 0.012)
+const LEFT_HAND_ADJUST := Vector3(0.0, -0.030, 0.018)
+## 右手略向握把靠拢、下移，掌心贴握把而不是悬空。
+const RIGHT_HAND_ADJUST := Vector3(0.006, -0.012, 0.008)
+## 把动画手腕往真实握持点拉近的混合量。
+const GRIP_BLEND := 0.48
+var grip_curl := 0.5
+## 持枪姿势整体下移（视模型 / 手臂），开镜时少移一点以免机瞄对不齐。
+const ARM_DOWN_HIP := 0.04
+const ARM_DOWN_ADS := 0.015
 const ARM_STRETCH_MAX := 1.28
 var finger_gain := 1.0
 const SHOULDER_MAX := 0.5
@@ -873,36 +881,65 @@ func _look_up_angle() -> float:
 	return asin(clampf(fwd.y, -1.0, 1.0))
 
 
+func _armed_arm_down() -> Vector3:
+	# 持枪手臂/枪位整体下移一些，开镜少移以免准星对不齐。
+	var y := lerpf(ARM_DOWN_HIP, ARM_DOWN_ADS, _ads_k)
+	return Vector3(0.0, -y, 0.0)
+
+
+func _waist_world() -> Vector3:
+	if skeleton == null:
+		if camera:
+			return camera.global_position + Vector3(0.0, -0.48, 0.0)
+		return Vector3.ZERO
+	var i := skeleton.find_bone("C_Spine_a")
+	if i < 0:
+		i = skeleton.find_bone("C_Hip_a")
+	if i < 0:
+		return camera.global_position + Vector3(0.0, -0.48, 0.0) if camera else Vector3.ZERO
+	return skeleton.global_transform * skeleton.get_bone_global_pose(i).origin
+
+
 func _pitch_hold_xf() -> Transform3D:
-	# 武器指向跟随镜头。低头时不再把枪往画面上方抬（那会浮在胸口并穿模），
-	# 而是略向下放到中下腹附近；上半身弯腰由 soft_secondary 的瞄腰完成。
-	# 开镜偏移保持很小，交给机瞄对齐。
+	# 兼容旧接口：额外平移/抬头避让。真正的腰部旋转在 _waist_aim_xf。
 	if not (player and bool(player.get("first_person"))):
-		return Transform3D()
+		return Transform3D(Basis.IDENTITY, _armed_arm_down())
 	var u := _look_up_angle()
 	var hip := 1.0 - _ads_k
-	var y_adj := 0.0
-	var z_adj := 0.0
+	var extra := _armed_arm_down()
 	var tilt := 0.0
-	if u >= 0.0:
+	if u > 0.0:
 		# 抬头：略下移以免穿下巴，只做很小的反向倾角，仍大体跟着视线。
-		y_adj = -sin(u) * (0.12 * hip + 0.03 * _ads_k)
-		z_adj = (1.0 - cos(u)) * (0.06 * hip + 0.03 * _ads_k)
+		extra.y += -sin(u) * (0.12 * hip + 0.03 * _ads_k)
+		extra.z += (1.0 - cos(u)) * (0.06 * hip + 0.03 * _ads_k)
 		tilt = -u * 0.16 * hip
-	else:
-		var d := -u
-		# 低头：枪下移到中下腹附近，并拉近到近裁范围内，避免被胸腹网格挡住。
-		y_adj = -sin(d) * (0.11 * hip + 0.03 * _ads_k)
-		z_adj = (1.0 - cos(d)) * (0.14 * hip + 0.04 * _ads_k)
-		tilt = 0.0
-	return Transform3D(Basis(Vector3.RIGHT, tilt), Vector3(0.0, y_adj, z_adj))
+	return Transform3D(Basis(Vector3.RIGHT, tilt), extra)
+
+
+func _waist_aim_xf(xf: Transform3D) -> Transform3D:
+	# 俯仰旋转中心放在腰部：枪（以及随后的手臂 IK）绕腰转动，不再弯折胸腹网格。
+	# 推导：水平时枪在相机空间为 off；当前俯仰角 u 时，
+	# g_cam = W_cam - Rx(u)*W_cam + off，使世界位置等于绕腰旋转后的点。
+	if not (player and bool(player.get("first_person"))) or camera == null:
+		return xf
+	var W := _waist_world()
+	if not W.is_finite():
+		return xf
+	var W_cam: Vector3 = camera.global_transform.affine_inverse() * W
+	if not W_cam.is_finite():
+		return xf
+	var u := _look_up_angle()
+	var rx := Basis(Vector3.RIGHT, u)
+	var origin: Vector3 = W_cam - rx * W_cam + xf.origin
+	return Transform3D(xf.basis, origin)
 
 
 func _view_local(w: WeaponDef) -> Transform3D:
 	var off: Vector3 = _hip_offset(w).lerp(_ads_offset(w), _ads_k) if w else Vector3.ZERO
 	var sc: float = w.view_scale if w else 0.8
-	var xf := Transform3D(Basis().scaled(Vector3.ONE * sc), off)
-	return _pitch_hold_xf() * xf
+	var hold := _pitch_hold_xf()
+	var xf := hold * Transform3D(Basis().scaled(Vector3.ONE * sc), off)
+	return _waist_aim_xf(xf)
 
 
 func _tp_hold_adjust(w: WeaponDef) -> Transform3D:
@@ -1992,7 +2029,7 @@ func _pull_gun_into_reach(pose: Dictionary) -> void:
 			var wrist_cam: Vector3 = _wrist_cam(s, h, a)
 			var want: Vector3 = view.global_transform * wrist_cam
 			var sh: Vector3 = skx * skeleton.get_bone_global_pose(int(a["sh"])).origin
-			var reach: float = (float(a["l1"]) + float(a["l2"])) * 0.88
+			var reach: float = (float(a["l1"]) + float(a["l2"])) * 0.96
 			var d := want.distance_to(sh)
 			var extra := d - reach
 			if extra > worst:
@@ -2020,11 +2057,75 @@ func _left_hand_adjust() -> Vector3:
 	return base * k
 
 
+var _gun_ext_cache: Dictionary = {}
+
+
+func _gun_x_extent() -> Vector2:
+	## 枪局部 X（+X 朝枪口）的最小 / 最大值，按武器缓存。忽略闪光/阴影。
+	var id := current
+	if _gun_ext_cache.has(id):
+		return _gun_ext_cache[id]
+	var lo := 1e9
+	var hi := -1e9
+	if gun:
+		for mi in gun.find_children("*", "MeshInstance3D", true, false):
+			if (mi as MeshInstance3D).mesh == null:
+				continue
+			var n := String(mi.name).to_lower()
+			if "shadow" in n or "flash" in n or "muzzle" in n:
+				continue
+			var a: AABB = (mi as MeshInstance3D).mesh.get_aabb()
+			var xf: Transform3D = gun.global_transform.affine_inverse() * (mi as MeshInstance3D).global_transform
+			for k in 8:
+				var q: Vector3 = xf * a.get_endpoint(k)
+				lo = minf(lo, q.x)
+				hi = maxf(hi, q.x)
+	var out := Vector2(lo, hi) if hi > lo else Vector2(-0.2, 0.6)
+	if gun:
+		_gun_ext_cache[id] = out
+	return out
+
+
+func _grip_target_x(s: String) -> float:
+	## 手腕（手骨原点）沿枪身应在的位置：右手握把、左手护木/泵动前托。按枪长比例，适配不同模型。
+	var w: WeaponDef = cur_def()
+	var ext := _gun_x_extent()
+	var L := ext.y - ext.x
+	if w == null or not _is_long_gun(w):
+		# 手枪：右手握把；左手包在右手前侧，不伸到套筒前面。
+		return ext.x + L * (0.02 if s == "R" else 0.10)
+	if str(w.category) == "shotgun":
+		return ext.x + L * (0.20 if s == "R" else 0.50)
+	return ext.x + L * (0.17 if s == "R" else 0.44)
+
+
+func _grip_anchor_gun(s: String) -> Vector3:
+	# 兼容：返回枪局部的握持参考点（x 为握持位置，y/z 为枪轴附近）。
+	return Vector3(_grip_target_x(s), 0.0, 0.0)
+
+
 func _wrist_cam(s: String, h: Dictionary, a: Dictionary) -> Vector3:
 	var sem_cam := Basis(h["q"] as Quaternion)
 	var wrist: Vector3 = (h["wrist"] as Vector3) + sem_cam.x * (float(h["flen"]) - float(a["flen"]))
 	if s == "L":
 		wrist += _left_hand_adjust()
+	else:
+		wrist += RIGHT_HAND_ADJUST
+	# 把动画手腕沿枪身拉到真实握持位置（右手握把、左手护木），让手掌落在枪上而不是悬空或搭在枪托上。
+	if gun and view and GRIP_BLEND > 0.0 and gun.get_parent() == view:
+		var gxf: Transform3D = gun.transform  # view 局部
+		var wg: Vector3 = gxf.affine_inverse() * wrist
+		if wg.is_finite():
+			var tx := _grip_target_x(s)
+			var want := wg
+			want.x = lerpf(wg.x, tx, GRIP_BLEND * 1.7 if GRIP_BLEND * 1.7 < 0.95 else 0.95)
+			# 左手往枪身中线下方靠，托住护木；右手略下移贴握把。
+			if s == "L":
+				want.z = lerpf(wg.z, 0.0, GRIP_BLEND * 0.5)
+				want.y -= 0.006
+			else:
+				want.y -= 0.004
+			wrist = gxf * want
 	return wrist
 
 
@@ -2058,6 +2159,10 @@ func _apply_ik(pose: Dictionary, w: float) -> void:
 			if int(fd["i"]) < 0:
 				continue
 			var ang := (curls[i] - float(fd["bend0"])) * finger_gain
+			# 非拇指手指再弯曲，包住握把/护木（右手握把握得更紧，左手托护木稍松）。
+			if i < 12:
+				var gc := grip_curl * (1.0 if s == "R" else 0.75)
+				ang += gc * (0.35 if (i % 3) == 0 else 1.0)
 			var q: Quaternion = (fd["rest"] as Quaternion) * Quaternion(fd["ax"] as Vector3, ang)
 			_set_rot(int(fd["i"]), q, w)
 	_align_thumbs_to_slide(pose, w)
@@ -2168,6 +2273,60 @@ func debug_aim_follow() -> Dictionary:
 	out["dot"] = wfwd.dot(cfwd)
 	out["view_y"] = view.position.y
 	out["view_pos"] = view.position
+	out["ok"] = true
+	return out
+
+
+func debug_arm_down_offset() -> float:
+	return _armed_arm_down().y
+
+
+func debug_waist_hold_vector() -> Vector3:
+	## 把「枪相对腰」的向量按当前仰角绕腰部右轴转回水平。若旋转中心是腰，
+	## 不同俯仰下这个向量应大致不变；若绕眼睛转，低头后会明显偏离。
+	if camera == null or view == null:
+		return Vector3.ZERO
+	var W := _waist_world()
+	var g: Vector3 = view.global_position
+	var u := _look_up_angle()
+	var yaw_fwd := -camera.global_transform.basis.z
+	yaw_fwd.y = 0.0
+	if yaw_fwd.length_squared() < 1e-8:
+		yaw_fwd = Vector3(0, 0, -1)
+	yaw_fwd = yaw_fwd.normalized()
+	# 右轴 = 水平前向 × 上，与相机 +X（朝右）一致。不要用 up.cross(fwd)，那是左轴。
+	var yaw_r := yaw_fwd.cross(Vector3.UP)
+	if yaw_r.length_squared() < 1e-8:
+		yaw_r = Vector3.RIGHT
+	yaw_r = yaw_r.normalized()
+	return Basis(yaw_r, -u) * (g - W)
+
+
+func debug_waist_pivot() -> Dictionary:
+	## 俯仰应以腰部为旋转中心；胸椎不应再被弯折。
+	var out := {
+		"ok": false,
+		"pivot": "waist",
+		"arm_down": debug_arm_down_offset(),
+		"look_up": 0.0,
+		"waist": Vector3.ZERO,
+		"gun": Vector3.ZERO,
+		"hold_vec": Vector3.ZERO,
+	}
+	if camera == null or view == null:
+		return out
+	out["look_up"] = _look_up_angle()
+	out["waist"] = _waist_world()
+	out["gun"] = view.global_position
+	out["hold_vec"] = debug_waist_hold_vector()
+	# 若仍绕眼睛转，hold 向量相对水平会偏 |R(-u)(E-W) - (E-W)|，作为对照。
+	var EW: Vector3 = camera.global_position - (out["waist"] as Vector3)
+	var yf := -camera.global_transform.basis.z
+	yf.y = 0.0
+	if yf.length_squared() < 1e-8:
+		yf = Vector3(0, 0, -1)
+	var yr := yf.normalized().cross(Vector3.UP).normalized()
+	out["eye_pivot_err"] = (Basis(yr, -float(out["look_up"])) * EW - EW).length()
 	out["ok"] = true
 	return out
 
@@ -2373,8 +2532,7 @@ func debug_hand_error() -> Dictionary:
 	for s in ["R", "L"]:
 		var a: Dictionary = _arm[s]
 		var h: Dictionary = _last_pose[s]
-		var sem_cam := Basis(h["q"] as Quaternion)
-		var wrist_cam: Vector3 = (h["wrist"] as Vector3) + sem_cam.x * (float(h["flen"]) - float(a["flen"]))
+		var wrist_cam: Vector3 = _wrist_cam(s, h, a)
 		var want := vx * wrist_cam
 		var got := skeleton.global_transform * skeleton.get_bone_global_pose(int(a["ha"])).origin
 		out[s] = want.distance_to(got)

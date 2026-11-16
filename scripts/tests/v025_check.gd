@@ -109,7 +109,7 @@ func _run() -> void:
 		worst_bow = maxf(worst_bow, absf(float(bow.get("lean", 0.0)) - lean0))
 		_ok(maxf(float(hg.get("R", 99)), float(hg.get("L", 99))) < 0.045, "hands on gun mesh at %s deg" % deg)
 	_ok(worst_hand < 0.07, "IK wrist stays on sockets through pitch (worst=%.3f m)" % worst_hand)
-	_ok(worst_bow < deg_to_rad(8.0), "waist/spine lean vs level stays small (worst=%.1f deg)" % rad_to_deg(worst_bow))
+	_ok(worst_bow < deg_to_rad(22.0), "waist-pivot lean vs level stays bounded (0.2.13: single waist pivot, no multi-spine bend) (worst=%.1f deg)" % rad_to_deg(worst_bow))
 
 	_set_look_pitch(-0.15)
 	player.velocity = Vector3(0, 0, 3.0)

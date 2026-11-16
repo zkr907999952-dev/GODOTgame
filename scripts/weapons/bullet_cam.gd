@@ -48,7 +48,8 @@ var _hud_hidden: CanvasLayer
 var _cooldown: float = 0.0
 var _burst_lock: bool = false
 var _park_eye0: Vector3 = Vector3.ZERO
-var _smoke_pts: Array = []  # {p, age}
+var _smoke_pts: Array = []  # 兼容：所有弹道点的扁平视图
+var _smoke_trails: Array = []  # 每发弹头一条 {pts: Array[{p, age}], wait: float}
 var _smoke_mi: MeshInstance3D
 var _smoke_mesh: ImmediateMesh
 var _smoke_wait: float = 0.0
@@ -80,7 +81,28 @@ func has_smoke_trail() -> bool:
 
 
 func smoke_point_count() -> int:
+	_flatten_smoke_pts()
 	return _smoke_pts.size()
+
+
+func smoke_trail_count() -> int:
+	# 至少有 2 个点、能画出轨迹线的弹道数量。
+	var n := 0
+	for tr in _smoke_trails:
+		if not (tr is Dictionary):
+			continue
+		var pts: Array = tr.get("pts", [])
+		if pts.size() >= 2:
+			n += 1
+	return n
+
+
+func pellet_trail_ready() -> bool:
+	# 特写里每一发弹头都有自己的白色弹道。
+	if not playing:
+		return false
+	var need := maxi(1, _pellets.size())
+	return smoke_trail_count() >= need
 
 
 func debug_reset() -> void:
@@ -196,6 +218,7 @@ func _start(info: Dictionary, projectile: Dictionary) -> void:
 		_bullet["pos"] = _muzzle
 	_smoke_pts.clear()
 	_smoke_wait = 0.0
+	_reset_smoke_trails()
 	_cam.current = true
 	_place_follow(_muzzle)
 	var hud := get_parent().get_node_or_null("HUD")
@@ -246,7 +269,7 @@ func _tick(wall: float) -> void:
 		var pos := _muzzle.lerp(_entry, _t)
 		_place_all_pellets(_t)
 		_place_follow(_pellet_centroid(_t, pos))
-		_push_smoke(pos, wall)
+		_push_all_trails(_t, wall)
 		_set_sphere(pos)
 		if _t >= 1.0:
 			_enter_park()
@@ -259,14 +282,17 @@ func _tick(wall: float) -> void:
 		var bpos := _entry.lerp(_exit + _dir * 0.04, in_u)
 		_place_all_pellets(1.0 + in_u)
 		_place_bullet(bpos, _dir)
-		_push_smoke(bpos, wall)
+		_push_all_trails(1.0 + in_u, wall)
 		_set_sphere(_entry.lerp(bpos, 0.45))
+		_update_organ_jello(in_u, 0.0, wall)
 		_place_park(_park_t)
 		if in_u >= 1.0:
 			_enter_hold()
 	elif _phase == "hold":
 		_hold_t += wall
 		_place_park(_park_t + _hold_t)
+		var settle := clampf(_hold_t / maxf(HOLD_SEC, 0.01), 0.0, 1.0)
+		_update_organ_jello(1.0, settle, wall)
 		if _hold_t >= HOLD_SEC:
 			_stop()
 	if playing and not _cam.current:
@@ -286,8 +312,9 @@ func _enter_park() -> void:
 	_phase = "park"
 	debug_phase = "park"
 	_park_t = 0.0
-	# 可见弹头刚到达体表：这时才播出腹部受击特效。
+	# 可见弹头刚到达体表：这时才播出腹部受击特效，并开始内脏果冻挤开。
 	_flush_impact()
+	_update_organ_jello(0.0, 0.0, 0.0)
 	var up := Vector3.UP
 	if absf(_dir.dot(up)) > 0.9:
 		up = Vector3.RIGHT
@@ -519,7 +546,10 @@ func _stop() -> void:
 	_pellets = []
 	_bullet = {}
 	_smoke_pts.clear()
+	_smoke_trails.clear()
 	_rebuild_smoke()
+	if _organs and is_instance_valid(_organs) and _organs.has_method("clear_cinematic_jello"):
+		_organs.call("clear_cinematic_jello")
 	_cam.current = false
 	if _prev and is_instance_valid(_prev):
 		_prev.current = true
@@ -588,50 +618,131 @@ func _build_smoke() -> void:
 	add_child(_smoke_mi)
 
 
-func _push_smoke(pos: Vector3, wall: float) -> void:
-	_smoke_wait += wall
-	# 略微滞后于弹头，形成拖在后面的白烟。
-	if _smoke_wait >= SMOKE_DELAY or _smoke_pts.is_empty():
-		_smoke_wait = 0.0
-		if _smoke_pts.is_empty() or pos.distance_to(_smoke_pts[_smoke_pts.size() - 1]["p"]) > 0.012:
-			_smoke_pts.append({"p": pos, "age": 0.0})
+func _reset_smoke_trails() -> void:
+	_smoke_trails.clear()
+	var n := maxi(1, _pellets.size())
+	for _i in n:
+		_smoke_trails.append({"pts": [], "wait": 0.0})
+
+
+func _ensure_smoke_trails() -> void:
+	var n := maxi(1, _pellets.size())
+	while _smoke_trails.size() < n:
+		_smoke_trails.append({"pts": [], "wait": 0.0})
+	while _smoke_trails.size() > n:
+		_smoke_trails.pop_back()
+
+
+func _pellet_pos_at(rec: Dictionary, u: float) -> Vector3:
+	var span := maxf(0.15, _muzzle.distance_to(_entry))
+	var o: Vector3 = _as_vec3(rec.get("origin"), _muzzle)
+	var d: Vector3 = _as_vec3(rec.get("dir"), _dir)
+	if d.length_squared() < 1e-10:
+		d = _dir
+	d = d.normalized()
+	return o + d * (span * clampf(u, 0.0, 2.2))
+
+
+func _push_all_trails(u: float, wall: float) -> void:
+	_ensure_smoke_trails()
+	if _pellets.is_empty():
+		var pos := _muzzle.lerp(_entry, clampf(u, 0.0, 1.0))
+		if u > 1.0:
+			var in_u := clampf(u - 1.0, 0.0, 1.0)
+			pos = _entry.lerp(_exit + _dir * 0.04, in_u)
+		_accumulate_trail(_smoke_trails[0], pos, wall)
+	else:
+		var i := 0
+		for rec in _pellets:
+			if i >= _smoke_trails.size():
+				break
+			if rec is Dictionary:
+				_accumulate_trail(_smoke_trails[i], _pellet_pos_at(rec, u), wall)
+			i += 1
+	_flatten_smoke_pts()
+	_rebuild_smoke()
+
+
+func _accumulate_trail(tr: Dictionary, pos: Vector3, wall: float) -> void:
+	if not pos.is_finite():
+		return
+	var pts: Array = tr.get("pts", [])
+	var wait := float(tr.get("wait", 0.0)) + wall
+	# 略微滞后于弹头，形成拖在后面的白烟。每发弹头各自一条。
+	if wait >= SMOKE_DELAY or pts.is_empty():
+		wait = 0.0
+		if pts.is_empty() or pos.distance_to(pts[pts.size() - 1]["p"]) > 0.012:
+			pts.append({"p": pos, "age": 0.0})
 	var i := 0
-	while i < _smoke_pts.size():
-		_smoke_pts[i]["age"] = float(_smoke_pts[i]["age"]) + wall
-		if float(_smoke_pts[i]["age"]) > SMOKE_FADE:
-			_smoke_pts.remove_at(i)
+	while i < pts.size():
+		pts[i]["age"] = float(pts[i]["age"]) + wall
+		if float(pts[i]["age"]) > SMOKE_FADE:
+			pts.remove_at(i)
 		else:
 			i += 1
-	while _smoke_pts.size() > 80:
-		_smoke_pts.remove_at(0)
+	while pts.size() > 80:
+		pts.remove_at(0)
+	tr["pts"] = pts
+	tr["wait"] = wait
+
+
+func _flatten_smoke_pts() -> void:
+	_smoke_pts.clear()
+	for tr in _smoke_trails:
+		if not (tr is Dictionary):
+			continue
+		for rec in tr.get("pts", []):
+			_smoke_pts.append(rec)
+
+
+func _push_smoke(pos: Vector3, wall: float) -> void:
+	# 兼容旧接口：没有分弹头时仍可往第一条轨迹加点。
+	_ensure_smoke_trails()
+	if _smoke_trails.is_empty():
+		_reset_smoke_trails()
+	_accumulate_trail(_smoke_trails[0], pos, wall)
+	_flatten_smoke_pts()
 	_rebuild_smoke()
+
+
+func _update_organ_jello(progress: float, settle: float, wall: float) -> void:
+	if _organs == null or not is_instance_valid(_organs):
+		return
+	if _organs.has_method("set_cinematic_jello"):
+		_organs.call("set_cinematic_jello", _entry, _exit, _dir, clampf(progress, 0.0, 1.0), 0.016, clampf(settle, 0.0, 1.0))
+	if wall > 0.0 and _organs.has_method("advance_cinematic_jello"):
+		_organs.call("advance_cinematic_jello", wall)
 
 
 func _rebuild_smoke() -> void:
 	if _smoke_mesh == null:
 		return
 	_smoke_mesh.clear_surfaces()
-	if _smoke_pts.size() < 2:
-		return
-	_smoke_mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLE_STRIP)
-	for i in range(_smoke_pts.size()):
-		var a: Vector3 = _smoke_pts[i]["p"]
-		var nxt: Vector3 = _smoke_pts[mini(i + 1, _smoke_pts.size() - 1)]["p"]
-		var prv: Vector3 = _smoke_pts[maxi(i - 1, 0)]["p"]
-		var tan: Vector3 = nxt - prv
-		if tan.length_squared() < 1e-10:
-			tan = _dir
-		tan = tan.normalized()
-		var side := tan.cross(Vector3.UP)
-		if side.length_squared() < 1e-8:
-			side = tan.cross(Vector3.RIGHT)
-		side = side.normalized() * SMOKE_WIDTH
-		var age := float(_smoke_pts[i]["age"])
-		var alpha := clampf(1.0 - age / SMOKE_FADE, 0.0, 1.0)
-		alpha *= 0.72
-		var col := Color(0.93, 0.95, 0.97, alpha)
-		_smoke_mesh.surface_set_color(col)
-		_smoke_mesh.surface_add_vertex(a + side)
-		_smoke_mesh.surface_set_color(col)
-		_smoke_mesh.surface_add_vertex(a - side)
-	_smoke_mesh.surface_end()
+	for tr in _smoke_trails:
+		if not (tr is Dictionary):
+			continue
+		var pts: Array = tr.get("pts", [])
+		if pts.size() < 2:
+			continue
+		_smoke_mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLE_STRIP)
+		for i in range(pts.size()):
+			var a: Vector3 = pts[i]["p"]
+			var nxt: Vector3 = pts[mini(i + 1, pts.size() - 1)]["p"]
+			var prv: Vector3 = pts[maxi(i - 1, 0)]["p"]
+			var tan: Vector3 = nxt - prv
+			if tan.length_squared() < 1e-10:
+				tan = _dir
+			tan = tan.normalized()
+			var side := tan.cross(Vector3.UP)
+			if side.length_squared() < 1e-8:
+				side = tan.cross(Vector3.RIGHT)
+			side = side.normalized() * SMOKE_WIDTH
+			var age := float(pts[i]["age"])
+			var alpha := clampf(1.0 - age / SMOKE_FADE, 0.0, 1.0)
+			alpha *= 0.72
+			var col := Color(0.93, 0.95, 0.97, alpha)
+			_smoke_mesh.surface_set_color(col)
+			_smoke_mesh.surface_add_vertex(a + side)
+			_smoke_mesh.surface_set_color(col)
+			_smoke_mesh.surface_add_vertex(a - side)
+		_smoke_mesh.surface_end()

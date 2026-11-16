@@ -593,18 +593,7 @@ func spawn_impact_sphere(hit: Vector3, dir: Vector3, impulse_len: float, _bone: 
 	sph.radius = SPHERE_RADIUS
 	cs.shape = sph
 	body.add_child(cs)
-	var mi := MeshInstance3D.new()
-	var mesh := SphereMesh.new()
-	mesh.radius = SPHERE_RADIUS
-	mesh.height = SPHERE_RADIUS * 2.0
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.95, 0.85, 0.35, 0.85)
-	mat.emission_enabled = true
-	mat.emission = Color(1.0, 0.75, 0.2)
-	mat.emission_energy_multiplier = 1.6
-	mesh.material = mat
-	mi.mesh = mesh
-	body.add_child(mi)
+	# 只保留物理碰撞与冲量；不再挂黄色可见球网格（正常游戏和特写里都不显示）。
 	var parent: Node = _host if _host != null else self
 	parent.add_child(body)
 	body.global_position = hit - dir * (SPHERE_RADIUS + 0.04)
@@ -717,3 +706,24 @@ func max_linear_speed() -> float:
 
 func bone_names() -> PackedStringArray:
 	return PackedStringArray(bones.keys())
+
+
+## 测试：冲击球是否有可见网格（应为 false）。
+func impact_sphere_visible() -> bool:
+	for rec in _spheres:
+		var n = rec.get("n")
+		if n == null or not is_instance_valid(n):
+			continue
+		for mi in (n as Node).find_children("*", "MeshInstance3D", true, false):
+			if (mi as MeshInstance3D).visible and (mi as MeshInstance3D).mesh != null:
+				return true
+	return false
+
+
+func live_impact_spheres() -> int:
+	var c := 0
+	for rec in _spheres:
+		var n = rec.get("n")
+		if n != null and is_instance_valid(n):
+			c += 1
+	return c

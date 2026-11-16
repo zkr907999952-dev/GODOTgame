@@ -153,15 +153,61 @@ vec3 dent_offset(vec3 p) {
 // 弹道通道（最多 4 条）：ball_a.xyz = 入射点(ab-local)，w = 半径；ball_b.xyz = 方向，w = 长度（<=0 关闭）
 uniform vec4 ball_a[4];
 uniform vec4 ball_b[4];
+// 特写穿过时限制通道只画到弹头已经走过的长度；很大 = 整条通道。
+uniform float ball_travel = 99.0;
 
 float ball_dist(vec3 l, int i, out float t, out vec3 radial) {
 	vec3 a = ball_a[i].xyz;
 	vec3 d = ball_b[i].xyz;
-	float len = ball_b[i].w;
+	float len = min(ball_b[i].w, max(ball_travel, 0.0));
 	vec3 p = l - a;
 	t = clamp(dot(p, d), 0.0, len);
 	radial = p - d * t;
 	return length(radial);
+}
+
+// 特写果冻挤开：弹头沿通道把软组织撑开，尖端鼓起，随后缓慢回弹，而不是整段静态撕裂。
+// jello_a.xyz = 入射点(ab-local)，w = 当前已走过的长度
+// jello_b.xyz = 方向，w = 半径
+// jello_p.x = 强度，y = 回弹(0 刚穿过 / 1 基本静止)，z = 墙钟时间（摆动），w = 通道全长
+uniform vec4 jello_a = vec4(0.0);
+uniform vec4 jello_b = vec4(0.0);
+uniform vec4 jello_p = vec4(0.0);
+
+vec3 jello_offset(vec3 l) {
+	float reach = jello_a.w;
+	float tot = jello_p.w;
+	float strength = jello_p.x;
+	if (strength <= 1e-5 || (reach <= 0.0 && tot <= 0.0)) return vec3(0.0);
+	float rad = max(jello_b.w, 0.007);
+	float settle = clamp(jello_p.y, 0.0, 1.0);
+	float age = jello_p.z;
+	vec3 a = jello_a.xyz;
+	vec3 d = jello_b.xyz;
+	if (dot(d, d) < 1e-8) return vec3(0.0);
+	d = normalize(d);
+	vec3 v = l - a;
+	float s = dot(v, d);
+	// 只影响已经走过的通道，并给尖端一点点前探。
+	float ahead = rad * 1.15;
+	if (s < -rad * 0.8 || s > reach + ahead) return vec3(0.0);
+	float t = clamp(s, 0.0, max(reach, 0.0));
+	vec3 radial = v - d * t;
+	float dist = length(radial);
+	float infl = rad * (4.6 + (1.0 - settle) * 2.2);
+	if (dist > infl) return vec3(0.0);
+	vec3 nrm = dist > 1e-5 ? radial / dist : vec3(1.0, 0.0, 0.0);
+	float shaft = exp(-dist * dist / (rad * rad * 7.5));
+	float tip = exp(-((s - reach) * (s - reach)) / (rad * rad * 5.0));
+	// 慢动作果冻摆动：穿过时更明显，停留阶段逐渐衰减，但仍在缓慢移动。
+	float wob = 1.0 + (1.0 - settle) * 0.22 * sin(age * 8.5 + dist * 26.0 + s * 14.0);
+	wob += settle * 0.08 * sin(age * 3.4 + s * 9.0);
+	float live = 1.0 - settle * 0.62;
+	float k = strength * shaft * live * wob;
+	vec3 o = nrm * (rad * 2.8 * k + rad * 3.6 * tip * (1.0 - settle) * strength);
+	// 尖端再沿弹道把组织轻轻推开，像弹头挤过去。
+	o += d * tip * rad * 1.1 * (1.0 - settle) * strength;
+	return o;
 }
 
 float ball_wound(vec3 l) {
