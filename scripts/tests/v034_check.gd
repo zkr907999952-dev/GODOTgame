@@ -466,10 +466,10 @@ func _check_observe_fire() -> void:
 	_ok(bool(player.call("observe_tap_fire", sp)), "observe tap on a character fires")
 	var ammo1: Vector2i = ws.call("ammo_of", "pistol")
 	_ok(ammo1.x == ammo0.x - 1, "tap-fire consumes one round (%d → %d)" % [ammo0.x, ammo1.x])
-	# 空白处不应射击
+	# 0.2.13：点击任意位置沿视线向内射击，不再要求点中人物。
 	var ammo2: Vector2i = ammo1
-	_ok(not bool(player.call("observe_tap_fire", Vector2(8, 8))), "tap on empty space does not fire")
-	_ok(ws.call("ammo_of", "pistol").x == ammo2.x, "ammo unchanged on miss")
+	_ok(bool(player.call("observe_tap_fire", Vector2(8, 8))), "tap on empty space still fires inward")
+	_ok(ws.call("ammo_of", "pistol").x == ammo2.x - 1, "empty-space tap consumes one round")
 	ws.call("holster")
 
 

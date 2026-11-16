@@ -1,7 +1,8 @@
 extends Node
 class_name CorpseDrag
 ## 第一人称尸体拖拽：收起武器且准星指向尸体时，在原开火键位置显示切换按钮；E 同样切换。
-## 选择范围大于手臂长；确认后手伸向抓取点，点和手拉到重合后才进入拖拽。抓住距离仍是手臂长。
+## 选择范围大于手臂长；确认后手伸向抓取点，点和手拉到重合后才进入拖拽。
+## 一旦拖拽成功开始，不再因走出选择范围或持握距离而自动放开；只能手动切换放下。手臂仍把持握点限制在够得到的位置。
 ## 抓取点可以是准星下的皮肤表面，物理拉力作用在最近的布娃娃骨骼上。
 
 const AIM_DIST := 4.8
@@ -247,9 +248,7 @@ func physics_tick(delta: float) -> void:
 		drop("armed")
 		return
 	var pt := current_grab_point()
-	if _walked_too_far(pt):
-		drop("range")
-		return
+	# 范围只用于开始选择。一旦抓住，走出原选择/持握距离也不自动放开。
 	if reaching:
 		_tick_reach(delta, pt)
 		return

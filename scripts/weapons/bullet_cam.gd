@@ -324,8 +324,25 @@ func _place_bullet(pos: Vector3, dir: Vector3) -> void:
 		var n: Node3D = _bullet["node"]
 		n.visible = true
 		n.global_position = pos
-		if dir.length_squared() > 1e-8:
-			n.look_at(pos + dir, Vector3.UP)
+		_orient_projectile(n, dir)
+
+
+func _orient_projectile(n: Node3D, d: Vector3) -> void:
+	# 弹头网格沿 +X 向前。look_at 会把 -Z 对准路径，特写里看起来像横着飞。
+	if n == null or d.length_squared() < 1e-10:
+		return
+	d = d.normalized()
+	var up := Vector3.UP
+	if absf(d.dot(up)) > 0.95:
+		up = Vector3.FORWARD
+	var z := d.cross(up)
+	if z.length_squared() < 1e-8:
+		z = d.cross(Vector3.RIGHT)
+	z = z.normalized()
+	var y := z.cross(d).normalized()
+	var xf := n.global_transform
+	xf.basis = Basis(d, y, z).orthonormalized()
+	n.global_transform = xf
 
 
 func _set_sphere(pos: Vector3) -> void:

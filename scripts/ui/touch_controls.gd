@@ -7,7 +7,7 @@ extends Control
 ##   · 双指 = 平移 + 捏合缩放，第二根手指落下会取消当前工具
 ## 角色控制（第一人称）模式：
 ##   · 左下虚拟摇杆（128px，外圈 ≥ 0.72 = 奔跑，径向死区 0.15）
-##   · 右下：跳跃 / 下蹲已对调；开火再下移；武器键再向左；瞄准在开火左上；左侧中间另有一个开火键
+##   · 右下：跳跃 / 下蹲已对调；互动为点按切换保持（不是长按）；开火再下移；武器键再向左；瞄准在开火左上；左侧中间另有一个开火键
 ##   · 左侧 FOV 竖条只在打开「摄像机」面板时显示
 ##   · 其余区域拖动 = 转视角（独立的触屏灵敏度）；第一人称下点画面不会触发工具
 ##   · 两种模式都有「切换」按钮（= Tab），贴在屏幕上边缘（安全区下方）
@@ -527,7 +527,9 @@ func _button(id: String, down: bool) -> void:
 			if down:
 				player.set("touch_jump_req", true)
 		"interact":
-			player.call("touch_interact", down)
+			# 手机：只在按下时切换保持；松开不再退出。
+			if down and player:
+				player.call("touch_interact", true, true)
 		"weapon":
 			# 按下 = 打开轮盘；拖到格子上松手 = 选中；原地松手 = 关闭不变
 			if hud == null:
@@ -600,7 +602,10 @@ func _draw() -> void:
 	var b := buttons()
 	for id in b.keys():
 		var r: Rect2 = b[id][0]
-		var on: bool = _pressed_btn.has(id) or (id == "crouch" and str(player.call("get_stance")) != "stand") or (id == "drag" and _drag_holding())
+		var interact_on := false
+		if id == "interact" and player and player.has_method("is_touch_interact_on"):
+			interact_on = bool(player.call("is_touch_interact_on"))
+		var on: bool = _pressed_btn.has(id) or interact_on or (id == "crouch" and str(player.call("get_stance")) != "stand") or (id == "drag" and _drag_holding())
 		if id == "ads":
 			var wads := _weapons()
 			on = on or (wads != null and bool(wads.get("ads")))

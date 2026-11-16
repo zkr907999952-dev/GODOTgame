@@ -239,8 +239,9 @@ func _ready() -> void:
 	_corpse_drag.name = "CorpseDrag"
 	add_child(_corpse_drag)
 	_corpse_drag.call("setup", self, skel)
-	# 角色胶囊互相碰撞，并与布娃娃骨骼碰撞（Jolt 双向 OR：只需本侧 mask 含角色层）。
-	# 布娃娃骨骼自己的 mask 仍只含世界，避免骨骼互撞抖动。
+	# 角色胶囊互相碰撞，并与布娃娃骨骼碰撞。Godot 碰撞是双向 AND：
+	# 双方 layer/mask 都要能对上。布娃娃骨骼 mask 现已含角色层，同体骨骼用 exception 防自碰。
+	collision_layer = 2
 	collision_mask = 1 | 2
 	_col_layer_live = collision_layer
 	_col_mask_live = collision_mask
@@ -511,77 +512,42 @@ func _stomp_ragdolls(delta: float) -> void:
 		if rag == null or not rag.has_method("apply_stomp"):
 			continue
 		var at: Vector3 = (col as Node3D).global_position
-		var sideways := hv * 0.55
-		if sideways.length() < 0.4 and hv.length() > 0.2:
-			sideways = hv.normalized() * 0.4
-		var down := Vector3(0, -2.2 - minf(2.0, absf(velocity.y)), 0)
+		var sideways := hv * 1.6
+		if sideways.length() < 1.2:
+			# 即使站着不动，踩上去也要能把尸体挤开一点。
+			var away: Vector3 = at - global_position
+			away.y = 0.0
+			if away.length_squared() < 1e-6:
+				away = Vector3.RIGHT
+			sideways = away.normalized() * maxf(sideways.length(), 1.6)
+		var down := Vector3(0, -6.5 - minf(5.0, absf(velocity.y) * 2.0), 0)
 		rag.call("apply_stomp", at, sideways + down)
 	# 踩在尸体上时不要把玩家顶起来飘在空中。
 	if not seen.is_empty() and velocity.y > 0.15 and is_on_floor():
 		velocity.y = 0.0
 
 
-## 观察模式：点击角色向该点射击（点击位置即弹道方向），可触发特写。拖视不像开火。
+## 观察模式：在点击位置沿视线垂直向内打一发（与互动同一套屏幕坐标），可触发特写。
+## 不要求点中人物；拖视不像开火。
 func observe_tap_fire(screen: Vector2) -> bool:
 	if first_person or not weapon_drawn() or is_dead() or input_locked:
 		return false
-	if _weapons == null or not _weapons.has_method("fire_at_point"):
+	if _weapons == null:
 		return false
 	var cam := get_camera()
 	if cam == null:
 		return false
-	var w3 := get_world_3d()
-	if w3 == null:
-		return false
-	var from := cam.project_ray_origin(screen)
-	var dir := cam.project_ray_normal(screen)
+	# 与互动相同：把逻辑坐标换到 project_ray 用的视口像素，避免手机 DPI 缩放送偏。
+	var ray := _screen_ray(screen)
+	var from: Vector3 = ray[0]
+	var dir: Vector3 = ray[1]
 	if dir.length_squared() < 1e-10:
 		return false
 	dir = dir.normalized()
-	var dest := from + dir * 80.0
-	var exclude: Array[RID] = []
-	_collect_collision_rids(self, exclude)
-	var space := w3.direct_space_state
-	var hit: Dictionary = {}
-	for _i in 5:
-		var q := PhysicsRayQueryParameters3D.create(from, dest, 1 | 2)
-		q.collide_with_areas = true
-		q.exclude = exclude
-		hit = space.intersect_ray(q)
-		if hit.is_empty():
-			break
-		var body := _wound_body_of(hit.get("collider") as Node)
-		if body == self:
-			exclude.append(hit["rid"])
-			from = hit["position"] + dir * 0.02
-			continue
-		if body != null:
-			return bool(_weapons.call("fire_at_point", hit["position"]))
-		# 先碰到地面 / 场景则不以该点当人物射击。
-		break
-	# 细射线错过胶囊时，用短半径扫一下屏幕点附近。
-	var shape := SphereShape3D.new()
-	shape.radius = 0.16
-	var sq := PhysicsShapeQueryParameters3D.new()
-	sq.shape = shape
-	sq.transform = Transform3D(Basis(), cam.project_ray_origin(screen) + dir * 1.2)
-	sq.motion = dir * 78.0
-	sq.collision_mask = 1 | 2
-	sq.collide_with_areas = true
-	sq.exclude = exclude
-	var rest := space.cast_motion(sq)
-	var travel := 1.2 + (rest[0] if rest.size() >= 1 else 0.0) * 78.0
-	sq.transform = Transform3D(Basis(), cam.project_ray_origin(screen) + dir * travel)
-	sq.motion = Vector3.ZERO
-	for rec in space.intersect_shape(sq, 8):
-		var body2 := _wound_body_of(rec.get("collider") as Node)
-		if body2 != null and body2 != self:
-			var pt: Vector3 = rec["collider"].global_position if rec.get("collider") else (cam.project_ray_origin(screen) + dir * travel)
-			if rec.get("collider") is Node3D:
-				pt = (rec["collider"] as Node3D).global_position
-			# 用屏幕射线打在身体上的最近点，保证弹道对准点击位置。
-			var aim := cam.project_ray_origin(screen) + dir * maxf(travel, 0.5)
-			return bool(_weapons.call("fire_at_point", aim))
+	if _weapons.has_method("fire_along_ray"):
+		return bool(_weapons.call("fire_along_ray", from, dir))
+	if _weapons.has_method("fire_at_point"):
+		return bool(_weapons.call("fire_at_point", from + dir * 8.0))
 	return false
 
 
@@ -1667,15 +1633,30 @@ func touch_tool_active() -> bool:
 	return _interact_held
 
 
-## 第一人称「互动」按钮（网页 tapFpInteract：屏幕中心射线按下）；按住时视线移动 = 拖动工具
-func touch_interact(pressed: bool) -> void:
+## 第一人称「互动」按钮（网页 tapFpInteract：屏幕中心射线）。
+## 手机：点一下进入并保持，再点一下退出（不是长按）。PC 鼠标互动仍是按下/松开。
+func touch_interact(pressed: bool, toggle: bool = false) -> void:
 	var c := get_viewport().get_visible_rect().size * 0.5
+	if toggle:
+		if not pressed:
+			return
+		if _touch_interact:
+			_touch_interact = false
+			touch_tool_end()
+		else:
+			_touch_interact = true
+			touch_tool_begin(c)
+		return
 	if pressed:
 		_touch_interact = true
 		touch_tool_begin(c)
 	else:
 		_touch_interact = false
 		touch_tool_end()
+
+
+func is_touch_interact_on() -> bool:
+	return _touch_interact
 
 
 func touch_crouch_tap() -> void:
@@ -1718,7 +1699,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 	if event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
 		var lb := event as InputEventMouseButton
-		# 观察模式持枪：单击人物开火，拖动不在这里处理（右键才环绕）。
+		# 观察模式持枪：单击屏幕点沿视线向内开火，拖动不在这里处理（右键才环绕）。
 		if not first_person and weapon_drawn():
 			if lb.pressed:
 				_observe_fire_from = lb.position

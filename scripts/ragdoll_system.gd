@@ -4,37 +4,38 @@ class_name RagdollSystem
 ## 死亡时启动模拟，尸体不despawn，子弹命中对对应骨骼施加冲量。
 ## 关节角度在物理步后钳制（Jolt 下 Cone/Hinge 的 bias/softness 往往不生效，钳制才能真正挡住反曲）。
 
-## 物理层：角色层 2 可被弹道（mask 1|2）打中；mask 只撞世界层 1，避免骨骼互撞抖动。
-## Jolt 的碰撞是双向 OR，两边都不把对方层写进 mask，就不会自碰。
+## 物理层：角色层 2 可被弹道（mask 1|2）打中。
+## 骨骼 mask 含世界 + 角色，才能和玩家胶囊、冲击球发生接触（Godot 碰撞是双向 AND）。
+## 同一具布娃娃的骨骼之间加 collision exception，避免自碰抖动。
 const LAYER_WORLD := 1
 const LAYER_CHAR := 2
 
 const BONES := [
-	{"name": "C_Hip_a", "joint": PhysicalBone3D.JOINT_TYPE_NONE, "mass": 8.0, "radius": 0.12, "kind": "box", "child": "C_Spine_a", "box": Vector3(0.26, 0.14, 0.16), "len_min": 0.14},
-	{"name": "C_Spine_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 4.5, "radius": 0.10, "kind": "capsule", "child": "C_Spine_b", "swing": 18.0, "twist": 12.0},
-	{"name": "C_Spine_c", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 8.5, "radius": 0.11, "kind": "capsule", "child": "C_Spine_d", "swing": 16.0, "twist": 10.0, "len_min": 0.14},
-	{"name": "C_Spine_d", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 6.0, "radius": 0.11, "kind": "capsule", "child": "C_Neck_a", "swing": 14.0, "twist": 10.0},
-	{"name": "C_Neck_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 1.4, "radius": 0.04, "kind": "capsule", "child": "C_Head_a", "swing": 30.0, "twist": 20.0, "len_min": 0.09},
-	{"name": "C_Head_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 5.0, "radius": 0.09, "kind": "capsule", "child": "", "length": 0.18, "swing": 28.0, "twist": 24.0},
-	{"name": "L_Shoulder_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 1.4, "radius": 0.045, "kind": "capsule", "child": "L_UpperArm_a", "swing": 40.0, "twist": 25.0},
-	{"name": "R_Shoulder_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 1.4, "radius": 0.045, "kind": "capsule", "child": "R_UpperArm_a", "swing": 40.0, "twist": 25.0},
-	{"name": "L_UpperArm_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 2.2, "radius": 0.045, "kind": "capsule", "child": "L_Forearm_a", "swing": 55.0, "twist": 30.0},
-	{"name": "R_UpperArm_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 2.2, "radius": 0.045, "kind": "capsule", "child": "R_Forearm_a", "swing": 55.0, "twist": 30.0},
-	{"name": "L_Forearm_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 1.3, "radius": 0.038, "kind": "capsule", "child": "L_Hand_a", "hinge_lo": 0.0, "hinge_hi": 130.0},
-	{"name": "R_Forearm_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 1.3, "radius": 0.038, "kind": "capsule", "child": "R_Hand_a", "hinge_lo": 0.0, "hinge_hi": 130.0},
-	{"name": "L_Hand_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 0.45, "radius": 0.035, "kind": "capsule", "child": "L_Middle_a", "swing": 35.0, "twist": 25.0, "len_min": 0.08},
-	{"name": "R_Hand_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 0.45, "radius": 0.035, "kind": "capsule", "child": "R_Middle_a", "swing": 35.0, "twist": 25.0, "len_min": 0.08},
-	{"name": "L_UpperLeg_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 6.2, "radius": 0.07, "kind": "capsule", "child": "L_Foreleg_a", "swing": 45.0, "twist": 20.0},
-	{"name": "R_UpperLeg_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 6.2, "radius": 0.07, "kind": "capsule", "child": "R_Foreleg_a", "swing": 45.0, "twist": 20.0},
-	{"name": "L_Foreleg_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 3.0, "radius": 0.05, "kind": "capsule", "child": "L_Foot_a", "hinge_lo": 0.0, "hinge_hi": 130.0},
-	{"name": "R_Foreleg_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 3.0, "radius": 0.05, "kind": "capsule", "child": "R_Foot_a", "hinge_lo": 0.0, "hinge_hi": 130.0},
-	{"name": "L_Foot_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 0.8, "radius": 0.04, "kind": "capsule", "child": "L_Toe_a", "hinge_lo": -25.0, "hinge_hi": 35.0},
-	{"name": "R_Foot_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 0.8, "radius": 0.04, "kind": "capsule", "child": "R_Toe_a", "hinge_lo": -25.0, "hinge_hi": 35.0},
+	{"name": "C_Hip_a", "joint": PhysicalBone3D.JOINT_TYPE_NONE, "mass": 5.0, "radius": 0.12, "kind": "box", "child": "C_Spine_a", "box": Vector3(0.26, 0.14, 0.16), "len_min": 0.14},
+	{"name": "C_Spine_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 2.9, "radius": 0.10, "kind": "capsule", "child": "C_Spine_b", "swing": 18.0, "twist": 12.0},
+	{"name": "C_Spine_c", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 5.4, "radius": 0.11, "kind": "capsule", "child": "C_Spine_d", "swing": 16.0, "twist": 10.0, "len_min": 0.14},
+	{"name": "C_Spine_d", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 3.8, "radius": 0.11, "kind": "capsule", "child": "C_Neck_a", "swing": 14.0, "twist": 10.0},
+	{"name": "C_Neck_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 1.0, "radius": 0.04, "kind": "capsule", "child": "C_Head_a", "swing": 30.0, "twist": 20.0, "len_min": 0.09},
+	{"name": "C_Head_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 3.2, "radius": 0.09, "kind": "capsule", "child": "", "length": 0.18, "swing": 28.0, "twist": 24.0},
+	{"name": "L_Shoulder_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 1.0, "radius": 0.045, "kind": "capsule", "child": "L_UpperArm_a", "swing": 40.0, "twist": 25.0},
+	{"name": "R_Shoulder_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 1.0, "radius": 0.045, "kind": "capsule", "child": "R_UpperArm_a", "swing": 40.0, "twist": 25.0},
+	{"name": "L_UpperArm_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 1.5, "radius": 0.045, "kind": "capsule", "child": "L_Forearm_a", "swing": 55.0, "twist": 30.0},
+	{"name": "R_UpperArm_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 1.5, "radius": 0.045, "kind": "capsule", "child": "R_Forearm_a", "swing": 55.0, "twist": 30.0},
+	{"name": "L_Forearm_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 0.9, "radius": 0.038, "kind": "capsule", "child": "L_Hand_a", "hinge_lo": 0.0, "hinge_hi": 130.0},
+	{"name": "R_Forearm_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 0.9, "radius": 0.038, "kind": "capsule", "child": "R_Hand_a", "hinge_lo": 0.0, "hinge_hi": 130.0},
+	{"name": "L_Hand_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 0.35, "radius": 0.035, "kind": "capsule", "child": "L_Middle_a", "swing": 35.0, "twist": 25.0, "len_min": 0.08},
+	{"name": "R_Hand_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 0.35, "radius": 0.035, "kind": "capsule", "child": "R_Middle_a", "swing": 35.0, "twist": 25.0, "len_min": 0.08},
+	{"name": "L_UpperLeg_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 4.0, "radius": 0.07, "kind": "capsule", "child": "L_Foreleg_a", "swing": 45.0, "twist": 20.0},
+	{"name": "R_UpperLeg_a", "joint": PhysicalBone3D.JOINT_TYPE_CONE, "mass": 4.0, "radius": 0.07, "kind": "capsule", "child": "R_Foreleg_a", "swing": 45.0, "twist": 20.0},
+	{"name": "L_Foreleg_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 2.0, "radius": 0.05, "kind": "capsule", "child": "L_Foot_a", "hinge_lo": 0.0, "hinge_hi": 130.0},
+	{"name": "R_Foreleg_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 2.0, "radius": 0.05, "kind": "capsule", "child": "R_Foot_a", "hinge_lo": 0.0, "hinge_hi": 130.0},
+	{"name": "L_Foot_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 0.55, "radius": 0.04, "kind": "capsule", "child": "L_Toe_a", "hinge_lo": -25.0, "hinge_hi": 35.0},
+	{"name": "R_Foot_a", "joint": PhysicalBone3D.JOINT_TYPE_HINGE, "mass": 0.55, "radius": 0.04, "kind": "capsule", "child": "R_Toe_a", "hinge_lo": -25.0, "hinge_hi": 35.0},
 ]
 
 ## 子弹冲量系数：乘以 ballistics 的 impulse(0..1)，再乘设置里的受击力度。
 ## 0.2.12 默认比 0.2.11 更强，步枪/霰弹能明显推动尸体，但速度仍有上限，不会飞出地图。
-const IMPULSE_SCALE := 14.0
+const IMPULSE_SCALE := 22.0
 const SPHERE_RADIUS := 0.036
 const SPHERE_LIFE := 0.16
 const MAX_BONE_SPEED := 14.0
@@ -76,6 +77,7 @@ func setup(skel: Skeleton3D, host: Node = null) -> bool:
 		if pb:
 			bones[str(def["name"])] = pb
 	_build_joint_limits()
+	_add_bone_exceptions()
 	ready_ok = bones.size() >= 10
 	if ready_ok:
 		print("RagdollSystem: built ", bones.size(), " physical bones, joint limits=", _joint_limits.size())
@@ -86,6 +88,20 @@ func setup(skel: Skeleton3D, host: Node = null) -> bool:
 
 func is_active() -> bool:
 	return active and simulator != null and simulator.is_simulating_physics()
+
+
+func _add_bone_exceptions() -> void:
+	# 同体骨骼互不理，才能把角色层写进 mask 而不自碰。
+	var arr: Array = bones.values()
+	for i in arr.size():
+		var a = arr[i]
+		if not (a is PhysicalBone3D):
+			continue
+		for j in range(i + 1, arr.size()):
+			var b = arr[j]
+			if b is PhysicalBone3D:
+				(a as PhysicalBone3D).add_collision_exception_with(b)
+				(b as PhysicalBone3D).add_collision_exception_with(a)
 
 
 func _make_bone(def: Dictionary) -> PhysicalBone3D:
@@ -104,12 +120,13 @@ func _make_bone(def: Dictionary) -> PhysicalBone3D:
 	pb.bounce = 0.0
 	pb.linear_damp_mode = PhysicalBone3D.DAMP_MODE_REPLACE
 	pb.angular_damp_mode = PhysicalBone3D.DAMP_MODE_REPLACE
-	pb.linear_damp = 1.2
-	pb.angular_damp = 3.2
+	pb.linear_damp = 0.55
+	pb.angular_damp = 2.0
 	pb.can_sleep = true
-	pb.gravity_scale = 1.0
+	pb.gravity_scale = 0.8
 	pb.collision_layer = LAYER_CHAR
-	pb.collision_mask = LAYER_WORLD
+	# 含角色层才能被玩家胶囊 / 冲击球推动（碰撞是双向 AND）。
+	pb.collision_mask = LAYER_WORLD | LAYER_CHAR
 	pb.joint_type = int(def.get("joint", PhysicalBone3D.JOINT_TYPE_NONE))
 	_apply_joint_limits(pb, def)
 	var mid := Vector3(0.0, length * 0.5, 0.0)
@@ -478,7 +495,7 @@ func set_map_frozen(on: bool) -> void:
 		for pb in bones.values():
 			if is_instance_valid(pb):
 				(pb as PhysicalBone3D).collision_layer = LAYER_CHAR
-				(pb as PhysicalBone3D).collision_mask = LAYER_WORLD
+				(pb as PhysicalBone3D).collision_mask = LAYER_WORLD | LAYER_CHAR
 		simulator.active = true
 		if not simulator.is_simulating_physics():
 			simulator.physical_bones_start_simulation()
@@ -499,16 +516,16 @@ func apply_hit_impulse(impulse: Vector3, hit: Vector3 = Vector3.ZERO, collider: 
 		pb = _closest_bone(hit)
 	if pb == null:
 		return
-	# 球体承担主要撞击；这里只留一部分冲量，避免两者叠加把尸体打飞。
-	var residual := impulse * 0.55
+	# 球体承担主要撞击；再给骨骼一截冲量。position 必须是相对质心的偏移，不能传世界坐标。
+	var residual := impulse * 0.8
 	if hit == Vector3.ZERO:
 		pb.apply_central_impulse(residual)
 	else:
-		pb.apply_impulse(residual, hit)
+		pb.apply_impulse(residual, hit - pb.global_position)
 	# 少量把冲量传给相邻躯干，避免单肢被拉开
 	var torso: PhysicalBone3D = bones.get("C_Spine_c", bones.get("C_Hip_a"))
 	if torso and torso != pb:
-		torso.apply_central_impulse(residual * 0.34)
+		torso.apply_central_impulse(residual * 0.4)
 	var dir := impulse.normalized() if impulse.length_squared() > 1e-8 else Vector3.FORWARD
 	var hit_p := hit if hit != Vector3.ZERO else pb.global_position
 	spawn_impact_sphere(hit_p, dir, impulse.length(), str(pb.bone_name))
@@ -557,8 +574,8 @@ func spawn_impact_sphere(hit: Vector3, dir: Vector3, impulse_len: float, _bone: 
 	dir = dir.normalized()
 	# 球体质量和速度受设置「受击力度」影响；默认比 0.2.11 更重更快。
 	var hf := hit_force_scale()
-	var mass := clampf((0.16 + impulse_len * 0.016) * hf, 0.12, 0.42)
-	var speed := clampf((62.0 + impulse_len * 5.5) * (0.65 + 0.35 * hf), 58.0, 150.0)
+	var mass := clampf((0.22 + impulse_len * 0.02) * hf, 0.16, 0.55)
+	var speed := clampf((70.0 + impulse_len * 6.5) * (0.7 + 0.35 * hf), 64.0, 160.0)
 	var body := RigidBody3D.new()
 	body.name = "BulletImpactSphere"
 	body.mass = mass
@@ -568,7 +585,8 @@ func spawn_impact_sphere(hit: Vector3, dir: Vector3, impulse_len: float, _bone: 
 	body.gravity_scale = 0.2
 	body.linear_damp = 0.4
 	body.angular_damp = 1.0
-	body.collision_layer = 0
+	# 放在角色层，骨骼 mask 含角色层，双向 AND 才能撞上。
+	body.collision_layer = LAYER_CHAR
 	body.collision_mask = LAYER_CHAR
 	var cs := CollisionShape3D.new()
 	var sph := SphereShape3D.new()
@@ -641,15 +659,19 @@ func apply_stomp(at: Vector3, push: Vector3) -> void:
 	var pb := _closest_bone(at)
 	if pb == null:
 		return
-	var j := push
-	if j.length() > 2.8:
-		j = j.normalized() * 2.8
+	var j := push * 3.2
+	if j.length() > 10.0:
+		j = j.normalized() * 10.0
 	pb.apply_impulse(j, at - pb.global_position)
 	var torso: PhysicalBone3D = bones.get("C_Spine_c", bones.get("C_Hip_a"))
 	if torso and torso != pb:
-		torso.apply_central_impulse(j * 0.35)
-	_clamp_t = maxf(_clamp_t, 0.18)
-	_clamp_speeds()
+		torso.apply_central_impulse(j * 0.55)
+	# 再给髋部一点水平挤开，角色踩上去能把尸体挪开。
+	var hip: PhysicalBone3D = bones.get("C_Hip_a")
+	if hip and hip != pb and hip != torso:
+		hip.apply_central_impulse(j * 0.35)
+	_clamp_t = maxf(_clamp_t, 0.12)
+	# 踩踏后不要立刻把速度钳死，让这一下先作用出去。
 
 
 func _closest_bone(hit: Vector3) -> PhysicalBone3D:
