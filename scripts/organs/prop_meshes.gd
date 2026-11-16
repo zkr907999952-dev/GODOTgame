@@ -208,9 +208,34 @@ static func bayonet_mesh(long: bool) -> Mesh:
 
 
 ## 网页 loadWoundAtlas：2×2 伤口图集，按亮度生成 alpha，边缘 + 径向渐隐。返回 4 张贴图。
+## 预烘焙的 4 张伤口贴图（256×256，带 alpha 渐隐）。t27u：原来首次命中时用 GDScript 逐像素生成
+## 4×256×256 像素（桌面约 115 ms，手机上近 1 秒卡顿，正好落在散弹枪特写入体那一帧），改为直接加载。
+const WOUND_TILE_PATHS := [
+	"res://assets/props/wound_tile_0.png",
+	"res://assets/props/wound_tile_1.png",
+	"res://assets/props/wound_tile_2.png",
+	"res://assets/props/wound_tile_3.png",
+]
+
+
 static func wound_tiles() -> Array:
 	if _cache.has("wounds"):
 		return _cache["wounds"]
+	var baked: Array = []
+	for path in WOUND_TILE_PATHS:
+		var t := load(path) as Texture2D if ResourceLoader.exists(path) else null
+		if t == null:
+			baked.clear()
+			break
+		baked.append(t)
+	if baked.size() == WOUND_TILE_PATHS.size():
+		_cache["wounds"] = baked
+		return baked
+	return _bake_wound_tiles()
+
+
+## 回退/重新烘焙用：从 wounds.webp 切 4 块并做 alpha 渐隐。
+static func _bake_wound_tiles() -> Array:
 	var out: Array = []
 	var tex := load(WOUND_TEX) as Texture2D
 	var img: Image = tex.get_image() if tex else null

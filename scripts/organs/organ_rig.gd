@@ -1950,7 +1950,8 @@ func _update_props() -> void:
 	for i in _decals.size():
 		var d := _decals[i]
 		if i >= tools.wounds.size():
-			d.visible = false
+			if d.visible:
+				d.visible = false
 			continue
 		var w: Dictionary = tools.wounds[i]
 		var n: Vector3 = (_frame.basis * (w["n"] as Vector3)).normalized()
@@ -1961,9 +1962,15 @@ func _update_props() -> void:
 		along = along.normalized().rotated(n, float(w["twist"]))
 		var xb := n.cross(along).normalized()
 		d.global_transform = Transform3D(Basis(xb, n, along), _frame * (w["p"] as Vector3))
-		d.size = Vector3(float(w["w"]), 0.05, float(w["h"]))
-		d.texture_albedo = tiles[int(w["tile"]) % tiles.size()]
-		d.visible = true
+		# 尺寸/贴图只在变化时写入，避免每帧对 10 个贴花重复提交 RenderingServer 调用。
+		var sz := Vector3(float(w["w"]), 0.05, float(w["h"]))
+		if not d.size.is_equal_approx(sz):
+			d.size = sz
+		var tx: Texture2D = tiles[int(w["tile"]) % tiles.size()]
+		if d.texture_albedo != tx:
+			d.texture_albedo = tx
+		if not d.visible:
+			d.visible = true
 
 
 func _build_fx() -> void:
