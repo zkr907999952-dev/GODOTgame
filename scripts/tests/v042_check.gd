@@ -110,6 +110,7 @@ func _run() -> void:
 		return
 	spawn = player.global_position
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
+	_ok(presets.find("version/name=\"0.2.14\"") >= 0 and presets.find("version/code=16") >= 0, "export version 0.2.14 / 16")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 	_ok(presets.find("keystore/release_password=\"\"") >= 0 and presets.find("keystore/release=\"\"") >= 0, "no keystore path/password committed")
 	_check_shader_source()

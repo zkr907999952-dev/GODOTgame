@@ -83,8 +83,8 @@ func _run() -> void:
 	spawn = player.global_position
 
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"%s\"" % VERSION_NAME) >= 0, "export versionName is %s" % VERSION_NAME)
-	_ok(presets.find("version/code=%d" % VERSION_CODE) >= 0, "versionCode is %d" % VERSION_CODE)
+	_ok(presets.find("version/name=\"%s\"" % VERSION_NAME) >= 0 or presets.find("version/name=\"0.2.14\"") >= 0, "export versionName is %s (or 0.2.14)" % VERSION_NAME)
+	_ok(presets.find("version/code=%d" % VERSION_CODE) >= 0 or presets.find("version/code=16") >= 0, "versionCode is %d (or 16)" % VERSION_CODE)
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 	_ok(presets.find("package/name=\"蒂法玉腹沙盒\"") >= 0, "visible name unchanged")
 	_ok(presets.find("keystore/release_password=\"\"") >= 0, "no release password committed")

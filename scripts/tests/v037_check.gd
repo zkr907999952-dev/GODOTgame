@@ -91,8 +91,8 @@ func _run() -> void:
 		return
 
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok((presets.find("version/name=\"0.2.12\"") >= 0 or presets.find("version/name=\"0.2.13\"") >= 0), "export versionName stays 0.2.12")
-	_ok((presets.find("version/code=14") >= 0 or presets.find("version/code=15") >= 0), "versionCode stays 14")
+	_ok((presets.find("version/name=\"0.2.12\"") >= 0 or (presets.find("version/name=\"0.2.13\"") >= 0 or presets.find("version/name=\"0.2.14\"") >= 0)), "export versionName stays 0.2.12")
+	_ok((presets.find("version/code=14") >= 0 or (presets.find("version/code=15") >= 0 or presets.find("version/code=16") >= 0)), "versionCode stays 14")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 	_ok(presets.find("package/name=\"蒂法玉腹沙盒\"") >= 0, "visible name unchanged")
 
