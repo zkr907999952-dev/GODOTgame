@@ -7,7 +7,11 @@ signal started
 signal finished
 
 const SLOW := 0.045  # 比 0.2.10 的 0.08 更慢
-const WALL_MAX := 16.0  # 只作故障兜底，须覆盖跟随 + 穿过 + 4 秒停留
+const WALL_MAX := 18.5  # 只作故障兜底，须覆盖跟随 + 穿过 + 穿出后继续飞 + 4 秒停留
+## t27u：弹头穿出人体后继续沿弹道飞（墙钟视速），直到撞到世界表面 / 最远距离 / 最长时间，再进入 4 秒停留。
+const THROUGH_SPEED := 3.2
+const THROUGH_MAX_SEC := 1.6
+const THROUGH_MAX_DIST := 14.0
 const FLY_SPEED := 4.0  # 特写里弹头在空气中的视速（米/秒，墙钟）；比 0.2.10 的 8.5 更慢
 const PARK_PASS_MIN := 0.55  # 体内穿过最短墙钟
 const HOLD_SEC := 4.0  # 穿过后在环绕受击点停留的墙钟秒数
@@ -44,6 +48,9 @@ var _t: float = 0.0
 var _wall: float = 0.0
 var _park_t: float = 0.0
 var _hold_t: float = 0.0
+var _through_t: float = 0.0
+## 每发弹头的穿出后飞行：{rec, from, dir, len}
+var _through: Array = []
 var _phase: String = "idle"
 var _saved_scale: float = 1.0
 var _organs: Node
@@ -200,6 +207,8 @@ func _start(info: Dictionary, projectile: Dictionary) -> void:
 	_wall = 0.0
 	_park_t = 0.0
 	_hold_t = 0.0
+	_through_t = 0.0
+	_through.clear()
 	_phase = "follow"
 	debug_phase = "follow"
 	_skip_dt = true
@@ -291,6 +300,14 @@ func _tick(wall: float) -> void:
 		_update_organ_jello(in_u, 0.0, wall)
 		_place_park(_park_t)
 		if in_u >= 1.0:
+			_enter_through()
+	elif _phase == "through":
+		_through_t += wall
+		var all_done := _step_through(_through_t, wall)
+		_place_park(_park_t + _through_t)
+		_update_organ_jello(1.0, clampf(_through_t / maxf(HOLD_SEC, 0.01), 0.0, 1.0) * 0.3, wall)
+		if all_done or _through_t >= THROUGH_MAX_SEC:
+			_finish_through()
 			_enter_hold()
 	elif _phase == "hold":
 		_hold_t += wall
@@ -304,6 +321,125 @@ func _tick(wall: float) -> void:
 	# 故障兜底：不应在正常的跟随 + 穿过 + 4 秒停留之前切断。
 	if _wall >= WALL_MAX and playing:
 		_stop()
+
+
+func _enter_through() -> void:
+	_phase = "through"
+	debug_phase = "through"
+	_through_t = 0.0
+	_through.clear()
+	var recs: Array = []
+	if _single_mode():
+		if not _bullet.is_empty():
+			recs.append(_bullet)
+		elif not _pellets.is_empty():
+			recs.append(_pellets[0])
+	else:
+		recs = _pellets.duplicate()
+		if not _bullet.is_empty() and _bullet not in recs:
+			recs.append(_bullet)
+	for rec in recs:
+		if not (rec is Dictionary):
+			continue
+		var d: Vector3 = _dir if _single_mode() else _as_vec3(rec.get("dir"), _dir)
+		if d.length_squared() < 1e-10:
+			d = _dir
+		d = d.normalized()
+		var from: Vector3 = _as_vec3(rec.get("pos"), _exit + _dir * 0.04)
+		var len := _through_len(from, d)
+		_through.append({"rec": rec, "from": from, "dir": d, "len": len, "done": false})
+
+
+## 穿出后的飞行长度：沿弹道找第一块世界表面（跳过人体、冲击球等 ballistics_ignore），否则按最远距离。
+func _through_len(from: Vector3, d: Vector3) -> float:
+	var w3 := get_world_3d()
+	if w3 == null or w3.direct_space_state == null or not from.is_finite():
+		return THROUGH_MAX_DIST
+	var exclude: Array[RID] = []
+	var start := from
+	for _i in 8:
+		var q := PhysicsRayQueryParameters3D.create(start, from + d * THROUGH_MAX_DIST)
+		q.collide_with_areas = false
+		q.collision_mask = 1 | 2
+		q.exclude = exclude
+		var hit := w3.direct_space_state.intersect_ray(q)
+		if hit.is_empty():
+			return THROUGH_MAX_DIST
+		var col = hit.get("collider")
+		if _is_pass_through(col):
+			if hit.get("rid") is RID:
+				exclude.append(hit["rid"])
+			start = (hit["position"] as Vector3) + d * 0.002
+			continue
+		return maxf(0.0, from.distance_to(hit["position"]) - 0.02)
+	return THROUGH_MAX_DIST
+
+
+func _is_pass_through(col: Object) -> bool:
+	var n := col as Node
+	if n == null:
+		return true
+	if n.is_in_group("ballistics_ignore") or n is PhysicalBone3D or n is CharacterBody3D:
+		return true
+	var x := n
+	while x:
+		if x.has_method("get_organs") or x.is_in_group("wound_body"):
+			return true
+		x = x.get_parent()
+	return false
+
+
+## 推进穿出后的弹头；全部到达终点返回 true。到终点（撞墙 / 最远距离）的弹头隐藏。
+func _step_through(t: float, wall: float) -> bool:
+	var all_done := true
+	var push_trails := not _single_mode()
+	var i := 0
+	for tr in _through:
+		var rec: Dictionary = tr["rec"]
+		var d: Vector3 = tr["dir"]
+		var dist := minf(float(tr["len"]), THROUGH_SPEED * t)
+		var pos: Vector3 = (tr["from"] as Vector3) + d * dist
+		rec["pos"] = pos
+		rec["cinematic"] = true
+		var reached := dist >= float(tr["len"]) - 1e-4
+		tr["done"] = reached
+		if not reached:
+			all_done = false
+		var nd = rec.get("node")
+		if nd and is_instance_valid(nd):
+			(nd as Node3D).visible = not reached
+			(nd as Node3D).global_position = pos
+			_orient_projectile(nd, d)
+		if push_trails and i < _smoke_trails.size() and not reached:
+			_accumulate_trail(_smoke_trails[i], pos, wall)
+		elif _single_mode() and i == 0 and not reached and not _smoke_trails.is_empty():
+			_accumulate_trail(_smoke_trails[0], pos, wall)
+		i += 1
+	_flatten_smoke_pts()
+	_rebuild_smoke()
+	return all_done
+
+
+func _finish_through() -> void:
+	# 时间到仍未撞墙的弹头：停在当前位置并隐藏，结束后由弹道系统从这里继续真实飞行。
+	for tr in _through:
+		var nd = (tr["rec"] as Dictionary).get("node")
+		if nd and is_instance_valid(nd):
+			(nd as Node3D).visible = false
+
+
+## 自检：穿出后飞行的最远位移（米）与弹头数。
+func debug_through() -> Dictionary:
+	var best := 0.0
+	var vis := 0
+	for tr in _through:
+		var rec: Dictionary = tr["rec"]
+		var pos: Vector3 = _as_vec3(rec.get("pos"), tr["from"])
+		best = maxf(best, pos.distance_to(_exit))
+		var nd = rec.get("node")
+		if nd and is_instance_valid(nd) and (nd as Node3D).visible:
+			vis += 1
+	return {"count": _through.size(), "max_beyond_exit": best, "visible": vis, "t": _through_t}
 
 
 func _enter_hold() -> void:
@@ -618,6 +754,7 @@ func _stop() -> void:
 			rec["cinematic"] = false
 	_pellets = []
 	_bullet = {}
+	_through.clear()
 	_smoke_pts.clear()
 	_smoke_trails.clear()
 	_rebuild_smoke()

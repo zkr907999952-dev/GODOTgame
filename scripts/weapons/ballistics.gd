@@ -383,16 +383,15 @@ func _on_body(p: Dictionary, body: Node, hp: Vector3, hn: Vector3, dir: Vector3,
 	var residual := clampf(0.32 + float(par.get("overpen", 0.3)) * 0.45, 0.18, 0.85)
 	if qinfo.get("thick") != null:
 		residual *= clampf(1.0 - float(qinfo["thick"]) * 0.7, 0.18, 1.0)
-	var v2 := speed * residual
-	if v2 < 18.0:
-		# 动能耗尽：在出口外侧消失，不留弹头在皮肤上
+	# t27u：穿出人体的弹头继续沿弹道飞，直到撞到世界表面 / 超出最远距离 / 超时（_step 里统一结束）。
+	# 只有剩余速度极低（几乎停住）时才在出口外侧消失，不留弹头在皮肤上。
+	var v2 := maxf(speed * residual, minf(speed, 60.0))
+	if v2 < 12.0:
 		_end(p, false)
 		return false
 	p["pos"] = exit_p
 	p["vel"] = dir * v2
-	# 出口弹痕不再放在世界坐标：身体/布娃娃一动就会悬在半空成黑点。只挂在布娃娃骨上，否则不画（皮肤 shader 自带伤口）。
-	if col is PhysicalBone3D:
-		_spawn_decal(exit_p - dir * 0.01, -hn, false, col)
+	# t27u：出口不再画黑点弹孔（包括布娃娃骨骼），皮肤 shader / 伤口贴花自带伤口。
 	_place(p)
 	return true
 
@@ -786,10 +785,11 @@ func _decal_parent_for(col: Object) -> Node:
 		return null
 	if col is StaticBody3D or col is CSGShape3D or col is GridMap:
 		return _host if _host else (get_tree().current_scene if get_tree() else self)
-	if col is PhysicalBone3D or col is RigidBody3D or col is AnimatableBody3D:
-		return col as Node
-	if col is CharacterBody3D:
+	# t27u：人体（活人胶囊、布娃娃骨骼、任何属于有器官角色的碰撞体）一律不画黑点弹孔，伤口由皮肤 shader/伤口贴花负责。
+	if col is PhysicalBone3D or col is CharacterBody3D or _body_of(col) != null:
 		return null
+	if col is RigidBody3D or col is AnimatableBody3D:
+		return col as Node
 	return _host if _host else (get_tree().current_scene if get_tree() else self)
 
 
@@ -864,6 +864,27 @@ func floating_decal_count() -> int:
 		q.exclude = ignore_rids()
 		if w3.direct_space_state.intersect_shape(q, 1).is_empty():
 			n += 1
+	return n
+
+
+## 自检（t27u）：挂在人体上（布娃娃骨、角色胶囊、有器官的角色子节点）或贴在人体附近 6cm 内的弹痕数量，应为 0。
+func body_decal_count(bodies: Array = []) -> int:
+	var n := 0
+	for d in _decals:
+		if not (d is Node3D) or not is_instance_valid(d):
+			continue
+		var par := (d as Node).get_parent()
+		if par is PhysicalBone3D or par is CharacterBody3D or _body_of(par) != null:
+			n += 1
+			continue
+		for b in bodies:
+			if b is Node3D and is_instance_valid(b) and b.has_method("get_organs"):
+				var o: Node = b.call("get_organs")
+				if o and o.has_method("abdomen_frame"):
+					var c: Vector3 = (o.call("abdomen_frame") as Transform3D).origin
+					if (d as Node3D).global_position.distance_to(c) < 0.25:
+						n += 1
+						break
 	return n
 
 
