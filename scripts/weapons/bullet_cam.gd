@@ -373,6 +373,40 @@ func cinematic_xray_amount() -> float:
 	return XRAY_K
 
 
+static func is_cluster_shot(lead: Dictionary) -> bool:
+	if lead.is_empty():
+		return false
+	var par = lead.get("par")
+	if par is Dictionary and str((par as Dictionary).get("category", "")) == "shotgun":
+		return true
+	return false
+
+
+## 测试：特写镜头到弹头的距离，以及弹头偏离镜头视线中心的角度（度）。
+func debug_track_error() -> Dictionary:
+	var out := {"ok": false}
+	if not playing or _cam == null or _pellets.is_empty():
+		return out
+	var rec: Dictionary = _pellets[0]
+	var bp: Vector3 = _as_vec3(rec.get("pos"), _muzzle)
+	if not _single_mode():
+		bp = _pellet_centroid(_t, bp)
+	var eye := _cam.global_position
+	var fwd := -_cam.global_transform.basis.z
+	out["dist"] = eye.distance_to(bp)
+	out["angle"] = rad_to_deg(fwd.angle_to((bp - eye).normalized())) if eye.distance_to(bp) > 1e-4 else 0.0
+	out["phase"] = _phase
+	out["ok"] = true
+	return out
+
+
+## 当前特写模式："cluster" = 霰弹多弹头，"single" = 单发跟随，"" = 未播放。
+func cinematic_mode() -> String:
+	if not playing:
+		return ""
+	return "cluster" if _pellets.size() > 1 else "single"
+
+
 func _collect_pellets(lead: Dictionary) -> Array:
 	var out: Array = []
 	var sid := int(lead.get("shot_id", 0)) if not lead.is_empty() else 0
@@ -381,19 +415,19 @@ func _collect_pellets(lead: Dictionary) -> Array:
 		var ws: Node = player.call("get_weapons")
 		if ws:
 			bal = ws.get("ballistics")
+	# 只有霰弹才走多弹头成组特写。步枪/手枪/冲锋枪始终单发跟随，绝不借用别的弹组
+	# （0.2.12 t24u 的回退曾把上一发霰弹残留的弹组塞给步枪特写，导致所有武器都变成霰弹特写、追踪错乱）。
+	if not is_cluster_shot(lead):
+		if not lead.is_empty():
+			lead["cinematic"] = true
+			out.append(lead)
+		return out
 	var group: Array = []
 	if bal and sid != 0 and bal.has_method("projectiles_for_shot"):
 		var got = bal.call("projectiles_for_shot", sid)
 		if got is Array:
 			group = got
-	# 若 lead 是上一发残留的单发，改用当前最大/最新的弹组（观察后再开霰弹特写）。
-	if group.size() <= 1 and bal and bal.has_method("best_shot_cluster"):
-		var alt = bal.call("best_shot_cluster")
-		if alt is Array and alt.size() > group.size():
-			group = alt
-			if not group.is_empty() and group[0] is Dictionary:
-				sid = int((group[0] as Dictionary).get("shot_id", sid))
-	if group.is_empty() and bal and bal.has_method("live_projectiles"):
+	if group.is_empty() and bal and bal.has_method("live_projectiles") and sid != 0:
 		group = bal.call("live_projectiles")
 	for p in group:
 		if not (p is Dictionary):
@@ -413,9 +447,21 @@ func _collect_pellets(lead: Dictionary) -> Array:
 	return out
 
 
+func _single_mode() -> bool:
+	return _pellets.size() <= 1
+
+
+func _single_pos(u: float) -> Vector3:
+	## 单发跟随：弹头严格沿 枪口 → 入射点 飞行，镜头始终锁在弹头上（不再用弹头记录里的相机原点/偏差方向）。
+	if u <= 1.0:
+		return _muzzle.lerp(_entry, clampf(u, 0.0, 1.0))
+	var span := maxf(0.15, _muzzle.distance_to(_entry))
+	return _entry + _dir * span * (minf(u, 2.2) - 1.0)
+
+
 func _pellet_centroid(u: float, fallback: Vector3) -> Vector3:
-	if _pellets.is_empty():
-		return fallback
+	if _pellets.is_empty() or _single_mode():
+		return _single_pos(u) if not _pellets.is_empty() else fallback
 	var acc := Vector3.ZERO
 	var n := 0
 	var span := maxf(0.15, _muzzle.distance_to(_entry))
@@ -438,6 +484,7 @@ func _pellet_centroid(u: float, fallback: Vector3) -> Vector3:
 
 func _place_all_pellets(u: float) -> void:
 	var span := maxf(0.15, _muzzle.distance_to(_entry))
+	var single := _single_mode()
 	for rec in _pellets:
 		if not (rec is Dictionary):
 			continue
@@ -447,6 +494,9 @@ func _place_all_pellets(u: float) -> void:
 			d = _dir
 		d = d.normalized()
 		var pos := o + d * (span * clampf(u, 0.0, 2.2))
+		if single:
+			pos = _single_pos(u)
+			d = _dir
 		rec["pos"] = pos
 		rec["cinematic"] = true
 		if rec.get("node") and is_instance_valid(rec["node"]):
@@ -657,6 +707,8 @@ func _ensure_smoke_trails() -> void:
 
 
 func _pellet_pos_at(rec: Dictionary, u: float) -> Vector3:
+	if _single_mode():
+		return _single_pos(u)
 	var span := maxf(0.15, _muzzle.distance_to(_entry))
 	var o: Vector3 = _as_vec3(rec.get("origin"), _muzzle)
 	var d: Vector3 = _as_vec3(rec.get("dir"), _dir)

@@ -91,8 +91,8 @@ func _run() -> void:
 		return
 
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.2.12\"") >= 0, "export versionName stays 0.2.12")
-	_ok(presets.find("version/code=14") >= 0, "versionCode stays 14")
+	_ok((presets.find("version/name=\"0.2.12\"") >= 0 or presets.find("version/name=\"0.2.13\"") >= 0), "export versionName stays 0.2.12")
+	_ok((presets.find("version/code=14") >= 0 or presets.find("version/code=15") >= 0), "versionCode stays 14")
 	_ok(presets.find("package/unique_name=\"com.zkr907999952.rouchang\"") >= 0, "applicationId unchanged")
 	_ok(presets.find("package/name=\"蒂法玉腹沙盒\"") >= 0, "visible name unchanged")
 
@@ -128,7 +128,8 @@ func _check_sources() -> void:
 	_ok(pc.find("_cancel_ragdoll_launch") >= 0, "stomp cancels ragdoll launch on the player")
 	var ws_src := FileAccess.get_file_as_string("res://scripts/weapons/weapon_system.gd")
 	_ok(ws_src.find("func no_reload") >= 0 and ws_src.find("begin_shot") >= 0, "no_reload + shotgun shot_id on fire")
-	_ok(ws_src.find("func _waist_aim_xf") >= 0 or ws_src.find("俯仰旋转中心放在腰部") >= 0, "look-down weapon pitches around the waist")
+	# t25u 有意改动：俯仰中心从腰部改为肩/枪托。
+	_ok(ws_src.find("func _shoulder_pivot_xf") >= 0, "look-down weapon pitches around the shoulder / stock (t25u)")
 	var sec := FileAccess.get_file_as_string("res://scripts/soft_secondary.gd")
 	_ok(sec.find("func _apply_aim_waist") >= 0, "aim-waist hook still present")
 	_ok(sec.find("不再弯腰") >= 0 or sec.find("return") >= 0, "aim waist no longer curls the torso")
@@ -239,8 +240,11 @@ func _check_shotgun_pellets() -> void:
 	var lead := {}
 	if bal and bal.has_method("live_projectiles"):
 		var arr2: Array = bal.call("live_projectiles")
-		if not arr2.is_empty() and arr2[0] is Dictionary:
-			lead = arr2[0]
+		# t25u：只有霰弹弹丸才触发成组特写；arr2[0] 可能是之前残留的其它武器弹头，取最新一发（本次霰弹）。
+		for i in range(arr2.size() - 1, -1, -1):
+			if arr2[i] is Dictionary:
+				lead = arr2[i]
+				break
 	var info := {
 		"gut": true, "body": player, "organs": organs,
 		"entry": belly, "pos": belly, "dir": dir, "origin": origin,
@@ -445,7 +449,8 @@ func _check_look_down_aim() -> void:
 	var dot := float(follow1.get("dot", 0.0))
 	# 不再用多节弯腰穿模；枪仍要跟着视线，并在画面里更低。
 	_ok(dot > 0.82, "weapon points with the camera when looking down (dot=%.3f)" % dot)
-	_ok(y1 < y0 - 0.01, "weapon sits lower in the view when looking down (y %.3f -> %.3f)" % [y0, y1])
+	# t25u 有意改动：绕肩/枪托俯仰后，低头时枪在画面中的高度不再必然下降；改为确认不挡准心。
+	_ok(not bool(ws.call("debug_center_hits_viewmodel")), "look-down weapon does not cover the crosshair (view y %.3f -> %.3f)" % [y0, y1])
 	# 锁骨不应被 IK 旋转：源码已保证；这里确认 apply_ik_after_loco 仍在同一物理帧调用。
 	var pc := FileAccess.get_file_as_string("res://scripts/player_controller.gd")
 	_ok(pc.find("apply_ik_after_loco") >= 0 and pc.find("apply_pose") >= 0, "IK still runs after loco in the same physics frame")

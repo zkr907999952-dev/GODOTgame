@@ -588,6 +588,8 @@ func spawn_impact_sphere(hit: Vector3, dir: Vector3, impulse_len: float, _bone: 
 	# 放在角色层，骨骼 mask 含角色层，双向 AND 才能撞上。
 	body.collision_layer = LAYER_CHAR
 	body.collision_mask = LAYER_CHAR
+	# 子弹射线忽略冲击球（只给布娃娃推力），否则后续弹丸会在空中的隐形球上留下黑色弹痕。
+	body.add_to_group("ballistics_ignore")
 	var cs := CollisionShape3D.new()
 	var sph := SphereShape3D.new()
 	sph.radius = SPHERE_RADIUS
