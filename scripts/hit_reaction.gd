@@ -273,10 +273,69 @@ func apply_cover(delta: float) -> void:
 		cover_weight = 0.0
 		last_cover = cover_life > 0.0
 		return
-	# 两只手捂向最近一次内脏受击点；不旋转锁骨，避免肩臂拧坏。
+	# 自然捂腹：微微鞠躬，两手叠在伤口前方，肘向外略向前绕过肚子，不穿躯干。不转锁骨。
+	_cover_hunch(cover_weight)
 	_cover_arm("L", cover_point, cover_weight)
 	_cover_arm("R", cover_point, cover_weight)
 	last_cover = true
+
+
+func _torso_frame() -> Dictionary:
+	var sk := skeleton.global_transform
+	var hip_i := skeleton.find_bone("C_Hip_a")
+	var sp_i := skeleton.find_bone("C_Spine_c")
+	var hip := sk.origin
+	var up := Vector3.UP
+	if hip_i >= 0:
+		hip = (sk * skeleton.get_bone_global_pose(hip_i)).origin
+	if sp_i >= 0:
+		var sp: Vector3 = (sk * skeleton.get_bone_global_pose(sp_i)).origin
+		up = (sp - hip).normalized() if sp.distance_to(hip) > 0.04 else Vector3.UP
+	var fwd := Vector3.FORWARD
+	var body := skeleton.get_parent()
+	if body is Node3D:
+		# 网格朝向为 Body +Z
+		fwd = (body as Node3D).global_transform.basis.z
+		fwd = (fwd - up * fwd.dot(up))
+		if fwd.length_squared() < 1e-6:
+			fwd = Vector3.FORWARD
+		fwd = fwd.normalized()
+	var right := up.cross(fwd)
+	if right.length_squared() < 1e-6:
+		right = Vector3.RIGHT
+	right = right.normalized()
+	fwd = right.cross(up).normalized()
+	return {"hip": hip, "up": up, "fwd": fwd, "right": right}
+
+
+func _front_of_torso(target: Vector3, fr: Dictionary) -> Vector3:
+	# 把受击点推到腹前表面，手按在肚子上而不是插进体内。
+	var hip: Vector3 = fr["hip"]
+	var fwd: Vector3 = fr["fwd"]
+	var up: Vector3 = fr["up"]
+	var rel := target - hip
+	var height := clampf(rel.dot(up), 0.15, 0.55)
+	var depth := rel.dot(fwd)
+	# 腹前大约在躯干中心前方 0.13–0.16m
+	var front := 0.15
+	if depth < front:
+		target = target + fwd * (front - depth)
+	# 高度不够时按在小腹
+	var want_h := hip + up * height + fwd * maxf(depth, front)
+	return want_h
+
+
+func _cover_hunch(w: float) -> void:
+	# 轻微含胸前倾，参考捂肚子时的佝偻，不转锁骨。
+	var fr := _torso_frame()
+	var fwd: Vector3 = fr["fwd"]
+	for rec in [["C_Spine_a", 0.10], ["C_Spine_c", 0.16], ["C_Spine_d", 0.07]]:
+		var bi := skeleton.find_bone(str(rec[0]))
+		if bi < 0:
+			continue
+		var rest := skeleton.get_bone_global_pose(bi)
+		var origin := (skeleton.global_transform * rest).origin
+		_aim_bone(bi, origin, origin + fwd * 0.2 - fr["up"] * 0.05, float(rec[1]) * w * 0.35)
 
 
 func _cover_arm(side: String, target: Vector3, w: float) -> void:
@@ -296,32 +355,110 @@ func _cover_arm(side: String, target: Vector3, w: float) -> void:
 	var l2 := p1.distance_to(p2)
 	if l1 < 0.05 or l2 < 0.05:
 		return
-	# 左右手略分开放在伤口两侧，掌心朝身体。
-	var off := Vector3(-0.04, 0.01, 0.0) if side == "L" else Vector3(0.04, 0.01, 0.0)
-	var goal := target + off
+	var fr := _torso_frame()
+	var fwd: Vector3 = fr["fwd"]
+	var right: Vector3 = fr["right"]
+	var up: Vector3 = fr["up"]
+	var goal := _front_of_torso(target, fr)
+	# 双手叠按：左手略偏左、右手叠在上面略偏右，掌心向内。
+	var side_sign := -1.0 if side == "L" else 1.0
+	goal += right * (0.035 * side_sign)
+	goal += up * (0.0 if side == "L" else 0.03)
+	goal += fwd * 0.01
 	var span := l1 + l2 - 0.02
 	if p0.distance_to(goal) > span:
 		goal = p0 + (goal - p0).normalized() * span
-	var dist := clampf(p0.distance_to(goal), 0.06, span)
-	# 解析两骨 IK
-	var dir := (goal - p0).normalized()
+	# 肘在体侧略向前，绕过肚子，不要走躯干内部的捷径。
+	var mid := (p0 + goal) * 0.5
+	var elbow_hint: Vector3 = mid + right * (0.32 * side_sign) + fwd * 0.18 - up * 0.05
+	# 保证肘在躯干圆柱外、略向前
+	var hip: Vector3 = fr["hip"]
+	var rel_e := elbow_hint - hip
+	var radial := rel_e - up * rel_e.dot(up)
+	if radial.length() < 0.28:
+		elbow_hint += (radial.normalized() if radial.length_squared() > 1e-6 else right * side_sign) * (0.28 - radial.length())
+	if (elbow_hint - hip).dot(fwd) < 0.08:
+		elbow_hint += fwd * (0.08 - (elbow_hint - hip).dot(fwd))
+	# 解析两骨：肩到肘、肘到手，保持骨长
+	var d_el := elbow_hint - p0
+	if d_el.length_squared() < 1e-6:
+		d_el = right * side_sign
+	elbow_hint = p0 + d_el.normalized() * l1
+	var d_h := goal - elbow_hint
+	if d_h.length_squared() < 1e-6:
+		d_h = fwd
+	# 若手目标与肘距离不等于前臂长，把肘在「外侧+前方」平面上再微调
+	var want := goal
+	var to_goal := want - p0
+	var dist := clampf(to_goal.length(), 0.06, span)
+	want = p0 + to_goal.normalized() * dist
+	var dir := (want - p0).normalized()
 	var x := clampf((dist * dist + l1 * l1 - l2 * l2) / (2.0 * dist * l1), -1.0, 1.0)
 	var elbow_ang := acos(x)
-	var mid := p0 + dir * (cos(elbow_ang) * l1)
-	var pole := Vector3.FORWARD
-	if skeleton.get_parent() is Node3D:
-		pole = -(skeleton.get_parent() as Node3D).global_transform.basis.z
-	if absf(dir.dot(pole)) > 0.92:
-		pole = Vector3.RIGHT
+	var along := p0 + dir * (cos(elbow_ang) * l1)
+	var pole := (right * side_sign + fwd * 0.55).normalized()
 	var nrm := dir.cross(pole)
+	if nrm.length_squared() < 1e-8:
+		nrm = (right * side_sign).cross(dir)
 	if nrm.length_squared() < 1e-8:
 		nrm = Vector3.RIGHT
 	nrm = nrm.normalized()
-	# 肘向外弯
-	var elbow_sign := -1.0 if side == "L" else 1.0
-	var elbow_pos := mid + nrm * sin(elbow_ang) * l1 * 0.85 * elbow_sign
+	# 让肘落在体外侧、略向前的那一侧
+	if nrm.dot(right * side_sign + fwd * 0.3) < 0.0:
+		nrm = -nrm
+	var elbow_pos := along + nrm * sin(elbow_ang) * l1
+	# 再向外推一次，防止前臂弦穿过躯干
+	var rel2 := elbow_pos - hip
+	var rad2 := rel2 - up * rel2.dot(up)
+	if rad2.length() < 0.26:
+		elbow_pos += (rad2.normalized() if rad2.length_squared() > 1e-6 else right * side_sign) * (0.26 - rad2.length())
+		elbow_pos = p0 + (elbow_pos - p0).normalized() * l1
+	if (elbow_pos - hip).dot(fwd) < 0.06:
+		elbow_pos += fwd * (0.06 - (elbow_pos - hip).dot(fwd))
+		elbow_pos = p0 + (elbow_pos - p0).normalized() * l1
 	_aim_bone(ua, p0, elbow_pos, w)
-	_aim_bone(fa, elbow_pos, goal, w)
+	_aim_bone(fa, elbow_pos, want, w)
+
+
+func cover_debug() -> Dictionary:
+	# 测试用：双手、两肘与受击点的世界坐标，以及前臂是否明显穿过躯干圆柱。
+	var fr := _torso_frame() if skeleton else {"hip": Vector3.ZERO, "up": Vector3.UP, "fwd": Vector3.FORWARD, "right": Vector3.RIGHT}
+	var out := {"point": cover_point, "weight": cover_weight, "hip": fr["hip"], "fwd": fr["fwd"]}
+	var sk := skeleton.global_transform if skeleton else Transform3D.IDENTITY
+	for side in ["L", "R"]:
+		var fa := skeleton.find_bone("%s_Forearm_a" % side) if skeleton else -1
+		var ha := skeleton.find_bone("%s_Hand_a" % side) if skeleton else -1
+		var elbow := Vector3.ZERO
+		var hand := Vector3.ZERO
+		if fa >= 0:
+			elbow = (sk * skeleton.get_bone_global_pose(fa)).origin
+		if ha >= 0:
+			hand = (sk * skeleton.get_bone_global_pose(ha)).origin
+		out[side + "_elbow"] = elbow
+		out[side + "_hand"] = hand
+		out[side + "_hand_dist"] = hand.distance_to(cover_point) if cover_point != Vector3.ZERO else 0.0
+		out[side + "_arm_through"] = _segment_hits_torso(elbow, hand, fr, 0.12)
+	return out
+
+
+func _segment_hits_torso(a: Vector3, b: Vector3, fr: Dictionary, _radius: float) -> bool:
+	# 前臂绕腹前是正常的；只有中段明显钻进躯干内部或绕到背后，才算穿模。
+	var hip: Vector3 = fr["hip"]
+	var up: Vector3 = fr["up"]
+	var fwd: Vector3 = fr["fwd"]
+	# 在前臂上取几个点，避开靠近手掌（本来就按在腹面）的一端。
+	for s in [0.35, 0.5, 0.65]:
+		var p: Vector3 = a.lerp(b, s)
+		var rel := p - (hip + up * 0.28)
+		var along := rel.dot(up)
+		if along < 0.0 or along > 0.55:
+			continue
+		var radial := rel - up * along
+		var depth := radial.dot(fwd)
+		# 钻进腹柱中心，或跑到背后穿过身体。
+		if radial.length() < 0.09 or (depth < -0.02 and radial.length() < 0.16):
+			return true
+	return false
 
 
 func _aim_bone(bi: int, from: Vector3, to: Vector3, w: float) -> void:

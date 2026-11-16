@@ -542,23 +542,35 @@ func _try_fire(delta: float) -> void:
 
 var _aim_override: Vector3 = Vector3.ZERO
 var _has_aim_override: bool = false
+var _origin_override: Vector3 = Vector3.ZERO
+var _has_origin_override: bool = false
 
 
 func fire_at_point(world_point: Vector3) -> bool:
+	var origin := camera.global_position if camera else Vector3.ZERO
+	var dir := world_point - origin
+	if dir.length_squared() < 1e-8:
+		return false
+	return fire_along_ray(origin, dir.normalized())
+
+
+func fire_along_ray(origin: Vector3, dir: Vector3) -> bool:
 	var w: WeaponDef = cur_def()
 	if w == null or not is_armed():
 		return false
 	if ammo_of(current).x <= 0:
 		return false
-	var origin := camera.global_position if camera else Vector3.ZERO
-	var dir := world_point - origin
 	if dir.length_squared() < 1e-8:
 		return false
 	_aim_override = dir.normalized()
 	_has_aim_override = true
+	_origin_override = origin
+	_has_origin_override = true
 	_fire_once(w)
 	_has_aim_override = false
 	_aim_override = Vector3.ZERO
+	_has_origin_override = false
+	_origin_override = Vector3.ZERO
 	return true
 
 
@@ -568,7 +580,7 @@ func _fire_once(w: WeaponDef) -> void:
 	ammo[current] = a
 	shots_total += 1
 	ammo_changed.emit(current, a.x, a.y)
-	var origin := camera.global_position
+	var origin := _origin_override if _has_origin_override else camera.global_position
 	var fwd := _aim_override if _has_aim_override else -camera.global_transform.basis.z
 	var spread := 0.0 if _has_aim_override else deg_to_rad((w.spread_deg * (0.35 if ads else 1.0)) + spread_extra)
 	for i in maxi(1, w.pellets):

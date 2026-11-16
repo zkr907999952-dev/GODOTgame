@@ -136,7 +136,7 @@ func fire_projectile(origin: Vector3, dir: Vector3, weapon_id: String, w: Resour
 	var pos := origin + d * 0.04
 	var pr := _make_visual(str(par["proj"]), float(par["scale"]))
 	pr.global_position = pos
-	_look_along(pr, d)
+	look_along(pr, d)
 	var rec := {
 		"pos": pos,
 		"origin": pos,
@@ -376,18 +376,18 @@ func _place(p: Dictionary) -> void:
 	var vel: Vector3 = p["vel"]
 	var d := vel.normalized() if vel.length_squared() > 1e-6 else (p["dir"] as Vector3)
 	n.global_position = p["pos"]
-	_look_along(n, d)
+	look_along(n, d)
 	n.visible = _mesh_far_enough(p["pos"])
 	var tr: MeshInstance3D = p.get("tracer")
 	if tr and is_instance_valid(tr):
 		var len := clampf(vel.length() * 0.0025, 0.04, 0.55)
 		tr.visible = true
 		tr.global_position = p["pos"] - d * len * 0.5
-		_look_along(tr, d)
+		look_along(tr, d)
 		tr.scale = Vector3(len, 1, 1)
 
 
-func _look_along(n: Node3D, d: Vector3) -> void:
+func look_along(n: Node3D, d: Vector3) -> void:
 	# 弹头网格沿 +X 向前
 	if d.length_squared() < 1e-10:
 		return
@@ -410,7 +410,7 @@ func _end(p: Dictionary, leave_spent: bool, at: Vector3 = Vector3.ZERO, dir: Vec
 	var n: MeshInstance3D = p.get("node")
 	if leave_spent and n and is_instance_valid(n):
 		n.global_position = at - dir * 0.004
-		_look_along(n, dir)
+		look_along(n, dir)
 		n.visible = true
 		_spent.append({"n": n, "t": 2.0})
 		p["node"] = null

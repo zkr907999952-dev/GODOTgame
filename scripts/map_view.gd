@@ -33,6 +33,8 @@ var _pinch_mid: Vector2 = Vector2.ZERO
 var _screen_touch_until: int = 0
 ## 最近一次有效指针（给测试 / 调试看走的是触摸还是 GUI）。
 var last_ingest: String = ""
+## index -> {t: msec, frame: int}，用来丢掉丢失了抬起事件的残指，避免一直卡在多点模式。
+var _touch_meta: Dictionary = {}
 
 
 func _ready() -> void:
@@ -88,7 +90,9 @@ func open(center: Vector3, current_player: Vector3) -> void:
 	_cam.current = true
 	_drag_on = false
 	_touches.clear()
+	_touch_meta.clear()
 	_pinch_dist = 0.0
+	set_process_input(true)
 	_update_cam()
 
 
@@ -98,7 +102,9 @@ func close() -> void:
 	is_open = false
 	_drag_on = false
 	_touches.clear()
+	_touch_meta.clear()
 	_pinch_dist = 0.0
+	set_process_input(false)
 	_marker_mi.visible = false
 	_player_mi.visible = false
 	if _prev_cam and is_instance_valid(_prev_cam):
@@ -157,6 +163,42 @@ func to_logical_rel(rel: Vector2, pos: Vector2) -> Vector2:
 	if pos.x > vis.size.x + 24.0 or pos.y > vis.size.y + 24.0:
 		return Vector2(rel.x * vis.size.x / backing.x, rel.y * vis.size.y / backing.y)
 	return rel
+
+
+## 在 GUI 之前先收到事件。抬起即使落在顶栏/底栏按钮上也不会丢，避免残指卡住多点模式。
+func _input(event: InputEvent) -> void:
+	if not is_open:
+		return
+	if event is InputEventScreenTouch and not (event as InputEventScreenTouch).pressed:
+		var st := event as InputEventScreenTouch
+		var pos := to_logical(st.position)
+		if _touches.has(st.index):
+			_touch_up(st.index, pos)
+			# 不 set handled，让顶栏按钮仍能收到这次抬起。
+
+
+func purge_stale_touches(max_frames: int = 25, max_ms: int = 280) -> int:
+	var now := Time.get_ticks_msec()
+	var fr := Engine.get_process_frames()
+	var dropped := 0
+	for idx in _touches.keys():
+		var meta: Dictionary = _touch_meta.get(idx, {})
+		var age_f := fr - int(meta.get("frame", fr))
+		var age_t := now - int(meta.get("t", now))
+		if age_f > max_frames or age_t > max_ms:
+			_touches.erase(idx)
+			_touch_meta.erase(idx)
+			dropped += 1
+	if _touches.size() < 2:
+		_pinch_dist = 0.0
+		if _touches.is_empty():
+			# 残指清干净后，单指可以重新开始拖/点选。
+			pass
+	return dropped
+
+
+func touch_count() -> int:
+	return _touches.size()
 
 
 ## GUI 捕捉层（HUD MapInputCatcher）把控件局部坐标转成视口坐标后再交给这里。
@@ -228,6 +270,7 @@ func handle_input(event: InputEvent) -> bool:
 		_screen_touch_until = Time.get_ticks_msec() + 160
 		var pos := to_logical(st.position)
 		if st.pressed:
+			purge_stale_touches()
 			_touch_down(st.index, pos)
 		else:
 			_touch_up(st.index, pos)
@@ -251,8 +294,15 @@ func _touch_pts() -> Array:
 	return pts
 
 
-func _touch_down(idx: int, p: Vector2) -> void:
+func _stamp_touch(idx: int, p: Vector2) -> void:
 	_touches[idx] = p
+	_touch_meta[idx] = {"t": Time.get_ticks_msec(), "frame": Engine.get_process_frames()}
+
+
+func _touch_down(idx: int, p: Vector2) -> void:
+	# 新的按下时再清一次过期残指，避免「多点结束后一直停在双指模式」。
+	purge_stale_touches()
+	_stamp_touch(idx, p)
 	var pts := _touch_pts()
 	if pts.size() >= 2:
 		_drag_on = false
@@ -267,7 +317,7 @@ func _touch_down(idx: int, p: Vector2) -> void:
 
 
 func _touch_move(idx: int, p: Vector2, rel: Vector2) -> void:
-	_touches[idx] = p
+	_stamp_touch(idx, p)
 	var pts := _touch_pts()
 	if pts.size() >= 2:
 		var mid: Vector2 = (pts[0] + pts[1]) * 0.5
@@ -294,8 +344,12 @@ func _touch_move(idx: int, p: Vector2, rel: Vector2) -> void:
 
 
 func _touch_up(idx: int, p: Vector2) -> void:
+	if not _touches.has(idx):
+		# 可能已由 _input 处理过同一次抬起，避免重复点选。
+		return
 	var was_pinch := _touches.size() >= 2
 	_touches.erase(idx)
+	_touch_meta.erase(idx)
 	var pts := _touch_pts()
 	if pts.size() >= 2:
 		_pinch_mid = (pts[0] + pts[1]) * 0.5
@@ -303,7 +357,7 @@ func _touch_up(idx: int, p: Vector2) -> void:
 		return
 	_pinch_dist = 0.0
 	if pts.size() == 1:
-		# 剩下单指：改从该指继续拖，不误判为单击选点
+		# 剩下单指：立刻恢复单指平移；不误判为单击选点
 		_drag_on = true
 		_drag_moved = true
 		_drag_from = pts[0]

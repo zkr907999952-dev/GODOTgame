@@ -33,7 +33,7 @@ func _ready() -> void:
 	var hit := StaticBody3D.new()
 	hit.name = "BodyHit"
 	hit.collision_layer = 2
-	hit.collision_mask = 0
+	hit.collision_mask = 1 | 2
 	var cs := CollisionShape3D.new()
 	var cyl := CylinderShape3D.new()
 	cyl.radius = 0.3

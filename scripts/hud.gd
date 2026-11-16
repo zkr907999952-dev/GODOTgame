@@ -20,6 +20,7 @@ var _show_help: bool = true
 var _btn_settings: Button
 var _btn_interact: Button
 var _btn_camera: Button
+var _btn_xray: Button
 var _panel_settings: PanelContainer
 var _panel_interact: PanelContainer
 var _panel_camera: PanelContainer
@@ -68,6 +69,11 @@ var _overhead_ui: Control
 var _overhead_info: Label
 var _overhead_clear: Button
 var _overhead_go: Button
+var _map_sidebar: Control
+var _map_sidebar_panel: Control
+var _map_sidebar_arrow: Button
+var _map_sidebar_list: VBoxContainer
+var _map_sidebar_open: bool = false
 ## 触屏 / 手机布局
 const TouchControlsScript := preload("res://scripts/ui/touch_controls.gd")
 const WeaponUIScript := preload("res://scripts/ui/weapon_ui.gd")
@@ -154,7 +160,7 @@ func _build_ui() -> void:
 	# 网页左上角「地图」按钮（M）
 	_btn_map = _make_chrome_button("地图")
 	_btn_map.position = Vector2(104, 16)
-	_btn_map.pressed.connect(func(): _toggle_panel(PanelId.MAP))
+	_btn_map.pressed.connect(func(): toggle_map_panel())
 	root.add_child(_btn_map)
 
 	# Top-right chrome: 摄像机 + 互动
@@ -162,7 +168,7 @@ func _build_ui() -> void:
 	right_bar.add_theme_constant_override("separation", 8)
 	right_bar.set_anchors_preset(Control.PRESET_TOP_RIGHT)
 	right_bar.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	right_bar.offset_left = -220
+	right_bar.offset_left = -320
 	right_bar.offset_right = -16
 	right_bar.offset_top = 16
 	right_bar.offset_bottom = 48
@@ -173,6 +179,12 @@ func _build_ui() -> void:
 	# 武器菜单已并入「互动」，顶栏不再单独显示武器按钮。
 	_btn_weapon.visible = false
 	_btn_weapon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	_btn_xray = _make_chrome_button("透视")
+	_btn_xray.name = "XrayButton"
+	_btn_xray.toggle_mode = true
+	_btn_xray.toggled.connect(_on_chrome_xray)
+	right_bar.add_child(_btn_xray)
 
 	_btn_camera = _make_chrome_button("摄像机")
 	_btn_camera.pressed.connect(func(): _toggle_panel(PanelId.CAMERA))
@@ -654,6 +666,8 @@ func _on_map_spawn(id: String, i: int) -> void:
 	_close_all_panels()
 	var g := _game()
 	if g:
+		if g.get("map_view") and bool(g.get("map_view").get("is_open")):
+			g.call("close_overhead", false)
 		g.call("switch_map", id, i)
 
 
@@ -744,7 +758,113 @@ func _build_overhead_ui() -> Control:
 		if g:
 			g.call("overhead_teleport"))
 	bh.add_child(_overhead_go)
+	_build_map_sidebar(ui)
 	return ui
+
+
+func _build_map_sidebar(ui: Control) -> void:
+	_map_sidebar = Control.new()
+	_map_sidebar.name = "MapSidebar"
+	_map_sidebar.set_anchors_preset(Control.PRESET_LEFT_WIDE)
+	_map_sidebar.offset_left = 0
+	_map_sidebar.offset_right = 280
+	_map_sidebar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.add_child(_map_sidebar)
+	_map_sidebar_panel = PanelContainer.new()
+	_map_sidebar_panel.name = "MapSidebarPanel"
+	_style_panel(_map_sidebar_panel)
+	_map_sidebar_panel.visible = false
+	_map_sidebar_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	_map_sidebar_panel.set_anchors_preset(Control.PRESET_LEFT_WIDE)
+	_map_sidebar_panel.offset_left = 8
+	_map_sidebar_panel.offset_right = 258
+	_map_sidebar_panel.offset_top = 88
+	_map_sidebar_panel.offset_bottom = -80
+	_map_sidebar.add_child(_map_sidebar_panel)
+	var sc := ScrollContainer.new()
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	sc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sc.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_map_sidebar_panel.add_child(sc)
+	_map_sidebar_list = VBoxContainer.new()
+	_map_sidebar_list.name = "MapSidebarList"
+	_map_sidebar_list.add_theme_constant_override("separation", 4)
+	_map_sidebar_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sc.add_child(_map_sidebar_list)
+	_map_sidebar_arrow = Button.new()
+	_map_sidebar_arrow.name = "MapSidebarArrow"
+	_map_sidebar_arrow.text = ">"
+	_map_sidebar_arrow.focus_mode = Control.FOCUS_NONE
+	_map_sidebar_arrow.custom_minimum_size = Vector2(28, 72)
+	_style_button(_map_sidebar_arrow, true)
+	_map_sidebar_arrow.set_anchors_preset(Control.PRESET_CENTER_LEFT)
+	_map_sidebar_arrow.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_map_sidebar_arrow.offset_left = 0
+	_map_sidebar_arrow.offset_right = 28
+	_map_sidebar_arrow.offset_top = -36
+	_map_sidebar_arrow.offset_bottom = 36
+	_map_sidebar_arrow.pressed.connect(toggle_map_sidebar)
+	_map_sidebar.add_child(_map_sidebar_arrow)
+	_set_map_sidebar_open(false)
+
+
+func is_map_sidebar_open() -> bool:
+	return _map_sidebar_open
+
+
+func toggle_map_sidebar() -> void:
+	_set_map_sidebar_open(not _map_sidebar_open)
+
+
+func _set_map_sidebar_open(on: bool) -> void:
+	_map_sidebar_open = on
+	if _map_sidebar_panel:
+		_map_sidebar_panel.visible = on
+	if _map_sidebar_arrow:
+		_map_sidebar_arrow.text = "<" if on else ">"
+		# 收起时贴在左缘；展开时贴在侧栏右沿。
+		if on:
+			_map_sidebar_arrow.offset_left = 258
+			_map_sidebar_arrow.offset_right = 286
+		else:
+			_map_sidebar_arrow.offset_left = 0
+			_map_sidebar_arrow.offset_right = 28
+
+
+func _rebuild_map_sidebar() -> void:
+	if _map_sidebar_list == null:
+		return
+	for c in _map_sidebar_list.get_children():
+		c.queue_free()
+	var title := Label.new()
+	title.text = "传送点"
+	title.add_theme_font_size_override("font_size", 16)
+	title.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	_map_sidebar_list.add_child(title)
+	var g := _game()
+	if g == null:
+		return
+	var cur := str(g.get("current_map"))
+	for m in g.call("get_maps"):
+		var l := Label.new()
+		l.text = str(m["label"]) + ("  ← 当前" if str(m["id"]) == cur else "")
+		l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_map_sidebar_list.add_child(l)
+		var grid := GridContainer.new()
+		grid.columns = 1
+		grid.add_theme_constant_override("v_separation", 4)
+		_map_sidebar_list.add_child(grid)
+		var spawns: Array = m["spawns"]
+		for i in spawns.size():
+			var b := Button.new()
+			b.text = str(spawns[i]["label"])
+			b.custom_minimum_size = Vector2(200, 32)
+			b.add_theme_font_size_override("font_size", 13)
+			b.focus_mode = Control.FOCUS_NONE
+			_style_button(b, false)
+			b.pressed.connect(_on_map_spawn.bind(str(m["id"]), i))
+			grid.add_child(b)
 
 
 ## game_root 调用：俯视地图开 / 关
@@ -752,13 +872,15 @@ func set_overhead(on: bool) -> void:
 	if _overhead_ui == null:
 		return
 	_overhead_ui.visible = on
-	for c in [_btn_settings, _btn_map, _btn_camera, _btn_interact, _status]:
+	for c in [_btn_settings, _btn_map, _btn_xray, _btn_camera, _btn_interact, _status]:
 		if c:
 			c.visible = not on
 	if _btn_weapon:
 		_btn_weapon.visible = false
 	if on:
 		_close_all_panels()
+		_set_map_sidebar_open(false)
+		_rebuild_map_sidebar()
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		var g := _game()
 		if g:
@@ -1525,7 +1647,16 @@ func open_panel_name() -> String:
 
 
 func toggle_map_panel() -> void:
-	_toggle_panel(PanelId.MAP)
+	# 地图按钮默认直接进俯视投影；再点（或 M / Esc）关闭。传送点在地图左侧栏。
+	var g := _game()
+	if g == null:
+		return
+	var mv = g.get("map_view")
+	if mv and bool(mv.get("is_open")):
+		g.call("close_overhead")
+	else:
+		_close_all_panels()
+		g.call("open_overhead")
 
 
 func toggle_ui_hidden() -> void:
@@ -1593,6 +1724,7 @@ func _sync_from_systems() -> void:
 	if org != null:
 		if _chk_xray:
 			_chk_xray.set_pressed_no_signal(bool(org.get("xray_enabled")))
+		_sync_xray_chrome()
 		if _xray_slider:
 			_xray_slider.set_value_no_signal(float(org.get("xray_amount")))
 		if _xray_value:
@@ -1633,14 +1765,32 @@ func _org() -> Node:
 	return null
 
 
+func _on_chrome_xray(on: bool) -> void:
+	_on_xray_toggled(on)
+	_sync_xray_chrome()
+
+
+func _sync_xray_chrome() -> void:
+	if _btn_xray == null:
+		return
+	var on := false
+	var o := _org()
+	if o:
+		on = bool(o.get("xray_enabled"))
+	_btn_xray.set_pressed_no_signal(on)
+	_style_button(_btn_xray, on)
+
+
 func _on_xray_toggled(on: bool) -> void:
 	var g := _game()
 	if g and g.has_method("apply_xray_enabled"):
 		g.call("apply_xray_enabled", on)
+		_sync_xray_chrome()
 		return
 	var o := _org()
 	if o:
 		o.call("set_xray_enabled", on)
+	_sync_xray_chrome()
 
 
 func _on_xray_amount(v: float) -> void:
@@ -2048,7 +2198,9 @@ func _apply_layout() -> void:
 		_touch.set("safe", _safe)
 	var bw := (60.0 if compact else 72.0) if touch_ui else 80.0
 	var bh := 48.0 if touch_ui else 32.0
-	for b in [_btn_settings, _btn_map, _btn_weapon, _btn_camera, _btn_interact]:
+	for b in [_btn_settings, _btn_map, _btn_weapon, _btn_xray, _btn_camera, _btn_interact]:
+		if b == null:
+			continue
 		b.custom_minimum_size = Vector2(bw, bh)
 		b.add_theme_font_size_override("font_size", 16 if touch_ui else 15)
 	var sl := _safe.x + 16.0
@@ -2059,7 +2211,7 @@ func _apply_layout() -> void:
 	_btn_map.position = Vector2(sl + bw + 8.0, st)
 	var right_bar := _btn_camera.get_parent() as Control
 	right_bar.offset_right = -sr
-	right_bar.offset_left = -sr - (bw * 2.0 + 8.0)
+	right_bar.offset_left = -sr - (bw * 3.0 + 16.0)
 	right_bar.offset_top = st
 	right_bar.offset_bottom = st + bh
 	_status.position = Vector2(sl, st + bh + 8.0)

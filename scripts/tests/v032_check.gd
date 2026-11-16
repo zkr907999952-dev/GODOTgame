@@ -298,14 +298,22 @@ func _check_corpse_drag() -> void:
 	_ok(not bool(drag.call("is_dragging")), "not dragging after drop")
 	if btn and hud.has_method("_refresh_corpse_drag_btn"):
 		hud.call("_refresh_corpse_drag_btn")
-	# 自动超距放下
+	# 一旦拖拽成功，走出选择/持握范围不再自动放开（范围只用于开始选择）。
 	drag.call("debug_aim", c, "C_Spine_c", chest)
 	_ok(bool(drag.call("toggle")), "restart drag")
+	for _k in range(48):
+		drag.call("physics_tick", 0.016)
+		await _phys(1)
+		if not bool(drag.get("reaching")):
+			break
 	player.global_position = chest + Vector3(5, 0, 5)
 	player.velocity = Vector3.ZERO
 	drag.call("physics_tick", 0.016)
-	_ok(not bool(drag.call("is_dragging")), "auto-drop when walking out of range")
-	_ok(str(drag.get("last_drop_reason")) == "range", "drop reason is range")
+	await _phys(2)
+	_ok(bool(drag.call("is_dragging")), "drag stays active after walking out of pick range")
+	_ok(str(drag.get("last_drop_reason")) != "range", "does not auto-drop for range")
+	if bool(drag.call("is_dragging")):
+		player.call("toggle_corpse_drag")
 	# 0.2.12：选择范围加长，站着也可以选中地上的尸体，抓住时再把手和点拉到臂长。
 	player.global_position = Vector3(chest.x + 0.2, 0.0, chest.z + 0.2)
 	player.velocity = Vector3.ZERO
