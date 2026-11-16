@@ -59,6 +59,9 @@ var _hud_hidden: CanvasLayer
 var _cooldown: float = 0.0
 var _burst_lock: bool = false
 var _park_eye0: Vector3 = Vector3.ZERO
+## t28u：环绕受击区域的累计时间（穿过体内 → 弹头穿出继续飞 → 4 秒停留 连续累加），
+## 镜头始终绕受击点转，不跟弹头出去，也不在阶段切换时跳回起始角度。
+var _orbit_t: float = 0.0
 var _smoke_pts: Array = []  # 兼容：所有弹道点的扁平视图
 var _smoke_trails: Array = []  # 每发弹头一条 {pts: Array[{p, age}], wait: float}
 var _smoke_mi: MeshInstance3D
@@ -298,20 +301,24 @@ func _tick(wall: float) -> void:
 		_push_all_trails(1.0 + in_u, wall)
 		_set_sphere(_entry.lerp(bpos, 0.45))
 		_update_organ_jello(in_u, 0.0, wall)
-		_place_park(_park_t)
+		_orbit_t += wall
+		_place_park(_orbit_t)
 		if in_u >= 1.0:
 			_enter_through()
 	elif _phase == "through":
 		_through_t += wall
 		var all_done := _step_through(_through_t, wall)
-		_place_park(_park_t + _through_t)
+		# 弹头继续往前飞，镜头仍环绕受击区域（不跟随弹头）。
+		_orbit_t += wall
+		_place_park(_orbit_t)
 		_update_organ_jello(1.0, clampf(_through_t / maxf(HOLD_SEC, 0.01), 0.0, 1.0) * 0.3, wall)
 		if all_done or _through_t >= THROUGH_MAX_SEC:
 			_finish_through()
 			_enter_hold()
 	elif _phase == "hold":
 		_hold_t += wall
-		_place_park(_park_t + _hold_t)
+		_orbit_t += wall
+		_place_park(_orbit_t)
 		var settle := clampf(_hold_t / maxf(HOLD_SEC, 0.01), 0.0, 1.0)
 		_update_organ_jello(1.0, settle, wall)
 		if _hold_t >= HOLD_SEC:
@@ -428,6 +435,22 @@ func _finish_through() -> void:
 			(nd as Node3D).visible = false
 
 
+## 自检：镜头与受击点的关系。dist = 镜头到入射点距离，look_err = 视线偏离受击点的角度（度），
+## bullet_dist = 镜头到最远穿出弹头的距离（弹头飞远时应变大，镜头不跟）。
+func debug_cam_focus() -> Dictionary:
+	if not playing or _cam == null:
+		return {"ok": false}
+	var eye := _cam.global_position
+	var fwd := -_cam.global_transform.basis.z
+	var to := _entry - eye
+	var err := rad_to_deg(fwd.angle_to(to.normalized())) if to.length() > 1e-5 else 0.0
+	var bd := 0.0
+	for tr in _through:
+		var pos: Vector3 = _as_vec3((tr["rec"] as Dictionary).get("pos"), tr["from"])
+		bd = maxf(bd, eye.distance_to(pos))
+	return {"ok": true, "dist": to.length(), "look_err": err, "bullet_dist": bd, "eye": eye, "entry": _entry, "orbit_t": _orbit_t, "phase": _phase}
+
+
 ## 自检：穿出后飞行的最远位移（米）与弹头数。
 func debug_through() -> Dictionary:
 	var best := 0.0
@@ -452,6 +475,7 @@ func _enter_park() -> void:
 	_phase = "park"
 	debug_phase = "park"
 	_park_t = 0.0
+	_orbit_t = 0.0
 	# 可见弹头刚到达体表：这时才播出腹部受击特效，并开始内脏果冻挤开。
 	_flush_impact()
 	_update_organ_jello(0.0, 0.0, 0.0)

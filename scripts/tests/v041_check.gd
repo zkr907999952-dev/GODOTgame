@@ -145,7 +145,8 @@ func _check_sources() -> void:
 	var bal := FileAccess.get_file_as_string("res://scripts/weapons/ballistics.gd")
 	_ok(bal.find("if col is PhysicalBone3D:\n\t\t_spawn_decal") < 0, "ragdoll-bone exit decal removed")
 	var skin := FileAccess.get_file_as_string("res://shaders/skin_xray.gdshader")
-	_ok(skin.find("ball_wound(") < 0, "skin shader no longer punches dark bullet holes (ball_wound cut/cavity tint removed)")
+	# t28u：用户要求保留暗红透明弹道孔（皮肤着色器），这里改为断言它仍在；体表弹孔贴花仍禁止。
+	_ok(skin.find("ball_wound(") >= 0, "skin shader keeps the dark-red translucent bullet channel (t28u)")
 
 
 # ---- 3) 散弹特写后卡顿：首次伤口不再逐像素生成贴图

@@ -199,6 +199,8 @@ func _run() -> void:
 	var cb3 := func(info): organ_hits[0] += 1
 	bal.connect("body_hit", cb2)
 	bal.connect("organ_path", cb3)
+	# 这发真弹头只测命中：默认 20% 特写概率会随机开播，导致下面 100% / 0% 的 consider 因「正在播放」而失败（偶发）。
+	settings.call("set_bullet_cam_chance", 0.0)
 	bal.call("fire_projectile", origin, dir, "rifle", ws.call("get_def", "rifle"))
 	await _phys(16)
 	_ok(body_hits[0] >= 1, "projectile hits body (body_hit=%d)" % body_hits[0])
