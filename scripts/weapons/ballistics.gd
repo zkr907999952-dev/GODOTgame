@@ -118,6 +118,21 @@ func params_of(weapon_id: String, w: Resource = null) -> Dictionary:
 	return p
 
 
+## 子弹不检测的物理体（冲击球等）所在的分组。
+const IGNORE_GROUP := "ballistics_ignore"
+
+
+func ignore_rids() -> Array[RID]:
+	var out: Array[RID] = []
+	var tree := get_tree()
+	if tree == null:
+		return out
+	for n in tree.get_nodes_in_group(IGNORE_GROUP):
+		if n is CollisionObject3D and is_instance_valid(n):
+			out.append((n as CollisionObject3D).get_rid())
+	return out
+
+
 func live_count() -> int:
 	return _live.size()
 
@@ -152,21 +167,6 @@ func projectiles_for_shot(sid: int) -> Array:
 		return []
 	var out: Array = _shot_groups.get(sid, [])
 	return out if out is Array else []
-
-
-func best_shot_cluster() -> Array:
-	# 优先最新的、数量最多的一组（霰弹特写不要被上一发残留的单发散弹带走）。
-	var best: Array = []
-	var best_id := 0
-	for k in _shot_groups.keys():
-		var g = _shot_groups[k]
-		if not (g is Array):
-			continue
-		var sid := int(k)
-		if (g as Array).size() > best.size() or ((g as Array).size() == best.size() and sid > best_id):
-			best = g
-			best_id = sid
-	return best
 
 
 func clear_all() -> void:
@@ -237,7 +237,7 @@ func fire_ray(origin: Vector3, dir: Vector3, range_m: float, weapon_id: String) 
 	if r.is_empty():
 		return r
 	hit.emit(r["position"], r["normal"], r["collider"], weapon_id)
-	_spawn_decal(r["position"], r["normal"], false)
+	_spawn_decal(r["position"], r["normal"], false, r.get("collider"))
 	return r
 
 
@@ -315,7 +315,7 @@ func _step(p: Dictionary, dt: float) -> bool:
 		# 世界
 		last_hit = hitd
 		hit.emit(hp, hn, col, str(p["id"]))
-		_spawn_decal(hp, hn, true)
+		_spawn_decal(hp, hn, true, col)
 		_end(p, true, hp, dir)
 		return false
 	p["age"] = float(p["age"]) + dt
@@ -390,7 +390,9 @@ func _on_body(p: Dictionary, body: Node, hp: Vector3, hn: Vector3, dir: Vector3,
 		return false
 	p["pos"] = exit_p
 	p["vel"] = dir * v2
-	_spawn_decal(exit_p - dir * 0.01, -hn, false)
+	# 出口弹痕不再放在世界坐标：身体/布娃娃一动就会悬在半空成黑点。只挂在布娃娃骨上，否则不画（皮肤 shader 自带伤口）。
+	if col is PhysicalBone3D:
+		_spawn_decal(exit_p - dir * 0.01, -hn, false, col)
 	_place(p)
 	return true
 
@@ -545,6 +547,10 @@ func _ray(from: Vector3, to: Vector3, extra: Array = []) -> Dictionary:
 	for r in extra:
 		if r is RID:
 			ex.append(r)
+	# 隐形冲击球等只做物理推力的刚体不能挡子弹：否则后续弹丸（霰弹）打在空中看不见的球上，
+	# 在半空留下黑色弹痕，球飞走后就成了悬浮黑点。
+	for r in ignore_rids():
+		ex.append(r)
 	q.exclude = ex
 	q.collide_with_areas = false
 	q.collision_mask = 1 | 2
@@ -771,16 +777,37 @@ func _world() -> World3D:
 	return vp.world_3d if vp else null
 
 
-func _spawn_decal(p: Vector3, n: Vector3, spark: bool) -> void:
+func _decal_parent_for(col: Object) -> Node:
+	## 弹痕只能贴在会一直待在原处的表面上。静态体：世界坐标。会动的刚体/骨骼：挂到该物体下随之移动。
+	## 返回 null = 不画（例如角色胶囊、未知的运动体）。
+	if col == null or not is_instance_valid(col):
+		return _host if _host else (get_tree().current_scene if get_tree() else self)
+	if col is Node and (col as Node).is_in_group(IGNORE_GROUP):
+		return null
+	if col is StaticBody3D or col is CSGShape3D or col is GridMap:
+		return _host if _host else (get_tree().current_scene if get_tree() else self)
+	if col is PhysicalBone3D or col is RigidBody3D or col is AnimatableBody3D:
+		return col as Node
+	if col is CharacterBody3D:
+		return null
+	return _host if _host else (get_tree().current_scene if get_tree() else self)
+
+
+func _spawn_decal(p: Vector3, n: Vector3, spark: bool, col: Object = null) -> void:
+	var par := _decal_parent_for(col)
+	if par == null:
+		return
 	var mi := MeshInstance3D.new()
+	mi.name = "BulletDecal"
 	mi.mesh = _decal_mesh
 	mi.material_override = _decal_mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_host_add(mi)
+	par.add_child(mi)
 	if not p.is_finite() or not n.is_finite() or n.length_squared() < 1e-10:
 		n = Vector3.UP
 	var face := -n if n.length_squared() > 1e-10 else Vector3.FORWARD
 	mi.global_transform = Transform3D(safe_basis_looking_at(face, Vector3.UP), p + n.normalized() * 0.003)
+	mi.set_meta("decal_parent_static", not (par is PhysicsBody3D))
 	_decals.append(mi)
 	while _decals.size() > MAX_DECALS:
 		var o: Node = _decals.pop_front()
@@ -814,6 +841,38 @@ func _step_spent(dt: float) -> void:
 			(n as MeshInstance3D).transparency = 1.0 - float(s["t"]) / 0.4
 		keep.append(s)
 	_spent = keep
+
+
+## 自检：留在场景里的弹痕中，附近 2cm 内没有任何碰撞面（也不挂在运动体上）的数量 = 悬浮黑点。
+func floating_decal_count() -> int:
+	var w3 := _world()
+	var n := 0
+	for d in _decals:
+		if not (d is MeshInstance3D) or not is_instance_valid(d) or not (d as MeshInstance3D).visible:
+			continue
+		var mi := d as MeshInstance3D
+		if mi.get_parent() is PhysicsBody3D:
+			continue
+		if w3 == null:
+			continue
+		var q := PhysicsShapeQueryParameters3D.new()
+		var sh := SphereShape3D.new()
+		sh.radius = 0.02
+		q.shape = sh
+		q.transform = Transform3D(Basis.IDENTITY, mi.global_position)
+		q.collision_mask = 1 | 2
+		q.exclude = ignore_rids()
+		if w3.direct_space_state.intersect_shape(q, 1).is_empty():
+			n += 1
+	return n
+
+
+func decal_count() -> int:
+	var n := 0
+	for d in _decals:
+		if is_instance_valid(d):
+			n += 1
+	return n
 
 
 func clear_decals() -> void:

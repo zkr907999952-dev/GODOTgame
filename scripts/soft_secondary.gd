@@ -527,7 +527,7 @@ func _apply_gaze() -> void:
 
 func _apply_aim_waist(cam_pitch: float) -> void:
 	# 不再弯腰：俯视时不转动腰/胸/锁骨，避免第一人称穿模看见自己的身体。
-	# 武器俯仰仍由 weapon_system._waist_aim_xf 跟随视线，与躯干姿态无关。
+	# 武器俯仰仍由 weapon_system._shoulder_pivot_xf（枪托/肩为轴）跟随视线，与躯干姿态无关。
 	return
 
 

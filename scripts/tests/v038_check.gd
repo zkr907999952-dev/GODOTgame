@@ -121,7 +121,8 @@ func _check_sources() -> void:
 		_ok(body.find("_nudge_look_bone(\"C_Spine_b\"") < 0 and body.find("_nudge_look_bone(\"C_Spine_c\"") < 0 and body.find("_nudge_look_bone(\"C_Spine_d\"") < 0, "aim waist no longer pitches mid/upper spine")
 		_ok(body.find("L_Shoulder_a") < 0 and body.find("R_Shoulder_a") < 0, "aim waist does not rotate clavicles")
 	var ws_src := FileAccess.get_file_as_string("res://scripts/weapons/weapon_system.gd")
-	_ok(ws_src.find("func _waist_aim_xf") >= 0 and ws_src.find("func _waist_world") >= 0, "weapon pitch pivots around the waist")
+	# t25u 有意改动：俯仰轴从腰部改为肩/枪托（用户要求以大臂肩膀为轴、枪托抵肩为另一轴）。
+	_ok(ws_src.find("func _shoulder_pivot_xf") >= 0, "weapon pitch pivots around the shoulder / stock (t25u)")
 	_ok(ws_src.find("func _armed_arm_down") >= 0 and ws_src.find("ARM_DOWN_HIP") >= 0, "armed arm pose has a downward offset")
 	_ok(ws_src.find("func _grip_anchor_gun") >= 0 and ws_src.find("GRIP_BLEND") >= 0, "hands are pulled onto weapon grip anchors")
 	_ok(ws_src.find("func apply_ik_after_loco") >= 0, "apply_ik_after_loco still present")
@@ -248,12 +249,15 @@ func _check_waist_pivot_and_grip() -> void:
 	var sc1 := float(bow1.get("spine_c", 0.0))
 	_ok(absf(sb1 - sb0) < deg_to_rad(8.0) and absf(sc1 - sc0) < deg_to_rad(8.0), "no mid-spine curl / clipping torso-bend (spine_b %.1f->%.1f spine_c %.1f->%.1f deg)" % [rad_to_deg(sb0), rad_to_deg(sb1), rad_to_deg(sc0), rad_to_deg(sc1)])
 	_ok(dot > 0.82, "weapon still points with the camera (dot=%.3f)" % dot)
-	_ok(y1 < y0 - 0.008, "weapon sits lower when looking down (y %.3f -> %.3f)" % [y0, y1])
-	var hold_err := hold0.distance_to(hold1)
-	var pv: Dictionary = ws.call("debug_waist_pivot") if ws.has_method("debug_waist_pivot") else {}
-	var eye_err := float(pv.get("eye_pivot_err", 0.0))
-	# 躯干已不再弯腰，腰部枢轴只作用于枪；残差会比「连同腰折」时略大，但仍应明显优于绕眼旋转。
-	_ok(hold_err < eye_err * 0.55 and hold_err < 0.50, "look-down weapon still orbits nearer the waist than the eye (waist err=%.3f m, eye-pivot would be %.3f m)" % [hold_err, eye_err])
+	# t25u 有意改动：枪绕肩窝里的枪托转，低头时枪托不离开肩（代替旧的「画面里更低 / 绕腰」断言）。
+	var spv: Dictionary = ws.call("debug_stock_pivot") if ws.has_method("debug_stock_pivot") else {}
+	var d_sh1 := 99.0
+	if spv.has("stock") and spv.has("R_UpperArm_a"):
+		d_sh1 = (spv["stock"] as Vector3).distance_to(spv["R_UpperArm_a"])
+	# 注：本脚本的 _open_space 点 (1.4,0,2.2) 在当前地图上没有地板，角色在下落，身体相对镜头会滞后，
+	# 所以这里只做宽松检查；严格的「俯仰时枪托不离肩窝」在 v040（出生点地板上）断言。
+	_ok(d_sh1 < 0.40, "look-down stock stays at the shoulder pocket (%.3f m from upper arm)" % d_sh1)
+	_ok(not bool(ws.call("debug_center_hits_viewmodel")), "look-down weapon does not cover the crosshair")
 
 	# 手应约束在枪上
 	var hg: Dictionary = ws.call("debug_hand_to_gun") if ws.has_method("debug_hand_to_gun") else {}
