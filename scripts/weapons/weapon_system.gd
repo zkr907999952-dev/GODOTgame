@@ -2376,21 +2376,14 @@ func _set_rot(bi: int, q: Quaternion, w: float) -> void:
 	skeleton.set_bone_pose_rotation(bi, _base_rot(bi).slerp(q, w) if w < 0.999 else q)
 
 
-## 渲染时骨架所在的世界变换（物理插值后的）。t27u：以前第一人称持枪时把骨架插值关掉，
-## 结果身体按物理帧跳动、镜头和枪按插值平滑移动——走路/跳跃时两者每帧错开最多一个物理步，
-## 手臂在「跳动的身体」和「平滑的枪」之间来回拉，看起来手晃、穿模、有虚影。
-## 现在骨架保持插值，IK 目标换算也用同一个插值变换，手、身体、枪在同一帧同一变换下绘制。
+## 渲染时骨架所在的世界变换。t27u：以前第一人称持枪时把骨架插值关掉，身体按物理帧跳动、
+## 镜头和枪按插值平滑移动——走路/跳跃时两者每帧错开最多一个物理步，手臂来回拉、穿模、有虚影。
+## 现在 player_controller 每个渲染帧把 Body 摆到与镜头相同的插值位置（Body 自身不再用引擎插值），
+## 所以即时变换就是渲染变换，IK、身体、枪同一帧同一变换。
 func _skel_xf() -> Transform3D:
 	if skeleton == null:
 		return Transform3D()
-	var live := skeleton.global_transform
-	if Engine.is_in_physics_frame() or not skeleton.is_physics_interpolated_and_enabled():
-		return live
-	var itp := skeleton.get_global_transform_interpolated()
-	# 真机偶发返回旧值/单位矩阵：离即时变换过远时退回即时变换（同 organ_rig._skel_world_xf）。
-	if not itp.origin.is_finite() or itp.origin.distance_squared_to(live.origin) > 0.25:
-		return live
-	return itp
+	return skeleton.global_transform
 
 
 func _sync_skel_interp() -> void:

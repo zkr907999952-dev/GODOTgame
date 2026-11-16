@@ -622,6 +622,41 @@ func _setup_body_params() -> void:
 ## 物理帧才更新；这里检测到位置被直接改写（传送）就立即对齐。
 var _fti_prev: Vector3 = Vector3.ZERO
 var _fti_cur: Vector3 = Vector3.ZERO
+## t27u：身体网格（Body）不再交给引擎物理插值，而是每个渲染帧用与镜头完全相同的插值位置摆放
+## （物理帧开始时归位）。这样身体、手臂 IK、挂在镜头上的枪三者用同一个插值结果，
+## 走跑/跳跃时不再出现「枪按插值平滑、身体按物理帧跳」造成的手晃、穿模和虚影。
+var _body_rest_pos := Vector3.ZERO
+var _body_interp_ready := false
+
+
+func _body_interp_reset() -> void:
+	if _body and _body_interp_ready:
+		_body.position = _body_rest_pos
+
+
+func _body_interp_apply() -> void:
+	if _body == null:
+		return
+	if not _body_interp_ready:
+		_body_rest_pos = _body.position
+		_body.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+		_body_interp_ready = true
+	if is_dead():
+		_body.position = _body_rest_pos
+		return
+	var off := _base_origin() - global_position
+	if not off.is_finite() or off.length() > 1.0:
+		off = Vector3.ZERO
+	_body.position = _body_rest_pos + global_transform.basis.inverse() * off
+
+
+## 自检：身体渲染偏移（米）与镜头插值偏移之差，应为 0。
+func debug_body_interp_error() -> float:
+	if _body == null:
+		return 99.0
+	var want := _base_origin() - global_position
+	var got := (_body.global_position - global_position) - global_transform.basis * _body_rest_pos
+	return got.distance_to(want)
 
 
 func _fti_tick() -> void:
@@ -1175,6 +1210,7 @@ func debug_tp_state() -> Dictionary:
 
 
 func _process(delta: float) -> void:
+	_body_interp_apply()
 	# 在面板上松开按键时收不到 release → 以实际按键状态为准。
 	if _rmb_down and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
 		_rmb_down = false
@@ -2169,6 +2205,7 @@ func _try_step_up(motion: Vector3) -> bool:
 
 
 func _physics_process(delta: float) -> void:
+	_body_interp_reset()
 	if is_dead():
 		velocity = Vector3.ZERO
 		if _corpse_drag and _corpse_drag.call("is_dragging"):

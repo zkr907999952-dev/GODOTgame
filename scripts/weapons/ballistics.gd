@@ -868,6 +868,8 @@ func floating_decal_count() -> int:
 
 
 ## 自检（t27u）：挂在人体上（布娃娃骨、角色胶囊、有器官的角色子节点）或贴在人体附近 6cm 内的弹痕数量，应为 0。
+## 自检：挂在人体（活体 CharacterBody / 布娃娃骨骼 / 其子节点）上的弹孔数量，应为 0。
+## 打穿后落在身下家具/墙上的弹孔挂在场景根下，属于正常的环境弹孔，不计入。
 func body_decal_count(bodies: Array = []) -> int:
 	var n := 0
 	for d in _decals:
@@ -878,13 +880,9 @@ func body_decal_count(bodies: Array = []) -> int:
 			n += 1
 			continue
 		for b in bodies:
-			if b is Node3D and is_instance_valid(b) and b.has_method("get_organs"):
-				var o: Node = b.call("get_organs")
-				if o and o.has_method("abdomen_frame"):
-					var c: Vector3 = (o.call("abdomen_frame") as Transform3D).origin
-					if (d as Node3D).global_position.distance_to(c) < 0.25:
-						n += 1
-						break
+			if b is Node and is_instance_valid(b) and (b as Node).is_ancestor_of(d):
+				n += 1
+				break
 	return n
 
 

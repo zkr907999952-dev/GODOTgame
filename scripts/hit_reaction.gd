@@ -122,11 +122,11 @@ func _bone_from_info(info: Dictionary) -> String:
 func _start_jolt(bone: String, zone: String, dir: Vector3, strength: float) -> void:
 	var names: Array = []
 	if LIMB_OF.has(bone):
-		names = LIMB_OF[bone]
+		names = (LIMB_OF[bone] as Array).duplicate()
 	elif CHAIN.has(zone):
-		names = CHAIN[zone]
+		names = (CHAIN[zone] as Array).duplicate()
 	else:
-		names = CHAIN["body"]
+		names = (CHAIN["body"] as Array).duplicate()
 	if names.is_empty():
 		names = ["C_Spine_c", "C_Spine_d"]
 	# 始终带一点躯干反馈，四肢命中时身体也会晃一下。
