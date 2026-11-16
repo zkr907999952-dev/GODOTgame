@@ -5,7 +5,7 @@ extends Control
 signal picked(id: String)
 
 const PER_PAGE := 8
-const DEAD := 34.0
+const DEAD := 58.0  # 中心收枪判定圈加大，更容易选中
 
 var weapons: Node  # weapon_system
 var is_open: bool = false
@@ -71,6 +71,10 @@ func close(apply: bool = true) -> Variant:
 	if out != null:
 		picked.emit(out)
 	return out
+
+
+func holster_dead_zone() -> float:
+	return DEAD
 
 
 func center() -> Vector2:

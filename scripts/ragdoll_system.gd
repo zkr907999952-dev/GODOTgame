@@ -659,17 +659,20 @@ func apply_stomp(at: Vector3, push: Vector3) -> void:
 	var pb := _closest_bone(at)
 	if pb == null:
 		return
-	var j := push * 3.2
-	if j.length() > 10.0:
-		j = j.normalized() * 10.0
+	var j := push * 5.2
+	if j.length() > 16.0:
+		j = j.normalized() * 16.0
+	# 水平推力优先，减轻尸体向上弹到角色脚下再把人顶飞。
+	if j.y > 0.0:
+		j.y *= 0.25
 	pb.apply_impulse(j, at - pb.global_position)
 	var torso: PhysicalBone3D = bones.get("C_Spine_c", bones.get("C_Hip_a"))
 	if torso and torso != pb:
-		torso.apply_central_impulse(j * 0.55)
+		torso.apply_central_impulse(j * 0.70)
 	# 再给髋部一点水平挤开，角色踩上去能把尸体挪开。
 	var hip: PhysicalBone3D = bones.get("C_Hip_a")
 	if hip and hip != pb and hip != torso:
-		hip.apply_central_impulse(j * 0.35)
+		hip.apply_central_impulse(j * 0.48)
 	_clamp_t = maxf(_clamp_t, 0.12)
 	# 踩踏后不要立刻把速度钳死，让这一下先作用出去。
 

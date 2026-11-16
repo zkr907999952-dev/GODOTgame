@@ -215,6 +215,12 @@ func infinite_reserve() -> bool:
 	return true if s == null else bool(s.get("infinite_reserve"))
 
 
+func no_reload() -> bool:
+	## 武器无需换弹：弹匣不会打空，开火不必换弹。与「无限备弹」独立。
+	var s := _settings_node()
+	return false if s == null else bool(s.get("no_reload"))
+
+
 func has_reserve(id: String = "") -> bool:
 	if infinite_reserve():
 		return true
@@ -342,6 +348,8 @@ func set_ads(on: bool) -> void:
 
 
 func reload() -> bool:
+	if no_reload():
+		return false
 	if state != "ready":
 		return false
 	var w: WeaponDef = cur_def()
@@ -516,15 +524,20 @@ func _try_fire(delta: float) -> void:
 		return
 	var a := ammo_of(current)
 	if a.x <= 0:
-		if not _trigger_used:
-			_trigger_used = true
-			dry_fired.emit(current)
-			sfx.emit("dry", current)
-			if w.sfx_dry:
-				_play(w.sfx_dry)
-			if has_reserve(current):
-				reload()
-		return
+		if no_reload():
+			var cap0 := _capacity(w, a.x)
+			a.x = maxi(1, cap0)
+			ammo[current] = a
+		else:
+			if not _trigger_used:
+				_trigger_used = true
+				dry_fired.emit(current)
+				sfx.emit("dry", current)
+				if w.sfx_dry:
+					_play(w.sfx_dry)
+				if has_reserve(current):
+					reload()
+			return
 	_trigger_used = true
 	var interval := 60.0 / maxf(1.0, w.rpm)
 	# 低帧率时一帧内补足应开的枪数（全自动射速与帧率无关）
@@ -558,7 +571,7 @@ func fire_along_ray(origin: Vector3, dir: Vector3, hit_owner: bool = false) -> b
 	var w: WeaponDef = cur_def()
 	if w == null or not is_armed():
 		return false
-	if ammo_of(current).x <= 0:
+	if ammo_of(current).x <= 0 and not no_reload():
 		return false
 	if not origin.is_finite() or not dir.is_finite() or dir.length_squared() < 1e-8:
 		return false
@@ -582,17 +595,27 @@ func fire_along_ray(origin: Vector3, dir: Vector3, hit_owner: bool = false) -> b
 
 func _fire_once(w: WeaponDef) -> void:
 	var a := ammo_of(current)
-	a.x -= 1
-	ammo[current] = a
+	if no_reload():
+		var cap := _capacity(w, a.x)
+		if a.x < cap:
+			a.x = cap
+			ammo[current] = a
+	else:
+		a.x -= 1
+		ammo[current] = a
 	shots_total += 1
 	ammo_changed.emit(current, a.x, a.y)
 	var origin := _origin_override if _has_origin_override else camera.global_position
 	var fwd := _aim_override if _has_aim_override else -camera.global_transform.basis.z
 	var spread := 0.0 if _has_aim_override else deg_to_rad((w.spread_deg * (0.35 if ads else 1.0)) + spread_extra)
+	if ballistics and ballistics.has_method("begin_shot"):
+		ballistics.call("begin_shot")
 	for i in maxi(1, w.pellets):
 		var dir := _spread_dir(fwd, spread)
 		shot_fired.emit(origin, dir, current)
 		ballistics.fire_projectile(origin, dir, current, w)
+	if ballistics and ballistics.has_method("end_shot"):
+		ballistics.call("end_shot")
 	fired.emit(current)
 	sfx.emit("fire", current)
 	if w.sfx_fire:
@@ -851,17 +874,27 @@ func _look_up_angle() -> float:
 
 
 func _pitch_hold_xf() -> Transform3D:
-	# 改持枪坐标，而不是弓腰：抬头/低头时把视模型在相机空间里下移或上移并略拉近，
-	# 使枪仍落在直立躯干的手臂可达范围内。开镜时偏移减小，交给机瞄对齐。
+	# 武器指向跟随镜头。低头时不再把枪往画面上方抬（那会浮在胸口并穿模），
+	# 而是略向下放到中下腹附近；上半身弯腰由 soft_secondary 的瞄腰完成。
+	# 开镜偏移保持很小，交给机瞄对齐。
 	if not (player and bool(player.get("first_person"))):
 		return Transform3D()
 	var u := _look_up_angle()
 	var hip := 1.0 - _ads_k
-	# 抬头：枪在画面里下移、略拉近镜头；低头：上移、同样拉近，避免枪掉到脚边够不着。
-	var y_adj := -sin(u) * (0.20 * hip + 0.04 * _ads_k)
-	var z_adj := (1.0 - cos(u)) * (0.10 * hip + 0.05 * _ads_k)
-	# 髋射时枪不完全跟着镜头抬到垂直，保持胸前自然握持；开镜几乎不反转。
-	var tilt := -u * 0.40 * hip
+	var y_adj := 0.0
+	var z_adj := 0.0
+	var tilt := 0.0
+	if u >= 0.0:
+		# 抬头：略下移以免穿下巴，只做很小的反向倾角，仍大体跟着视线。
+		y_adj = -sin(u) * (0.12 * hip + 0.03 * _ads_k)
+		z_adj = (1.0 - cos(u)) * (0.06 * hip + 0.03 * _ads_k)
+		tilt = -u * 0.16 * hip
+	else:
+		var d := -u
+		# 低头：枪下移到中下腹附近，并拉近到近裁范围内，避免被胸腹网格挡住。
+		y_adj = -sin(d) * (0.11 * hip + 0.03 * _ads_k)
+		z_adj = (1.0 - cos(d)) * (0.14 * hip + 0.04 * _ads_k)
+		tilt = 0.0
 	return Transform3D(Basis(Vector3.RIGHT, tilt), Vector3(0.0, y_adj, z_adj))
 
 
@@ -2123,6 +2156,20 @@ func debug_ads_error() -> float:
 	## 三点一线：孔和准星尖都应投影在屏幕中心 + 上。
 	var d := debug_ads_parts()
 	return maxf(float(d.get("rear", 999.0)), float(d.get("front", 999.0)))
+
+
+func debug_aim_follow() -> Dictionary:
+	## 低头瞄准：枪口 +X 应与相机前向大致同向，视模型在画面中偏下。
+	var out := {"dot": 0.0, "view_y": 0.0, "view_pos": Vector3.ZERO, "ok": false}
+	if gun == null or camera == null or view == null:
+		return out
+	var wfwd := (gun.global_transform.basis * Vector3.RIGHT).normalized()
+	var cfwd := (-camera.global_transform.basis.z).normalized()
+	out["dot"] = wfwd.dot(cfwd)
+	out["view_y"] = view.position.y
+	out["view_pos"] = view.position
+	out["ok"] = true
+	return out
 
 
 func debug_stock_vs_head() -> Dictionary:

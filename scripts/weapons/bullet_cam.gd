@@ -12,7 +12,8 @@ const FLY_SPEED := 4.0  # 特写里弹头在空气中的视速（米/秒，墙�
 const PARK_PASS_MIN := 0.55  # 体内穿过最短墙钟
 const HOLD_SEC := 4.0  # 穿过后在环绕受击点停留的墙钟秒数
 const COOLDOWN_SEC := 0.9
-const SPHERE_R := 0.16
+const SPHERE_R := 0.36  # 特写透视范围加大，绕射时仍能看见弹道与脏器
+const ORBIT_SPEED := 0.32  # 比 0.2.12 的 0.55 更慢
 const SMOKE_FADE := 0.75
 const SMOKE_DELAY := 0.05
 const SMOKE_WIDTH := 0.012
@@ -51,6 +52,8 @@ var _smoke_pts: Array = []  # {p, age}
 var _smoke_mi: MeshInstance3D
 var _smoke_mesh: ImmediateMesh
 var _smoke_wait: float = 0.0
+## 同一发射出的全部弹头（霰弹多弹头一起飞）。
+var _pellets: Array = []
 
 
 func setup(p: Node, s: Node) -> void:
@@ -118,10 +121,7 @@ func consider(info: Dictionary, projectile: Dictionary = {}) -> bool:
 		return false
 	if settings == null or not bool(settings.get("bullet_cam_enabled")):
 		return false
-	if player and not bool(player.get("first_person")) and player.has_method("is_display_mode"):
-		# 只在角色控制（可第一人称）下触发；展示模式不抢观察相机
-		if bool(player.call("is_display_mode")):
-			return false
+	# 观察模式与第一人称一样：命中肠道/子宫（或尸体腹部路径）即可开特写。
 	var gut := bool(info.get("gut", false))
 	var ut := bool(info.get("uterus", false))
 	var body = info.get("body")
@@ -190,6 +190,7 @@ func _start(info: Dictionary, projectile: Dictionary) -> void:
 		if _organs.has_method("set_xray_sphere_world"):
 			_organs.call("set_xray_sphere_world", _muzzle, SPHERE_R, 0.95)
 	_bullet = projectile
+	_pellets = _collect_pellets(projectile)
 	if not _bullet.is_empty():
 		_bullet["cinematic"] = true
 		_bullet["pos"] = _muzzle
@@ -243,8 +244,8 @@ func _tick(wall: float) -> void:
 		var dur := maxf(0.40, span / FLY_SPEED)
 		_t = minf(1.0, _t + wall / dur)
 		var pos := _muzzle.lerp(_entry, _t)
-		_place_bullet(pos, _dir)
-		_place_follow(pos)
+		_place_all_pellets(_t)
+		_place_follow(_pellet_centroid(_t, pos))
 		_push_smoke(pos, wall)
 		_set_sphere(pos)
 		if _t >= 1.0:
@@ -256,6 +257,7 @@ func _tick(wall: float) -> void:
 		var pass_dur := maxf(PARK_PASS_MIN, in_span / 0.28)
 		var in_u := clampf(_park_t / pass_dur, 0.0, 1.0)
 		var bpos := _entry.lerp(_exit + _dir * 0.04, in_u)
+		_place_all_pellets(1.0 + in_u)
 		_place_bullet(bpos, _dir)
 		_push_smoke(bpos, wall)
 		_set_sphere(_entry.lerp(bpos, 0.45))
@@ -291,8 +293,9 @@ func _enter_park() -> void:
 		up = Vector3.RIGHT
 	var side := _dir.cross(up).normalized()
 	up = side.cross(_dir).normalized()
-	# 停在入射点侧后上方的合适距离，不要再贴着弹头飞。
-	_park_eye0 = _entry - _dir * 0.22 + up * 0.10 + side * 0.14
+	# 停在入射点侧后上方，离身体更远，旋转时不容易穿进网格。
+	_park_eye0 = _entry - _dir * 0.38 + up * 0.16 + side * 0.22
+	_park_eye0 = _avoid_mesh_clip(_park_eye0, _entry)
 
 
 func _place_follow(pos: Vector3) -> void:
@@ -313,13 +316,130 @@ func _place_follow(pos: Vector3) -> void:
 func _place_park(t: float) -> void:
 	var up := Vector3.UP
 	var rel: Vector3 = _park_eye0 - _entry
-	var ang := t * 0.55
+	var ang := t * ORBIT_SPEED
 	var rot := Basis(up, ang)
 	var eye: Vector3 = _entry + rot * rel
+	eye = _avoid_mesh_clip(eye, _entry)
 	var look := (_entry - eye)
 	if not look.is_finite() or look.length_squared() < 1e-8:
 		look = _dir if _dir.length_squared() > 1e-8 else Vector3.FORWARD
 	_cam.global_transform = Transform3D(_safe_looking_at(look.normalized(), up), eye)
+
+
+func cinematic_pellet_count() -> int:
+	return maxi(1, _pellets.size()) if playing else 0
+
+
+func orbit_speed() -> float:
+	return ORBIT_SPEED
+
+
+func xray_sphere_radius() -> float:
+	return SPHERE_R
+
+
+func _collect_pellets(lead: Dictionary) -> Array:
+	var out: Array = []
+	var sid := int(lead.get("shot_id", 0)) if not lead.is_empty() else 0
+	var bal = lead.get("ballistics") if not lead.is_empty() else null
+	if bal == null and player and player.has_method("get_weapons"):
+		var ws: Node = player.call("get_weapons")
+		if ws:
+			bal = ws.get("ballistics")
+	if bal and bal.has_method("live_projectiles"):
+		for p in bal.call("live_projectiles"):
+			if not (p is Dictionary):
+				continue
+			var rec: Dictionary = p
+			if sid != 0 and int(rec.get("shot_id", 0)) == sid:
+				rec["cinematic"] = true
+				out.append(rec)
+	if out.is_empty() and not lead.is_empty():
+		lead["cinematic"] = true
+		out.append(lead)
+	elif not lead.is_empty() and lead not in out:
+		lead["cinematic"] = true
+		out.insert(0, lead)
+	return out
+
+
+func _pellet_centroid(u: float, fallback: Vector3) -> Vector3:
+	if _pellets.is_empty():
+		return fallback
+	var acc := Vector3.ZERO
+	var n := 0
+	var span := maxf(0.15, _muzzle.distance_to(_entry))
+	for rec in _pellets:
+		if not (rec is Dictionary):
+			continue
+		var o: Vector3 = _as_vec3(rec.get("origin"), _muzzle)
+		var d: Vector3 = _as_vec3(rec.get("dir"), _dir)
+		if d.length_squared() < 1e-10:
+			d = _dir
+		d = d.normalized()
+		# u<=1 在空气中飞向入射距离；u>1 继续沿自身方向穿过。
+		var dist := span * clampf(u, 0.0, 2.2)
+		acc += o + d * dist
+		n += 1
+	if n <= 0:
+		return fallback
+	return acc / float(n)
+
+
+func _place_all_pellets(u: float) -> void:
+	var span := maxf(0.15, _muzzle.distance_to(_entry))
+	for rec in _pellets:
+		if not (rec is Dictionary):
+			continue
+		var o: Vector3 = _as_vec3(rec.get("origin"), _muzzle)
+		var d: Vector3 = _as_vec3(rec.get("dir"), _dir)
+		if d.length_squared() < 1e-10:
+			d = _dir
+		d = d.normalized()
+		var pos := o + d * (span * clampf(u, 0.0, 2.2))
+		rec["pos"] = pos
+		rec["cinematic"] = true
+		if rec.get("node") and is_instance_valid(rec["node"]):
+			var n: Node3D = rec["node"]
+			n.visible = true
+			n.global_position = pos
+			_orient_projectile(n, d)
+
+
+func _avoid_mesh_clip(eye: Vector3, look_at: Vector3) -> Vector3:
+	# 从受击点向外探到目标机位：若中间撞到身体，就把相机停在体表外侧。
+	if not eye.is_finite() or not look_at.is_finite():
+		return eye
+	var w3 := get_world_3d()
+	if w3 == null or w3.direct_space_state == null:
+		return eye
+	var rel := eye - look_at
+	var dist := rel.length()
+	if dist < 0.08:
+		return eye
+	var dir := rel / dist
+	var start := look_at + dir * 0.04
+	var q := PhysicsRayQueryParameters3D.create(start, eye)
+	q.collide_with_areas = false
+	q.collision_mask = 1 | 2
+	var hit := w3.direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		# 仍保证一个最小观察距离，避免近裁面切进皮肤。
+		if dist < 0.20:
+			return look_at + dir * 0.20
+		return eye
+	var hp: Vector3 = hit["position"]
+	var nrm: Vector3 = hit.get("normal", -dir)
+	if not (nrm is Vector3) or (nrm as Vector3).length_squared() < 1e-8:
+		nrm = -dir
+	else:
+		nrm = (nrm as Vector3).normalized()
+		if nrm.dot(dir) > 0.0:
+			nrm = -nrm
+	var safe: Vector3 = hp + nrm * 0.10
+	if safe.distance_to(look_at) < 0.18:
+		safe = look_at + (safe - look_at).normalized() * 0.18
+	return safe
 
 
 func _place_bullet(pos: Vector3, dir: Vector3) -> void:
@@ -393,6 +513,10 @@ func _stop() -> void:
 	_flush_impact()
 	if not _bullet.is_empty():
 		_bullet["cinematic"] = false
+	for rec in _pellets:
+		if rec is Dictionary:
+			rec["cinematic"] = false
+	_pellets = []
 	_bullet = {}
 	_smoke_pts.clear()
 	_rebuild_smoke()
@@ -426,15 +550,20 @@ func _safe_looking_at(dir: Vector3, up: Vector3 = Vector3.UP) -> Basis:
 
 
 func _flush_impact() -> void:
-	if _bullet.is_empty():
-		return
-	if _bullet.get("impact_applied", false):
-		return
-	if not (_bullet.get("pending_impact") is Dictionary):
-		return
-	var bal = _bullet.get("ballistics")
-	if bal and is_instance_valid(bal) and bal.has_method("apply_deferred_impact"):
-		bal.call("apply_deferred_impact", _bullet)
+	var seen: Array = []
+	if not _bullet.is_empty():
+		seen.append(_bullet)
+	for rec in _pellets:
+		if rec is Dictionary and rec not in seen:
+			seen.append(rec)
+	for rec in seen:
+		if rec.get("impact_applied", false):
+			continue
+		if not (rec.get("pending_impact") is Dictionary):
+			continue
+		var bal = rec.get("ballistics")
+		if bal and is_instance_valid(bal) and bal.has_method("apply_deferred_impact"):
+			bal.call("apply_deferred_impact", rec)
 
 
 func _build_smoke() -> void:

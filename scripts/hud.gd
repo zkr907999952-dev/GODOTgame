@@ -33,6 +33,7 @@ var _sens_slider: HSlider
 var _touch_sens_slider: HSlider
 var _chk_ads_toggle: CheckButton
 var _chk_infinite_reserve: CheckButton
+var _chk_no_reload: CheckButton
 var _res_option: OptionButton
 var _cam_sens_slider: HSlider
 var _btn_fp: Button
@@ -113,6 +114,7 @@ var _world_hp_alpha: float = 0.0
 var debug_world_hp_visible: bool = false
 var _drag_btn: Button
 var debug_drag_btn_visible: bool = false
+var _reticle: Control
 
 
 func setup(player: Node) -> void:
@@ -241,6 +243,7 @@ func _build_ui() -> void:
 		_wui.call("build_into", interact_body)
 	_wui.call("build_ammo_hud", root)
 	_build_health_ui(root)
+	_build_reticle(root)
 	_wrap_scroll(_panel_settings)
 	_wrap_scroll(_panel_map)
 	_wrap_scroll(_panel_weapon)
@@ -1068,6 +1071,12 @@ func _build_settings_panel() -> PanelContainer:
 	_chk_infinite_reserve.toggled.connect(_on_infinite_reserve_changed)
 	v.add_child(_chk_infinite_reserve)
 
+	_chk_no_reload = CheckButton.new()
+	_chk_no_reload.text = "武器无需换弹"
+	_chk_no_reload.button_pressed = false
+	_chk_no_reload.toggled.connect(_on_no_reload_changed)
+	v.add_child(_chk_no_reload)
+
 	var res_l := Label.new()
 	res_l.text = "画面分辨率"
 	res_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
@@ -1152,7 +1161,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。受击力度调节子弹对布娃娃的撞击强弱。拉扯力度调节拖拽尸体时的拉力。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。受击力度调节子弹对布娃娃的撞击强弱。拉扯力度调节拖拽尸体时的拉力。「武器无需换弹」开启后开火不必换弹，与「无限备弹」独立。电脑瞄准为按住，手机为切换。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)
@@ -1713,6 +1722,8 @@ func _sync_from_systems() -> void:
 	var st := _settings()
 	if st and _chk_infinite_reserve:
 		_chk_infinite_reserve.set_pressed_no_signal(bool(st.get("infinite_reserve")))
+	if st and _chk_no_reload:
+		_chk_no_reload.set_pressed_no_signal(bool(st.get("no_reload")))
 	if "first_person" in _player and _btn_fp:
 		_btn_fp.text = "第一人称" if bool(_player.first_person) else "第三人称"
 		_style_button(_btn_fp, bool(_player.first_person))
@@ -1933,7 +1944,46 @@ func _on_preset_input(ev: InputEvent, i: int) -> void:
 var _last_mode: int = -1
 
 
+func _build_reticle(root: Control) -> void:
+	_reticle = Control.new()
+	_reticle.name = "Reticle"
+	_reticle.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_reticle.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_reticle.draw.connect(_draw_reticle)
+	root.add_child(_reticle)
+
+
+func reticle_mode() -> String:
+	## hidden / dot / cross。第一人称：空手小白点，持枪髋射十字准星，开镜隐藏（用机瞄）。
+	## 手机和电脑同一套逻辑。
+	if _player == null or not bool(_player.get("first_person")):
+		return "hidden"
+	if not _player.has_method("weapon_drawn") or not bool(_player.call("weapon_drawn")):
+		return "dot"
+	var ws: Node = _player.call("get_weapons") if _player.has_method("get_weapons") else null
+	if ws and (bool(ws.get("ads")) or float(ws.get("_ads_k")) > 0.45):
+		return "hidden"
+	return "cross"
+
+
+func _draw_reticle() -> void:
+	if _reticle == null:
+		return
+	var mode := reticle_mode()
+	if mode == "hidden":
+		return
+	var cc: Vector2 = _reticle.size * 0.5
+	if mode == "dot":
+		_reticle.draw_circle(cc, 2.6, Color(1, 1, 1, 0.95))
+	elif mode == "cross":
+		var col := Color(1, 1, 1, 0.78)
+		_reticle.draw_line(cc - Vector2(9, 0), cc + Vector2(9, 0), col, 1.2)
+		_reticle.draw_line(cc - Vector2(0, 9), cc + Vector2(0, 9), col, 1.2)
+
+
 func _process(_delta: float) -> void:
+	if _reticle:
+		_reticle.queue_redraw()
 	if _wui:
 		_wui.call("_refresh_ammo_hud")
 	_refresh_player_hp()
@@ -1971,6 +2021,12 @@ func _on_ads_toggle_changed(on: bool) -> void:
 		_player.call("set_ads_toggle", on)
 	if _chk_ads_toggle:
 		_chk_ads_toggle.text = "举枪瞄准：切换（关=长按）" if on else "举枪瞄准：长按（开=切换）"
+
+
+func _on_no_reload_changed(on: bool) -> void:
+	var s: Node = _settings()
+	if s and s.has_method("set_no_reload"):
+		s.call("set_no_reload", on)
 
 
 func _on_infinite_reserve_changed(on: bool) -> void:
