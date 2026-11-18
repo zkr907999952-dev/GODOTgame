@@ -49,6 +49,10 @@ var _player_col_layer: int = 2
 var _player_col_mask: int = 3
 var vehicle_cam: String = "third"  # "first" | "third" — default third on car/plane
 var vehicle_look_mode: String = "yaw"  # "yaw" | "orbit" — mobile observe button
+# Car scissor-door boarding: 1 = just entered (open then close), -1 = exiting
+# (open, then step out and close). Plane / exam bed skip this.
+var _board_phase: int = 0
+var _board_timer: float = 0.0
 var _toggle_lock_until_ms: int = 0
 const TOGGLE_LOCK_MS := 380
 var touch_throttle: float = -1.0  # >=0 overrides plane throttle (0..1)
@@ -916,6 +920,13 @@ func try_toggle() -> bool:
 
 
 func try_enter() -> bool:
+	# If a car door-exit is in progress, finish it so we can board another vehicle.
+	if occupied and _board_phase < 0:
+		var leaving := occupied
+		var dest := _exit_stand_dest(leaving)
+		_finish_exit(dest, true)
+		if is_instance_valid(leaving) and leaving.get("door_target") != null:
+			leaving.set("door_target", 0.0)
 	if occupied or nearest == null or player == null:
 		return false
 	var v := nearest
@@ -948,15 +959,21 @@ func try_enter() -> bool:
 	var k := kind_of(v)
 	if k == "exam_bed":
 		# Keep the current play mode. Observation must keep the pose.
+		# Start the first-person look at the default (toward the feet) so
+		# the head and camera share a common zero.
+		player.set("_yaw", 0.0)
+		player.set("_pitch", 0.0)
 		_apply_exam_pose()
 	else:
-		# Cars / planes default to third person. V still toggles 1st/3rd on PC.
-		# The mobile 观察 button switches yaw swipe vs orbit, not 1st/3rd.
+		# Cars / planes default to third person. V and the mobile 视角
+		# button toggle 1st/3rd. The 观察 button switches yaw swipe vs orbit.
 		vehicle_cam = "third"
 		vehicle_look_mode = "yaw"
 		_reset_vehicle_cam()
 		_sync_vehicle_look_from_heading()
 		_hide_player_body(true)
+		if k == "car":
+			_begin_board_anim(1)
 	occupancy_changed.emit(v)
 	proximity_changed.emit(v, true)
 	return true
@@ -965,8 +982,12 @@ func try_enter() -> bool:
 func try_exit() -> bool:
 	if occupied == null or player == null:
 		return false
-	var v := occupied
-	var dest := _exit_stand_dest(v)
+	if _board_phase < 0:
+		return true  # already opening the door to step out
+	if kind_of(occupied) == "car":
+		_begin_board_anim(-1)
+		return true
+	var dest := _exit_stand_dest(occupied)
 	return _finish_exit(dest, true)
 
 
@@ -995,6 +1016,8 @@ func _finish_exit(dest: Vector3, restore_collision: bool) -> bool:
 	player.set("occupier", null)
 	player.reset_physics_interpolation()
 	occupied = null
+	_board_phase = 0
+	_board_timer = 0.0
 	occupancy_changed.emit(null)
 	_update_nearest()
 	proximity_changed.emit(nearest, false)
@@ -1123,6 +1146,38 @@ func _restore_standing(dest: Vector3) -> void:
 		body2.rotation = Vector3(0.0, body2.rotation.y, 0.0)
 	if "pitch" in _saved_player:
 		player.set("_pitch", float(_saved_player["pitch"]))
+
+
+func _begin_board_anim(phase: int) -> void:
+	## phase 1: just boarded — open scissor doors, then auto-close.
+	## phase -1: exiting — open, then step out and close.
+	_board_phase = phase
+	_board_timer = 0.72 if phase > 0 else 0.52
+	if occupied and occupied.get("door_target") != null:
+		occupied.set("door_target", 1.0)
+
+
+func _tick_board_anim(delta: float) -> void:
+	if _board_phase == 0:
+		return
+	_board_timer -= delta
+	if _board_timer > 0.0:
+		return
+	if _board_phase > 0:
+		if is_instance_valid(occupied) and occupied.get("door_target") != null:
+			occupied.set("door_target", 0.0)
+		_board_phase = 0
+		_board_timer = 0.0
+		return
+	# Finished opening for exit: step out, then close the doors behind us.
+	var v := occupied
+	_board_phase = 0
+	_board_timer = 0.0
+	if is_instance_valid(v):
+		var dest := _exit_stand_dest(v)
+		_finish_exit(dest, true)
+		if is_instance_valid(v) and v.get("door_target") != null:
+			v.set("door_target", 0.0)
 
 
 func toggle_vehicle_cam() -> String:
@@ -1260,6 +1315,10 @@ func debug_orbit_state() -> Dictionary:
 func _process_occupied(delta: float) -> void:
 	if not is_instance_valid(occupied) or player == null:
 		return
+	_tick_board_anim(delta)
+	# If the exit animation just finished, occupancy may already be cleared.
+	if not is_instance_valid(occupied) or player == null:
+		return
 	var k := kind_of(occupied)
 	# Stay empty-handed for the whole occupancy (boarding with a weapon,
 	# or any later attempt to draw, holsters again).
@@ -1302,8 +1361,12 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 	# A little along the spine plus a horizontal slide toward the headrest
 	# (bed -Z) so the torso sits farther back without lifting the hips off
 	# the cushion (playtest "身体向后一些").
-	const BACK_SHIFT := 0.04
-	const HEADWARD := 0.07
+	# 0.2.25: shift the whole body farther toward the headrest so the calves
+	# can reach and drape onto the stirrups instead of bracing on top of them.
+	# The first-person eye offset is still derived from the head bone, so it
+	# travels with the body (do not retune the eye independently).
+	const BACK_SHIFT := 0.05
+	const HEADWARD := 0.16
 	var sit := hip_local + BUTTOCK
 	var headward := -bed.global_transform.basis.z * HEADWARD
 	headward.y = 0.0
@@ -1311,19 +1374,26 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 	if skel:
 		var al: Vector3 = bed.armrest_l_global() if bed.has_method("armrest_l_global") else bed.stirrup_l_global()
 		var ar: Vector3 = bed.armrest_r_global() if bed.has_method("armrest_r_global") else bed.stirrup_r_global()
-		# Plant the calves on the stirrup pads, coaxial with the pad long axis
-		# (outward + toward the feet). The smaller 0.2.23 bed needs a slightly
-		# wider / more extended reach than the tight 0.24 abduction pose.
+		# Hands rest along the armrests, slightly toward the head so the
+		# forearms lie flatter; a touch of face-up so the elbow can sit raised.
+		al = al + lie.y * 0.04 + lie.z * 0.02
+		ar = ar + lie.y * 0.04 + lie.z * 0.02
+		# Plant the calves ON the stirrup pads (not propped on top): reach
+		# farther toward the feet and sit the shin on the pad surface.
 		var left := lie.x
 		var feet := -lie.y
 		var up := lie.z
-		var sl: Vector3 = bed.stirrup_l_global() + left * 0.08 + feet * 0.20 + up * 0.01
-		var sr: Vector3 = bed.stirrup_r_global() - left * 0.08 + feet * 0.20 + up * 0.01
+		var sl: Vector3 = bed.stirrup_l_global() + left * 0.10 + feet * 0.32 - up * 0.015
+		var sr: Vector3 = bed.stirrup_r_global() - left * 0.10 + feet * 0.32 - up * 0.015
 		ExamPose.apply(skel, sl, sr, bed.backrest_angle, al, ar)
-		# First-person: the head follows the look direction (after IK).
+		# First-person: the visible head follows the camera look (after IK).
+		# Clamp first, then apply look, and do NOT call clear_gaze afterwards
+		# — that reset C_Head_a to rest and made the mirror look frozen.
 		var fp_now := bool(player.get("first_person")) and not (player.has_method("is_display_mode") and bool(player.call("is_display_mode")))
 		if fp_now:
-			ExamPose.apply_look(skel, float(player.get("_yaw")), float(player.get("_pitch")))
+			var yp := _clamp_exam_look()
+			var look_fwd := _exam_look_forward(yp.x, yp.y, lie)
+			ExamPose.apply_look(skel, yp.x, yp.y, look_fwd)
 		ExamPose.offset_hair(skel, Vector3(0.0, 0.02, -0.10))
 		# Observation mode: head / eyes look at the orbit camera.
 		if player.has_method("is_display_mode") and bool(player.call("is_display_mode")) and player.has_method("get_secondary"):
@@ -1339,8 +1409,12 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 					sec.call("snap_hair_to_pose")
 		elif player.has_method("get_secondary"):
 			var sec2 = player.call("get_secondary")
-			if sec2 and sec2.has_method("clear_gaze"):
-				sec2.call("clear_gaze")
+			# Only clear the gaze *intent*. Never reset look bones to rest
+			# here — that would wipe ExamPose.apply_look on the visible head.
+			if sec2 and sec2.has_method("clear_gaze_intent"):
+				sec2.call("clear_gaze_intent")
+			elif sec2:
+				sec2.set("gaze_want", false)
 			if sec2 and sec2.has_method("snap_hair_to_pose"):
 				sec2.call("snap_hair_to_pose")
 
@@ -1367,16 +1441,13 @@ func _exam_camera(_delta: float) -> void:
 	if look_dir.length_squared() < 1e-6:
 		look_dir = bed.global_transform.basis.z
 	look_dir = look_dir.normalized()
-	# Side / downward looks stay modest so the neck stump is not the main
-	# view. Looking up (negative pitch, Godot camera convention) is free.
-	const YAW_LIM := 1.15
-	const PITCH_MIN := -1.55
-	const PITCH_MAX := 0.58
-	var yaw := clampf(float(player.get("_yaw")), -YAW_LIM, YAW_LIM)
-	var pitch := minf(float(player.get("_pitch")), PITCH_MAX)
-	pitch = clampf(pitch, PITCH_MIN, PITCH_MAX)
-	player.set("_yaw", yaw)
-	player.set("_pitch", pitch)
+	# 0.2.24 had the pitch signs backwards. In this project positive _pitch
+	# looks UP (Godot camera X / the standing FP convention). Looking up is
+	# unrestricted; looking down is limited a little so the neck stump is
+	# not the main view.
+	var yp := _clamp_exam_look()
+	var yaw := yp.x
+	var pitch := yp.y
 	# Untilted origin: world-up so the first-person camera has no roll
 	# from the lying basis. The CharacterBody stays identity.
 	var up_ref := Vector3.UP
@@ -1397,6 +1468,37 @@ func _exam_camera(_delta: float) -> void:
 	cam.fov = float(player.get("fp_fov"))
 	cam.near = 0.08
 	cam.current = true
+
+
+func _clamp_exam_look() -> Vector2:
+	## Returns (yaw, pitch). Positive pitch looks UP. Looking down is limited.
+	const YAW_LIM := 1.15
+	const PITCH_MIN := -0.62  # look down (toward the body) — modest limit
+	const PITCH_MAX := 1.55   # look up — essentially free
+	var yaw := clampf(float(player.get("_yaw")), -YAW_LIM, YAW_LIM)
+	var pitch := clampf(float(player.get("_pitch")), PITCH_MIN, PITCH_MAX)
+	player.set("_yaw", yaw)
+	player.set("_pitch", pitch)
+	return Vector2(yaw, pitch)
+
+
+func _exam_look_forward(yaw: float, pitch: float, lie: Basis) -> Vector3:
+	## Same composition as _exam_camera: default look toward the feet / abdomen,
+	## then the player's yaw/pitch extras, world-up, no roll.
+	var look_dir := -lie.y * 0.92 - lie.z * 0.25
+	if look_dir.length_squared() < 1e-6:
+		look_dir = Vector3(0, 0, 1)
+	look_dir = look_dir.normalized()
+	var up_ref := Vector3.UP
+	if absf(look_dir.dot(up_ref)) > 0.94:
+		up_ref = lie.x if absf(lie.x.dot(Vector3.UP)) < 0.9 else Vector3.RIGHT
+	var base := Basis.looking_at(look_dir, up_ref)
+	var extra := Basis.from_euler(Vector3(pitch, yaw, 0.0))
+	var look := (base * extra).orthonormalized()
+	var fwd := -look.z
+	if fwd.length_squared() < 1e-8:
+		return look_dir
+	return fwd.normalized()
 
 
 func _attach_player_to_vehicle() -> void:
@@ -1521,8 +1623,10 @@ func _vehicle_camera(delta: float) -> void:
 		_chase_basis = xf.basis.orthonormalized()
 		_cam_ready = true
 	if not held:
-		_orbit_yaw += wrapf(0.0 - _orbit_yaw, -PI, PI) * (1.0 - exp(-3.2 * dt))
-		_orbit_pitch += (want_pitch - _orbit_pitch) * (1.0 - exp(-2.8 * dt))
+		# 0.2.25: softer, slightly slower recenter from a dragged orbit or
+		# a sliding heading, not a sudden snap (tau ≈ 0.77 s / 0.83 s).
+		_orbit_yaw += wrapf(0.0 - _orbit_yaw, -PI, PI) * (1.0 - exp(-1.3 * dt))
+		_orbit_pitch += (want_pitch - _orbit_pitch) * (1.0 - exp(-1.2 * dt))
 	_orbit_pitch = clampf(_orbit_pitch, -1.25, 0.55)
 	var dist := 8.5 if k == "car" else 16.0
 	var height := 2.4 if k == "car" else 4.6
@@ -1588,7 +1692,8 @@ func _vehicle_camera(delta: float) -> void:
 		if just_ready or _chase_dir.length_squared() < 1e-6 or motion.length() <= 1.4:
 			_chase_dir = motion_dir
 		else:
-			_chase_dir = _chase_dir.slerp(motion_dir, 1.0 - exp(-2.6 * dt)).normalized()
+			# Softer heading catch-up after a slide so the view eases back.
+			_chase_dir = _chase_dir.slerp(motion_dir, 1.0 - exp(-1.45 * dt)).normalized()
 		var chase := _chase_dir
 		var yaw := _heading_yaw(chase, _heading_yaw(fwd)) + _orbit_yaw
 		var cy := cos(_orbit_pitch)

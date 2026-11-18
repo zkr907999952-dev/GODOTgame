@@ -20,19 +20,21 @@ const FK := {
 	# Legs: x = flex, y = twist, z = abduct. 0.2.24: open the thighs just
 	# enough that the calves can extend outward along the (smaller) stirrup
 	# pads, and stretch the shins forward so they share the pad axis.
-	"L_UpperLeg_a": Vector3(-0.42, 0.04, 0.34),
-	"R_UpperLeg_a": Vector3(-0.42, -0.04, -0.34),
-	"L_Foreleg_a": Vector3(0.58, 0.0, 0.03),
-	"R_Foreleg_a": Vector3(0.58, 0.0, -0.03),
-	"L_Foot_a": Vector3(0.16, 0.08, 0.04),
-	"R_Foot_a": Vector3(0.16, -0.08, -0.04),
-	# Arms: flatter, resting naturally on the armrests (less bent / hiked elbows).
-	"L_Shoulder_a": Vector3(0.00, 0.04, 0.06),
-	"R_Shoulder_a": Vector3(0.00, -0.04, -0.06),
-	"L_UpperArm_a": Vector3(0.08, 0.16, 0.42),
-	"R_UpperArm_a": Vector3(0.08, -0.16, -0.42),
-	"L_Forearm_a": Vector3(0.12, 0.0, 0.04),
-	"R_Forearm_a": Vector3(0.12, 0.0, -0.04),
+	# 0.2.25: a little more abduction so the calves can drape outward onto
+	# the stirrups, with a flatter (less sharply bent) shin.
+	"L_UpperLeg_a": Vector3(-0.36, 0.04, 0.38),
+	"R_UpperLeg_a": Vector3(-0.36, -0.04, -0.38),
+	"L_Foreleg_a": Vector3(0.32, 0.0, 0.02),
+	"R_Foreleg_a": Vector3(0.32, 0.0, -0.02),
+	"L_Foot_a": Vector3(0.10, 0.06, 0.03),
+	"R_Foot_a": Vector3(0.10, -0.06, -0.03),
+	# Arms: gradual, naturally flush with the armrests; elbows slightly raised.
+	"L_Shoulder_a": Vector3(0.00, 0.03, 0.05),
+	"R_Shoulder_a": Vector3(0.00, -0.03, -0.05),
+	"L_UpperArm_a": Vector3(0.04, 0.12, 0.38),
+	"R_UpperArm_a": Vector3(0.04, -0.12, -0.38),
+	"L_Forearm_a": Vector3(0.08, 0.0, 0.03),
+	"R_Forearm_a": Vector3(0.08, 0.0, -0.03),
 	"L_Hand_a": Vector3(0.04, 0.0, 0.0),
 	"R_Hand_a": Vector3(0.04, 0.0, 0.0),
 }
@@ -171,9 +173,9 @@ static func _ik_arm(skel: Skeleton3D, left: bool, target: Vector3) -> void:
 	if to_t.length_squared() < 1e-8:
 		return
 	var axis_dir := to_t.normalized()
-	# Pole: slightly out and down so the arm lies flatter on the armrest
-	# instead of a hiked, kinked elbow.
-	var pole := Vector3(0.32 if left else -0.32, -0.06, -0.08)
+	# Pole: slightly out and up (face +Z while lying) so the elbow is a
+	# little raised while the forearm still rests along the armrest.
+	var pole := Vector3(0.30 if left else -0.30, -0.02, 0.16)
 	var pole_n := pole - axis_dir * pole.dot(axis_dir)
 	if pole_n.length_squared() < 1e-6:
 		pole_n = Vector3(0, 0, 1)
@@ -231,16 +233,40 @@ static func _first_child_bone(skel: Skeleton3D, idx: int) -> int:
 	return -1
 
 
-static func apply_look(skel: Skeleton3D, yaw: float, pitch: float) -> void:
-	## Rotate neck / head with the first-person look so the head follows the camera.
-	## yaw / pitch use the same signs as the exam-bed camera extra euler
-	## (positive pitch looks down in Godot camera convention).
+static func apply_look(skel: Skeleton3D, yaw: float, pitch: float, look_world: Vector3 = Vector3.ZERO) -> void:
+	## Rotate neck / head / eyes with the first-person look so the face follows
+	## the camera — this must be visible in a room mirror. Prefer aiming at
+	## look_world (camera forward). yaw / pitch are the exam-bed camera extras
+	## (positive pitch = look up in this project's _pitch convention).
 	if skel == null:
 		return
-	var neck_e := Vector3(pitch * 0.35, yaw * 0.40, 0.0)
-	var head_e := Vector3(pitch * 0.65, yaw * 0.60, 0.0)
-	_add_local_euler(skel, "C_Neck_a", neck_e)
-	_add_local_euler(skel, "C_Head_a", head_e)
+	var neck_p := 0.0
+	var neck_y := 0.0
+	var head_p := 0.0
+	var head_y := 0.0
+	if look_world.length_squared() > 1e-8:
+		var inv := skel.global_transform.basis.orthonormalized().inverse()
+		var d := (inv * look_world.normalized()).normalized()
+		# Body / skeleton space: +Z face, +Y toward the crown, +X left.
+		var yaw_s := atan2(d.x, d.z)
+		var pitch_s := atan2(-d.y, maxf(Vector2(d.x, d.z).length(), 1e-5))
+		yaw_s = clampf(yaw_s, -1.15, 1.15)
+		pitch_s = clampf(pitch_s, -1.05, 1.20)
+		neck_y = yaw_s * 0.42
+		head_y = yaw_s * 0.62
+		neck_p = pitch_s * 0.42
+		head_p = pitch_s * 0.62
+	else:
+		# Fallback: camera extras. Positive pitch (look up) tilts the head back
+		# (negative local X, matching the lithotomy FK extension).
+		neck_y = yaw * 0.42
+		head_y = yaw * 0.62
+		neck_p = -pitch * 0.42
+		head_p = -pitch * 0.62
+	_add_local_euler(skel, "C_Neck_a", Vector3(neck_p, neck_y, 0.0))
+	_add_local_euler(skel, "C_Head_a", Vector3(head_p, head_y, 0.0))
+	_add_local_euler(skel, "L_Eye", Vector3(head_p * 0.35, head_y * 0.35, 0.0))
+	_add_local_euler(skel, "R_Eye", Vector3(head_p * 0.35, head_y * 0.35, 0.0))
 	skel.force_update_transform()
 
 

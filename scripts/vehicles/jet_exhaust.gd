@@ -275,10 +275,10 @@ func _apply_diamonds(thrust: float, cr: float, ab: float, rad: float, flicker: f
 	# Nozzle pressure ratio grows with dry thrust and afterburner.
 	var npr := 1.0 + cr * 1.6 + ab * 3.4
 	npr /= maxf(p_ratio, 0.2)
-	# Spacing of Mach disks ≈ 0.5–0.9 · D · sqrt(NPR − 1). 0.2.24 compresses
-	# the gaps (not just the total trail length) so the diamonds sit tighter.
-	var spacing := EXIT_DIAMETER * 0.62 * sqrt(maxf(npr - 1.0, 0.0)) * flicker
-	spacing = clampf(spacing, 0.16, 0.72)
+	# Spacing of Mach disks. 0.2.25 tightens the gaps a lot more and keeps
+	# the chain short — very small gaps, not a long stretched string.
+	var spacing := EXIT_DIAMETER * 0.22 * sqrt(maxf(npr - 1.0, 0.0)) * flicker
+	spacing = clampf(spacing, 0.08, 0.26)
 	# Visible once the jet is clearly underexpanded (high dry or any AB).
 	var vis := clampf((thrust - 0.55) / 0.25, 0.0, 1.0)
 	vis *= clampf(0.35 + ab * 0.9, 0.0, 1.0)
@@ -288,8 +288,8 @@ func _apply_diamonds(thrust: float, cr: float, ab: float, rad: float, flicker: f
 	# Mach diamonds must not run past the visible plume tip, even at high thrust
 	# when NPR spacing would otherwise stretch the trail too far.
 	var tip := plume_tip_length()
-	var last_along := 0.28 + float(maxi(diamonds.size() - 1, 0)) * spacing
-	var cap := maxf(tip * 0.95, 0.4)
+	var last_along := 0.18 + float(maxi(diamonds.size() - 1, 0)) * spacing
+	var cap := maxf(tip * 0.62, 0.28)
 	if last_along > cap and last_along > 1e-4:
 		spacing *= cap / last_along
 	for i in diamonds.size():
@@ -298,7 +298,7 @@ func _apply_diamonds(thrust: float, cr: float, ab: float, rad: float, flicker: f
 			d.visible = false
 			continue
 		# Place disks along the lagged trail, not a straight aft line.
-		var along := 0.28 + float(i) * spacing
+		var along := 0.18 + float(i) * spacing
 		along = minf(along, cap)
 		if along > cap - 0.02 and tip < 0.5:
 			d.visible = false

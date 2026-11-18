@@ -383,6 +383,83 @@ static func split_mesh_by_x(mi: MeshInstance3D, wrap: Node3D, keep_left: bool, e
 	return inst
 
 
+static func split_mesh_by_pred(mi: MeshInstance3D, wrap: Node3D, pred: Callable) -> MeshInstance3D:
+	## Keep triangles whose wrap-local centroid passes pred(Vector3).
+	if mi == null or mi.mesh == null:
+		return null
+	var src := mi.mesh
+	var keep_v := PackedVector3Array()
+	var keep_n := PackedVector3Array()
+	var keep_u := PackedVector2Array()
+	var xf := mi.global_transform
+	var inv_wrap := wrap.global_transform.affine_inverse()
+	for s in src.get_surface_count():
+		var arr := src.surface_get_arrays(s)
+		if arr.is_empty() or arr[Mesh.ARRAY_VERTEX] == null:
+			continue
+		var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var norms: PackedVector3Array = arr[Mesh.ARRAY_NORMAL] if arr[Mesh.ARRAY_NORMAL] != null else PackedVector3Array()
+		var uvs: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV] if arr[Mesh.ARRAY_TEX_UV] != null else PackedVector2Array()
+		var indices: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+		var get_i := func(k: int) -> int:
+			return indices[k] if indices.size() else k
+		var tri_count: int = indices.size() / 3 if indices.size() else verts.size() / 3
+		for t in tri_count:
+			var i0: int = get_i.call(t * 3)
+			var i1: int = get_i.call(t * 3 + 1)
+			var i2: int = get_i.call(t * 3 + 2)
+			var w0: Vector3 = inv_wrap * (xf * verts[i0])
+			var w1: Vector3 = inv_wrap * (xf * verts[i1])
+			var w2: Vector3 = inv_wrap * (xf * verts[i2])
+			var c := (w0 + w1 + w2) / 3.0
+			if not bool(pred.call(c)):
+				continue
+			keep_v.append(verts[i0])
+			keep_v.append(verts[i1])
+			keep_v.append(verts[i2])
+			if norms.size() > i2:
+				keep_n.append(norms[i0])
+				keep_n.append(norms[i1])
+				keep_n.append(norms[i2])
+			if uvs.size() > i2:
+				keep_u.append(uvs[i0])
+				keep_u.append(uvs[i1])
+				keep_u.append(uvs[i2])
+	if keep_v.size() < 3:
+		return null
+	var out_arr: Array = []
+	out_arr.resize(Mesh.ARRAY_MAX)
+	out_arr[Mesh.ARRAY_VERTEX] = keep_v
+	if keep_n.size() == keep_v.size():
+		out_arr[Mesh.ARRAY_NORMAL] = keep_n
+	if keep_u.size() == keep_v.size():
+		out_arr[Mesh.ARRAY_TEX_UV] = keep_u
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, out_arr)
+	var inst := MeshInstance3D.new()
+	inst.mesh = mesh
+	if mi.mesh.get_surface_count() > 0:
+		var mat := mi.get_active_material(0)
+		if mat:
+			inst.material_override = mat
+	inst.cast_shadow = mi.cast_shadow
+	inst.global_transform = mi.global_transform
+	return inst
+
+
+static func punch_mesh_by_pred(mi: MeshInstance3D, wrap: Node3D, drop: Callable) -> void:
+	## Drop triangles whose wrap-local centroid passes drop(), keep the rest on mi.
+	if mi == null or mi.mesh == null:
+		return
+	var kept := split_mesh_by_pred(mi, wrap, func(c: Vector3) -> bool: return not bool(drop.call(c)))
+	if kept == null or kept.mesh == null:
+		return
+	mi.mesh = kept.mesh
+	if kept.material_override:
+		mi.material_override = kept.material_override
+	kept.free()
+
+
 static func reparent_keep_global(n: Node3D, new_parent: Node3D) -> void:
 	var xf := n.global_transform
 	if n.get_parent():

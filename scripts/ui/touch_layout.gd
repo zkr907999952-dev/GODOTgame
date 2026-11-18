@@ -37,6 +37,7 @@ const IDS := {
 	"reload": "换弹",
 	"drag": "拖拽",
 	"enter": "上下载具",
+	"vcam": "载具视角",
 	"observe": "观察",
 	"accel": "加速",
 	"brake": "手刹",
@@ -205,8 +206,7 @@ static func _from_code(code: String) -> Dictionary:
 		if eq <= 0:
 			continue
 		var id := piece.substr(0, eq)
-		if id == "vcam":
-			id = "observe"
+		# vcam is its own 1st/3rd toggle again (0.2.24 briefly aliased it to observe).
 		if not IDS.has(id):
 			continue
 		var nums := piece.substr(eq + 1).split(",")

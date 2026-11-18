@@ -25,6 +25,10 @@ const K_INDUCED := 0.11
 const CL_ALPHA := 4.4  # per radian
 const CL_MAX := 1.15
 const ALPHA_STALL := 0.28  # rad ≈ 16°
+# Speed stall (arcade-realistic): below this airspeed the jet loses authority
+# and the nose drops. Decelerating above this quickly raises pitch/roll agility.
+const STALL_SPEED := 52.0  # m/s ≈ 187 km/h
+const DECEL_AGILITY := 1.70
 const RHO_SL := 1.225
 # Gear-down parasite drag. Raised a little so a hanging gear is noticeable
 # (Ace Combat / old web project: gear adds measurable drag).
@@ -313,8 +317,13 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var beta := 0.0
 	if airspeed > 4.0:
 		beta = atan2(v_right, maxf(v_fwd, 4.0))
-	# Stall blending (smooth, not a cliff).
+	# Stall blending (smooth, not a cliff). AoA stall plus a low-speed stall
+	# so bleeding too much airspeed for agility ends in a buffet / nose drop.
 	var stall := clampf((absf(aoa) - ALPHA_STALL) / 0.12, 0.0, 1.0)
+	var speed_stall := 0.0
+	if airborne:
+		speed_stall = clampf((STALL_SPEED - airspeed) / 14.0, 0.0, 1.0)
+	stall = maxf(stall, speed_stall)
 	stall_amount = stall
 	var cl := clampf(CL_ALPHA * aoa, -CL_MAX, CL_MAX) * (1.0 - 0.72 * stall)
 	# Flaps at low speed / gear down add a little CL and CD.
@@ -361,14 +370,27 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	# with a torque servo, plus stability-derivative damping and weathercock.
 	# Rates: pitch 1.45*ctrl, roll 2.15*ctrl, yaw 0.62, with ctrl = clamp(V/42, 0.22, 1.55).
 	var ctrl_s := clampf(airspeed / 42.0, 0.22, 1.55) * (1.0 - 0.55 * stall)
+	# Decelerate to trade airspeed for a quick agility bump — but not while stalling.
+	var decelerating := bool(get_meta("decelerating", false)) or speed_brake > 0.15
+	if decelerating and airborne and speed_stall < 0.15:
+		ctrl_s *= DECEL_AGILITY
 	if not airborne and airspeed < ROTATE_SPEED * 0.70:
 		ctrl_s *= 0.15
+	# Low-speed stall: lose most pitch/roll authority.
+	if speed_stall > 0.0:
+		ctrl_s *= lerpf(1.0, 0.18, speed_stall)
 	var want_pitch := ctrl_pitch * 1.90 * ctrl_s
 	var want_roll := ctrl_roll * 2.15 * ctrl_s
 	var want_yaw := ctrl_yaw * 0.62 * ctrl_s
 	# Weathercock / AoA stability (godot-simplified-flightsim tail: drag aft).
 	want_yaw += -beta * 1.15 * clampf(airspeed / 50.0, 0.0, 1.0)
 	want_pitch += -aoa * (0.35 + 1.4 * stall)
+	# Speed stall: buffet + a nose-down moment so the jet falls off the stall.
+	if speed_stall > 0.05:
+		want_pitch -= 0.85 * speed_stall
+		var buffet := sin(Time.get_ticks_msec() * 0.041) * 0.22 * speed_stall
+		want_pitch += buffet
+		want_roll += cos(Time.get_ticks_msec() * 0.053) * 0.16 * speed_stall
 	var w := state.angular_velocity
 	var rate_roll := w.dot(fwd)
 	var rate_pitch := w.dot(right)

@@ -276,6 +276,13 @@ func set_gaze_target(point: Vector3) -> void:
 
 
 func clear_gaze() -> void:
+	clear_gaze_intent()
+	_reset_look_bones_to_rest()
+
+
+func clear_gaze_intent() -> void:
+	## Drop the display-mode gaze target without resetting head / eye bones.
+	## Used on the exam bed so first-person apply_look is not wiped.
 	gaze_want = false
 	gaze_blend = 0.0
 	gaze_eye_blend = 0.0
@@ -286,7 +293,6 @@ func clear_gaze() -> void:
 	gaze_head_pitch = 0.0
 	gaze_eye_yaw = 0.0
 	gaze_eye_pitch = 0.0
-	_reset_look_bones_to_rest()
 
 
 func blink_now() -> void:

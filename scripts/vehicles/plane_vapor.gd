@@ -209,17 +209,22 @@ func _measure_wingtips() -> void:
 func _build_clouds() -> void:
 	# Soft additive discs / ellipsoids on the upper fuselage, LEX and wing roots.
 	# Local positions are in wrap space (visual nose -Z, up +Y).
+	# Volumetric 3D region (not paper-thin cards): fatter ellipsoids stacked
+	# over the upper fuselage / LEX / wing-root, with real Y thickness.
 	var placements: Array = [
-		# 1 = dorsal / spine / LEX (F-22 label 1)
-		{"pos": Vector3(0.0, 1.15, -1.6), "size": Vector3(1.6, 0.55, 2.6), "mode": 0.15},
-		{"pos": Vector3(0.0, 1.05, 0.4), "size": Vector3(1.3, 0.48, 2.2), "mode": 0.2},
-		{"pos": Vector3(-0.55, 0.95, -0.6), "size": Vector3(1.1, 0.42, 1.8), "mode": 0.25},
-		{"pos": Vector3(0.55, 0.95, -0.6), "size": Vector3(1.1, 0.42, 1.8), "mode": 0.25},
-		# 2 = larger cloud off the wing / LEX / leading-edge (F-22 label 2)
-		{"pos": Vector3(-2.4, 0.72, -0.2), "size": Vector3(2.4, 0.7, 2.8), "mode": 0.05},
-		{"pos": Vector3(2.4, 0.72, -0.2), "size": Vector3(2.4, 0.7, 2.8), "mode": 0.05},
-		{"pos": Vector3(-1.5, 0.85, -1.8), "size": Vector3(1.6, 0.5, 1.8), "mode": 0.15},
-		{"pos": Vector3(1.5, 0.85, -1.8), "size": Vector3(1.6, 0.5, 1.8), "mode": 0.15},
+		# Dorsal / spine / LEX
+		{"pos": Vector3(0.0, 1.20, -1.5), "size": Vector3(1.9, 1.45, 2.5), "mode": 0.08},
+		{"pos": Vector3(0.0, 1.55, -0.4), "size": Vector3(1.5, 1.20, 2.1), "mode": 0.12},
+		{"pos": Vector3(0.0, 1.05, 0.5), "size": Vector3(1.5, 1.15, 2.0), "mode": 0.10},
+		{"pos": Vector3(-0.70, 1.15, -0.5), "size": Vector3(1.35, 1.05, 1.9), "mode": 0.16},
+		{"pos": Vector3(0.70, 1.15, -0.5), "size": Vector3(1.35, 1.05, 1.9), "mode": 0.16},
+		# Wing-root / LEX / leading-edge volumes
+		{"pos": Vector3(-2.3, 0.95, -0.15), "size": Vector3(2.3, 1.35, 2.6), "mode": 0.05},
+		{"pos": Vector3(2.3, 0.95, -0.15), "size": Vector3(2.3, 1.35, 2.6), "mode": 0.05},
+		{"pos": Vector3(-1.55, 1.20, -1.7), "size": Vector3(1.7, 1.15, 1.9), "mode": 0.12},
+		{"pos": Vector3(1.55, 1.20, -1.7), "size": Vector3(1.7, 1.15, 1.9), "mode": 0.12},
+		{"pos": Vector3(-1.8, 0.70, 0.6), "size": Vector3(1.6, 1.05, 1.8), "mode": 0.10},
+		{"pos": Vector3(1.8, 0.70, 0.6), "size": Vector3(1.6, 1.05, 1.8), "mode": 0.10},
 	]
 	_cloud_alpha.resize(placements.size())
 	for i in placements.size():
@@ -229,8 +234,8 @@ func _build_clouds() -> void:
 		var mesh := SphereMesh.new()
 		mesh.radius = 0.5
 		mesh.height = 1.0
-		mesh.radial_segments = 20
-		mesh.rings = 12
+		mesh.radial_segments = 24
+		mesh.rings = 16
 		mi.mesh = mesh
 		var mat := ShaderMaterial.new()
 		if _shader:
@@ -238,6 +243,7 @@ func _build_clouds() -> void:
 			mat.set_shader_parameter("u_color", Vector3(0.83, 0.92, 1.0))
 			mat.set_shader_parameter("u_alpha", 0.0)
 			mat.set_shader_parameter("u_mode", float(p["mode"]))
+			mat.set_shader_parameter("u_noise", 0.35)
 			mi.material_override = mat
 		else:
 			var sm := StandardMaterial3D.new()
@@ -325,7 +331,7 @@ func _update_clouds(intensity: float, _delta: float) -> void:
 		# Slight per-cloud variation so the sheet is not a uniform blob.
 		var k := intensity * (0.75 + 0.25 * sin(float(i) * 1.7 + intensity * 4.0))
 		_cloud_alpha[i] = k
-		var a := k * (0.22 if i >= 4 else 0.32)
+		var a := k * (0.20 if i >= 5 else 0.30)
 		mi.visible = on and a > 0.02
 		var mat := mi.material_override
 		if mat is ShaderMaterial:
@@ -356,3 +362,13 @@ func tip_local_left() -> Vector3:
 
 func tip_local_right() -> Vector3:
 	return _tip_local_r
+
+
+func cloud_min_height() -> float:
+	## Smallest Y scale of the body-vapor volumes. Paper-thin cards are << 1.
+	var h := 0.0
+	for mi in _clouds:
+		if mi == null:
+			continue
+		h = mi.scale.y if h <= 0.0 else minf(h, mi.scale.y)
+	return h

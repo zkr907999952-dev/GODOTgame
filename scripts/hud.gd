@@ -71,6 +71,7 @@ var _btn_enter_exit: Button
 var _plane_throttle: VSlider
 var _plane_throttle_box: Control
 var _btn_observe: Button
+var _btn_vehicle_cam: Button
 var _btn_car_accel: Button
 var _btn_car_brake: Button
 var _btn_thrust_up: Button
@@ -1047,6 +1048,15 @@ func _build_vehicle_touch(root: Control) -> void:
 	)
 	root.add_child(_btn_observe)
 
+	_btn_vehicle_cam = _veh_btn("切换·第一人称", Vector2(128, 40), 14)
+	_btn_vehicle_cam.visible = false
+	_btn_vehicle_cam.pressed.connect(func():
+		if _vehicle_system and _vehicle_system.has_method("toggle_vehicle_cam"):
+			_vehicle_system.call("toggle_vehicle_cam")
+		_refresh_vehicle_touch()
+	)
+	root.add_child(_btn_vehicle_cam)
+
 	_btn_car_accel = _veh_btn("加速", Vector2(88, 52), 16)
 	_btn_car_brake = _veh_btn("手刹", Vector2(88, 52), 16)
 	_hold_btn(_btn_car_accel, "touch_car_accel")
@@ -1199,6 +1209,18 @@ func _refresh_vehicle_touch() -> void:
 	var kind := str(vs.call("kind_of", occ if occ else near)) if vs and (occ or near) and vs.has_method("kind_of") else ""
 	var v := get_viewport().get_visible_rect().size
 	var show_enter := occ != null or near != null
+	# Exit + gear sit on the same top-right row, gear to the RIGHT of exit,
+	# no overlap. Leave room under the chrome bar.
+	var right := v.x - _safe.z - 16.0
+	var enter_sz := Vector2(108, 48)
+	var gear_sz := Vector2(100, 48)
+	var pair_gap := 8.0
+	var gear_x := right - gear_sz.x
+	var pair_y := _safe.y + 72.0
+	# When the gear button is shown, slide exit left so gear sits on its right.
+	# Otherwise exit stays on the right edge.
+	var show_gear_row := (occ != null and kind == "plane" and touch_ui)
+	var enter_x := (right - enter_sz.x - pair_gap - gear_sz.x) if show_gear_row else (right - enter_sz.x)
 	if _btn_enter_exit:
 		_btn_enter_exit.visible = show_enter and not (_touch and bool(_touch.get("layout_edit"))) and not is_map_open()
 		_btn_enter_exit.disabled = false
@@ -1206,16 +1228,30 @@ func _refresh_vehicle_touch() -> void:
 			_btn_enter_exit.text = "离开检查床" if kind == "exam_bed" else "离开载具"
 		elif near:
 			_btn_enter_exit.text = "上检查床" if kind == "exam_bed" else "上载具"
-		_place_layout_btn(_btn_enter_exit, "enter", Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 72.0), Vector2(108, 48))
+		_place_layout_btn(_btn_enter_exit, "enter", Vector2(enter_x, pair_y), enter_sz)
 	var in_drive := occ != null and kind in ["car", "plane"]
 	var editing := _touch != null and bool(_touch.get("layout_edit"))
+	# 观察 sits at the TOP, immediately left of 透视.
 	if _btn_observe:
 		_btn_observe.visible = in_drive and not editing and not is_map_open()
 		if in_drive and vs:
 			var orbit := str(vs.get("vehicle_look_mode")) == "orbit"
 			_btn_observe.text = "观察·开" if orbit else "观察"
 			_style_button(_btn_observe, orbit)
-		_place_layout_btn(_btn_observe, "observe", Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 126.0), Vector2(108, 40))
+		var obs_pos := Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 16.0)
+		if _btn_xray:
+			var xr := _btn_xray.get_global_rect()
+			# root-local: root is typically at (0,0)
+			obs_pos = Vector2(xr.position.x - 8.0 - 108.0, xr.position.y)
+		_place_layout_btn(_btn_observe, "observe", obs_pos, Vector2(108, 40))
+	# Top 1st/3rd view-switch, restored in vehicles (in addition to 观察).
+	if _btn_vehicle_cam:
+		_btn_vehicle_cam.visible = in_drive and not editing and not is_map_open()
+		if in_drive and vs:
+			var first := str(vs.get("vehicle_cam")) == "first"
+			_btn_vehicle_cam.text = "切换·第三人称" if first else "切换·第一人称"
+			_style_button(_btn_vehicle_cam, first)
+		_place_layout_btn(_btn_vehicle_cam, "vcam", Vector2(v.x * 0.5 - 64.0, _safe.y + 8.0), Vector2(128, 40))
 	var show_car := touch_ui and occ != null and kind == "car" and not editing and not is_map_open()
 	if _btn_car_accel:
 		_btn_car_accel.visible = show_car
@@ -1225,7 +1261,6 @@ func _refresh_vehicle_touch() -> void:
 		_place_layout_btn(_btn_car_brake, "brake", Vector2(v.x - _safe.z - 16.0 - 88.0, v.y - _safe.w - 122.0), Vector2(88, 52))
 	var show_plane := occ != null and kind == "plane"
 	var show_plane_btns := touch_ui and show_plane and not editing and not is_map_open()
-	var right := v.x - _safe.z - 16.0
 	var by := v.y - _safe.w
 	# Thrust bar sits on the right, immediately left of the decelerate button.
 	if _thrust_lever:
@@ -1248,8 +1283,9 @@ func _refresh_vehicle_touch() -> void:
 		_btn_yaw_r.visible = show_plane_btns
 		_place_layout_btn(_btn_yaw_r, "yaw_r", Vector2(right - 64.0, by - 250.0), Vector2(64, 40))
 	if _btn_gear:
+		# Gear is to the RIGHT of the exit button (same row), not overlapping.
 		_btn_gear.visible = show_plane_btns
-		_place_layout_btn(_btn_gear, "gear", Vector2(right - 88.0, by - 300.0), Vector2(88, 40))
+		_place_layout_btn(_btn_gear, "gear", Vector2(gear_x, pair_y), gear_sz)
 		if show_plane_btns and occ:
 			var g = occ.get("gear")
 			var gw = occ.get("gear_want")
@@ -2327,7 +2363,9 @@ func _build_reticle(root: Control) -> void:
 
 func reticle_mode() -> String:
 	## hidden / dot / cross。第一人称：空手小白点，持枪髋射十字准星，开镜隐藏（用机瞄）。
-	## 手机和电脑同一套逻辑。
+	## 手机和电脑同一套逻辑。载具第三人称不显示中心圆点。
+	if _vehicle_system and _vehicle_system.has_method("is_drive_third") and bool(_vehicle_system.call("is_drive_third")):
+		return "hidden"
 	if _player == null or not bool(_player.get("first_person")):
 		return "hidden"
 	if not _player.has_method("weapon_drawn") or not bool(_player.call("weapon_drawn")):
@@ -2689,13 +2727,13 @@ func _apply_layout() -> void:
 	_btn_map.position = Vector2(sl + bw + 8.0, st)
 	if _btn_vehicle:
 		_btn_vehicle.position = Vector2(sl + (bw + 8.0) * 2.0, st)
-	if has_method("_refresh_vehicle_touch"):
-		_refresh_vehicle_touch()
 	var right_bar := _btn_camera.get_parent() as Control
 	right_bar.offset_right = -sr
 	right_bar.offset_left = -sr - (bw * 3.0 + 16.0)
 	right_bar.offset_top = st
 	right_bar.offset_bottom = st + bh
+	if has_method("_refresh_vehicle_touch"):
+		_refresh_vehicle_touch()
 	_status.position = Vector2(sl, st + bh + 8.0)
 	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART if compact else TextServer.AUTOWRAP_OFF
 	_status.size = Vector2(v.x - sl - sr, 0) if compact else Vector2.ZERO

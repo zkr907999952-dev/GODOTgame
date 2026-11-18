@@ -17,6 +17,7 @@ var height: float = 1.18
 var wheel_r: float = 0.34
 var ready_ok: bool = false
 var _nitro_fx: Array = []  # MeshInstance3D flames at the exhausts
+var doors: Array = []  # VehicleHinge scissor doors (open upward about A-pillar)
 
 
 func setup() -> bool:
@@ -58,6 +59,7 @@ func setup() -> bool:
 			"axis": VehicleCommon.local_thin_axis(steer as Node3D),
 		}
 	VehicleCommon.make_glass(wrap, "glass|Glass|window|Window", 0.18)
+	_make_scissor_doors()
 	_attach_nitro_flames()
 	var box := VehicleCommon.world_aabb(wrap)
 	var mn := wrap.to_local(box.position)
@@ -184,6 +186,9 @@ func apply_pose(st: Dictionary, _delta: float, _time: float) -> void:
 				e.z = ang
 		sw.quaternion = steer_wheel["rest"] * Quaternion.from_euler(e)
 	_apply_nitro(bool(st.get("nitro", false)), _time)
+	var door_t := float(st.get("door", 0.0))
+	for d in doors:
+		(d as VehicleHinge).apply(door_t)
 
 
 func wheel_rig_info() -> Array:
@@ -265,3 +270,102 @@ func _apply_nitro(on: bool, time: float) -> void:
 		if sm:
 			sm.albedo_color = Color(0.3, 0.65, 1.0, 0.55 * flicker)
 			sm.emission_energy_multiplier = 2.2 * flicker
+
+
+func _make_scissor_doors() -> void:
+	## Port of rouchangmoniqi3 makeScissorDoors: split Interior_doors / side
+	## windows / mirrors / the door-skin region of the hood, and hang each
+	## half on a pivot near the A-pillar / front of the roof. The doors
+	## rotate upward about local +Z (aft), not a conventional side swing.
+	doors.clear()
+	if wrap == null:
+		return
+	wrap.force_update_transform()
+	var interior := VehicleCommon.first_named(wrap, "^Interior_doors$")
+	var extras: Array = []
+	for re in ["^Right&Left_windows$", "^Right&Left_window_2$", "^Mirrors$"]:
+		var o := VehicleCommon.first_named(wrap, re)
+		if o:
+			extras.append(o)
+	var hood := VehicleCommon.first_named(wrap, "Hood075_Body_0$")
+	if hood == null:
+		hood = VehicleCommon.first_named(wrap, "^Hood\\.075_Body_0$")
+	if hood == null:
+		hood = VehicleCommon.first_named(wrap, "Hood.*Body_0")
+	# Door volume in wrap space (fallback matches the web prototype).
+	var x_abs := 0.52
+	var min_y := 0.14
+	var max_y := 0.92
+	var min_z := -1.02
+	var max_z := 0.42
+	if interior:
+		var a := VehicleCommon.aabb_in(wrap, interior as Node3D)
+		if not bool(a.get("empty", false)):
+			x_abs = maxf(0.48, minf(absf(float(a["minX"])), absf(float(a["maxX"]))) * 0.58)
+			min_y = float(a["minY"]) - 0.05
+			max_y = float(a["maxY"]) + 0.14
+			min_z = float(a["minZ"]) - 0.06
+			max_z = float(a["maxZ"]) + 0.10
+	var in_door := func(c: Vector3) -> bool:
+		return absf(c.x) >= x_abs and c.y >= min_y and c.y <= max_y and c.z >= min_z and c.z <= max_z
+	var sources: Array = []
+	if interior:
+		sources.append(interior)
+	sources.append_array(extras)
+	for side: String in ["L", "R"]:
+		var left: bool = side == "L"
+		var pred := func(c: Vector3) -> bool:
+			return bool(in_door.call(c)) and (c.x < 0.0 if left else c.x >= 0.0)
+		var made: Array[MeshInstance3D] = []
+		for src in sources:
+			if src == null:
+				continue
+			for mi in VehicleCommon.mesh_instances(src):
+				var half := VehicleCommon.split_mesh_by_pred(mi, wrap, pred)
+				if half == null:
+					continue
+				half.name = "%s_%s" % [mi.name, side]
+				wrap.add_child(half)
+				half.global_transform = mi.global_transform
+				made.append(half)
+		if hood:
+			for mi in VehicleCommon.mesh_instances(hood):
+				var half := VehicleCommon.split_mesh_by_pred(mi, wrap, pred)
+				if half == null:
+					continue
+				half.name = "%s_%s" % [mi.name, side]
+				wrap.add_child(half)
+				half.global_transform = mi.global_transform
+				made.append(half)
+		if made.is_empty():
+			continue
+		var mn := Vector3(1e9, 1e9, 1e9)
+		var mx := Vector3(-1e9, -1e9, -1e9)
+		for half in made:
+			var box := VehicleCommon.aabb_in(wrap, half)
+			if bool(box.get("empty", false)):
+				continue
+			mn.x = minf(mn.x, float(box["minX"]))
+			mn.y = minf(mn.y, float(box["minY"]))
+			mn.z = minf(mn.z, float(box["minZ"]))
+			mx.x = maxf(mx.x, float(box["maxX"]))
+			mx.y = maxf(mx.y, float(box["maxY"]))
+			mx.z = maxf(mx.z, float(box["maxZ"]))
+		var outer_x := mn.x if left else mx.x
+		var hx := outer_x * 0.72
+		var hy := mx.y - 0.02
+		var hz := mn.z + 0.08
+		var sign := -1.0 if left else 1.0
+		# Pivot first half as the hinge target; the rest ride as extras.
+		var target: Node3D = made[0]
+		var extras_n: Array = []
+		for i in range(1, made.size()):
+			extras_n.append(made[i])
+		doors.append(VehicleHinge.mount(wrap, target, Vector3(hx, hy, hz), "z", sign, 1.35, "scissor", extras_n))
+	if doors.size():
+		for src in sources:
+			if src is Node3D:
+				(src as Node3D).visible = false
+		if hood:
+			for mi in VehicleCommon.mesh_instances(hood):
+				VehicleCommon.punch_mesh_by_pred(mi, wrap, in_door)

@@ -77,6 +77,7 @@ var _wheel_in_contact: Array[bool] = []
 var _wheel_omega: PackedFloat32Array = PackedFloat32Array()
 var _wheel_long_slip: PackedFloat32Array = PackedFloat32Array()
 var _vis_spin: float = 0.0
+var _launch_slip: float = 0.0  # brief, slight burnout window on a hard start
 var spawn_map: String = "city"
 
 
@@ -297,6 +298,12 @@ func _drive(delta: float) -> void:
 	# is held. Releasing accel ends it. Shift (nitro flag) is an extra punch.
 	nitro_auto = false
 	nitro_active = occupied and throttle_in > 0.12
+	# Brief slight slip on a hard standing start, then grip returns quickly.
+	# Not a prolonged spin that throws the car out of control.
+	if occupied and throttle_in > 0.72 and absf(long_speed) < 2.4:
+		_launch_slip = minf(_launch_slip + delta * 5.0, 0.18)
+	else:
+		_launch_slip = maxf(_launch_slip - delta * 4.0, 0.0)
 	var steer_limit := MAX_STEER / (1.0 + speed * 0.022)
 	var steer_target := steer_in * steer_limit
 	steer_angle = move_toward(steer_angle, steer_target, STEER_SPEED * delta)
@@ -412,19 +419,20 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 				# exceeds the cap so the drive wheels can spin (burnout) and
 				# leave black marks, without yawing the car chaotically.
 				var mu := TIRE_MU * ARCADE_GRIP
-				if throttle_in > 0.7 and absf(long_v) < 5.0:
-					mu *= lerpf(0.78, 1.0, clampf(absf(long_v) / 5.0, 0.0, 1.0))
+				if _launch_slip > 0.02 and absf(long_v) < 3.2 and throttle_in > 0.7:
+					mu *= lerpf(1.0, 0.90, clampf(_launch_slip / 0.18, 0.0, 1.0))
 				var max_fx := maxf(mu * maxf(susp_n, 2000.0), 2500.0)
 				var fx := clampf(want, -max_fx, max_fx)
 				long_force += fx
 				var ground_w := long_v / maxf(r, 0.2)
 				var omega := _wheel_omega[i] if i < _wheel_omega.size() else ground_w
-				if absf(want) > max_fx * 1.02 and absf(throttle_in) > 0.65 and absf(long_v) < 9.0:
+				if _launch_slip > 0.02 and absf(want) > max_fx * 1.02 and absf(throttle_in) > 0.7 and absf(long_v) < 3.2:
 					var extra := (absf(want) - max_fx) / maxf(WHEEL_INERTIA, 0.2)
-					var spin := clampf(extra * 0.12, 0.0, 90.0) * signf(want)
+					var spin := clampf(extra * 0.06, 0.0, 14.0) * signf(want)
 					omega = ground_w + spin
 				else:
-					omega = lerpf(omega, ground_w, clampf(dt * 8.0, 0.0, 1.0))
+					# Grip returns promptly once the brief launch slip is over.
+					omega = lerpf(omega, ground_w, clampf(dt * 12.0, 0.0, 1.0))
 				if i < _wheel_omega.size():
 					_wheel_omega[i] = omega
 				if i < _wheel_long_slip.size():
@@ -506,6 +514,7 @@ func _apply_visuals(delta: float) -> void:
 		"susp": susp,
 		"wheel_travel": travels,
 		"nitro": nitro_active,
+		"door": door,
 	}, delta, Time.get_ticks_msec() * 0.001)
 	if _skids:
 		var marks: Array = []
@@ -563,6 +572,7 @@ func on_exit() -> void:
 	nitro = false
 	nitro_auto = false
 	nitro_active = false
+	_launch_slip = 0.0
 	occupied_changed.emit(false)
 	get_tree().create_timer(0.8).timeout.connect(func():
 		if not occupied and linear_velocity.length() < 0.6:
