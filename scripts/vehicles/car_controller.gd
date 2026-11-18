@@ -73,13 +73,21 @@ func _ready() -> void:
 
 
 func _build_collision() -> void:
-	# Per-mesh convex hulls that follow the body shell, excluding wheels.
+	# Convex hulls that follow the body shell, excluding wheels.
 	# No concave trimesh on a moving VehicleBody (Jolt misbehaves).
+	# Prefer pre-baked hulls — Mesh.create_convex_shape at runtime stalls
+	# the main thread for many seconds per vehicle (map teleport "卡死").
 	var n := 0
+	var baked := false
 	if visuals and visuals.wrap:
-		n = VehicleCommon.add_convexes_from_visual(self, visuals.wrap, VehicleCommon.WHEELISH_RE, 0.05)
-	# Keep the hulls clear of the ground / wheel volume so suspension can work.
-	_trim_hulls_above_wheels()
+		n = VehicleCommon.apply_baked_hulls(self, VehicleCommon.CAR_HULLS_PATH)
+		baked = n >= 2
+		if not baked:
+			n = VehicleCommon.add_convexes_from_visual(self, visuals.wrap, VehicleCommon.WHEELISH_RE, 0.05)
+	# Keep generated hulls clear of the wheel volume so suspension can work.
+	# Baked resources are already trimmed.
+	if not baked:
+		_trim_hulls_above_wheels()
 	if n < 2:
 		# Fallback boxes that stay above the wheel tops.
 		var wr: float = visuals.wheel_r if visuals else 0.34

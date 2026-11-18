@@ -69,11 +69,11 @@ func notify_map(map_id: String) -> void:
 	if map_id == "city":
 		call_deferred("_ensure_city_defaults")
 	_sync_visibility()
-	# Leaving a map while occupying a vehicle on that map: exit first.
-	if occupied and str(occupied.get("spawn_map")) != map_id and str(occupied.get("KIND")) != "":
-		# Exam bed is room-only by default; cars/planes are city. Exit if hidden.
-		if not _vehicle_visible(occupied):
-			try_exit()
+	# Leaving a map while occupying a vehicle on that map: detach, but do
+	# not stand beside the (now hidden) vehicle — the map switch places
+	# the player at the destination.
+	if occupied and not _vehicle_visible(occupied):
+		release_occupancy()
 
 
 func _vehicle_visible(v: Node) -> bool:
@@ -289,10 +289,10 @@ func _sample_road_points(count: int, avoid: Array) -> Array:
 	return out
 
 
-func _ground(x: float, z: float) -> Variant:
+func _ground(x: float, z: float, top: float = 320.0) -> Variant:
 	if game and game.has_method("ground_at"):
-		return game.call("ground_at", x, z, 320.0)
-	var q := PhysicsRayQueryParameters3D.create(Vector3(x, 320, z), Vector3(x, -60, z), 1)
+		return game.call("ground_at", x, z, top)
+	var q := PhysicsRayQueryParameters3D.create(Vector3(x, top, z), Vector3(x, -60, z), 1)
 	if player:
 		q.exclude = [player.get_rid()]
 	var hit := get_world_3d().direct_space_state.intersect_ray(q)
@@ -469,19 +469,31 @@ func try_exit() -> bool:
 	if occupied == null or player == null:
 		return false
 	var v := occupied
-	if v.has_method("on_exit"):
+	var dest := _exit_stand_dest(v)
+	return _finish_exit(dest, true)
+
+
+func release_occupancy() -> void:
+	## Detach from a vehicle / exam bed without walking to the exit offset.
+	## Used when a map switch is about to place the player somewhere else.
+	if occupied == null or player == null:
+		return
+	_finish_exit(player.global_position, false)
+
+
+func _finish_exit(dest: Vector3, restore_collision: bool) -> bool:
+	var v := occupied
+	if v and v.has_method("on_exit"):
 		v.call("on_exit")
 	_hide_player_body(false)
-	var off: Vector3 = v.call("exit_offset") if v.has_method("exit_offset") else v.global_transform.basis.x * 2.0
-	var dest: Vector3 = v.global_position + off
-	var g: Variant = _ground(dest.x, dest.z)
-	if g != null:
-		dest.y = (g as Vector3).y + 0.04
-	else:
-		dest.y = v.global_position.y
 	_restore_standing(dest)
-	player.collision_layer = int(_saved_player.get("col_layer", _player_col_layer))
-	player.collision_mask = int(_saved_player.get("col_mask", _player_col_mask))
+	if restore_collision:
+		player.collision_layer = int(_saved_player.get("col_layer", _player_col_layer))
+		player.collision_mask = int(_saved_player.get("col_mask", _player_col_mask))
+	else:
+		# Caller (map teleport / switch) will re-enable after placing.
+		player.collision_layer = 0
+		player.collision_mask = 0
 	player.set("occupancy", "")
 	player.set("occupier", null)
 	player.reset_physics_interpolation()
@@ -490,6 +502,59 @@ func try_exit() -> bool:
 	_update_nearest()
 	proximity_changed.emit(nearest, false)
 	return true
+
+
+func _exit_stand_dest(v: Node) -> Vector3:
+	## Stand beside the vehicle on the real floor (not the ceiling) and,
+	## when leaving the home exam bed, stay inside the room.
+	var off: Vector3 = v.call("exit_offset") if v.has_method("exit_offset") else v.global_transform.basis.x * 2.0
+	var dest: Vector3 = v.global_position + off
+	var in_room := str(game.get("current_map") if game else current_map) == "room" 		or str(v.get("spawn_map")) == "room"
+	if in_room and kind_of(v) == "exam_bed":
+		dest = _safe_room_stand(v, dest)
+	# Cast from just above standing height — a sky-high ray hits the
+	# room roof first (its top face is a valid floor).
+	var top: float = dest.y + 1.85
+	var g: Variant = _ground(dest.x, dest.z, top)
+	if g != null:
+		dest.y = (g as Vector3).y + 0.04
+	else:
+		dest.y = v.global_position.y
+	# If a ceiling was somehow still chosen, fall back to the room spawn.
+	if in_room and dest.y > 1.6:
+		dest = _room_spawn_floor()
+	return dest
+
+
+func _room_stand_bounds() -> AABB:
+	## Inset of the room walls, with a standing-height ceiling so a roof
+	## snap cannot count as "inside".
+	return AABB(Vector3(-1.58, 0.0, -2.90), Vector3(4.70, 1.70, 3.45))
+
+
+func _room_spawn_floor() -> Vector3:
+	var spawn := Vector3(-0.2, 0.0, 0.3)
+	if game and game.get("ROOM_SPAWN") != null:
+		spawn = game.get("ROOM_SPAWN")
+	var g: Variant = _ground(spawn.x, spawn.z, 1.85)
+	if g != null:
+		spawn.y = (g as Vector3).y + 0.04
+	return spawn
+
+
+func _safe_room_stand(v: Node, dest: Vector3) -> Vector3:
+	var bounds := _room_stand_bounds()
+	var candidates: Array[Vector3] = [dest]
+	if v.has_method("exit_offset"):
+		# Opposite side of the table, in case the default side is blocked.
+		var off: Vector3 = v.call("exit_offset")
+		candidates.append(v.global_position - Vector3(off.x, 0.0, 0.0))
+	candidates.append(_room_spawn_floor())
+	for c in candidates:
+		var p := Vector3(c.x, 0.2, c.z)
+		if bounds.has_point(p):
+			return c
+	return _room_spawn_floor()
 
 
 func _hide_player_body(hide: bool) -> void:

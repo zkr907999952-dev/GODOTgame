@@ -4,6 +4,30 @@ extends RefCounted
 ##   +Y up, -Z forward (nose), +X right, origin on the ground (y=0) then lifted by origin_y.
 class_name VehicleCommon
 
+const CAR_HULLS_PATH := "res://assets/vehicles/collision/car_hulls.tres"
+const PLANE_HULLS_PATH := "res://assets/vehicles/collision/plane_hulls.tres"
+
+
+static func apply_baked_hulls(body: CollisionObject3D, path: String) -> int:
+	## Load precomputed body-local convex hulls. Returns 0 if the resource is missing.
+	if body == null or path.is_empty() or not ResourceLoader.exists(path):
+		return 0
+	var baked = load(path)
+	if baked == null or not (baked is BakedHulls):
+		return 0
+	var n: int = baked.hull_count()
+	if n < 1:
+		return 0
+	for i in n:
+		var cs := CollisionShape3D.new()
+		cs.name = str(baked.hull_names[i])
+		var poly := ConvexPolygonShape3D.new()
+		poly.points = baked.hull_points[i]
+		cs.shape = poly
+		cs.transform = baked.hull_transforms[i]
+		body.add_child(cs)
+	return n
+
 
 static func find_named(root: Node, regex: String) -> Array[Node]:
 	var re := RegEx.new()

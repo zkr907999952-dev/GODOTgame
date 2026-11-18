@@ -68,6 +68,8 @@ var _clones_root: Node3D
 var settings: Node
 var bullet_cam: Node
 var vehicle_system: Node
+var _player_col_layer: int = 2
+var _player_col_mask: int = 3
 
 
 func _ready() -> void:
@@ -79,6 +81,9 @@ func _ready() -> void:
 	add_child(_clones_root)
 	LightingRigScript.tune_room_shadows(_room)
 	_apply_map_visibility("room")
+	if _player:
+		_player_col_layer = _player.collision_layer
+		_player_col_mask = _player.collision_mask
 	_place_player(ROOM_SPAWN, ROOM_SPAWN_YAW)
 	settings = GameSettingsScript.new()
 	settings.name = "GameSettings"
@@ -289,6 +294,10 @@ func switch_map(id: String, spawn_i: int = 0) -> void:
 	var spawns: Array = m["spawns"]
 	var s: Dictionary = spawns[clampi(spawn_i, 0, spawns.size() - 1)]
 	close_overhead(false)
+	# Leave any occupied vehicle / exam bed behind; the destination place
+	# call puts the player down standing and walkable.
+	if vehicle_system and vehicle_system.has_method("release_occupancy"):
+		vehicle_system.call("release_occupancy")
 	# 活着的分身仍随地图清掉；已死亡的布娃娃尸体整局保留，只在非当前地图时冻结隐藏。
 	_clear_living_clones()
 	current_map = str(m["id"])
@@ -306,26 +315,63 @@ func _place_player(p: Vector3, yaw: float) -> void:
 	_player.global_position = p
 	_player.velocity = Vector3.ZERO
 	_player.call("set_facing", yaw)
+	_restore_player_collision()
 	_player.reset_physics_interpolation()
 
 
-## 向下射线找地面（城市）。新建 / 刚启用的碰撞体要等一个物理帧才进入空间。
+func _restore_player_collision() -> void:
+	if _player == null:
+		return
+	if _player.collision_layer == 0:
+		_player.collision_layer = _player_col_layer
+	if _player.collision_mask == 0:
+		_player.collision_mask = _player_col_mask
+
+
+## 向下射线找可站立的地面（跳过天花板 / 朝下的表面）。
+## 新建 / 刚启用的碰撞体要等一个物理帧才进入空间。
 func ground_at(x: float, z: float, top: float = 320.0) -> Variant:
-	var q := PhysicsRayQueryParameters3D.create(Vector3(x, top, z), Vector3(x, -60.0, z), 1)
-	q.exclude = [_player.get_rid()]
-	var hit := get_world_3d().direct_space_state.intersect_ray(q)
-	return null if hit.is_empty() else hit["position"]
+	if _player == null:
+		return null
+	var space := get_world_3d().direct_space_state
+	var from_y := top
+	var exclude: Array = [_player.get_rid()]
+	for _i in 12:
+		if from_y <= -59.0:
+			return null
+		var q := PhysicsRayQueryParameters3D.create(Vector3(x, from_y, z), Vector3(x, -60.0, z), 1)
+		q.exclude = exclude
+		q.hit_from_inside = false
+		var hit := space.intersect_ray(q)
+		if hit.is_empty():
+			return null
+		var pos: Vector3 = hit["position"]
+		var nrm: Vector3 = hit.get("normal", Vector3.UP)
+		# A floor / ramp faces mostly up. Ceilings and undersides face down.
+		if nrm.dot(Vector3.UP) >= 0.5:
+			return pos
+		# Step just below this hit so the next ray starts inside / past a
+		# thick ceiling slab and continues toward the real floor.
+		from_y = pos.y - 0.03
+	return null
 
 
 func _place_on_ground(x: float, z: float, yaw: float, top: float = 320.0) -> void:
 	_busy = true
 	_player.set_physics_process(false)
+	# Stay out of the physics world while we wait for the new map's
+	# colliders; otherwise the capsule sits at the old coordinates
+	# (e.g. the room origin) inside city geometry for two frames.
+	_player.collision_layer = 0
+	_player.collision_mask = 0
+	_player.velocity = Vector3.ZERO
 	await get_tree().physics_frame
 	await get_tree().physics_frame
 	var g: Variant = ground_at(x, z, top)
 	var y: float = (g as Vector3).y if g != null else 2.0
 	_place_player(Vector3(x, y + 0.02, z), yaw)
 	_player.set_physics_process(true)
+	_player.set("input_locked", false)
 	_busy = false
 
 
@@ -366,8 +412,13 @@ func overhead_teleport() -> void:
 	var p: Vector3 = map_view.marker
 	_overhead_preview = false
 	close_overhead(false)
+	if vehicle_system and vehicle_system.has_method("release_occupancy"):
+		vehicle_system.call("release_occupancy")
 	current_map = "city"
 	_apply_map_visibility("city")
+	# Keep the capsule locked until it is sitting on the destination floor.
+	_player.set("input_locked", true)
+	_player.set_physics_process(false)
 	await _place_on_ground(p.x, p.z, float(_player.get("_body_logic_yaw")), p.y + 3.0)
 	_hud.call("sync")
 

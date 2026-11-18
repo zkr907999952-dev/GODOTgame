@@ -94,11 +94,14 @@ var gear_manual: bool = false
 
 
 func _build_collision() -> void:
-	# Per-mesh convex hulls matching the airframe, excluding landing-gear wheels.
-	# No concave trimesh on a moving RigidBody.
+	# Convex hulls matching the airframe, excluding landing-gear wheels.
+	# No concave trimesh on a moving RigidBody. Prefer pre-baked hulls
+	# so city default spawns (map teleport) do not stall the main thread.
 	var n := 0
 	if visuals and visuals.wrap:
-		n = VehicleCommon.add_convexes_from_visual(self, visuals.wrap, VehicleCommon.PLANE_GEAR_RE, 0.08)
+		n = VehicleCommon.apply_baked_hulls(self, VehicleCommon.PLANE_HULLS_PATH)
+		if n < 3:
+			n = VehicleCommon.add_convexes_from_visual(self, visuals.wrap, VehicleCommon.PLANE_GEAR_RE, 0.08)
 	if n < 3:
 		var hl: float = visuals.half_l if visuals else 8.6
 		VehicleCommon.add_box_shape(self, "fuse", Vector3(0.0, 0.25, 0.4), Vector3(2.2, 1.6, hl * 1.35))

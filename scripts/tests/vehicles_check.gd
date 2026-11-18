@@ -1,9 +1,9 @@
 extends SceneTree
-## 0.2.16 载具 / 检查床 / RoomCollision 自检。
+## 0.2.17 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.16"
-const VERSION_CODE := 18
+const VERSION_NAME := "0.2.17"
+const VERSION_CODE := 19
 
 var fails := 0
 var main: Node
@@ -52,12 +52,14 @@ func _run() -> void:
 	_check_room_collision()
 	_check_exam_bed_default()
 	_check_f_routing()
+	await _check_exam_exit_in_room()
 	_check_hud()
 	_check_car_plane_scenes()
 	_check_bindings_and_hinge()
 	_check_exam_pose_api()
 	_check_menu_spawn_and_clear()
 	_check_map_open()
+	await _check_overhead_teleport_and_home()
 	await _check_car_cam_and_exit()
 	await _check_city_defaults()
 	_finish()
@@ -71,6 +73,8 @@ func _check_version() -> void:
 	_ok(FileAccess.file_exists("res://assets/vehicles/plane.glb"), "plane.glb present")
 	_ok(FileAccess.file_exists("res://assets/vehicles/exam_bed/exam_bed.glb"), "exam_bed.glb present")
 	_ok(FileAccess.file_exists("res://assets/vehicles/exam_bed/ATTRIBUTION.txt"), "exam bed attribution present")
+	_ok(FileAccess.file_exists("res://assets/vehicles/collision/car_hulls.tres"), "baked car hulls present")
+	_ok(FileAccess.file_exists("res://assets/vehicles/collision/plane_hulls.tres"), "baked plane hulls present")
 
 
 func _check_room_collision() -> void:
@@ -433,6 +437,168 @@ func _check_map_open() -> void:
 		_ok(mv != null and bool(mv.get("is_open")), "HUD 地图 button opens the map")
 		hud.call("toggle_map_panel")
 		_ok(mv == null or not bool(mv.get("is_open")), "HUD 地图 button closes the map")
+
+
+func _in_room(p: Vector3) -> bool:
+	# Walls at x≈-1.98 / 3.52, z≈-3.30 / 0.95; ceiling ~2.3–2.7. Standing origin must be on the floor.
+	return p.x > -1.70 and p.x < 3.30 and p.z > -3.10 and p.z < 0.80 and p.y > -0.05 and p.y < 1.55
+
+
+func _walkable() -> bool:
+	if player == null:
+		return false
+	var loco = player.call("get_loco") if player.has_method("get_loco") else null
+	return (not bool(player.get("input_locked"))) 		and player.is_physics_processing() 		and str(player.get("occupancy")) == "" 		and (loco == null or not bool(loco.get("frozen"))) 		and player.collision_layer != 0 and player.collision_mask != 0
+
+
+func _check_exam_exit_in_room() -> void:
+	if vs == null or player == null:
+		return
+	var bed: Node = null
+	for v in vs.vehicles:
+		if str(vs.call("kind_of", v)) == "exam_bed" and bool(v.get("is_default")):
+			bed = v
+			break
+	if bed == null:
+		_ok(false, "default exam bed present for exit-in-room check")
+		return
+	# A ray from standing height (below the ceiling) must hit the floor.
+	# A sky-high ray would hit the roof first — its top face is a valid floor.
+	if main.has_method("ground_at"):
+		var fl: Variant = main.call("ground_at", -0.2, 0.15, 1.85)
+		_ok(fl != null, "ground_at from standing height returns a hit")
+		if fl != null:
+			_ok((fl as Vector3).y < 1.2, "standing-height ground_at hits the room floor, not the ceiling (y=%.2f)" % (fl as Vector3).y)
+	if vs.get("occupied"):
+		vs.call("try_exit")
+	# Use control mode so walkability is meaningful after exit.
+	if player.has_method("set_play_mode"):
+		player.call("set_play_mode", 1)
+	player.global_position = bed.global_position + Vector3(1.2, 0.1, 0.0)
+	player.velocity = Vector3.ZERO
+	var yaw_before := float(player.get("_body_logic_yaw") if player.get("_body_logic_yaw") != null else player.get("_yaw"))
+	vs.call("_update_nearest")
+	_ok(bool(vs.call("try_enter")), "enter default exam bed for exit-in-room check")
+	await _phys(2)
+	_ok(str(player.get("occupancy")) == "exam_bed", "occupying exam bed before exit")
+	_ok(bool(vs.call("try_exit")), "exit default exam bed")
+	await _phys(8)
+	await _frames(2)
+	var p: Vector3 = player.global_position
+	_ok(_in_room(p), "after leaving the exam bed the player is inside the room on the floor (pos=%s)" % p)
+	_ok(player.global_transform.basis.y.dot(Vector3.UP) > 0.99, "player is upright after exam-bed exit (physics)")
+	_ok(_walkable(), "player is walkable after exam-bed exit (unlocked, physics on, occupancy cleared)")
+	var yaw_after := float(player.get("_body_logic_yaw") if player.get("_body_logic_yaw") != null else player.get("_yaw"))
+	_ok(absf(wrapf(yaw_after - yaw_before, -PI, PI)) < 0.05, "yaw restored after exam-bed exit (physics)")
+	if player.has_node("Body"):
+		var body: Node3D = player.get_node("Body")
+		_ok(absf(body.rotation.x) < 0.05 and absf(body.rotation.z) < 0.05, "Body has no residual lying rotation after exit")
+
+
+func _check_overhead_teleport_and_home() -> void:
+	if main == null or player == null or vs == null:
+		return
+	# Ensure we start in the room, not occupying anything, map closed.
+	if vs.get("occupied"):
+		vs.call("try_exit")
+	if main.get("map_view") and bool(main.get("map_view").get("is_open")):
+		main.call("close_overhead")
+	if str(main.get("current_map")) != "room":
+		main.call("switch_map", "room", 0)
+		await _phys(4)
+	if player.has_method("set_play_mode"):
+		player.call("set_play_mode", 1)
+	player.global_position = Vector3(-0.2, 0.1, 0.3)
+	player.velocity = Vector3.ZERO
+	await _phys(2)
+	_ok(str(main.get("current_map")) == "room", "teleport test starts in the room")
+	_ok(not bool(vs.get("_city_ready")), "city defaults are not spawned before the first real map switch")
+	main.call("open_overhead")
+	var mv = main.get("map_view")
+	_ok(mv != null and bool(mv.get("is_open")), "overhead opens for teleport")
+	_ok(str(main.get("current_map")) == "room", "preview does not change current_map")
+	_ok(not bool(vs.get("_city_ready")), "preview still does not spawn city vehicles")
+	var spawn: Dictionary = main.call("get_maps")[1]["spawns"][0]
+	mv.call("set_marker", Vector3(float(spawn["x"]), 2.0, float(spawn["z"])))
+	_ok(mv.get("marker") != null, "teleport marker is set")
+	var t0 := Time.get_ticks_msec()
+	main.call("overhead_teleport")
+	# Placement awaits two physics frames; city defaults spawn deferred but must not stall.
+	var guard := 0
+	while bool(main.get("_busy")) and guard < 90:
+		await _phys(1)
+		guard += 1
+	await _phys(8)
+	await _frames(4)
+	var elapsed := Time.get_ticks_msec() - t0
+	print("vehicles: overhead_teleport settled in ", elapsed, " ms (busy_wait=", guard, ")")
+	_ok(not bool(main.get("_busy")), "teleport placement finished (waited %d frames, %d ms)" % [guard, elapsed])
+	_ok(elapsed < 15000, "teleport does not stall the main thread (elapsed=%d ms)" % elapsed)
+	_ok(str(main.get("current_map")) == "city", "overhead teleport switches to the city")
+	_ok(mv == null or not bool(mv.get("is_open")), "map view is closed after teleport")
+	_ok(not bool(main.get("_overhead_preview")), "not left in overhead preview after teleport")
+	_ok(_walkable(), "player is walkable after room→city teleport")
+	var pos: Vector3 = player.global_position
+	var err := Vector2(pos.x - float(spawn["x"]), pos.z - float(spawn["z"])).length()
+	_ok(err < 4.0, "player arrived near the chosen city point (pos=%s err=%.2f)" % [pos, err])
+	_ok(main.get_node("City").visible, "city is visible after teleport")
+	var room_n := main.get_node_or_null("Room")
+	_ok(room_n == null or not room_n.visible, "room is hidden after teleport")
+	# Wait briefly for city defaults; they must not have blocked placement.
+	var g2 := 0
+	while vs and not bool(vs.get("_city_ready")) and g2 < 60:
+		await _phys(1)
+		g2 += 1
+	_ok(bool(vs.get("_city_ready")), "city defaults ready after teleport (waited %d extra frames)" % g2)
+
+	# Go home from the overhead map.
+	main.call("open_overhead")
+	_ok(mv != null and bool(mv.get("is_open")), "overhead opens from the city")
+	main.call("overhead_go_home")
+	await _phys(6)
+	await _frames(2)
+	_ok(str(main.get("current_map")) == "room", "go-home returns to the room")
+	_ok(mv == null or not bool(mv.get("is_open")), "map view is closed after go-home")
+	_ok(not bool(main.get("_overhead_preview")), "not left in preview after go-home")
+	_ok(_walkable(), "player is walkable after city→room go-home")
+	_ok(_in_room(player.global_position), "player is inside the room after go-home (pos=%s)" % player.global_position)
+	_ok(room_n == null or room_n.visible, "room is visible after go-home")
+	_ok(not main.get_node("City").visible, "city is hidden after go-home")
+	_ok(int(vs.call("default_bed_count")) == 1, "home exam bed is back after go-home")
+
+	# Teleport while still on the exam bed must also arrive walkable in the city.
+	if player.has_method("set_play_mode"):
+		player.call("set_play_mode", 1)
+	player.global_position = Vector3(-0.2, 0.1, 0.3)
+	# Find the default bed again (visibility should be on).
+	var bed: Node = null
+	for v in vs.vehicles:
+		if str(vs.call("kind_of", v)) == "exam_bed" and bool(v.get("is_default")):
+			bed = v
+			break
+	if bed:
+		player.global_position = bed.global_position + Vector3(1.2, 0.1, 0.0)
+		vs.call("_update_nearest")
+		_ok(bool(vs.call("try_enter")), "can enter the exam bed before a map teleport")
+		await _phys(2)
+		main.call("open_overhead")
+		mv.call("set_marker", Vector3(float(spawn["x"]), 2.0, float(spawn["z"])))
+		main.call("overhead_teleport")
+		var g3 := 0
+		while bool(main.get("_busy")) and g3 < 90:
+			await _phys(1)
+			g3 += 1
+		await _phys(6)
+		_ok(str(main.get("current_map")) == "city", "teleport from the exam bed reaches the city")
+		_ok(_walkable(), "player is walkable after teleporting off the exam bed")
+		_ok(str(player.get("occupancy")) == "", "exam occupancy is cleared by the map teleport")
+		# Return home so later tests start in the room.
+		main.call("open_overhead")
+		main.call("overhead_go_home")
+		await _phys(6)
+		await _frames(2)
+		_ok(str(main.get("current_map")) == "room", "returned to the room after bed-teleport")
+		_ok(_walkable() and _in_room(player.global_position), "walkable in the room after returning from bed-teleport")
 
 
 func _check_car_cam_and_exit() -> void:
