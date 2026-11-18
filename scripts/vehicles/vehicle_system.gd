@@ -20,11 +20,12 @@ const FALLBACK_RUNWAY := Vector3(-824.61, 0.0, 494.28)
 const FALLBACK_RUNWAY_YAW := 0.70456  # nose toward the helipad end
 const FALLBACK_RUNWAY_AXIS := Vector3(0.64770, 0.0, 0.76189)  # t+ toward threshold
 const RUNWAY_LANE := 7.2
-const RUNWAY_STANDOFF := 46.0  # metres inward from the mesh end if bars cannot be measured
-# Playtest photo: red/blue dots sit on the pavement past the piano keys,
-# about 26 m from the inner edge of the bars (not on the bars themselves).
-const RUNWAY_PAST_BARS := 26.0
-const ROAD_CAR_COUNT := 5
+const RUNWAY_STANDOFF := 110.0  # metres inward from the mesh end if bars cannot be measured
+# 0.2.24: move further up the runway toward mid-strip. 0.2.22/0.2.23 sat
+# only ~26 m past the piano keys and still looked jammed on the threshold.
+const RUNWAY_PAST_BARS := 84.0
+const RUNWAY_FRAC := 0.18  # fraction of the asphalt length from the threshold
+const ROAD_CAR_COUNT := 0  # no random roadside fleet; one airport car only
 const LANDMARK_GROUND := "^(Boulevard_Ground|Docks_Ground|Island_Ground|AirPort_Track)"
 const LANDMARK_ROAD := "^(Boulevard_Ground|Docks_Ground|Island_Ground)$"
 const LANDMARK_AIRPORT := "^(AirPort_Track|Airport_Front|AirPort)$"
@@ -47,6 +48,9 @@ var _chase_dist: float = 9.0
 var _player_col_layer: int = 2
 var _player_col_mask: int = 3
 var vehicle_cam: String = "third"  # "first" | "third" — default third on car/plane
+var vehicle_look_mode: String = "yaw"  # "yaw" | "orbit" — mobile observe button
+var _toggle_lock_until_ms: int = 0
+const TOGGLE_LOCK_MS := 380
 var touch_throttle: float = -1.0  # >=0 overrides plane throttle (0..1)
 var touch_steer: Vector2 = Vector2.ZERO
 var touch_car_accel: bool = false
@@ -509,10 +513,16 @@ func _measure_runway() -> Dictionary:
 				break
 		if run_start >= 0 and run_start <= 8 and run_end >= run_start:
 			bars_inner_dist = (float(run_end) + 1.0) * bin_w
+	var strip_len := absf(hel_t - thr_t)
 	var stand := RUNWAY_STANDOFF
-	if bars_inner_dist >= 8.0 and bars_inner_dist <= 36.0:
+	if bars_inner_dist >= 8.0 and bars_inner_dist <= 40.0:
 		stand = bars_inner_dist + RUNWAY_PAST_BARS
-	stand = clampf(stand, 40.0, 60.0)
+	# Prefer a fraction of the runway so the pair sits mid-width and further
+	# up the asphalt, not jammed on the threshold bars.
+	if strip_len > 80.0:
+		stand = maxf(stand, strip_len * RUNWAY_FRAC)
+	var stand_max := strip_len * 0.32 if strip_len > 80.0 else 220.0
+	stand = clampf(stand, 80.0, maxf(stand_max, 80.0))
 	var mid_t := thr_t + sign_in * stand
 	var mid := Vector3(mx + ex * mid_t + sx * center_s, 0.0, mz + ez * mid_t + sz * center_s)
 	# yaw such that visual nose (-basis.z) = heading: (-sin y, 0, -cos y) = heading
@@ -533,34 +543,84 @@ func _measure_runway() -> Dictionary:
 
 
 func _spawn_default_cars() -> void:
-	var spawn_xz := Vector2(42.5, 40.2)
-	if game and game.get("MAPS"):
-		var maps: Array = game.get("MAPS")
-		for m in maps:
-			if str(m.get("id")) == "city" and m.get("spawns"):
-				var s: Dictionary = m["spawns"][0]
-				spawn_xz = Vector2(float(s["x"]), float(s["z"]))
-				break
-	var avoid: Array = [{"x": spawn_xz.x, "z": spawn_xz.y, "r": 8.0}]
-	# Keep cars off the runway default planes too.
-	for v in vehicles:
-		if v is PlaneController:
-			avoid.append({"x": v.global_position.x, "z": v.global_position.z, "r": 16.0})
-	var pts := _sample_road_points(ROAD_CAR_COUNT, avoid)
-	if pts.is_empty():
-		# Fallback ring around the city spawn, outdoors only.
-		var rings := [Vector2(8.4, 3.2), Vector2(10.2, -3.6), Vector2(-8.8, 4.4), Vector2(22.5, 6.2), Vector2(-20.8, 5.4)]
-		for d in rings:
-			if pts.size() >= ROAD_CAR_COUNT:
-				break
-			var x: float = spawn_xz.x + d.x
-			var z: float = spawn_xz.y + d.y
-			var gy: Variant = _pavement_y(x, z)
-			if gy == null:
+	## 0.2.24: only one sports car at the airport. No random roadside fleet.
+	## Menu-spawned cars remain a player action.
+	var spot := _airport_car_spawn()
+	if spot.is_empty():
+		return
+	_spawn_car(Vector3(spot["x"], spot["y"], spot["z"]), float(spot["yaw"]), true, "city")
+
+
+func _airport_car_spawn() -> Dictionary:
+	## One coupe on the airport apron (Airport_Front / terminal pad), off the
+	## runway and clear of the two fighters. AirPort_Track itself is avoided
+	## because its AABB includes grassy shoulders.
+	var info := _measure_runway()
+	var mid: Vector3 = info["mid"]
+	var heading: Vector3 = info["heading"]
+	var across: Vector3 = info["across"]
+	if across.length_squared() < 1e-6:
+		across = Vector3(-heading.z, 0.0, heading.x)
+	across = across.normalized()
+	var yaw := float(info.get("yaw", 0.0))
+	var candidates: Array = []
+	# Prefer named apron / frontage meshes.
+	for k in _landmarks.keys():
+		var key := str(k)
+		if "Airport_Front" in key or "AirPort_Front" in key or key == "AirPort":
+			var b: AABB = _landmarks[k]
+			var c := b.get_center()
+			candidates.append(Vector2(c.x, c.z))
+			candidates.append(Vector2(c.x + 12.0, c.z + 8.0))
+			candidates.append(Vector2(c.x - 12.0, c.z + 10.0))
+			candidates.append(Vector2(c.x + 8.0, c.z - 10.0))
+	# Terminal-side fallback near the airport buildings.
+	var bld := Vector3(-831.86, 0.0, 362.89)
+	candidates.append(Vector2(bld.x + 22.0, bld.z + 18.0))
+	candidates.append(Vector2(bld.x - 18.0, bld.z + 22.0))
+	candidates.append(Vector2(bld.x + 30.0, bld.z + 8.0))
+	# Last, a pad well off the fighter lane (airport-tolerant ground check).
+	for side in [1.0, -1.0]:
+		var x: float = mid.x + across.x * (RUNWAY_LANE * 4.2) * side - heading.x * 20.0
+		var z: float = mid.z + across.z * (RUNWAY_LANE * 4.2) * side - heading.z * 20.0
+		candidates.append(Vector2(x, z))
+	for c in candidates:
+		var clash := false
+		for v in vehicles:
+			if not is_instance_valid(v):
 				continue
-			pts.append({"x": x, "y": float(gy), "z": z, "yaw": PI})
-	for p in pts:
-		_spawn_car(Vector3(p["x"], p["y"], p["z"]), float(p["yaw"]), true, "city")
+			if Vector2(v.global_position.x - c.x, v.global_position.z - c.y).length() < 16.0:
+				clash = true
+				break
+		if clash:
+			continue
+		var gy: Variant = _airport_pad_y(c.x, c.y)
+		if gy == null:
+			continue
+		return {"x": c.x, "y": float(gy), "z": c.y, "yaw": yaw}
+	return {}
+
+
+func _airport_pad_y(x: float, z: float) -> Variant:
+	## Solid airport pavement: allow apron / frontage, reject sea and grass.
+	var g: Variant = _road_ground(x, z)
+	if g == null:
+		return null
+	var gy: Vector3 = g
+	if gy.y <= 0.04 or gy.y >= 8.0:
+		return null
+	if _hit_is_non_pavement(x, z, true):
+		return null
+	for d in [Vector2(1.6, 0.0), Vector2(-1.6, 0.0), Vector2(0.0, 1.6), Vector2(0.0, -1.6)]:
+		var n: Variant = _road_ground(x + d.x, z + d.y)
+		if n == null:
+			return null
+		var ny: Vector3 = n
+		if ny.y <= 0.04 or absf(ny.y - gy.y) > 0.8:
+			return null
+		if _hit_is_non_pavement(x + d.x, z + d.y, true):
+			return null
+	return gy.y
 
 
 func _sample_road_points(count: int, avoid: Array) -> Array:
@@ -643,7 +703,7 @@ func _pavement_y(x: float, z: float) -> Variant:
 	return gy.y
 
 
-func _hit_is_non_pavement(x: float, z: float) -> bool:
+func _hit_is_non_pavement(x: float, z: float, allow_airport_pad: bool = false) -> bool:
 	## Reject sea / grass / sidewalk names under a downward ray.
 	var exclude: Array = []
 	if player:
@@ -670,16 +730,28 @@ func _hit_is_non_pavement(x: float, z: float) -> bool:
 	if "grass" in low or "lawn" in low:
 		return true
 	# AirPort_Track shoulders are grass even when the mesh name is the track.
-	if "airport_track" in low:
+	# Apron / frontage spawns may opt into airport pads (not the runway mesh).
+	if "airport_track" in low and not allow_airport_pad:
 		return true
+	if allow_airport_pad and "airport_track" in low:
+		# Still reject if we clearly landed on a grass-looking name.
+		if "grass" in low or "shoulder" in low:
+			return true
 	return false
 
 
 func is_default_car_on_pavement(v: Node) -> bool:
 	if v == null:
 		return false
-	var y = _pavement_y(v.global_position.x, v.global_position.z)
-	return y != null
+	var n := v as Node3D
+	if n == null:
+		return false
+	var x := n.global_position.x
+	var z := n.global_position.z
+	# The single airport default car sits on the apron, which is not a city road.
+	if _airport_pad_y(x, z) != null:
+		return true
+	return _pavement_y(x, z) != null
 
 
 func _ground(x: float, z: float, top: float = 320.0, ignore: Node = null) -> Variant:
@@ -832,9 +904,15 @@ func _holster_occupied_weapons() -> void:
 
 
 func try_toggle() -> bool:
-	if occupied:
-		return try_exit()
-	return try_enter()
+	## One physical tap must not both board and immediately exit after the
+	## occupied flag flips (or after a touch + emulated-mouse double event).
+	var now := Time.get_ticks_msec()
+	if now < _toggle_lock_until_ms:
+		return false
+	var ok := try_exit() if occupied else try_enter()
+	if ok:
+		_toggle_lock_until_ms = now + TOGGLE_LOCK_MS
+	return ok
 
 
 func try_enter() -> bool:
@@ -872,9 +950,12 @@ func try_enter() -> bool:
 		# Keep the current play mode. Observation must keep the pose.
 		_apply_exam_pose()
 	else:
-		# Cars / planes default to third person; the player can toggle 1st/3rd.
+		# Cars / planes default to third person. V still toggles 1st/3rd on PC.
+		# The mobile 观察 button switches yaw swipe vs orbit, not 1st/3rd.
 		vehicle_cam = "third"
+		vehicle_look_mode = "yaw"
 		_reset_vehicle_cam()
+		_sync_vehicle_look_from_heading()
 		_hide_player_body(true)
 	occupancy_changed.emit(v)
 	proximity_changed.emit(v, true)
@@ -1048,7 +1129,34 @@ func toggle_vehicle_cam() -> String:
 	vehicle_cam = "first" if vehicle_cam != "first" else "third"
 	if vehicle_cam == "third":
 		_reset_vehicle_cam()
+	else:
+		_sync_vehicle_look_from_heading()
 	return vehicle_cam
+
+
+func toggle_observe_mode() -> String:
+	## Mobile 观察: first press = right-side / look drag orbits (release recenters);
+	## press again = right-side horizontal swipe is yaw. Default is yaw.
+	vehicle_look_mode = "orbit" if vehicle_look_mode != "orbit" else "yaw"
+	if vehicle_look_mode == "yaw":
+		end_orbit()
+	return vehicle_look_mode
+
+
+func is_observe_orbit() -> bool:
+	return is_drive_third() and vehicle_look_mode == "orbit"
+
+
+func _sync_vehicle_look_from_heading() -> void:
+	## First-person inside a vehicle is cockpit-aligned: look starts on the
+	## vehicle basis (visual nose -Z), not a leftover world / character yaw.
+	if player == null or occupied == null:
+		return
+	var xf := _vehicle_visual_xf()
+	var heading := _heading_yaw(_vehicle_forward(xf))
+	player.set("_yaw", heading)
+	var k := kind_of(occupied)
+	player.set("_pitch", 0.04 if k == "plane" else -0.06)
 
 
 func is_drive_third() -> bool:
@@ -1203,14 +1311,19 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 	if skel:
 		var al: Vector3 = bed.armrest_l_global() if bed.has_method("armrest_l_global") else bed.stirrup_l_global()
 		var ar: Vector3 = bed.armrest_r_global() if bed.has_method("armrest_r_global") else bed.stirrup_r_global()
-		# Plant the calves on the stirrup pads, along the pad long axis (bed +Z /
-		# toward the feet). 0.2.22's outward offset hung the shins beside the pads.
+		# Plant the calves on the stirrup pads, coaxial with the pad long axis
+		# (outward + toward the feet). The smaller 0.2.23 bed needs a slightly
+		# wider / more extended reach than the tight 0.24 abduction pose.
 		var left := lie.x
 		var feet := -lie.y
 		var up := lie.z
-		var sl: Vector3 = bed.stirrup_l_global() - left * 0.04 + feet * 0.10 + up * 0.02
-		var sr: Vector3 = bed.stirrup_r_global() + left * 0.04 + feet * 0.10 + up * 0.02
+		var sl: Vector3 = bed.stirrup_l_global() + left * 0.08 + feet * 0.20 + up * 0.01
+		var sr: Vector3 = bed.stirrup_r_global() - left * 0.08 + feet * 0.20 + up * 0.01
 		ExamPose.apply(skel, sl, sr, bed.backrest_angle, al, ar)
+		# First-person: the head follows the look direction (after IK).
+		var fp_now := bool(player.get("first_person")) and not (player.has_method("is_display_mode") and bool(player.call("is_display_mode")))
+		if fp_now:
+			ExamPose.apply_look(skel, float(player.get("_yaw")), float(player.get("_pitch")))
 		ExamPose.offset_hair(skel, Vector3(0.0, 0.02, -0.10))
 		# Observation mode: head / eyes look at the orbit camera.
 		if player.has_method("is_display_mode") and bool(player.call("is_display_mode")) and player.has_method("get_secondary"):
@@ -1254,13 +1367,14 @@ func _exam_camera(_delta: float) -> void:
 	if look_dir.length_squared() < 1e-6:
 		look_dir = bed.global_transform.basis.z
 	look_dir = look_dir.normalized()
-	# Clamp look so the player cannot crane around far enough to see the
-	# neck cross-section, and keep yaw/pitch in a comfortable exam range.
-	const YAW_LIM := 0.95
-	const PITCH_MIN := -0.55
-	const PITCH_MAX := 0.42
+	# Side / downward looks stay modest so the neck stump is not the main
+	# view. Looking up (negative pitch, Godot camera convention) is free.
+	const YAW_LIM := 1.15
+	const PITCH_MIN := -1.55
+	const PITCH_MAX := 0.58
 	var yaw := clampf(float(player.get("_yaw")), -YAW_LIM, YAW_LIM)
-	var pitch := clampf(float(player.get("_pitch")), PITCH_MIN, PITCH_MAX)
+	var pitch := minf(float(player.get("_pitch")), PITCH_MAX)
+	pitch = clampf(pitch, PITCH_MIN, PITCH_MAX)
 	player.set("_yaw", yaw)
 	player.set("_pitch", pitch)
 	# Untilted origin: world-up so the first-person camera has no roll
@@ -1440,13 +1554,16 @@ func _vehicle_camera(delta: float) -> void:
 		_chase_dir = cfwd
 		up_ref = cup
 		# Orbit offsets live in the lagged aircraft frame (yaw about up, pitch about right).
+		# look_dir is the *view* direction (along the nose). Camera sits behind
+		# the jet at pivot - look_dir * dist, looking forward — never a rear-view
+		# from in front of the nose. Visual nose is -Z = cfwd.
 		var right := _chase_basis.x
 		if right.length_squared() < 1e-8:
 			right = cfwd.cross(cup)
 		right = right.normalized()
-		var look_dir := (-cfwd).rotated(cup, _orbit_yaw).rotated(right, _orbit_pitch)
+		var look_dir := cfwd.rotated(cup, _orbit_yaw).rotated(right, _orbit_pitch)
 		if look_dir.length_squared() < 1e-8:
-			look_dir = -cfwd
+			look_dir = cfwd
 		else:
 			look_dir = look_dir.normalized()
 		var cam_pos: Vector3 = pivot_pt - look_dir * dist + cup * (height * 0.22)

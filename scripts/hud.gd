@@ -70,7 +70,7 @@ var _vehicle_system: Node
 var _btn_enter_exit: Button
 var _plane_throttle: VSlider
 var _plane_throttle_box: Control
-var _btn_vehicle_cam: Button
+var _btn_observe: Button
 var _btn_car_accel: Button
 var _btn_car_brake: Button
 var _btn_thrust_up: Button
@@ -425,7 +425,10 @@ func _hp_color(ratio: float) -> Color:
 
 
 func _refresh_player_hp() -> void:
-	if _hp_box == null or _player == null:
+	if _hp_box == null:
+		return
+	_hp_box.visible = not is_map_open()
+	if _player == null:
 		return
 	var hp := 100.0
 	var mx := 100.0
@@ -933,6 +936,10 @@ func set_overhead(on: bool) -> void:
 			if not mv.is_connected("marker_changed", _on_overhead_marker):
 				mv.connect("marker_changed", _on_overhead_marker)
 		_on_overhead_marker(null)
+	_refresh_player_hp()
+	_refresh_vehicle_touch()
+	if _touch:
+		_touch.queue_redraw()
 
 
 func _on_overhead_marker(m: Variant) -> void:
@@ -1029,17 +1036,16 @@ func _build_vehicle_touch(root: Control) -> void:
 	_btn_enter_exit = _veh_btn("上载具", Vector2(108, 48), 16)
 	_btn_enter_exit.visible = false
 	_btn_enter_exit.pressed.connect(_on_enter_exit_pressed)
-	_btn_enter_exit.gui_input.connect(_on_enter_exit_gui)
 	root.add_child(_btn_enter_exit)
 
-	_btn_vehicle_cam = _veh_btn("第三人称", Vector2(108, 40), 14)
-	_btn_vehicle_cam.visible = false
-	_btn_vehicle_cam.pressed.connect(func():
-		if _vehicle_system and _vehicle_system.has_method("toggle_vehicle_cam"):
-			_vehicle_system.call("toggle_vehicle_cam")
+	_btn_observe = _veh_btn("观察", Vector2(108, 40), 14)
+	_btn_observe.visible = false
+	_btn_observe.pressed.connect(func():
+		if _vehicle_system and _vehicle_system.has_method("toggle_observe_mode"):
+			_vehicle_system.call("toggle_observe_mode")
 		_refresh_vehicle_touch()
 	)
-	root.add_child(_btn_vehicle_cam)
+	root.add_child(_btn_observe)
 
 	_btn_car_accel = _veh_btn("加速", Vector2(88, 52), 16)
 	_btn_car_brake = _veh_btn("手刹", Vector2(88, 52), 16)
@@ -1194,7 +1200,8 @@ func _refresh_vehicle_touch() -> void:
 	var v := get_viewport().get_visible_rect().size
 	var show_enter := occ != null or near != null
 	if _btn_enter_exit:
-		_btn_enter_exit.visible = show_enter and not (_touch and bool(_touch.get("layout_edit")))
+		_btn_enter_exit.visible = show_enter and not (_touch and bool(_touch.get("layout_edit"))) and not is_map_open()
+		_btn_enter_exit.disabled = false
 		if occ:
 			_btn_enter_exit.text = "离开检查床" if kind == "exam_bed" else "离开载具"
 		elif near:
@@ -1202,13 +1209,14 @@ func _refresh_vehicle_touch() -> void:
 		_place_layout_btn(_btn_enter_exit, "enter", Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 72.0), Vector2(108, 48))
 	var in_drive := occ != null and kind in ["car", "plane"]
 	var editing := _touch != null and bool(_touch.get("layout_edit"))
-	if _btn_vehicle_cam:
-		_btn_vehicle_cam.visible = in_drive and not editing
+	if _btn_observe:
+		_btn_observe.visible = in_drive and not editing and not is_map_open()
 		if in_drive and vs:
-			var cam := str(vs.get("vehicle_cam"))
-			_btn_vehicle_cam.text = "第一人称" if cam == "first" else "第三人称"
-		_place_layout_btn(_btn_vehicle_cam, "vcam", Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 126.0), Vector2(108, 40))
-	var show_car := touch_ui and occ != null and kind == "car" and not editing
+			var orbit := str(vs.get("vehicle_look_mode")) == "orbit"
+			_btn_observe.text = "观察·开" if orbit else "观察"
+			_style_button(_btn_observe, orbit)
+		_place_layout_btn(_btn_observe, "observe", Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 126.0), Vector2(108, 40))
+	var show_car := touch_ui and occ != null and kind == "car" and not editing and not is_map_open()
 	if _btn_car_accel:
 		_btn_car_accel.visible = show_car
 		_place_layout_btn(_btn_car_accel, "accel", Vector2(v.x - _safe.z - 16.0 - 88.0, v.y - _safe.w - 180.0), Vector2(88, 52))
@@ -1216,12 +1224,12 @@ func _refresh_vehicle_touch() -> void:
 		_btn_car_brake.visible = show_car
 		_place_layout_btn(_btn_car_brake, "brake", Vector2(v.x - _safe.z - 16.0 - 88.0, v.y - _safe.w - 122.0), Vector2(88, 52))
 	var show_plane := occ != null and kind == "plane"
-	var show_plane_btns := touch_ui and show_plane and not editing
+	var show_plane_btns := touch_ui and show_plane and not editing and not is_map_open()
 	var right := v.x - _safe.z - 16.0
 	var by := v.y - _safe.w
 	# Thrust bar sits on the right, immediately left of the decelerate button.
 	if _thrust_lever:
-		_thrust_lever.visible = show_plane and not editing
+		_thrust_lever.visible = show_plane and not editing and not is_map_open()
 		_place_layout_btn(_thrust_lever, "thrust", Vector2(right - 88.0 - 12.0 - 40.0, by - 200.0), Vector2(40, 180))
 		if show_plane and occ:
 			var th = occ.get("thrust")
@@ -2049,6 +2057,10 @@ func toggle_map_panel() -> void:
 	else:
 		_close_all_panels()
 		g.call("open_overhead")
+	_refresh_player_hp()
+	_refresh_vehicle_touch()
+	if _touch:
+		_touch.queue_redraw()
 
 
 func toggle_ui_hidden() -> void:
@@ -2770,11 +2782,21 @@ func toggle_weapon_panel() -> void:
 	_toggle_panel(PanelId.INTERACT)
 
 
-func should_hide_weapon_ui() -> bool:
-	# 打开地图菜单或俯视选点时不显示弹药 HUD / 武器界面。
+func is_map_open() -> bool:
+	## 俯视地图或地图面板打开时，隐藏血条和角色交互按键。
 	if _overhead_ui and _overhead_ui.visible:
 		return true
-	return _open == PanelId.MAP
+	if _open == PanelId.MAP:
+		return true
+	var g := _game()
+	if g and g.get("map_view") and bool(g.get("map_view").get("is_open")):
+		return true
+	return false
+
+
+func should_hide_weapon_ui() -> bool:
+	# 打开地图菜单或俯视选点时不显示弹药 HUD / 武器界面。
+	return is_map_open()
 
 
 func _to_wheel_local(p: Vector2) -> Vector2:
@@ -2997,34 +3019,16 @@ func _place_layout_btn(b: Control, id: String, default_pos: Vector2, default_siz
 
 
 func _on_enter_exit_pressed() -> void:
-	# 若这一次已经在 gui_input 按下时处理过，就不要在抬起时再切换（会立刻下车）。
-	if _btn_enter_exit and bool(_btn_enter_exit.get_meta("skip_pressed", false)):
-		_btn_enter_exit.set_meta("skip_pressed", false)
-		return
+	# 点一下上车 / 再点一下下车。只走 Button 的抬起信号，避免
+	# 按下处理 + 抬起处理、或触摸+模拟鼠标把同一次点击做成上车立刻下车。
+	# try_toggle 本身还有短锁，防止同一次手势连触发两次。
 	var g := _game()
 	if g and g.get("vehicle_system"):
 		g.get("vehicle_system").call("try_toggle")
-	_refresh_vehicle_touch()
-
-
-func _on_enter_exit_gui(event: InputEvent) -> void:
-	# 按下即上车，不依赖 Button 的抬起判定（真机上容易被划成「长按」而点不中）。
-	var down := false
-	if event is InputEventScreenTouch:
-		down = (event as InputEventScreenTouch).pressed
-	elif event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
-		down = (event as InputEventMouseButton).pressed
-	else:
-		return
-	if not down:
-		return
 	if _btn_enter_exit:
-		_btn_enter_exit.set_meta("skip_pressed", true)
-	var g := _game()
-	if g and g.get("vehicle_system"):
-		g.get("vehicle_system").call("try_toggle")
+		_btn_enter_exit.disabled = false
+		_btn_enter_exit.set_pressed_no_signal(false)
 	_refresh_vehicle_touch()
-	_btn_enter_exit.accept_event()
 
 
 func _build_layout_overlay(root: Control) -> void:

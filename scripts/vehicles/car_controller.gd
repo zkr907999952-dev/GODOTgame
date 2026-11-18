@@ -19,17 +19,17 @@ const PEAK_RPM := 5200.0
 const FINAL_DRIVE := 3.54
 const GEAR_RATIOS := [0.0, 3.21, 2.11, 1.47, 1.14, 0.92, 0.74]
 # custom-3d-car: ENGINE_POWER = 15 * HP at ~1000 kg. Scale ~1.42 for this mass.
-# 0.2.23: base power raised (9800 → 11800) because 0.2.22 still felt weak.
-# Auto-nitro engages above NITRO_SPEED while accelerating; Shift still punches it.
-# Auto nitro uses ENGINE_POWER_NITRO; Shift on top can hold it even below the
-# speed gate. Combined (Shift + already auto) stays on the nitro curve.
-const ENGINE_POWER := 11800.0
-const ENGINE_POWER_NITRO := 17800.0
-const ENGINE_POWER_REV := 6200.0
-# Auto-nitro gate: 24 m/s ≈ 86 km/h. Feels like the second-stage rush after
-# the first few gears; drops out 3 m/s below so it doesn't chatter.
-const NITRO_SPEED := 24.0
-const NITRO_SPEED_DROP := 21.0
+# 0.2.24: more power / torque so a hard launch can spin the drive wheels
+# (burnout). Holding accelerate uses nitro (blue flames + extra power);
+# PC Shift still adds a slightly stronger manual punch on top.
+const ENGINE_POWER := 15200.0
+const ENGINE_POWER_NITRO := 20500.0
+const ENGINE_POWER_SHIFT := 24000.0
+const ENGINE_POWER_REV := 7800.0
+const TIRE_MU := 1.15
+const ARCADE_GRIP := 3.4
+const LONG_SLIP_STIFF := 2200.0
+const WHEEL_INERTIA := 1.15
 const BRAKE_FORCE_MULT := 1.5
 const HANDBRAKE_MULT := 3.0
 # Suspension: weight/wheel ≈ 3480 N. 0.2.23 raises the rest length again
@@ -74,6 +74,8 @@ var _wheel_steer: Array[bool] = []
 var _wheel_drive: Array[bool] = []
 var _wheel_prev_len: PackedFloat32Array = PackedFloat32Array()
 var _wheel_in_contact: Array[bool] = []
+var _wheel_omega: PackedFloat32Array = PackedFloat32Array()
+var _wheel_long_slip: PackedFloat32Array = PackedFloat32Array()
 var _vis_spin: float = 0.0
 var spawn_map: String = "city"
 
@@ -113,6 +115,8 @@ func _ready() -> void:
 	_wheel_hit_pos.resize(4)
 	_wheel_hit_n.resize(4)
 	_wheel_side.resize(4)
+	_wheel_omega.resize(4)
+	_wheel_long_slip.resize(4)
 	call_deferred("_restore_wheel_positions")
 
 
@@ -289,14 +293,10 @@ func _drive(delta: float) -> void:
 	var speed := linear_velocity.length()
 	var fwd := -global_transform.basis.z
 	var long_speed := linear_velocity.dot(fwd)
-	# Auto nitro: after the car has accelerated past NITRO_SPEED while the
-	# throttle is in, the boost stays on until speed falls below the drop gate
-	# or the driver lifts. Shift is a manual punch that works at any speed.
-	if throttle_in > 0.35 and long_speed >= NITRO_SPEED:
-		nitro_auto = true
-	elif throttle_in < 0.12 or long_speed < NITRO_SPEED_DROP:
-		nitro_auto = false
-	nitro_active = occupied and throttle_in > 0.12 and (nitro or nitro_auto)
+	# 按下加速使用氮气加速: nitro is on the whole time the accel / throttle
+	# is held. Releasing accel ends it. Shift (nitro flag) is an extra punch.
+	nitro_auto = false
+	nitro_active = occupied and throttle_in > 0.12
 	var steer_limit := MAX_STEER / (1.0 + speed * 0.022)
 	var steer_target := steer_in * steer_limit
 	steer_angle = move_toward(steer_angle, steer_target, STEER_SPEED * delta)
@@ -346,6 +346,8 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 			if i < _wheel_slip.size():
 				_wheel_slip[i] = 0.0
 				_wheel_in_contact[i] = false
+			if i < _wheel_long_slip.size():
+				_wheel_long_slip[i] = 0.0
 			continue
 		var point := ray.get_collision_point()
 		var dist := attach.distance_to(point)
@@ -385,19 +387,58 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 			long_force *= HANDBRAKE_MULT
 		elif brake_in > 0.05:
 			long_force += -signf(long_v) * brake_in * power * BRAKE_FORCE_MULT / float(maxi(_wheels.size(), 1))
-		# Drive: rear wheels, force along the visual nose (-Z). Custom-3d-car
-		# used +Z because its mesh faces +Z; ours faces -Z, so no sign flip.
+		# Drive: rear wheels, force along the visual nose (-Z), capped by
+		# tire friction so a hard launch can spin the wheels (burnout).
 		if occupied and _wheel_drive[i] and not handbrake:
-			var mult := power / float(drive_count)
+			var power_use := power
+			if nitro and nitro_active:
+				power_use = ENGINE_POWER_SHIFT
+			elif nitro_active:
+				power_use = ENGINE_POWER_NITRO
+			if throttle_in < -0.02:
+				power_use = ENGINE_POWER_REV
+			var mult := power_use / float(drive_count)
 			var ratio: float = GEAR_RATIOS[gear] * FINAL_DRIVE * 0.22
 			mult *= maxf(ratio, 0.4)
 			if rpm > REDLINE_RPM:
 				mult = 0.0
 			# Braking if throttle is against current motion.
 			if throttle_in * long_v < -0.05 and absf(long_v) > 1.0:
-				long_force += -signf(long_v) * absf(throttle_in) * power * BRAKE_FORCE_MULT / float(drive_count)
+				long_force += -signf(long_v) * absf(throttle_in) * power_use * BRAKE_FORCE_MULT / float(drive_count)
 			else:
-				long_force += wheel_fwd.dot(fwd) * throttle_in * mult
+				var want := wheel_fwd.dot(fwd) * throttle_in * mult
+				# Arcade grip stays punchy and predictable (force is always
+				# along the requested drive). A hard standing-start still
+				# exceeds the cap so the drive wheels can spin (burnout) and
+				# leave black marks, without yawing the car chaotically.
+				var mu := TIRE_MU * ARCADE_GRIP
+				if throttle_in > 0.7 and absf(long_v) < 5.0:
+					mu *= lerpf(0.78, 1.0, clampf(absf(long_v) / 5.0, 0.0, 1.0))
+				var max_fx := maxf(mu * maxf(susp_n, 2000.0), 2500.0)
+				var fx := clampf(want, -max_fx, max_fx)
+				long_force += fx
+				var ground_w := long_v / maxf(r, 0.2)
+				var omega := _wheel_omega[i] if i < _wheel_omega.size() else ground_w
+				if absf(want) > max_fx * 1.02 and absf(throttle_in) > 0.65 and absf(long_v) < 9.0:
+					var extra := (absf(want) - max_fx) / maxf(WHEEL_INERTIA, 0.2)
+					var spin := clampf(extra * 0.12, 0.0, 90.0) * signf(want)
+					omega = ground_w + spin
+				else:
+					omega = lerpf(omega, ground_w, clampf(dt * 8.0, 0.0, 1.0))
+				if i < _wheel_omega.size():
+					_wheel_omega[i] = omega
+				if i < _wheel_long_slip.size():
+					_wheel_long_slip[i] = absf(omega * r - long_v)
+		else:
+			# Non-driven / coasting: wheel speed follows the road.
+			var ground_w := long_v / maxf(r, 0.2)
+			if i < _wheel_omega.size():
+				_wheel_omega[i] = lerpf(_wheel_omega[i], ground_w, clampf(dt * 8.0, 0.0, 1.0))
+			if i < _wheel_long_slip.size():
+				_wheel_long_slip[i] = 0.0
+		if i < _wheel_slip.size():
+			var long_s := float(_wheel_long_slip[i]) if i < _wheel_long_slip.size() else 0.0
+			_wheel_slip[i] = maxf(_wheel_slip[i], long_s)
 		state.apply_force(wheel_fwd * long_force, point - origin)
 
 
@@ -428,9 +469,20 @@ func _apply_visuals(delta: float) -> void:
 		return
 	var fwd := -global_transform.basis.z
 	var long_speed := linear_velocity.dot(fwd)
-	# Forward motion must spin the wheel so the contact patch travels backward
-	# (rotate around local X with a negative sign). See custom-3d-car _wheel_spin.
-	_vis_spin += -(long_speed / maxf(visuals.wheel_r, 0.2)) * delta
+	# Forward motion (or a burnout wheel-spin) rotates the mesh so the
+	# contact patch travels backward (negative local X). See custom-3d-car.
+	var spin_w := long_speed / maxf(visuals.wheel_r, 0.2)
+	if _wheel_omega.size() >= 1:
+		var acc := 0.0
+		var n := 0
+		for i in _wheel_omega.size():
+			if i < _wheel_drive.size() and _wheel_drive[i]:
+				acc += _wheel_omega[i]
+				n += 1
+		if n > 0:
+			spin_w = acc / float(n)
+	# Sign: -(long_speed / radius) so forward travel spins the contact patch backward.
+	_vis_spin += -spin_w * delta
 	var susp: Array = []
 	var travels: Array = []
 	for i in _wheels.size():

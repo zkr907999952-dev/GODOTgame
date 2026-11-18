@@ -18,8 +18,8 @@ const MASS_KG := 14000.0
 const WING_AREA := 78.0  # m², F-22 class
 const WING_SPAN := 13.6
 const MAC := 5.7  # mean aerodynamic chord
-const THRUST_DRY := 520000.0  # N, Ace Combat-style punch (~3.8 g dry)
-const THRUST_AB := 880000.0  # ~6.4 g with hold-to-afterburner
+const THRUST_DRY := 680000.0  # N, 0.2.24 punch (~4.9 g dry)
+const THRUST_AB := 1120000.0  # ~8.1 g with hold-to-afterburner
 const CD0 := 0.028
 const K_INDUCED := 0.11
 const CL_ALPHA := 4.4  # per radian
@@ -239,11 +239,14 @@ func _physics_process(delta: float) -> void:
 	# Retract only when the weight is off the wheels and AGL is past the
 	# Ace Combat / old-project threshold. Auto-extend again on approach.
 	if not gear_manual:
-		if (not weight_on_gear()) and airborne and _agl > GEAR_AUTO_RETRACT_AGL:
+		# Retract once clearly off the pavement (AGL + no weight on the legs).
+		# Do not wait on the airborne flag alone — a late flag used to leave
+		# the gear hanging after a normal takeoff.
+		if (not weight_on_gear()) and _agl > GEAR_AUTO_RETRACT_AGL and airspeed > 18.0:
 			gear_want = 0.0
 		elif _agl < GEAR_AUTO_EXTEND_AGL or weight_on_gear():
 			gear_want = 1.0
-	gear = move_toward(gear, gear_want, delta * (1.55 if gear_manual else 0.55))
+	gear = move_toward(gear, gear_want, delta * (1.55 if gear_manual else 0.95))
 	# Signed: forward (along the visual nose) spins the contact patch backward.
 	var long_spin := linear_velocity.dot(-global_transform.basis.z)
 	_vis_spin += -(long_spin / 0.42) * delta * (1.0 if _on_wheels else 0.15)
@@ -360,7 +363,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var ctrl_s := clampf(airspeed / 42.0, 0.22, 1.55) * (1.0 - 0.55 * stall)
 	if not airborne and airspeed < ROTATE_SPEED * 0.70:
 		ctrl_s *= 0.15
-	var want_pitch := ctrl_pitch * 1.45 * ctrl_s
+	var want_pitch := ctrl_pitch * 1.90 * ctrl_s
 	var want_roll := ctrl_roll * 2.15 * ctrl_s
 	var want_yaw := ctrl_yaw * 0.62 * ctrl_s
 	# Weathercock / AoA stability (godot-simplified-flightsim tail: drag aft).
@@ -444,9 +447,10 @@ func _apply_gear_suspension(state: PhysicsDirectBodyState3D, xf: Transform3D, _f
 		var spring := GEAR_STIFF * maxf(compression, 0.0) - GEAR_DAMP * rel_v
 		spring = clampf(spring, -MASS_KG * 12.0, MASS_KG * 18.0)
 		state.apply_force(nrm * spring, r_arm)
-	if hits >= 1 and gear > 0.35 and agl_min < 2.4:
+	# Weight-on-wheels is decided in _probe_ground (which also measures AGL
+	# with a long downward ray). Do not overwrite a higher in-flight AGL here.
+	if hits >= 1 and gear > 0.35 and agl_min < 1.2:
 		_on_wheels = true
-		_agl = maxf(0.0, agl_min)
 	return Vector3.ZERO
 
 
@@ -471,19 +475,15 @@ func _probe_ground(state: PhysicsDirectBodyState3D, xf: Transform3D) -> void:
 		var d: float = start.distance_to(hit["position"])
 		agl_min = minf(agl_min, d)
 	_on_wheels = hits >= 1 and gear > 0.35 and agl_min < 2.1
-	if agl_min > 1e8:
-		# Short contact rays missed — measure AGL with a long world-down ray
-		# so auto-retract (and "are we still on the runway?") work in flight.
-		# A miss here used to leave _agl at 0, which looked like "on the ground".
-		var origin := xf.origin + Vector3(0.0, 2.0, 0.0)
-		var q3 := PhysicsRayQueryParameters3D.create(origin, origin + Vector3(0.0, -400.0, 0.0), 1, exclude)
-		var hit3 := space.intersect_ray(q3)
-		if hit3.is_empty():
-			_agl = 400.0
-		else:
-			_agl = maxf(0.0, origin.distance_to(hit3["position"]) - 2.0)
+	# Always measure AGL with a long world-down ray so auto-retract works
+	# after takeoff even if a short contact ray still grazes.
+	var origin := xf.origin + Vector3(0.0, 2.0, 0.0)
+	var q3 := PhysicsRayQueryParameters3D.create(origin, origin + Vector3(0.0, -400.0, 0.0), 1, exclude)
+	var hit3 := space.intersect_ray(q3)
+	if hit3.is_empty():
+		_agl = 400.0 if agl_min > 1e8 else maxf(0.0, agl_min - 0.7)
 	else:
-		_agl = maxf(0.0, agl_min - 0.7)
+		_agl = maxf(0.0, origin.distance_to(hit3["position"]) - 2.0)
 	# Airborne if not on wheels or clearly climbing with speed.
 	airborne = (not _on_wheels) or (_agl > 2.4 and airspeed > ROTATE_SPEED * 0.7)
 

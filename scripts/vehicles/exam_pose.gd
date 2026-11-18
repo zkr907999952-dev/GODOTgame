@@ -17,23 +17,24 @@ const FK := {
 	"C_Spine_d": Vector3(0.02, 0.0, 0.0),
 	"C_Neck_a": Vector3(-0.10, 0.0, 0.0),
 	"C_Head_a": Vector3(-0.06, 0.0, 0.0),
-	# Legs: x = flex, y = twist, z = abduct. 0.2.23: tighter thigh abduction
-	# than 0.2.22's 0.40 rad; IK plants the calves on the stirrup pads.
-	"L_UpperLeg_a": Vector3(-0.50, 0.05, 0.24),
-	"R_UpperLeg_a": Vector3(-0.50, -0.05, -0.24),
-	"L_Foreleg_a": Vector3(0.88, 0.0, 0.04),
-	"R_Foreleg_a": Vector3(0.88, 0.0, -0.04),
-	"L_Foot_a": Vector3(0.22, 0.10, 0.06),
-	"R_Foot_a": Vector3(0.22, -0.10, -0.06),
-	# Arms: smoother arc to the armrests, less shrugged / kinked shoulders.
-	"L_Shoulder_a": Vector3(0.02, 0.06, 0.10),
-	"R_Shoulder_a": Vector3(0.02, -0.06, -0.10),
-	"L_UpperArm_a": Vector3(0.16, 0.22, 0.32),
-	"R_UpperArm_a": Vector3(0.16, -0.22, -0.32),
-	"L_Forearm_a": Vector3(0.28, 0.0, 0.08),
-	"R_Forearm_a": Vector3(0.28, 0.0, -0.08),
-	"L_Hand_a": Vector3(0.08, 0.0, 0.0),
-	"R_Hand_a": Vector3(0.08, 0.0, 0.0),
+	# Legs: x = flex, y = twist, z = abduct. 0.2.24: open the thighs just
+	# enough that the calves can extend outward along the (smaller) stirrup
+	# pads, and stretch the shins forward so they share the pad axis.
+	"L_UpperLeg_a": Vector3(-0.42, 0.04, 0.34),
+	"R_UpperLeg_a": Vector3(-0.42, -0.04, -0.34),
+	"L_Foreleg_a": Vector3(0.58, 0.0, 0.03),
+	"R_Foreleg_a": Vector3(0.58, 0.0, -0.03),
+	"L_Foot_a": Vector3(0.16, 0.08, 0.04),
+	"R_Foot_a": Vector3(0.16, -0.08, -0.04),
+	# Arms: flatter, resting naturally on the armrests (less bent / hiked elbows).
+	"L_Shoulder_a": Vector3(0.00, 0.04, 0.06),
+	"R_Shoulder_a": Vector3(0.00, -0.04, -0.06),
+	"L_UpperArm_a": Vector3(0.08, 0.16, 0.42),
+	"R_UpperArm_a": Vector3(0.08, -0.16, -0.42),
+	"L_Forearm_a": Vector3(0.12, 0.0, 0.04),
+	"R_Forearm_a": Vector3(0.12, 0.0, -0.04),
+	"L_Hand_a": Vector3(0.04, 0.0, 0.0),
+	"R_Hand_a": Vector3(0.04, 0.0, 0.0),
 }
 
 
@@ -123,8 +124,8 @@ static func _ik_leg(skel: Skeleton3D, left: bool, target: Vector3) -> void:
 	var axis_dir := to_t.normalized()
 	# Pole: out to the patient's side (mesh +X is left) and slightly "up" (face).
 	# In skeleton/Body space after lying: +X = left, +Y = toward head, +Z = face/up.
-	# Pole slightly out and face-up, less side pull so the shin stays on the pad.
-	var pole := Vector3(0.28 if left else -0.28, 0.06, 0.82)
+	# A little more side so the shin stays coaxial with the outward stirrup pad.
+	var pole := Vector3(0.42 if left else -0.42, 0.02, 0.70)
 	var pole_n := pole - axis_dir * pole.dot(axis_dir)
 	if pole_n.length_squared() < 1e-6:
 		pole_n = Vector3(0, 0, 1)
@@ -170,9 +171,9 @@ static func _ik_arm(skel: Skeleton3D, left: bool, target: Vector3) -> void:
 	if to_t.length_squared() < 1e-8:
 		return
 	var axis_dir := to_t.normalized()
-	# Pole: slightly out and toward the feet so the arm flows to the
-	# armrest in a smooth arc instead of a hiked, kinked elbow.
-	var pole := Vector3(0.48 if left else -0.48, -0.22, 0.18)
+	# Pole: slightly out and down so the arm lies flatter on the armrest
+	# instead of a hiked, kinked elbow.
+	var pole := Vector3(0.32 if left else -0.32, -0.06, -0.08)
 	var pole_n := pole - axis_dir * pole.dot(axis_dir)
 	if pole_n.length_squared() < 1e-6:
 		pole_n = Vector3(0, 0, 1)
@@ -228,6 +229,27 @@ static func _first_child_bone(skel: Skeleton3D, idx: int) -> int:
 		if skel.get_bone_parent(i) == idx:
 			return i
 	return -1
+
+
+static func apply_look(skel: Skeleton3D, yaw: float, pitch: float) -> void:
+	## Rotate neck / head with the first-person look so the head follows the camera.
+	## yaw / pitch use the same signs as the exam-bed camera extra euler
+	## (positive pitch looks down in Godot camera convention).
+	if skel == null:
+		return
+	var neck_e := Vector3(pitch * 0.35, yaw * 0.40, 0.0)
+	var head_e := Vector3(pitch * 0.65, yaw * 0.60, 0.0)
+	_add_local_euler(skel, "C_Neck_a", neck_e)
+	_add_local_euler(skel, "C_Head_a", head_e)
+	skel.force_update_transform()
+
+
+static func _add_local_euler(skel: Skeleton3D, name: String, e: Vector3) -> void:
+	var i := skel.find_bone(name)
+	if i < 0:
+		return
+	var cur := skel.get_bone_pose_rotation(i)
+	skel.set_bone_pose_rotation(i, cur * Quaternion.from_euler(e))
 
 
 static func head_world(skel: Skeleton3D) -> Transform3D:

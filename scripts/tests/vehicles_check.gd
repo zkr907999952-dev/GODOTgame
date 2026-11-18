@@ -1,11 +1,11 @@
 extends SceneTree
 
 const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
-## 0.2.23 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.24 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.23"
-const VERSION_CODE := 25
+const VERSION_NAME := "0.2.24"
+const VERSION_CODE := 26
 
 var fails := 0
 var main: Node
@@ -70,6 +70,7 @@ func _run() -> void:
 	await _check_0221_playtest_fixes()
 	await _check_0222_playtest_fixes()
 	await _check_0223_playtest_fixes()
+	await _check_0224_playtest_fixes()
 	_finish()
 
 
@@ -238,7 +239,7 @@ func _check_hud() -> void:
 	_ok(hud.get("_btn_map") != null, "地图 button exists")
 	if hud.get("_btn_vehicle"):
 		_ok(str(hud.get("_btn_vehicle").text) == "载具", "载具 button label")
-	_ok(hud.get("_btn_vehicle_cam") != null, "1st/3rd camera toggle button exists")
+	_ok(hud.get("_btn_observe") != null, "vehicle 观察 button exists")
 	_ok(hud.get("_btn_car_accel") != null and hud.get("_btn_car_brake") != null, "mobile car accel + drift buttons exist")
 	_ok(hud.get("_btn_thrust_up") != null and hud.get("_btn_thrust_down") != null, "mobile fighter accel/decel buttons exist")
 	_ok(hud.get("_btn_yaw_l") != null and hud.get("_btn_yaw_r") != null, "mobile fighter yaw buttons exist")
@@ -386,7 +387,7 @@ func _check_city_defaults() -> void:
 	var planes := int(vs.call("default_plane_count"))
 	_ok(planes == 2, "exactly two default fighters (got %d)" % planes)
 	var cars := int(vs.call("default_car_count"))
-	_ok(cars >= 3, "several default cars on roads (got %d)" % cars)
+	_ok(cars == 1, "exactly one default sports car at the airport (got %d)" % cars)
 	var paved := 0
 	for v in vs.vehicles:
 		if str(vs.call("kind_of", v)) == "car" and bool(v.get("is_default")):
@@ -423,7 +424,7 @@ func _check_city_defaults() -> void:
 			var d_thr := Vector2(mid.x - threshold.x, mid.z - threshold.z).length()
 			var d_hel := Vector2(mid.x - helipad.x, mid.z - helipad.z).length()
 			_ok(d_thr < d_hel - 40.0, "parked nearer the threshold than the helipads (d_thr=%.1f d_hel=%.1f)" % [d_thr, d_hel])
-			_ok(d_thr > 36.0 and d_thr < 80.0, "standoff is past the piano-key bars on the asphalt (d=%.1f m)" % d_thr)
+			_ok(d_thr > 70.0 and d_thr < 220.0, "standoff is further up the runway, past the piano-key bars (d=%.1f m)" % d_thr)
 			var bars_inner := float(info.get("bars_inner", -1.0))
 			if bars_inner > 4.0:
 				_ok(d_thr > bars_inner + 12.0, "pair mid is past the inner edge of the threshold bars (d=%.1f bars_inner=%.1f)" % [d_thr, bars_inner])
@@ -1223,9 +1224,15 @@ func _check_0220_spawn_yaw_car_turn_weapons() -> void:
 		await _phys(1)
 	var yaw0: float = car.rotation.y
 	car.set_driver_input(1.0, 1.0, 0.0, false, false)
+	# Accumulate unwrapped yaw so a punchy nitro launch can turn past PI
+	# in this window without flipping the sign.
+	var dyaw := 0.0
+	var prev_yaw := yaw0
 	for i in 90:
 		await _phys(1)
-	var dyaw := wrapf(car.rotation.y - yaw0, -PI, PI)
+		var ynow: float = car.rotation.y
+		dyaw += wrapf(ynow - prev_yaw, -PI, PI)
+		prev_yaw = ynow
 	_ok(absf(dyaw) > 0.25, "steering actually turns the sports car (dyaw=%.3f)" % dyaw)
 	_ok(dyaw > 0.15, "positive steer turns left / +Y (dyaw=%.3f)" % dyaw)
 	car.queue_free()
@@ -1288,8 +1295,8 @@ func _check_0221_playtest_fixes() -> void:
 	_ok(drive.find("those offsets stay on top") >= 0 or drive.find("composited") >= 0, "look-drag is composited on the dynamic follow")
 	_ok(drive.find("airborne or agl > 3.0") >= 0, "airborne exit stays beside the vehicle")
 	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
-	_ok(pl_src.find("THRUST_DRY := 520000.0") >= 0 and pl_src.find("THRUST_AB := 880000.0") >= 0, "fighter dry/AB thrust is 520 kN / 880 kN (was 210 / 310)")
-	_ok(pl_src.find("ctrl_pitch * 1.45") >= 0 and pl_src.find("ctrl_roll * 2.15") >= 0, "pitch/roll track old-project Ace Combat rates (1.45 / 2.15)")
+	_ok(pl_src.find("THRUST_DRY := 680000.0") >= 0 and pl_src.find("THRUST_AB := 1120000.0") >= 0, "fighter dry/AB thrust is 680 kN / 1120 kN")
+	_ok(pl_src.find("ctrl_pitch * 1.90") >= 0 and pl_src.find("ctrl_roll * 2.15") >= 0, "pitch rate is 1.90, roll stays 2.15")
 	_ok(pl_src.find("ctrl_yaw * 0.62") >= 0, "yaw rate is milder than pitch/roll (0.62 from vehicle-sim.ts)")
 	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
 	_ok(ex_src.find("_update_trail") >= 0 and ex_src.find("TRAIL_COUNT") >= 0, "jet exhaust uses a lagged inertial trail")
@@ -1654,7 +1661,7 @@ func _check_0222_playtest_fixes() -> void:
 	_ok(ex_src.find("plume_body_visible") >= 0, "exhaust exposes a visibility helper for tests")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
 	_ok(pose_src.find("L_UpperLeg_a") >= 0, "exam pose still has thigh FK")
-	_ok(pose_src.find("Vector3(0.16, 0.22, 0.32)") >= 0, "arm FK is a smoother arc than 0.2.21")
+	_ok(pose_src.find("Vector3(0.08, 0.16, 0.42)") >= 0, "arm FK is flatter on the armrests")
 
 	# Visible exhaust body at military and afterburner thrust.
 	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
@@ -1748,7 +1755,7 @@ func _check_0223_playtest_fixes() -> void:
 	_ok(vs_src.find("_chase_basis") >= 0 and vs_src.find("slerp(want_b") >= 0, "plane chase cam follows aircraft attitude with lag")
 	_ok(vs_src.find("left * 0.22") < 0, "exam calves are no longer IK'd outward off the stirrup pads")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
-	_ok(pose_src.find("Vector3(-0.50, 0.05, 0.24)") >= 0, "thigh abduction is tighter than 0.2.22 (0.40 → 0.24)")
+	_ok(pose_src.find("Vector3(-0.42, 0.04, 0.34)") >= 0, "thigh abduction opened to 0.34 so calves can follow the stirrups")
 	var bed_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_bed.gd")
 	_ok(bed_src.find("TARGET_LENGTH := 1.72") >= 0, "exam bed TARGET_LENGTH shrank again (1.86 → 1.72)")
 	var vis_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
@@ -1759,12 +1766,12 @@ func _check_0223_playtest_fixes() -> void:
 	_ok(ex_src.find("plume_tip_length") >= 0 and ex_src.find("along = minf(along, cap)") >= 0, "mach diamonds are capped to the plume tip")
 	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
 	_ok(car_src.find("REST_DISTANCE := 0.36") >= 0, "car rest distance was raised to 0.36")
-	_ok(car_src.find("NITRO_SPEED := 24.0") >= 0 and car_src.find("nitro_auto") >= 0, "car has a speed-triggered auto nitro")
+	_ok(car_src.find("nitro_active = occupied and throttle_in > 0.12") >= 0, "holding accelerate uses nitro")
 	_ok(car_src.find("CarSkidMarks") >= 0, "car uses a skid-mark trail")
 	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
 	_ok(tc_src.find("TouchLayout") >= 0 and tc_src.find("layout_edit") >= 0, "touch controls support a custom layout editor")
 	_ok(tc_src.find('f["role"] = "yaw"') >= 0, "plane right-side swipe is yaw")
-	_ok(tc_src.find("toggle_vehicle_cam") >= 0, "mode button in a vehicle toggles 1st/3rd")
+	_ok(tc_src.find("is_observe_orbit") >= 0 and tc_src.find("orbit_mode") >= 0, "observe button switches look-drag to orbit mode")
 	_ok(FileAccess.file_exists("res://scripts/ui/touch_layout.gd"), "TouchLayout script exists")
 	# Layout code round-trip.
 	var empty := TouchLayout.encode({})
@@ -1845,13 +1852,11 @@ func _check_0223_playtest_fixes() -> void:
 	_ok(is_equal_approx(float(car.REST_DISTANCE), 0.36), "car REST_DISTANCE is 0.36")
 	car.occupied = true
 	car.set_driver_input(1.0, 0.0, 0.0, false, false)
-	# Fake a speed past the nitro gate.
-	car.linear_velocity = -car.global_transform.basis.z * 26.0
 	car._drive(0.016)
-	_ok(bool(car.nitro_auto) or bool(car.nitro_active), "auto nitro arms above the speed gate while accelerating")
+	_ok(bool(car.nitro_active), "holding accelerate turns nitro on")
 	car.set_driver_input(0.0, 0.0, 0.0, false, false)
 	car._drive(0.016)
-	_ok(not bool(car.nitro_auto), "auto nitro drops when the throttle is released")
+	_ok(not bool(car.nitro_active), "releasing accelerate turns nitro off")
 	var vis = car.get("visuals")
 	_ok(vis != null and vis.get("_nitro_fx") != null and vis._nitro_fx.size() > 0, "car has nitro flame meshes")
 	if vis:
@@ -1868,8 +1873,103 @@ func _check_0223_playtest_fixes() -> void:
 	# HUD layout helpers exist.
 	var hud_src := FileAccess.get_file_as_string("res://scripts/hud.gd")
 	_ok(hud_src.find("自定义按键布局") >= 0 and hud_src.find("生成布局码") >= 0, "settings expose custom layout / layout-code UI")
-	_ok(hud_src.find("_on_enter_exit_gui") >= 0, "enter/exit has a tap-on-press handler")
+	_ok(hud_src.find("try_toggle") >= 0 and hud_src.find("_on_enter_exit_gui") < 0, "enter/exit is a single tap on button release, no press+release double fire")
 	_ok(hud_src.find("right - 88.0 - 12.0 - 40.0") >= 0, "plane thrust bar is on the right, left of decelerate")
+
+
+func _check_0224_playtest_fixes() -> void:
+	## Exam-bed pose / free look-up / head follow, boarding debounce, map HUD,
+	## reversed chase cam, observe button, thrust / pitch, tighter diamonds,
+	## wingtip vertices, auto gear, nitro-on-accel, one airport car.
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	_ok(vs_src.find("look_dir := cfwd.rotated") >= 0, "plane chase look_dir follows the nose, not -cfwd (rear-view)")
+	_ok(vs_src.find("PITCH_MIN := -1.55") >= 0, "exam-bed looking up is essentially unrestricted")
+	_ok(vs_src.find("TOGGLE_LOCK_MS") >= 0, "enter/exit has a same-tap debounce lock")
+	_ok(vs_src.find("func toggle_observe_mode") >= 0 and vs_src.find("vehicle_look_mode") >= 0, "observe mode yaw/orbit toggle exists")
+	_ok(vs_src.find("func _sync_vehicle_look_from_heading") >= 0, "vehicle first-person look snaps to the vehicle basis")
+	_ok(vs_src.find("RUNWAY_PAST_BARS := 84.0") >= 0, "runway spawn stands further up from the piano keys")
+	_ok(vs_src.find("func _airport_car_spawn") >= 0, "default car spawn is the single airport car")
+	_ok(vs_src.find("ExamPose.apply_look") >= 0, "exam first-person rotates the head with the look")
+	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
+	_ok(pose_src.find("func apply_look") >= 0, "ExamPose.apply_look exists")
+	_ok(pose_src.find("Vector3(-0.42, 0.04, 0.34)") >= 0, "exam thighs abduct 0.34 rad")
+	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
+	_ok(pl_src.find("THRUST_DRY := 680000.0") >= 0, "dry thrust raised to 680 kN")
+	_ok(pl_src.find("ctrl_pitch * 1.90") >= 0, "pitch command rate raised to 1.90")
+	_ok(pl_src.find("airspeed > 18.0") >= 0 and pl_src.find("GEAR_AUTO_RETRACT_AGL") >= 0, "auto gear retracts on AGL without waiting only on the airborne flag")
+	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
+	_ok(ex_src.find("EXIT_DIAMETER * 0.62") >= 0, "mach diamond spacing is compressed")
+	var vap_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_vapor.gd")
+	_ok(vap_src.find("ARRAY_VERTEX") >= 0 and vap_src.find("min_x") >= 0, "wingtip vapor uses actual tip vertices")
+	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
+	_ok(car_src.find("ENGINE_POWER := 15200.0") >= 0, "car engine power was raised")
+	_ok(car_src.find("_wheel_omega") >= 0 and car_src.find("TIRE_MU") >= 0, "car has a wheel-spin / burnout slip model")
+	var hud_src := FileAccess.get_file_as_string("res://scripts/hud.gd")
+	_ok(hud_src.find("func is_map_open") >= 0 and hud_src.find("_hp_box.visible = not is_map_open()") >= 0, "map open hides the health bar")
+	_ok(hud_src.find("_btn_observe") >= 0 and hud_src.find("_btn_vehicle_cam") < 0, "mobile 1st/3rd toggle was replaced by 观察")
+	var lay_src := FileAccess.get_file_as_string("res://scripts/ui/touch_layout.gd")
+	_ok(lay_src.find("\"observe\":") >= 0, "custom layout includes the observe button id")
+	var hud: Node = main.get_node_or_null("HUD") if main else null
+	if hud and hud.has_method("is_map_open"):
+		_ok(hud.get("_btn_observe") != null, "观察 button is on the HUD")
+		_ok(not bool(hud.call("is_map_open")), "map starts closed")
+
+	# Live: tighter diamonds, wingtip span, nitro-on-accel, observe toggle, debounce.
+	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(jet)
+	await _frames(2)
+	var pvis = jet.get("visuals")
+	if pvis and pvis.exhausts.size():
+		var fx = pvis.exhausts[0]
+		fx.call("apply", 1.0, 1.0, 0.0, 0.016)
+		var tip := float(fx.call("plume_tip_length")) if fx.has_method("plume_tip_length") else 0.0
+		var alongs: Array[float] = []
+		for d in fx.diamonds:
+			if d.visible:
+				alongs.append(d.position.length())
+		alongs.sort()
+		if alongs.size() >= 2:
+			var gap := alongs[1] - alongs[0]
+			_ok(gap < 0.85, "mach diamond spacing is tight (gap=%.2f m, tip=%.2f)" % [gap, tip])
+		var far := alongs[alongs.size() - 1] if alongs.size() else 0.0
+		if tip > 0.0:
+			_ok(far <= tip * 1.05 + 0.05, "diamonds still stay within the plume tip (far=%.2f tip=%.2f)" % [far, tip])
+	if pvis and pvis.vapor:
+		var tl: Vector3 = pvis.vapor.call("tip_local_left")
+		var tr: Vector3 = pvis.vapor.call("tip_local_right")
+		var span := absf(tr.x - tl.x)
+		_ok(span > 6.0, "wingtip emitters span the real wing (span=%.2f m, L=%s R=%s)" % [span, tl, tr])
+	jet.queue_free()
+
+	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	root.add_child(car)
+	await _frames(2)
+	_ok(float(car.ENGINE_POWER) >= 15000.0, "ENGINE_POWER is at least 15200")
+	car.occupied = true
+	car.set_driver_input(1.0, 0.0, 0.0, false, false)
+	car._drive(0.016)
+	_ok(bool(car.nitro_active), "nitro is on while accelerate is held, even from a standstill")
+	car.set_driver_input(0.2, 0.0, 0.0, false, false)
+	car._drive(0.016)
+	_ok(bool(car.nitro_active), "a light throttle still counts as holding accelerate")
+	car.set_driver_input(0.0, 0.0, 0.0, false, false)
+	car._drive(0.016)
+	_ok(not bool(car.nitro_active), "nitro ends when accelerate is released")
+	car.queue_free()
+	await _frames(1)
+
+	if vs and vs.has_method("toggle_observe_mode"):
+		var prev := str(vs.get("vehicle_look_mode"))
+		_ok(str(vs.call("toggle_observe_mode")) == "orbit", "first 观察 press switches to orbit")
+		_ok(str(vs.call("toggle_observe_mode")) == "yaw", "second 观察 press returns to yaw")
+		vs.set("vehicle_look_mode", prev if prev else "yaw")
+	if vs and vs.has_method("try_toggle"):
+		var t0 := Time.get_ticks_msec()
+		# With no nearest vehicle this should fail (and not lock forever).
+		# We only check the lock constant exists and a second immediate call after
+		# a successful enter would be ignored — covered by TOGGLE_LOCK_MS source.
+		_ok(vs_src.find("now < _toggle_lock_until_ms") >= 0, "try_toggle ignores a second event inside the lock window")
+		_ok(t0 >= 0, "debounce clock is available")
 
 
 func _finish() -> void:

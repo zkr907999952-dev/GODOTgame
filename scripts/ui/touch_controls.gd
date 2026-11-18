@@ -157,9 +157,15 @@ func _in_vehicle() -> bool:
 	return player != null and str(player.get("occupancy")) != ""
 
 
+func _map_open() -> bool:
+	return hud != null and hud.has_method("is_map_open") and bool(hud.call("is_map_open"))
+
+
 func _show_stick() -> bool:
 	if layout_edit:
 		return true
+	if _map_open():
+		return false
 	return _fp() or _in_drive()
 
 
@@ -288,11 +294,6 @@ func _default_item(id: String) -> Dictionary:
 			return {"center": c, "size": Vector2(STICK_SIZE, STICK_SIZE), "label": "摇杆"}
 		"mode":
 			var label := "切换·观察" if _fp() else "切换·控制"
-			if _in_drive() and not layout_edit:
-				var cam := "third"
-				if hud and hud.get("_vehicle_system"):
-					cam = str(hud.get("_vehicle_system").get("vehicle_cam"))
-				label = "第一人称" if cam == "first" else "第三人称"
 			return {"center": Vector2(v.x * 0.5, top + 22.0), "size": Vector2(112, 44), "label": label}
 		"crouch":
 			return {"center": Vector2(x + 8.0, y + 8.0) + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "下蹲"}
@@ -321,8 +322,11 @@ func _default_item(id: String) -> Dictionary:
 			return {"center": Vector2(lx, ly) + fire_sz2 * 0.5, "size": fire_sz2, "label": "左开火"}
 		"enter":
 			return {"center": Vector2(right - 54.0, safe.y + 72.0 + 24.0), "size": Vector2(108, 48), "label": "上下载具"}
-		"vcam":
-			return {"center": Vector2(right - 54.0, safe.y + 126.0 + 20.0), "size": Vector2(108, 40), "label": "载具视角"}
+		"observe":
+			var orbit := false
+			if hud and hud.get("_vehicle_system"):
+				orbit = str(hud.get("_vehicle_system").get("vehicle_look_mode")) == "orbit"
+			return {"center": Vector2(right - 54.0, safe.y + 126.0 + 20.0), "size": Vector2(108, 40), "label": "观察·开" if orbit else "观察"}
 		"accel":
 			return {"center": Vector2(right - 44.0, by - 180.0 + 26.0), "size": Vector2(88, 52), "label": "加速"}
 		"brake":
@@ -346,8 +350,13 @@ func _default_item(id: String) -> Dictionary:
 ## 按钮布局：id -> [Rect2, 文字]
 func buttons() -> Dictionary:
 	var out := {}
+	if _map_open() and not layout_edit:
+		# 打开地图时不显示角色交互按键，地图 UI 自己可用。
+		return out
 	var item_mode := _default_item("mode")
-	out["mode"] = [_rect_from("mode", item_mode["center"] - item_mode["size"] * 0.5, item_mode["size"]), item_mode["label"]]
+	# 载具里不显示角色「切换」键（不再用它切第一/第三人称）。
+	if layout_edit or not _in_drive():
+		out["mode"] = [_rect_from("mode", item_mode["center"] - item_mode["size"] * 0.5, item_mode["size"]), item_mode["label"]]
 	var walk := layout_edit or (_fp() and not _in_drive())
 	if walk:
 		var crouch_txt := "下蹲"
@@ -368,7 +377,7 @@ func buttons() -> Dictionary:
 			out["drag"] = [_rect_from("drag", it["center"] - it["size"] * 0.5, it["size"]), "放下" if _drag_holding() else "拖拽"]
 	if layout_edit:
 		# 载具按键也画出来，方便一次编好行走和载具两套位置。
-		for id in ["enter", "vcam", "accel", "brake", "thrust_up", "thrust_down", "yaw_l", "yaw_r", "gear", "thrust"]:
+		for id in ["enter", "observe", "accel", "brake", "thrust_up", "thrust_down", "yaw_l", "yaw_r", "gear", "thrust"]:
 			var it := _default_item(id)
 			out[id] = [_rect_from(id, it["center"] - it["size"] * 0.5, it["size"]), it["label"]]
 	return out
@@ -529,8 +538,14 @@ func _on_down(idx: int, p: Vector2) -> void:
 					fingers[k]["role"] = "orbit"
 			get_viewport().set_input_as_handled()
 			return
-		# 飞机：屏幕右侧左右划屏控制偏航幅度。
-		if str(player.get("occupancy")) == "plane" and p.x >= vp().x * 0.55:
+		var orbit_mode := false
+		if hud and hud.get("_vehicle_system") and hud.get("_vehicle_system").has_method("is_observe_orbit"):
+			orbit_mode = bool(hud.get("_vehicle_system").call("is_observe_orbit"))
+		if orbit_mode:
+			# 观察键打开：单指拖动旋转视角，松手回正。
+			f["role"] = "orbit"
+		elif str(player.get("occupancy")) == "plane" and p.x >= vp().x * 0.55:
+			# 飞机：屏幕右侧左右划屏控制偏航幅度。
 			f["role"] = "yaw"
 		else:
 			f["role"] = "none"
@@ -763,12 +778,7 @@ func _button(id: String, down: bool) -> void:
 	match id:
 		"mode":
 			if down:
-				if _in_drive() and hud and hud.get("_vehicle_system") and hud.get("_vehicle_system").has_method("toggle_vehicle_cam"):
-					hud.get("_vehicle_system").call("toggle_vehicle_cam")
-					if hud.has_method("_refresh_vehicle_touch"):
-						hud.call("_refresh_vehicle_touch")
-				else:
-					player.call("toggle_play_mode")
+				player.call("toggle_play_mode")
 				_release_all_except_buttons()
 		"jump":
 			if down:

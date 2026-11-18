@@ -162,35 +162,48 @@ func setup(wrap: Node3D) -> void:
 
 
 func _measure_wingtips() -> void:
+	## Use the actual leftmost / rightmost wing-mesh vertices in wrap space
+	## so the contrail starts on the tip, not on a blended AABB centre.
 	_tip_local_l = Vector3(-5.2, 0.2, 0.3)
 	_tip_local_r = Vector3(5.2, 0.2, 0.3)
 	if _wrap == null:
 		return
 	var parts: Array = []
 	parts.append_array(VehicleCommon.find_named(_wrap, "^wing_"))
-	parts.append_array(VehicleCommon.find_named(_wrap, "^aileron_"))
+	parts.append_array(VehicleCommon.find_named(_wrap, "wingtip"))
+	parts.append_array(VehicleCommon.find_named(_wrap, "WingTip"))
+	if parts.is_empty():
+		parts.append_array(VehicleCommon.find_named(_wrap, "^aileron_"))
 	if parts.is_empty():
 		return
-	var box := AABB()
-	var any := false
+	var left := _tip_local_l
+	var right := _tip_local_r
+	var min_x := 1e9
+	var max_x := -1e9
+	var found := false
 	for o in parts:
 		if not (o is Node3D):
 			continue
-		var wa := VehicleCommon.world_aabb(o as Node3D)
-		var mn := _wrap.to_local(wa.position)
-		var mx := _wrap.to_local(wa.position + wa.size)
-		var a2 := AABB(Vector3(minf(mn.x, mx.x), minf(mn.y, mx.y), minf(mn.z, mx.z)), (mx - mn).abs())
-		if not any:
-			box = a2
-			any = true
-		else:
-			box = box.merge(a2)
-	if not any:
-		return
-	var y := box.position.y * 0.2 + (box.position.y + box.size.y) * 0.8
-	var z := box.position.z * 0.25 + (box.position.z + box.size.z) * 0.75
-	_tip_local_l = Vector3(box.position.x, y, z)
-	_tip_local_r = Vector3(box.position.x + box.size.x, y, z)
+		for mi in VehicleCommon.mesh_instances(o as Node3D):
+			if mi == null or mi.mesh == null:
+				continue
+			var xf: Transform3D = _wrap.global_transform.affine_inverse() * mi.global_transform
+			for s in mi.mesh.get_surface_count():
+				var arr := mi.mesh.surface_get_arrays(s)
+				var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+				for v in verts:
+					var loc: Vector3 = xf * v
+					if loc.x < min_x:
+						min_x = loc.x
+						left = loc
+						found = true
+					if loc.x > max_x:
+						max_x = loc.x
+						right = loc
+						found = true
+	if found and (max_x - min_x) > 2.0:
+		_tip_local_l = left
+		_tip_local_r = right
 
 
 func _build_clouds() -> void:
