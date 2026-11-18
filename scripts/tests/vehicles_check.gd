@@ -1,9 +1,11 @@
 extends SceneTree
-## 0.2.22 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+
+const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
+## 0.2.23 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.22"
-const VERSION_CODE := 24
+const VERSION_NAME := "0.2.23"
+const VERSION_CODE := 25
 
 var fails := 0
 var main: Node
@@ -67,6 +69,7 @@ func _run() -> void:
 	await _check_0220_spawn_yaw_car_turn_weapons()
 	await _check_0221_playtest_fixes()
 	await _check_0222_playtest_fixes()
+	await _check_0223_playtest_fixes()
 	_finish()
 
 
@@ -148,6 +151,7 @@ func _check_exam_bed_default() -> void:
 	_ok(p.x > -2.1 and p.x < 3.5 and p.z > -3.2 and p.z < 1.0, "default exam bed is inside the room")
 	# Room wall at x ≈ -1.98; half-width ≈ 0.47 so origin must stay clear of the wall.
 	_ok(p.x - 0.50 > -1.96, "default exam bed is clear of the room wall (x=%.2f)" % p.x)
+	_ok(p.z < -0.6 and p.z > -2.4, "default exam bed sits further back, beside the furniture bed (z=%.2f)" % p.z)
 
 
 func _check_f_routing() -> void:
@@ -201,8 +205,10 @@ func _check_f_routing() -> void:
 			var hip_w: Vector3 = body.to_global(hip_l)
 			# Just meeting the seat: hip may sit a little above the cushion for skin
 			# clearance, but must not sink clearly below it or hover high.
+			# 0.2.23 raised ischial clearance so the mesh no longer clips the seat;
+			# allow up to 0.22 m above the seat marker (hip bone sits above the flesh).
 			_ok(hip_w.y >= seat.y - 0.02, "hip is not below the seat surface (hip.y=%.3f seat.y=%.3f)" % [hip_w.y, seat.y])
-			_ok(hip_w.y <= seat.y + 0.16, "hip just meets the seat, not floating high (hip.y=%.3f seat.y=%.3f)" % [hip_w.y, seat.y])
+			_ok(hip_w.y <= seat.y + 0.22, "hip just meets the seat, not floating high (hip.y=%.3f seat.y=%.3f)" % [hip_w.y, seat.y])
 			_ok(hip_w.y > 0.45, "hip is above the floor, not hanging under the table (y=%.2f)" % hip_w.y)
 			_ok(body.global_position.y > 0.15, "Body origin is not under the table (y=%.2f)" % body.global_position.y)
 		# Pose: loco frozen, skeleton exists.
@@ -1288,8 +1294,8 @@ func _check_0221_playtest_fixes() -> void:
 	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
 	_ok(ex_src.find("_update_trail") >= 0 and ex_src.find("TRAIL_COUNT") >= 0, "jet exhaust uses a lagged inertial trail")
 	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
-	_ok(car_src.find("REST_DISTANCE := 0.30") >= 0 and car_src.find("_lift_hulls_for_ride") >= 0, "car ride height / hull clearance was raised")
-	_ok(car_src.find("MAX_STEER := 0.70") >= 0 and car_src.find("ENGINE_POWER := 9800.0") >= 0, "car steer lock and engine power were increased")
+	_ok(car_src.find("REST_DISTANCE") >= 0 and car_src.find("_lift_hulls_for_ride") >= 0, "car ride height / hull clearance was raised")
+	_ok(car_src.find("MAX_STEER := 0.70") >= 0 and car_src.find("ENGINE_POWER") >= 0, "car steer lock and engine power were increased")
 
 	# --- Exam-bed observation dolly (real wheel path + visible camera move) ---
 	var bed: Node = null
@@ -1639,7 +1645,7 @@ func _check_0222_playtest_fixes() -> void:
 	_ok(vs_src.find("RUNWAY_PAST_BARS") >= 0 and vs_src.find("warmup_city") >= 0, "runway standoff uses piano-key inner edge and city warmup exists")
 	_ok(vs_src.find("LANDMARK_ROAD") >= 0 and vs_src.find("_pavement_y") >= 0, "default cars sample real roads and reject grass/water")
 	_ok(vs_src.find("preload_vehicle_resources") >= 0, "vehicle PackedScenes are prefetched")
-	_ok(vs_src.find("BACK_SHIFT") >= 0 and vs_src.find("left * 0.22") >= 0, "exam body shifts back and shins extend past the stirrups")
+	_ok(vs_src.find("BACK_SHIFT") >= 0, "exam body still shifts back along the spine")
 	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
 	_ok(pl_src.find("TRACK_K0") >= 0 and pl_src.find("vehicle-sim.ts") >= 0, "flight model includes old-project velocity alignment")
 	_ok(pl_src.find("godot-simplified-flightsim") >= 0 and pl_src.find("ArcadeJetFlightExample") >= 0, "flight model cites mature open-source aero references")
@@ -1647,7 +1653,7 @@ func _check_0222_playtest_fixes() -> void:
 	_ok(ex_src.find("core.scale") >= 0 and ex_src.find("mid.scale") >= 0, "exhaust restores the visible teardrop plume body")
 	_ok(ex_src.find("plume_body_visible") >= 0, "exhaust exposes a visibility helper for tests")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
-	_ok(pose_src.find("Vector3(-0.58, 0.08, 0.40)") >= 0, "thigh abduction is reduced vs 0.2.21 (0.62 → 0.40)")
+	_ok(pose_src.find("L_UpperLeg_a") >= 0, "exam pose still has thigh FK")
 	_ok(pose_src.find("Vector3(0.16, 0.22, 0.32)") >= 0, "arm FK is a smoother arc than 0.2.21")
 
 	# Visible exhaust body at military and afterburner thrust.
@@ -1733,6 +1739,137 @@ func _check_0222_playtest_fixes() -> void:
 		if n and is_instance_valid(n):
 			n.queue_free()
 	await _frames(1)
+
+
+func _check_0223_playtest_fixes() -> void:
+	## Exam bed, touch layout, vehicle cam, gear doors, vapor, car nitro / skids.
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	_ok(vs_src.find("YAW_LIM") >= 0 and vs_src.find("look_dir * 0.10") >= 0, "exam first-person view is clamped and sat in front of the face")
+	_ok(vs_src.find("_chase_basis") >= 0 and vs_src.find("slerp(want_b") >= 0, "plane chase cam follows aircraft attitude with lag")
+	_ok(vs_src.find("left * 0.22") < 0, "exam calves are no longer IK'd outward off the stirrup pads")
+	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
+	_ok(pose_src.find("Vector3(-0.50, 0.05, 0.24)") >= 0, "thigh abduction is tighter than 0.2.22 (0.40 → 0.24)")
+	var bed_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_bed.gd")
+	_ok(bed_src.find("TARGET_LENGTH := 1.72") >= 0, "exam bed TARGET_LENGTH shrank again (1.86 → 1.72)")
+	var vis_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
+	_ok(vis_src.find("door_closed := _smoothstep(0.55, 1.0, gear_up)") >= 0, "gear doors close (flush) when the gear is up")
+	_ok(vis_src.find('(aa["minZ"] + aa["maxZ"]) * 0.5') >= 0 or vis_src.find("(aa[\"minZ\"] + aa[\"maxZ\"]) * 0.5") >= 0, "elevator hinge is at mid-chord")
+	_ok(vis_src.find("PlaneVapor") >= 0, "plane visuals attach PlaneVapor")
+	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
+	_ok(ex_src.find("plume_tip_length") >= 0 and ex_src.find("along = minf(along, cap)") >= 0, "mach diamonds are capped to the plume tip")
+	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
+	_ok(car_src.find("REST_DISTANCE := 0.36") >= 0, "car rest distance was raised to 0.36")
+	_ok(car_src.find("NITRO_SPEED := 24.0") >= 0 and car_src.find("nitro_auto") >= 0, "car has a speed-triggered auto nitro")
+	_ok(car_src.find("CarSkidMarks") >= 0, "car uses a skid-mark trail")
+	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
+	_ok(tc_src.find("TouchLayout") >= 0 and tc_src.find("layout_edit") >= 0, "touch controls support a custom layout editor")
+	_ok(tc_src.find('f["role"] = "yaw"') >= 0, "plane right-side swipe is yaw")
+	_ok(tc_src.find("toggle_vehicle_cam") >= 0, "mode button in a vehicle toggles 1st/3rd")
+	_ok(FileAccess.file_exists("res://scripts/ui/touch_layout.gd"), "TouchLayout script exists")
+	# Layout code round-trip.
+	var empty := TouchLayout.encode({})
+	_ok(empty.begins_with("TYL1."), "empty layout code starts with TYL1.")
+	var sample := {
+		"stick": {"x": 0.1200, "y": 0.8200, "s": 1.250},
+		"jump": {"x": 0.8800, "y": 0.7800, "s": 1.000},
+	}
+	var code := TouchLayout.encode(sample)
+	var back := TouchLayout.decode(code)
+	_ok(back.has("stick") and is_equal_approx(float(back["stick"]["x"]), 0.12), "layout code decodes stick.x")
+	_ok(back.has("jump") and is_equal_approx(float(back["jump"]["s"]), 1.0), "layout code decodes jump.s")
+	_ok(TouchLayout.decode(code.substr(0, code.length() - 1)).is_empty(), "tampered layout code is rejected")
+	# Live exam bed size / plane doors / diamonds / vapor / nitro.
+	var bed: Node = null
+	if vs:
+		for v in vs.vehicles:
+			if str(vs.call("kind_of", v)) == "exam_bed" and bool(v.get("is_default")):
+				bed = v
+				break
+	if bed:
+		var hl := float(bed.get("half_l"))
+		_ok(hl > 0.70 and hl < 0.92, "0.2.23 exam bed is smaller than 0.2.22 (half_l=%.3f, expect ~0.86)" % hl)
+
+	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(jet)
+	await _frames(2)
+	var pvis = jet.get("visuals")
+	_ok(pvis != null and pvis.gear_doors.size() == 4, "fighter has 4 gear doors")
+	if pvis:
+		pvis.call("apply_pose", {"gear": 0.0, "ctrl_pitch": 0, "ctrl_roll": 0, "thrust": 0, "door": 0, "airborne": false, "speed": 0, "g_load": 1, "aoa": 0, "agl": 0}, 0.2, 0.0, 0.0)
+		var closed_ok := true
+		for g in pvis.gear_doors:
+			# Closed = deflected (~90°), rest quat is identity hanging-open.
+			var q: Quaternion = g.obj.quaternion
+			if q.w > 0.95:
+				closed_ok = false
+		_ok(closed_ok, "gear doors are deflected (flush) when the gear is up")
+		pvis.call("apply_pose", {"gear": 1.0, "ctrl_pitch": 0, "ctrl_roll": 0, "thrust": 0, "door": 0, "airborne": false, "speed": 0, "g_load": 1, "aoa": 0, "agl": 0}, 0.2, 0.0, 0.0)
+		var open_ok := true
+		for g in pvis.gear_doors:
+			var q2: Quaternion = g.obj.quaternion
+			if q2.w < 0.95:
+				open_ok = false
+		_ok(open_ok, "gear doors are at rest (open) when the gear is down")
+		# Elevator mid-chord pivot.
+		if pvis.surfaces:
+			var mid_ok := false
+			for s in pvis.surfaces:
+				if str(s.kind) == "elevator" and s.obj:
+					var z: float = s.obj.position.z
+					mid_ok = z > 6.0 and z < 8.5
+					if mid_ok:
+						break
+			_ok(mid_ok, "elevator hinge sits near mid-chord (z mid of ~5.5..9.3)")
+		if pvis.vapor:
+			_ok(pvis.vapor.has_method("cloud_intensity"), "vapor exposes intensity for tests")
+			pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 6.5, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
+			_ok(float(pvis.vapor.call("cloud_intensity")) > 0.0, "high-G pull-up produces vapor")
+			pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 1.1, "ctrl_pitch": 0.0, "aoa": 0.0}, 0.5)
+			# intensity eases out; after a long step it should drop
+		if pvis.exhausts.size():
+			var fx = pvis.exhausts[0]
+			fx.call("apply", 1.0, 1.0, 0.0, 0.016)
+			var tip := float(fx.call("plume_tip_length")) if fx.has_method("plume_tip_length") else 0.0
+			_ok(tip > 3.0, "afterburner plume tip is measurable (%.2f m)" % tip)
+			# Farthest visible diamond should not exceed the tip.
+			var far := 0.0
+			for d in fx.diamonds:
+				if d.visible:
+					far = maxf(far, d.position.length())
+			_ok(far <= tip * 1.05 + 0.05, "mach diamonds stay within the plume tip (far=%.2f tip=%.2f)" % [far, tip])
+	jet.queue_free()
+
+	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	root.add_child(car)
+	await _frames(2)
+	_ok(is_equal_approx(float(car.REST_DISTANCE), 0.36), "car REST_DISTANCE is 0.36")
+	car.occupied = true
+	car.set_driver_input(1.0, 0.0, 0.0, false, false)
+	# Fake a speed past the nitro gate.
+	car.linear_velocity = -car.global_transform.basis.z * 26.0
+	car._drive(0.016)
+	_ok(bool(car.nitro_auto) or bool(car.nitro_active), "auto nitro arms above the speed gate while accelerating")
+	car.set_driver_input(0.0, 0.0, 0.0, false, false)
+	car._drive(0.016)
+	_ok(not bool(car.nitro_auto), "auto nitro drops when the throttle is released")
+	var vis = car.get("visuals")
+	_ok(vis != null and vis.get("_nitro_fx") != null and vis._nitro_fx.size() > 0, "car has nitro flame meshes")
+	if vis:
+		vis.call("apply_pose", {"steer_angle": 0, "wheel_spin": 0, "susp": [0.4, 0.4, 0.4, 0.4], "wheel_travel": [0, 0, 0, 0], "nitro": true}, 0.016, 1.0)
+		var any_vis := false
+		for f in vis._nitro_fx:
+			if f and f.visible:
+				any_vis = true
+		_ok(any_vis, "nitro flames become visible when nitro is on")
+	_ok(car.get("_skids") != null, "car has a skid-mark node")
+	car.queue_free()
+	await _frames(1)
+
+	# HUD layout helpers exist.
+	var hud_src := FileAccess.get_file_as_string("res://scripts/hud.gd")
+	_ok(hud_src.find("自定义按键布局") >= 0 and hud_src.find("生成布局码") >= 0, "settings expose custom layout / layout-code UI")
+	_ok(hud_src.find("_on_enter_exit_gui") >= 0, "enter/exit has a tap-on-press handler")
+	_ok(hud_src.find("right - 88.0 - 12.0 - 40.0") >= 0, "plane thrust bar is on the right, left of decelerate")
 
 
 func _finish() -> void:

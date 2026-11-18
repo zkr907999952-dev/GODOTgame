@@ -284,14 +284,25 @@ func _apply_diamonds(thrust: float, cr: float, ab: float, rad: float, flicker: f
 	# Fade in very thin air (plume barely scatters) and at low thrust.
 	vis *= clampf(density * 1.15, 0.15, 1.0)
 	var inv := global_transform.affine_inverse()
+	# Mach diamonds must not run past the visible plume tip, even at high thrust
+	# when NPR spacing would otherwise stretch the trail too far.
+	var tip := plume_tip_length()
+	var last_along := 0.38 + float(maxi(diamonds.size() - 1, 0)) * spacing * (1.0 + float(maxi(diamonds.size() - 1, 0)) * 0.04)
+	var cap := maxf(tip * 0.95, 0.4)
+	if last_along > cap and last_along > 1e-4:
+		spacing *= cap / last_along
 	for i in diamonds.size():
 		var d := diamonds[i]
 		if vis < 0.04:
 			d.visible = false
 			continue
-		d.visible = true
 		# Place disks along the lagged trail, not a straight aft line.
 		var along := 0.38 + float(i) * spacing * (1.0 + float(i) * 0.04)
+		along = minf(along, cap)
+		if along > cap - 0.02 and tip < 0.5:
+			d.visible = false
+			continue
+		d.visible = true
 		d.position = inv * _point_along_trail(along)
 		d.rotation = Vector3(PI * 0.5, 0.0, 0.0)
 		var s := rad * (0.55 - float(i) * 0.06)
@@ -323,6 +334,13 @@ func plume_body_length() -> float:
 	if core == null or not visible:
 		return 0.0
 	return absf(core.scale.y)
+
+
+func plume_tip_length() -> float:
+	## Distance from the nozzle to the visible mid-plume tip (teardrop y in [-0.5, 0.5]).
+	if mid == null or not visible:
+		return plume_body_length()
+	return absf(mid.position.z) + absf(mid.scale.y) * 0.5
 
 
 func plume_body_visible() -> bool:

@@ -4,6 +4,8 @@ extends Node3D
 ## plane_controller.gd; this node only binds and poses the model.
 class_name PlaneVisuals
 
+const PlaneVaporScript := preload("res://scripts/vehicles/plane_vapor.gd")
+
 const MODEL_PATH := "res://assets/vehicles/plane.glb"
 const TARGET_LEN := 18.6
 const ORIGIN_Y := 1.28
@@ -17,6 +19,7 @@ var nozzle_engines: Array = []  # {top, bot, aim, exit_z, throat_z}
 var exhausts: Array = []
 var steer_wheel: Dictionary = {}  # {obj, rest}
 var flap_t: float = 0.0
+var vapor: Node
 var _surf_t: Dictionary = {}  # hinge id -> current (smoothed) deflection
 var wrap: Node3D
 var cockpit: Dictionary = {"x": 0.0, "y": 1.28, "z": -5.15}
@@ -57,6 +60,9 @@ func setup() -> bool:
 		steer_wheel = {"obj": steer, "rest": (steer as Node3D).quaternion, "axis": VehicleCommon.local_thin_axis(steer as Node3D)}
 	VehicleCommon.make_glass(wrap, "window_lf|door_dside_f", 0.1)
 	_attach_exhausts()
+	vapor = PlaneVaporScript.new()
+	add_child(vapor)
+	vapor.setup(wrap)
 	var box := VehicleCommon.world_aabb(wrap)
 	var local_min := wrap.to_local(box.position)
 	var local_max := wrap.to_local(box.position + box.size)
@@ -234,10 +240,10 @@ func _bind_surfaces_and_nozzles() -> void:
 				wrap.add_child(h)
 				h.global_transform = mesh.global_transform
 				var aa := VehicleCommon.aabb_in(wrap, h)
-				surfaces.append(VehicleHinge.mount(wrap, h, Vector3(aa["cx"], aa["cy"], aa["minZ"] + 0.06), "x", 1.0, 0.38, "elevator"))
+				surfaces.append(VehicleHinge.mount(wrap, h, Vector3(aa["cx"], aa["cy"], (aa["minZ"] + aa["maxZ"]) * 0.5), "x", 1.0, 0.38, "elevator"))
 			mesh.visible = false
 		else:
-			surfaces.append(VehicleHinge.mount(wrap, mesh, Vector3(a["cx"], a["cy"], a["minZ"] + 0.06), "x", 1.0, 0.38, "elevator"))
+			surfaces.append(VehicleHinge.mount(wrap, mesh, Vector3(a["cx"], a["cy"], (a["minZ"] + a["maxZ"]) * 0.5), "x", 1.0, 0.38, "elevator"))
 
 	var up: Dictionary = _split_lr(upper_noz, "NU")
 	var lo: Dictionary = _split_lr(lower_noz, "NL")
@@ -444,10 +450,13 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 	var gear_up := 1.0 - gear_down
 	for g in gears:
 		(g as VehicleHinge).apply(gear_up)
-	# 1 - smoothstep(0.55, 1, gearUp)
-	var door_close := 1.0 - _smoothstep(0.55, 1.0, gear_up)
+	# The glb rest pose hangs the doors open (vertical). apply(1) rotates them
+	# ~90° to lie flush with the belly. Close when the gear is up (and keep
+	# them open while the legs travel, and when down and locked, so the struts
+	# are clear of the covers).
+	var door_closed := _smoothstep(0.55, 1.0, gear_up)
 	for g in gear_doors:
-		(g as VehicleHinge).apply(door_close)
+		(g as VehicleHinge).apply(door_closed)
 	var pitch_c := clampf(float(st.get("ctrl_pitch", 0.0)), -1.0, 1.0)
 	var roll_c := clampf(float(st.get("ctrl_roll", 0.0)), -1.0, 1.0)
 	var yaw_c := clampf(float(st.get("ctrl_yaw", steer_angle * 1.6)), -1.0, 1.0)
@@ -523,6 +532,8 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 		sw.quaternion = steer_wheel["rest"] * Quaternion.from_euler(e)
 	for fx in exhausts:
 		(fx as JetExhaust).apply(thrust, time, altitude, delta)
+	if vapor:
+		vapor.update(st, delta)
 
 
 func _fin_hinge_line(wrap_n: Node3D, obj: Node3D, a: Dictionary) -> Array:

@@ -11,8 +11,8 @@ class_name VehicleSystem
 const CAR_SCENE := "res://scenes/vehicles/car.tscn"
 const PLANE_SCENE := "res://scenes/vehicles/plane.tscn"
 const BED_SCENE := "res://scenes/vehicles/exam_bed.tscn"
-const ROOM_BED_POS := Vector3(-1.32, 0.0, 0.05)
-const ROOM_BED_YAW := 0.0  # length along Z, head toward -Z; clear of the furniture bed and wall
+const ROOM_BED_POS := Vector3(-1.28, 0.0, -1.18)
+const ROOM_BED_YAW := 0.0  # length along Z, head toward -Z; beside the furniture bed, further back than 0.2.22
 # Last-resort fallback if AirPort_Track cannot be measured this frame.
 # Mid is past the white piano-key bars at the building-end threshold, on the
 # asphalt, noses toward the helipad end. Prefer live mesh measurement.
@@ -72,6 +72,7 @@ var _orbit_pitch: float = -0.18
 var _cam_ready: bool = false
 var _chase_dir: Vector3 = Vector3.ZERO  # smoothed motion/heading for the chase cam
 var _orbit_pivot: Vector3 = Vector3.ZERO  # stable vehicle-centered point used while orbiting
+var _chase_basis: Basis = Basis.IDENTITY  # lagged full attitude (plane rolls with this)
 const CAM_PITCH_DEFAULT := -0.18
 const CAM_PITCH_AIR := -0.12
 
@@ -1081,6 +1082,7 @@ func _reset_vehicle_cam() -> void:
 	_orbit_pitch = CAM_PITCH_DEFAULT
 	_chase_dir = Vector3.ZERO
 	_orbit_pivot = Vector3.ZERO
+	_chase_basis = Basis.IDENTITY
 
 
 func toggle_occupied_gear() -> void:
@@ -1143,6 +1145,7 @@ func debug_orbit_state() -> Dictionary:
 		"pivot": _orbit_pivot,
 		"cam": cam_pos,
 		"chase": _chase_dir,
+		"basis_up": _chase_basis.y,
 	}
 
 
@@ -1184,13 +1187,15 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 	# Sit-bones slightly behind the hip; lift the body a little so it sits
 	# on (not in) the cushion and the backrest. Shift toward the headrest
 	# (patient +Y / spine) so the torso sits farther back, per playtest guides.
-	const BUTTOCK := Vector3(0.0, -0.02, -0.10)
-	const SEAT_SKIN := 0.055
+	# Raise the ischial contact off the cushion (0.2.22 sat too low and clipped)
+	# without floating: a thicker seat skin and a slight hip lift.
+	const BUTTOCK := Vector3(0.0, 0.03, -0.08)
+	const SEAT_SKIN := 0.12
 	# A little along the spine plus a horizontal slide toward the headrest
 	# (bed -Z) so the torso sits farther back without lifting the hips off
 	# the cushion (playtest "身体向后一些").
-	const BACK_SHIFT := 0.035
-	const HEADWARD := 0.08
+	const BACK_SHIFT := 0.04
+	const HEADWARD := 0.07
 	var sit := hip_local + BUTTOCK
 	var headward := -bed.global_transform.basis.z * HEADWARD
 	headward.y = 0.0
@@ -1198,11 +1203,13 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 	if skel:
 		var al: Vector3 = bed.armrest_l_global() if bed.has_method("armrest_l_global") else bed.stirrup_l_global()
 		var ar: Vector3 = bed.armrest_r_global() if bed.has_method("armrest_r_global") else bed.stirrup_r_global()
-		# Lower legs extend outward past the stirrup cups (playtest red curves).
+		# Plant the calves on the stirrup pads, along the pad long axis (bed +Z /
+		# toward the feet). 0.2.22's outward offset hung the shins beside the pads.
 		var left := lie.x
 		var feet := -lie.y
-		var sl: Vector3 = bed.stirrup_l_global() + left * 0.22 + feet * 0.16
-		var sr: Vector3 = bed.stirrup_r_global() - left * 0.22 + feet * 0.16
+		var up := lie.z
+		var sl: Vector3 = bed.stirrup_l_global() - left * 0.04 + feet * 0.10 + up * 0.02
+		var sr: Vector3 = bed.stirrup_r_global() + left * 0.04 + feet * 0.10 + up * 0.02
 		ExamPose.apply(skel, sl, sr, bed.backrest_angle, al, ar)
 		ExamPose.offset_hair(skel, Vector3(0.0, 0.02, -0.10))
 		# Observation mode: head / eyes look at the orbit camera.
@@ -1247,8 +1254,15 @@ func _exam_camera(_delta: float) -> void:
 	if look_dir.length_squared() < 1e-6:
 		look_dir = bed.global_transform.basis.z
 	look_dir = look_dir.normalized()
-	var yaw := float(player.get("_yaw"))
-	var pitch := float(player.get("_pitch"))
+	# Clamp look so the player cannot crane around far enough to see the
+	# neck cross-section, and keep yaw/pitch in a comfortable exam range.
+	const YAW_LIM := 0.95
+	const PITCH_MIN := -0.55
+	const PITCH_MAX := 0.42
+	var yaw := clampf(float(player.get("_yaw")), -YAW_LIM, YAW_LIM)
+	var pitch := clampf(float(player.get("_pitch")), PITCH_MIN, PITCH_MAX)
+	player.set("_yaw", yaw)
+	player.set("_pitch", pitch)
 	# Untilted origin: world-up so the first-person camera has no roll
 	# from the lying basis. The CharacterBody stays identity.
 	var up_ref := Vector3.UP
@@ -1256,7 +1270,9 @@ func _exam_camera(_delta: float) -> void:
 		up_ref = lie.x if absf(lie.x.dot(Vector3.UP)) < 0.9 else Vector3.RIGHT
 	var base := Basis.looking_at(look_dir, up_ref)
 	var extra := Basis.from_euler(Vector3(pitch, yaw, 0.0))
-	var eye := head.origin + Vector3.UP * 0.04 + lie.z * 0.06
+	# Sit the eye slightly in front of the face (along the default look and
+	# the face-up axis) so the neck stump stays behind the near plane.
+	var eye := head.origin + Vector3.UP * 0.03 + lie.z * 0.12 + look_dir * 0.10
 	var look := (base * extra).orthonormalized()
 	# Strip residual roll: rebuild with world up.
 	var fwd2 := -look.z
@@ -1265,7 +1281,7 @@ func _exam_camera(_delta: float) -> void:
 		up2 = look.y
 	cam.global_transform = Transform3D(Basis.looking_at(fwd2, up2), eye)
 	cam.fov = float(player.get("fp_fov"))
-	cam.near = 0.04
+	cam.near = 0.08
 	cam.current = true
 
 
@@ -1369,15 +1385,18 @@ func _vehicle_camera(delta: float) -> void:
 		cam.near = 0.08
 		cam.current = true
 		return
-	# Third person: dynamic chase based on motion, composited with the user's
-	# orbit / look-drag. Slow or stationary: fall back to the visual nose.
-	# Hold LMB / swipe to orbit around a stable vehicle-centered pivot;
-	# those offsets stay on top of the follow even while moving. Release recenters.
+	# Third person: the same vehicle-centered pivot is used for the default
+	# follow and for drag-to-orbit. For the plane, the camera follows the
+	# nose attitude (with a little lag on hard turns) and rolls with the
+	# airframe — a hardcore fighter view, not a horizon-locked inertia cam.
 	var dt := maxf(delta, 0.0001)
 	var held := _orbit_held or _touch_orbit or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 	if bool(player.get("ui_blocks_capture")):
 		held = _orbit_held or _touch_orbit
 	_orbit_held = held
+	# Look-drag yaw/pitch are composited on the dynamic follow; those offsets stay on top
+	# of the lagged attitude / chase direction, and the same _orbit_pivot is used either way.
+	var orbiting := held
 	var airborne := k == "plane" and bool(occupied.get("airborne"))
 	var want_pitch := CAM_PITCH_AIR if airborne else CAM_PITCH_DEFAULT
 	var just_ready := not _cam_ready
@@ -1385,6 +1404,7 @@ func _vehicle_camera(delta: float) -> void:
 		_orbit_yaw = 0.0
 		_orbit_pitch = want_pitch
 		_chase_dir = Vector3.ZERO
+		_chase_basis = xf.basis.orthonormalized()
 		_cam_ready = true
 	if not held:
 		_orbit_yaw += wrapf(0.0 - _orbit_yaw, -PI, PI) * (1.0 - exp(-3.2 * dt))
@@ -1393,57 +1413,78 @@ func _vehicle_camera(delta: float) -> void:
 	var dist := 8.5 if k == "car" else 16.0
 	var height := 2.4 if k == "car" else 4.6
 	var look_y_off := 1.2 if k == "car" else 1.8
-	var look_ahead := 5.5 if k == "car" else 14.0
 	var fwd := _vehicle_forward(xf)
 	var origin := xf.origin
-	var vel := Vector3.ZERO
-	if occupied is RigidBody3D:
-		vel = (occupied as RigidBody3D).linear_velocity
-	# Motion direction; at low speed use the nose. Never lock to fuselage roll.
-	# Keep updating while the user is dragging so look offsets composite on
-	# top of the live follow rather than freezing or overwriting it.
-	var motion := vel
-	if not airborne:
-		motion.y = 0.0
-	var motion_dir := fwd
-	if motion.length() > (3.5 if airborne else 1.4):
-		motion_dir = motion.normalized()
-		# Reverse: keep the camera behind the visual nose, not ahead of the boot.
-		if motion_dir.dot(fwd) < -0.15:
-			motion_dir = fwd
-	if just_ready or _chase_dir.length_squared() < 1e-6 or motion.length() <= (3.5 if airborne else 1.4):
-		# Parked / slow: sit on the visual nose so the default chase stays
-		# heading-aligned. Motion slerp only kicks in once actually moving.
-		_chase_dir = motion_dir
-	else:
-		_chase_dir = _chase_dir.slerp(motion_dir, 1.0 - exp(-2.6 * dt)).normalized()
-	var chase := _chase_dir
-	var pivot_pt := origin + Vector3(0.0, look_y_off, 0.0)
+	# Shared pivot for follow and orbit so the visual center never jumps.
+	var pivot_pt := origin + xf.basis.y.normalized() * look_y_off if k == "plane" else origin + Vector3(0.0, look_y_off, 0.0)
 	_orbit_pivot = pivot_pt
 	var up_ref := Vector3.UP
-	var yaw := _heading_yaw(chase, _heading_yaw(fwd)) + _orbit_yaw
-	var cy := cos(_orbit_pitch)
-	var look_dir := Vector3(-sin(yaw) * cy, sin(_orbit_pitch), -cos(yaw) * cy)
-	# Always place the camera relative to the stable vehicle pivot. Look-ahead
-	# is only a default follow target, never the orbit rotation center.
-	var orbiting := held or absf(_orbit_yaw) > 0.002 or absf(_orbit_pitch - want_pitch) > 0.015
-	var cam_pos: Vector3 = pivot_pt - look_dir * dist
-	cam_pos.y = pivot_pt.y - look_dir.y * dist + height * 0.12
-	var look_pt: Vector3 = pivot_pt
-	if not orbiting:
-		var fwd_h := Vector3(chase.x, 0.0, chase.z)
-		if fwd_h.length_squared() < 1e-8:
-			fwd_h = Vector3(fwd.x, 0.0, fwd.z)
-		if fwd_h.length_squared() > 1e-8:
-			fwd_h = fwd_h.normalized()
-		look_pt = pivot_pt + fwd_h * look_ahead
-		if airborne:
-			cam_pos += up_ref * height * 0.18
-	var to_tgt := look_pt - cam_pos
-	if to_tgt.length_squared() < 1e-8:
-		to_tgt = chase if chase.length_squared() > 1e-8 else Vector3(0, 0, -1)
-	var want_xf := Transform3D(Basis.looking_at(to_tgt, up_ref), cam_pos)
-	_apply_vehicle_cam_xform(pivot, cam, want_xf, just_ready)
+	var back_dir := -fwd
+	if k == "plane":
+		# Slerp the full attitude toward the aircraft so a hard turn leaves a
+		# small lag, then the view recenters on the nose. Roll is followed,
+		# not stripped to the horizon.
+		var want_b := xf.basis.orthonormalized()
+		if just_ready or _chase_basis.x.length_squared() < 1e-6:
+			_chase_basis = want_b
+		else:
+			# Slightly slower than 1:1 so a sharp break can offset a little.
+			var k_follow := 1.0 - exp(-5.4 * dt)
+			_chase_basis = _chase_basis.slerp(want_b, k_follow).orthonormalized()
+		var cfwd := -_chase_basis.z
+		var cup := _chase_basis.y
+		if cup.length_squared() < 1e-8:
+			cup = Vector3.UP
+		else:
+			cup = cup.normalized()
+		_chase_dir = cfwd
+		up_ref = cup
+		# Orbit offsets live in the lagged aircraft frame (yaw about up, pitch about right).
+		var right := _chase_basis.x
+		if right.length_squared() < 1e-8:
+			right = cfwd.cross(cup)
+		right = right.normalized()
+		var look_dir := (-cfwd).rotated(cup, _orbit_yaw).rotated(right, _orbit_pitch)
+		if look_dir.length_squared() < 1e-8:
+			look_dir = -cfwd
+		else:
+			look_dir = look_dir.normalized()
+		var cam_pos: Vector3 = pivot_pt - look_dir * dist + cup * (height * 0.22)
+		var look_pt: Vector3 = pivot_pt
+		var to_tgt := look_pt - cam_pos
+		if to_tgt.length_squared() < 1e-8:
+			to_tgt = cfwd
+		# looking_at with the aircraft up so the camera rolls with the jet.
+		var want_xf := Transform3D(Basis.looking_at(to_tgt, up_ref), cam_pos)
+		_apply_vehicle_cam_xform(pivot, cam, want_xf, just_ready)
+	else:
+		var vel := Vector3.ZERO
+		if occupied is RigidBody3D:
+			vel = (occupied as RigidBody3D).linear_velocity
+		var motion := vel
+		motion.y = 0.0
+		var motion_dir := fwd
+		if motion.length() > 1.4:
+			motion_dir = motion.normalized()
+			if motion_dir.dot(fwd) < -0.15:
+				motion_dir = fwd
+		if just_ready or _chase_dir.length_squared() < 1e-6 or motion.length() <= 1.4:
+			_chase_dir = motion_dir
+		else:
+			_chase_dir = _chase_dir.slerp(motion_dir, 1.0 - exp(-2.6 * dt)).normalized()
+		var chase := _chase_dir
+		var yaw := _heading_yaw(chase, _heading_yaw(fwd)) + _orbit_yaw
+		var cy := cos(_orbit_pitch)
+		var look_dir := Vector3(-sin(yaw) * cy, sin(_orbit_pitch), -cos(yaw) * cy)
+		var cam_pos: Vector3 = pivot_pt - look_dir * dist
+		cam_pos.y = pivot_pt.y - look_dir.y * dist + height * 0.12
+		# Same look target as orbit: the pivot itself (no look-ahead jump).
+		var look_pt: Vector3 = pivot_pt
+		var to_tgt := look_pt - cam_pos
+		if to_tgt.length_squared() < 1e-8:
+			to_tgt = chase if chase.length_squared() > 1e-8 else Vector3(0, 0, -1)
+		var want_xf := Transform3D(Basis.looking_at(to_tgt, up_ref), cam_pos)
+		_apply_vehicle_cam_xform(pivot, cam, want_xf, just_ready)
 	cam.fov = 55.0 if k == "car" else 62.0
 	cam.near = 0.15
 	cam.current = true

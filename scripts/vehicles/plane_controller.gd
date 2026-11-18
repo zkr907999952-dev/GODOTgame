@@ -68,6 +68,7 @@ var wheel_spin: float = 0.0
 var stall_amount: float = 0.0
 var aoa: float = 0.0
 var airspeed: float = 0.0
+var g_load: float = 1.0  # body-up load factor, ~1 on the runway
 var visuals: PlaneVisuals
 var _vis_spin: float = 0.0
 var _gear_rays: Array[Vector3] = [
@@ -78,6 +79,8 @@ var _gear_rays: Array[Vector3] = [
 var _on_wheels: bool = true
 var _agl: float = 0.0
 var _gear_setup: Array = []  # {start, rest, radius} in body space
+var _prev_vel: Vector3 = Vector3.ZERO
+var _prev_vel_ok: bool = false
 
 
 func _ready() -> void:
@@ -258,6 +261,9 @@ func _physics_process(delta: float) -> void:
 			"speed_brake": speed_brake,
 			"airborne": airborne,
 			"speed": airspeed,
+			"aoa": aoa,
+			"g_load": g_load,
+			"agl": _agl,
 			"decelerating": bool(get_meta("decelerating", false)) or speed_brake > 0.15 or thrust < 0.32,
 			"susp": [0.4, 0.4, 0.4],
 		}, delta, Time.get_ticks_msec() * 0.001, global_position.y)
@@ -280,6 +286,15 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var right := basis.x
 	var vel := state.linear_velocity
 	airspeed = vel.length()
+	if _prev_vel_ok and dt > 1e-5:
+		var acc: Vector3 = (vel - _prev_vel) / dt
+		# Accelerometer G along body up (includes gravity). ~1 parked, >1 in a pull-up.
+		var g_inst := (acc - Vector3(0.0, -9.81, 0.0)).dot(up) / 9.81
+		g_load = lerpf(g_load, clampf(g_inst, -4.0, 12.0), 1.0 - exp(-8.0 * dt))
+	else:
+		g_load = 1.0
+	_prev_vel = vel
+	_prev_vel_ok = true
 	var alt := xf.origin.y
 	var rho := RHO_SL * exp(-maxf(alt, 0.0) / 8500.0)
 	# Wheel contact / AGL (ray along body -Y).

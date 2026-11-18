@@ -16,6 +16,7 @@ var half_w: float = 1.08
 var height: float = 1.18
 var wheel_r: float = 0.34
 var ready_ok: bool = false
+var _nitro_fx: Array = []  # MeshInstance3D flames at the exhausts
 
 
 func setup() -> bool:
@@ -57,6 +58,7 @@ func setup() -> bool:
 			"axis": VehicleCommon.local_thin_axis(steer as Node3D),
 		}
 	VehicleCommon.make_glass(wrap, "glass|Glass|window|Window", 0.18)
+	_attach_nitro_flames()
 	var box := VehicleCommon.world_aabb(wrap)
 	var mn := wrap.to_local(box.position)
 	var mx := wrap.to_local(box.position + box.size)
@@ -181,6 +183,7 @@ func apply_pose(st: Dictionary, _delta: float, _time: float) -> void:
 			_:
 				e.z = ang
 		sw.quaternion = steer_wheel["rest"] * Quaternion.from_euler(e)
+	_apply_nitro(bool(st.get("nitro", false)), _time)
 
 
 func wheel_rig_info() -> Array:
@@ -206,3 +209,59 @@ func wheel_layout() -> Array:
 		var off: Vector3 = w["offset"]
 		out.append({"x": off.x, "y": off.y, "z": off.z, "steer": w["steer"]})
 	return out
+
+
+func _attach_nitro_flames() -> void:
+	_nitro_fx.clear()
+	var hubs: Array = VehicleCommon.find_named(wrap, "Exhaust")
+	if hubs.is_empty():
+		hubs = VehicleCommon.find_named(wrap, "exhaust")
+	for h in hubs:
+		if not (h is Node3D):
+			continue
+		_nitro_fx.append(_make_flame(h as Node3D))
+	if _nitro_fx.is_empty() and wrap:
+		# Fallback: two tips at the rear corners of the body.
+		for x in [-0.45, 0.45]:
+			var hub := Node3D.new()
+			hub.name = "NitroHub"
+			wrap.add_child(hub)
+			hub.position = Vector3(x, 0.28, half_l * 0.92)
+			_nitro_fx.append(_make_flame(hub))
+
+
+func _make_flame(hub: Node3D) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = "NitroFlame"
+	mi.mesh = VehicleCommon.make_teardrop_mesh(0.07)
+	mi.rotation.x = PI * 0.5
+	mi.position = Vector3(0.0, 0.02, 0.18)
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var sm := StandardMaterial3D.new()
+	sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	sm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	sm.albedo_color = Color(0.25, 0.55, 1.0, 0.0)
+	sm.emission_enabled = true
+	sm.emission = Color(0.2, 0.55, 1.0)
+	sm.emission_energy_multiplier = 2.4
+	mi.material_override = sm
+	mi.visible = false
+	hub.add_child(mi)
+	return mi
+
+
+func _apply_nitro(on: bool, time: float) -> void:
+	var flicker := 1.0 + sin(time * 28.0) * 0.08
+	for mi in _nitro_fx:
+		if mi == null:
+			continue
+		mi.visible = on
+		if not on:
+			continue
+		mi.scale = Vector3(0.85 * flicker, 1.35 * flicker, 0.85 * flicker)
+		var sm := mi.material_override as StandardMaterial3D
+		if sm:
+			sm.albedo_color = Color(0.3, 0.65, 1.0, 0.55 * flicker)
+			sm.emission_energy_multiplier = 2.2 * flicker

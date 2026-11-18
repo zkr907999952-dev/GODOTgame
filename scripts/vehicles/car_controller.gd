@@ -6,6 +6,8 @@ extends RigidBody3D
 ## Shift/Space binds). Lateral tire force is what lets the car actually turn.
 class_name CarController
 
+const CarSkidMarksScript := preload("res://scripts/vehicles/car_skids.gd")
+
 const KIND := "car"
 const ENTER_RADIUS := 4.2
 const MASS_KG := 1420.0
@@ -17,16 +19,24 @@ const PEAK_RPM := 5200.0
 const FINAL_DRIVE := 3.54
 const GEAR_RATIOS := [0.0, 3.21, 2.11, 1.47, 1.14, 0.92, 0.74]
 # custom-3d-car: ENGINE_POWER = 15 * HP at ~1000 kg. Scale ~1.42 for this mass.
-const ENGINE_POWER := 9800.0
-const ENGINE_POWER_NITRO := 13800.0
-const ENGINE_POWER_REV := 5600.0
+# 0.2.23: base power raised (9800 → 11800) because 0.2.22 still felt weak.
+# Auto-nitro engages above NITRO_SPEED while accelerating; Shift still punches it.
+# Auto nitro uses ENGINE_POWER_NITRO; Shift on top can hold it even below the
+# speed gate. Combined (Shift + already auto) stays on the nitro curve.
+const ENGINE_POWER := 11800.0
+const ENGINE_POWER_NITRO := 17800.0
+const ENGINE_POWER_REV := 6200.0
+# Auto-nitro gate: 24 m/s ≈ 86 km/h. Feels like the second-stage rush after
+# the first few gears; drops out 3 m/s below so it doesn't chatter.
+const NITRO_SPEED := 24.0
+const NITRO_SPEED_DROP := 21.0
 const BRAKE_FORCE_MULT := 1.5
 const HANDBRAKE_MULT := 3.0
-# Suspension: weight/wheel ≈ 3480 N. Longer travel so the chassis stays
-# clear of the pavement after sag (~0.07 m) instead of bottoming / hitching.
-const SPRING_STRENGTH := 52000.0
-const SPRING_DAMP := 3200.0
-const REST_DISTANCE := 0.30
+# Suspension: weight/wheel ≈ 3480 N. 0.2.23 raises the rest length again
+# (0.30 → 0.36) so the wheels sit clear of the body instead of sinking in.
+const SPRING_STRENGTH := 50000.0
+const SPRING_DAMP := 3300.0
+const REST_DISTANCE := 0.36
 const TIRE_GRIP := 7400.0
 const GRIP_FALLOFF := 0.032
 const MAX_LATERAL_FORCE := 14500.0
@@ -46,6 +56,13 @@ var steer_in: float = 0.0
 var brake_in: float = 0.0
 var handbrake: bool = false
 var nitro: bool = false
+var nitro_auto: bool = false
+var nitro_active: bool = false
+var _skids: Node
+var _wheel_slip: PackedFloat32Array = PackedFloat32Array()
+var _wheel_hit_pos: PackedVector3Array = PackedVector3Array()
+var _wheel_hit_n: PackedVector3Array = PackedVector3Array()
+var _wheel_side: PackedVector3Array = PackedVector3Array()
 var gear: int = 1
 var rpm: float = IDLE_RPM
 var steer_angle: float = 0.0
@@ -89,6 +106,13 @@ func _ready() -> void:
 	_build_wheels()
 	_build_collision()
 	_freeze_parked(true)
+	_skids = CarSkidMarksScript.new()
+	add_child(_skids)
+	_skids.setup()
+	_wheel_slip.resize(4)
+	_wheel_hit_pos.resize(4)
+	_wheel_hit_n.resize(4)
+	_wheel_side.resize(4)
 	call_deferred("_restore_wheel_positions")
 
 
@@ -253,6 +277,8 @@ func _physics_process(delta: float) -> void:
 		steer_in = 0.0
 		brake_in = 1.0
 		nitro = false
+		nitro_auto = false
+		nitro_active = false
 		_apply_visuals(delta)
 		return
 	_drive(delta)
@@ -263,6 +289,14 @@ func _drive(delta: float) -> void:
 	var speed := linear_velocity.length()
 	var fwd := -global_transform.basis.z
 	var long_speed := linear_velocity.dot(fwd)
+	# Auto nitro: after the car has accelerated past NITRO_SPEED while the
+	# throttle is in, the boost stays on until speed falls below the drop gate
+	# or the driver lifts. Shift is a manual punch that works at any speed.
+	if throttle_in > 0.35 and long_speed >= NITRO_SPEED:
+		nitro_auto = true
+	elif throttle_in < 0.12 or long_speed < NITRO_SPEED_DROP:
+		nitro_auto = false
+	nitro_active = occupied and throttle_in > 0.12 and (nitro or nitro_auto)
 	var steer_limit := MAX_STEER / (1.0 + speed * 0.022)
 	var steer_target := steer_in * steer_limit
 	steer_angle = move_toward(steer_angle, steer_target, STEER_SPEED * delta)
@@ -290,7 +324,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var origin := xf.origin
 	var up := xf.basis.y.normalized()
 	var fwd := -xf.basis.z
-	var power := ENGINE_POWER_NITRO if (nitro and throttle_in > 0.1) else ENGINE_POWER
+	var power := ENGINE_POWER_NITRO if nitro_active else ENGINE_POWER
 	if throttle_in < -0.02:
 		power = ENGINE_POWER_REV
 	var drive_count := 0
@@ -309,6 +343,9 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 		_wheel_in_contact[i] = hit
 		if not hit:
 			_wheel_prev_len[i] = REST_DISTANCE
+			if i < _wheel_slip.size():
+				_wheel_slip[i] = 0.0
+				_wheel_in_contact[i] = false
 			continue
 		var point := ray.get_collision_point()
 		var dist := attach.distance_to(point)
@@ -328,6 +365,11 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 		var vel := state.linear_velocity + state.angular_velocity.cross(point - origin)
 		# Lateral grip (custom-3d-car _apply_lateral_force) — this is the turn force.
 		var lat_v := vel.dot(wheel_side)
+		if i < _wheel_slip.size():
+			_wheel_slip[i] = absf(lat_v)
+			_wheel_hit_pos[i] = point
+			_wheel_hit_n[i] = ray.get_collision_normal()
+			_wheel_side[i] = wheel_side
 		var desired_lat := -lat_v * TIRE_GRIP
 		var spd := state.linear_velocity.length()
 		var grip_factor := 1.0 / (1.0 + spd * GRIP_FALLOFF)
@@ -411,7 +453,22 @@ func _apply_visuals(delta: float) -> void:
 		"wheel_spin": _vis_spin,
 		"susp": susp,
 		"wheel_travel": travels,
+		"nitro": nitro_active,
 	}, delta, Time.get_ticks_msec() * 0.001)
+	if _skids:
+		var marks: Array = []
+		for i in _wheels.size():
+			var side := Vector3.RIGHT
+			if i < _wheel_side.size() and _wheel_side[i].length_squared() > 1e-6:
+				side = _wheel_side[i]
+			marks.append({
+				"pos": _wheel_hit_pos[i] if i < _wheel_hit_pos.size() else global_position,
+				"normal": _wheel_hit_n[i] if i < _wheel_hit_n.size() else Vector3.UP,
+				"slip": float(_wheel_slip[i]) if i < _wheel_slip.size() else 0.0,
+				"contact": bool(_wheel_in_contact[i]) if i < _wheel_in_contact.size() else false,
+				"side": side,
+			})
+		_skids.update(marks, delta)
 
 
 func pose_state() -> Dictionary:
@@ -452,6 +509,8 @@ func on_exit() -> void:
 	brake_in = 1.0
 	handbrake = false
 	nitro = false
+	nitro_auto = false
+	nitro_active = false
 	occupied_changed.emit(false)
 	get_tree().create_timer(0.8).timeout.connect(func():
 		if not occupied and linear_velocity.length() < 0.6:

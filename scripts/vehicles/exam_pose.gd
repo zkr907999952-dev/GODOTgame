@@ -17,12 +17,12 @@ const FK := {
 	"C_Spine_d": Vector3(0.02, 0.0, 0.0),
 	"C_Neck_a": Vector3(-0.10, 0.0, 0.0),
 	"C_Head_a": Vector3(-0.06, 0.0, 0.0),
-	# Legs: x = flex, y = twist, z = abduct. Reduced hip abduction vs 0.2.21;
-	# IK then extends the shins outward past the stirrups.
-	"L_UpperLeg_a": Vector3(-0.58, 0.08, 0.40),
-	"R_UpperLeg_a": Vector3(-0.58, -0.08, -0.40),
-	"L_Foreleg_a": Vector3(0.95, 0.0, 0.10),
-	"R_Foreleg_a": Vector3(0.95, 0.0, -0.10),
+	# Legs: x = flex, y = twist, z = abduct. 0.2.23: tighter thigh abduction
+	# than 0.2.22's 0.40 rad; IK plants the calves on the stirrup pads.
+	"L_UpperLeg_a": Vector3(-0.50, 0.05, 0.24),
+	"R_UpperLeg_a": Vector3(-0.50, -0.05, -0.24),
+	"L_Foreleg_a": Vector3(0.88, 0.0, 0.04),
+	"R_Foreleg_a": Vector3(0.88, 0.0, -0.04),
 	"L_Foot_a": Vector3(0.22, 0.10, 0.06),
 	"R_Foot_a": Vector3(0.22, -0.10, -0.06),
 	# Arms: smoother arc to the armrests, less shrugged / kinked shoulders.
@@ -123,8 +123,8 @@ static func _ik_leg(skel: Skeleton3D, left: bool, target: Vector3) -> void:
 	var axis_dir := to_t.normalized()
 	# Pole: out to the patient's side (mesh +X is left) and slightly "up" (face).
 	# In skeleton/Body space after lying: +X = left, +Y = toward head, +Z = face/up.
-	# Less side pull (narrower hips) and more face-up so the shin can kick out.
-	var pole := Vector3(0.42 if left else -0.42, 0.04, 0.78)
+	# Pole slightly out and face-up, less side pull so the shin stays on the pad.
+	var pole := Vector3(0.28 if left else -0.28, 0.06, 0.82)
 	var pole_n := pole - axis_dir * pole.dot(axis_dir)
 	if pole_n.length_squared() < 1e-6:
 		pole_n = Vector3(0, 0, 1)

@@ -9,7 +9,7 @@ const KIND := "exam_bed"
 const ENTER_RADIUS := 2.6
 const MODEL_PATH := "res://assets/vehicles/exam_bed/exam_bed.glb"
 const RAW_SIZE := Vector3(27.43, 50.476, 58.818)
-const TARGET_LENGTH := 1.86
+const TARGET_LENGTH := 1.72
 
 signal occupied_changed(on: bool)
 

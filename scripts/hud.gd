@@ -1,4 +1,6 @@
 extends CanvasLayer
+
+const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
 ## 中文 HUD：设置 / 互动 / 摄像机 面板（对齐网页 overlay 结构，精简版）。
 
 enum PanelId { NONE, SETTINGS, INTERACT, CAMERA, MAP, WEAPON, VEHICLE }
@@ -133,6 +135,13 @@ var debug_world_hp_visible: bool = false
 var _drag_btn: Button
 var debug_drag_btn_visible: bool = false
 var _reticle: Control
+var _btn_layout: Button
+var _layout_overlay: Control
+var _layout_slider: HSlider
+var _layout_slider_val: Label
+var _layout_code_edit: LineEdit
+var _layout_status: Label
+var _layout_hint: Label
 
 
 func setup(player: Node) -> void:
@@ -250,6 +259,7 @@ func _build_ui() -> void:
 	_panel_vehicle.position = Vector2(16, 88)
 	root.add_child(_panel_vehicle)
 	_build_vehicle_touch(root)
+	_build_layout_overlay(root)
 
 	_overhead_ui = _build_overhead_ui()
 	root.add_child(_overhead_ui)
@@ -1018,12 +1028,8 @@ func _build_vehicle_panel() -> PanelContainer:
 func _build_vehicle_touch(root: Control) -> void:
 	_btn_enter_exit = _veh_btn("上载具", Vector2(108, 48), 16)
 	_btn_enter_exit.visible = false
-	_btn_enter_exit.pressed.connect(func():
-		var g := _game()
-		if g and g.get("vehicle_system"):
-			g.get("vehicle_system").call("try_toggle")
-		_refresh_vehicle_touch()
-	)
+	_btn_enter_exit.pressed.connect(_on_enter_exit_pressed)
+	_btn_enter_exit.gui_input.connect(_on_enter_exit_gui)
 	root.add_child(_btn_enter_exit)
 
 	_btn_vehicle_cam = _veh_btn("第三人称", Vector2(108, 40), 14)
@@ -1104,11 +1110,15 @@ func _veh_btn(text: String, min_size: Vector2, font: int) -> Button:
 	var b := Button.new()
 	b.text = text
 	b.custom_minimum_size = min_size
+	b.size = min_size
 	b.add_theme_font_size_override("font_size", font)
 	_style_button(b, true)
 	b.focus_mode = Control.FOCUS_NONE
 	b.visible = false
-	b.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
+	# 点按抬起才触发，避免被误当成「必须长按」。尺寸必须显式设定，
+	# 否则挂在非容器根下时 size 可能是 0，点不中。
+	b.action_mode = BaseButton.ACTION_MODE_BUTTON_RELEASE
+	b.mouse_filter = Control.MOUSE_FILTER_STOP
 	return b
 
 
@@ -1184,54 +1194,54 @@ func _refresh_vehicle_touch() -> void:
 	var v := get_viewport().get_visible_rect().size
 	var show_enter := occ != null or near != null
 	if _btn_enter_exit:
-		_btn_enter_exit.visible = show_enter
+		_btn_enter_exit.visible = show_enter and not (_touch and bool(_touch.get("layout_edit")))
 		if occ:
 			_btn_enter_exit.text = "离开检查床" if kind == "exam_bed" else "离开载具"
 		elif near:
 			_btn_enter_exit.text = "上检查床" if kind == "exam_bed" else "上载具"
-		_btn_enter_exit.position = Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 72.0)
+		_place_layout_btn(_btn_enter_exit, "enter", Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 72.0), Vector2(108, 48))
 	var in_drive := occ != null and kind in ["car", "plane"]
+	var editing := _touch != null and bool(_touch.get("layout_edit"))
 	if _btn_vehicle_cam:
-		_btn_vehicle_cam.visible = in_drive
+		_btn_vehicle_cam.visible = in_drive and not editing
 		if in_drive and vs:
 			var cam := str(vs.get("vehicle_cam"))
 			_btn_vehicle_cam.text = "第一人称" if cam == "first" else "第三人称"
-		_btn_vehicle_cam.position = Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 126.0)
-	var show_car := touch_ui and occ != null and kind == "car"
+		_place_layout_btn(_btn_vehicle_cam, "vcam", Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 126.0), Vector2(108, 40))
+	var show_car := touch_ui and occ != null and kind == "car" and not editing
 	if _btn_car_accel:
 		_btn_car_accel.visible = show_car
-		_btn_car_accel.position = Vector2(v.x - _safe.z - 16.0 - 88.0, v.y - _safe.w - 180.0)
+		_place_layout_btn(_btn_car_accel, "accel", Vector2(v.x - _safe.z - 16.0 - 88.0, v.y - _safe.w - 180.0), Vector2(88, 52))
 	if _btn_car_brake:
 		_btn_car_brake.visible = show_car
-		_btn_car_brake.position = Vector2(v.x - _safe.z - 16.0 - 88.0, v.y - _safe.w - 122.0)
+		_place_layout_btn(_btn_car_brake, "brake", Vector2(v.x - _safe.z - 16.0 - 88.0, v.y - _safe.w - 122.0), Vector2(88, 52))
 	var show_plane := occ != null and kind == "plane"
-	var show_plane_btns := touch_ui and show_plane
+	var show_plane_btns := touch_ui and show_plane and not editing
+	var right := v.x - _safe.z - 16.0
+	var by := v.y - _safe.w
+	# Thrust bar sits on the right, immediately left of the decelerate button.
 	if _thrust_lever:
-		_thrust_lever.visible = show_plane
-		_thrust_lever.position = Vector2(_safe.x + 16.0, v.y * 0.42)
-		_thrust_lever.size = Vector2(40, 180)
+		_thrust_lever.visible = show_plane and not editing
+		_place_layout_btn(_thrust_lever, "thrust", Vector2(right - 88.0 - 12.0 - 40.0, by - 200.0), Vector2(40, 180))
 		if show_plane and occ:
 			var th = occ.get("thrust")
 			if th != null:
 				_update_thrust_lever(float(th))
-	var right := v.x - _safe.z - 16.0
-	var by := v.y - _safe.w
 	if _btn_thrust_up:
 		_btn_thrust_up.visible = show_plane_btns
-		_btn_thrust_up.position = Vector2(right - 88.0, by - 200.0)
+		_place_layout_btn(_btn_thrust_up, "thrust_up", Vector2(right - 88.0, by - 200.0), Vector2(88, 48))
 	if _btn_thrust_down:
 		_btn_thrust_down.visible = show_plane_btns
-		_btn_thrust_down.position = Vector2(right - 88.0, by - 146.0)
-	# Left/right yaw sit side-by-side just above the accelerate button.
+		_place_layout_btn(_btn_thrust_down, "thrust_down", Vector2(right - 88.0, by - 146.0), Vector2(88, 48))
 	if _btn_yaw_l:
 		_btn_yaw_l.visible = show_plane_btns
-		_btn_yaw_l.position = Vector2(right - 132.0, by - 250.0)
+		_place_layout_btn(_btn_yaw_l, "yaw_l", Vector2(right - 132.0, by - 250.0), Vector2(64, 40))
 	if _btn_yaw_r:
 		_btn_yaw_r.visible = show_plane_btns
-		_btn_yaw_r.position = Vector2(right - 64.0, by - 250.0)
+		_place_layout_btn(_btn_yaw_r, "yaw_r", Vector2(right - 64.0, by - 250.0), Vector2(64, 40))
 	if _btn_gear:
 		_btn_gear.visible = show_plane_btns
-		_btn_gear.position = Vector2(right - 88.0, by - 300.0)
+		_place_layout_btn(_btn_gear, "gear", Vector2(right - 88.0, by - 300.0), Vector2(88, 40))
 		if show_plane_btns and occ:
 			var g = occ.get("gear")
 			var gw = occ.get("gear_want")
@@ -1489,6 +1499,14 @@ func _build_settings_panel() -> PanelContainer:
 	_pull_force_slider.custom_minimum_size = Vector2(220, 18)
 	_pull_force_slider.value_changed.connect(_on_pull_force_changed)
 	v.add_child(_pull_force_slider)
+
+	_btn_layout = Button.new()
+	_btn_layout.text = "自定义按键布局"
+	_btn_layout.custom_minimum_size = Vector2(0, 36)
+	_btn_layout.focus_mode = Control.FOCUS_NONE
+	_style_button(_btn_layout, false)
+	_btn_layout.pressed.connect(_open_layout_editor)
+	v.add_child(_btn_layout)
 
 	var help_chk := CheckButton.new()
 	help_chk.text = "显示本面板说明"
@@ -2621,7 +2639,10 @@ func _over(n: Node, pos: Vector2, vp: Vector2) -> bool:
 		var c := ch as Control
 		if c == null or not c.visible:
 			continue
-		if c.mouse_filter == Control.MOUSE_FILTER_STOP and c.size.x < vp.x * 0.98 and c.get_global_rect().has_point(pos):
+		var r := c.get_global_rect()
+		if r.size.x < 2.0 or r.size.y < 2.0:
+			r.size = Vector2(maxf(r.size.x, c.custom_minimum_size.x), maxf(r.size.y, c.custom_minimum_size.y))
+		if c.mouse_filter == Control.MOUSE_FILTER_STOP and r.size.x < vp.x * 0.98 and r.grow(8.0).has_point(pos):
 			return true
 		if _over(c, pos, vp):
 			return true
@@ -2953,3 +2974,265 @@ func _on_pull_force_changed(v: float) -> void:
 	if _pull_force_value:
 		_pull_force_value.text = "%.2f" % v
 
+
+
+func _place_layout_btn(b: Control, id: String, default_pos: Vector2, default_size: Vector2) -> void:
+	if b == null:
+		return
+	var sc := 1.0
+	var pos := default_pos
+	var sz := default_size
+	if _touch and _touch.has_method("_layout_scale"):
+		sc = float(_touch.call("_layout_scale", id))
+		sz = default_size * sc
+		var c: Vector2 = default_pos + default_size * 0.5
+		if _touch.has_method("_layout_center"):
+			c = _touch.call("_layout_center", id, c)
+		pos = c - sz * 0.5
+	b.position = pos
+	b.size = sz
+	b.custom_minimum_size = sz
+	b.reset_size()
+	b.size = sz
+
+
+func _on_enter_exit_pressed() -> void:
+	# 若这一次已经在 gui_input 按下时处理过，就不要在抬起时再切换（会立刻下车）。
+	if _btn_enter_exit and bool(_btn_enter_exit.get_meta("skip_pressed", false)):
+		_btn_enter_exit.set_meta("skip_pressed", false)
+		return
+	var g := _game()
+	if g and g.get("vehicle_system"):
+		g.get("vehicle_system").call("try_toggle")
+	_refresh_vehicle_touch()
+
+
+func _on_enter_exit_gui(event: InputEvent) -> void:
+	# 按下即上车，不依赖 Button 的抬起判定（真机上容易被划成「长按」而点不中）。
+	var down := false
+	if event is InputEventScreenTouch:
+		down = (event as InputEventScreenTouch).pressed
+	elif event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+		down = (event as InputEventMouseButton).pressed
+	else:
+		return
+	if not down:
+		return
+	if _btn_enter_exit:
+		_btn_enter_exit.set_meta("skip_pressed", true)
+	var g := _game()
+	if g and g.get("vehicle_system"):
+		g.get("vehicle_system").call("try_toggle")
+	_refresh_vehicle_touch()
+	_btn_enter_exit.accept_event()
+
+
+func _build_layout_overlay(root: Control) -> void:
+	_layout_overlay = Control.new()
+	_layout_overlay.name = "LayoutEditor"
+	_layout_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_layout_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_layout_overlay.visible = false
+	root.add_child(_layout_overlay)
+
+	var bar := PanelContainer.new()
+	bar.mouse_filter = Control.MOUSE_FILTER_STOP
+	_style_panel(bar)
+	bar.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	bar.offset_top = -210.0
+	bar.offset_bottom = -8.0
+	bar.offset_left = 12.0
+	bar.offset_right = -12.0
+	_layout_overlay.add_child(bar)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 6)
+	bar.add_child(col)
+
+	_layout_hint = Label.new()
+	_layout_hint.text = "自定义按键布局：点选按键后拖动改位置，下方拉条改大小。"
+	_layout_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_layout_hint.add_theme_font_size_override("font_size", 13)
+	_layout_hint.add_theme_color_override("font_color", Color(0.92, 0.94, 0.96))
+	col.add_child(_layout_hint)
+
+	var sc_row := HBoxContainer.new()
+	var sc_l := Label.new()
+	sc_l.text = "按键缩放"
+	sc_l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sc_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	sc_row.add_child(sc_l)
+	_layout_slider_val = Label.new()
+	_layout_slider_val.text = "1.00"
+	_layout_slider_val.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	sc_row.add_child(_layout_slider_val)
+	col.add_child(sc_row)
+	_layout_slider = HSlider.new()
+	_layout_slider.min_value = 0.50
+	_layout_slider.max_value = 2.00
+	_layout_slider.step = 0.05
+	_layout_slider.value = 1.0
+	_layout_slider.custom_minimum_size = Vector2(200, 22)
+	_layout_slider.value_changed.connect(_on_layout_scale_changed)
+	col.add_child(_layout_slider)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	col.add_child(row)
+	var save_b := Button.new()
+	save_b.text = "保存"
+	save_b.focus_mode = Control.FOCUS_NONE
+	_style_button(save_b, true)
+	save_b.pressed.connect(_save_layout_editor)
+	row.add_child(save_b)
+	var cancel_b := Button.new()
+	cancel_b.text = "取消"
+	cancel_b.focus_mode = Control.FOCUS_NONE
+	_style_button(cancel_b, false)
+	cancel_b.pressed.connect(_close_layout_editor)
+	row.add_child(cancel_b)
+	var reset_b := Button.new()
+	reset_b.text = "恢复默认"
+	reset_b.focus_mode = Control.FOCUS_NONE
+	_style_button(reset_b, false)
+	reset_b.pressed.connect(_reset_layout_editor)
+	row.add_child(reset_b)
+
+	var code_row := HBoxContainer.new()
+	code_row.add_theme_constant_override("separation", 6)
+	col.add_child(code_row)
+	var gen_b := Button.new()
+	gen_b.text = "生成布局码"
+	gen_b.focus_mode = Control.FOCUS_NONE
+	_style_button(gen_b, false)
+	gen_b.pressed.connect(_generate_layout_code)
+	code_row.add_child(gen_b)
+	var copy_b := Button.new()
+	copy_b.text = "复制"
+	copy_b.focus_mode = Control.FOCUS_NONE
+	_style_button(copy_b, false)
+	copy_b.pressed.connect(_copy_layout_code)
+	code_row.add_child(copy_b)
+	var use_b := Button.new()
+	use_b.text = "使用布局码"
+	use_b.focus_mode = Control.FOCUS_NONE
+	_style_button(use_b, true)
+	use_b.pressed.connect(_use_layout_code)
+	code_row.add_child(use_b)
+
+	_layout_code_edit = LineEdit.new()
+	_layout_code_edit.placeholder_text = "布局码 TYL1.…"
+	_layout_code_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_child(_layout_code_edit)
+
+	_layout_status = Label.new()
+	_layout_status.text = ""
+	_layout_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_layout_status.add_theme_font_size_override("font_size", 12)
+	_layout_status.add_theme_color_override("font_color", Color(0.75, 0.85, 0.7))
+	col.add_child(_layout_status)
+
+
+func _open_layout_editor() -> void:
+	_close_all_panels()
+	if _touch == null:
+		return
+	# 布局编辑需要看到按键，必要时先打开触屏层。
+	if not touch_ui:
+		set_touch_ui(true)
+	_touch.call("set_enabled", true)
+	_touch.call("begin_layout_edit")
+	if not _touch.layout_selection_changed.is_connected(_on_layout_selected):
+		_touch.layout_selection_changed.connect(_on_layout_selected)
+	if _layout_overlay:
+		_layout_overlay.visible = true
+	_layout_status.text = ""
+	if _layout_code_edit:
+		_layout_code_edit.text = str(_touch.call("current_layout_code"))
+	_refresh_vehicle_touch()
+
+
+func _close_layout_editor() -> void:
+	if _touch and _touch.has_method("cancel_layout_edit"):
+		_touch.call("cancel_layout_edit")
+	if _layout_overlay:
+		_layout_overlay.visible = false
+	_refresh_vehicle_touch()
+
+
+func _save_layout_editor() -> void:
+	if _touch and _touch.has_method("commit_layout_edit"):
+		_touch.call("commit_layout_edit")
+	if _layout_overlay:
+		_layout_overlay.visible = false
+	if _layout_status:
+		_layout_status.text = "已保存到本机，下次启动仍会使用。"
+	_refresh_vehicle_touch()
+
+
+func _reset_layout_editor() -> void:
+	TouchLayout.clear_saved()
+	if _touch:
+		_touch.layout_working = {}
+		_touch.queue_redraw()
+		if _layout_code_edit:
+			_layout_code_edit.text = str(_touch.call("current_layout_code"))
+	if _layout_status:
+		_layout_status.text = "已恢复内置默认布局。"
+	_refresh_vehicle_touch()
+
+
+func _on_layout_selected(id: String) -> void:
+	if _layout_hint:
+		var name := str(TouchLayout.IDS.get(id, id))
+		_layout_hint.text = "正在编辑：%s。拖动改位置，拉条改大小。" % name
+	if _layout_slider and _touch:
+		_layout_slider.set_value_no_signal(float(_touch.call("selected_scale")))
+		if _layout_slider_val:
+			_layout_slider_val.text = "%.2f" % _layout_slider.value
+
+
+func _on_layout_scale_changed(v: float) -> void:
+	if _layout_slider_val:
+		_layout_slider_val.text = "%.2f" % v
+	if _touch and _touch.has_method("set_selected_scale"):
+		_touch.call("set_selected_scale", v)
+	_refresh_vehicle_touch()
+
+
+func _generate_layout_code() -> void:
+	if _touch == null:
+		return
+	var code := str(_touch.call("current_layout_code"))
+	if _layout_code_edit:
+		_layout_code_edit.text = code
+	if _layout_status:
+		_layout_status.text = "已生成布局码。可复制发给别人，或以后贴回来设成默认。"
+
+
+func _copy_layout_code() -> void:
+	var code := ""
+	if _layout_code_edit:
+		code = _layout_code_edit.text.strip_edges()
+	if code.is_empty() and _touch:
+		code = str(_touch.call("current_layout_code"))
+		if _layout_code_edit:
+			_layout_code_edit.text = code
+	if code.is_empty():
+		return
+	DisplayServer.clipboard_set(code)
+	if _layout_status:
+		_layout_status.text = "布局码已复制到剪贴板。"
+
+
+func _use_layout_code() -> void:
+	if _touch == null or _layout_code_edit == null:
+		return
+	var code := _layout_code_edit.text.strip_edges()
+	# 若框是空的，试着从剪贴板读取。
+	if code.is_empty():
+		code = DisplayServer.clipboard_get().strip_edges()
+		_layout_code_edit.text = code
+	var ok: bool = bool(_touch.call("apply_layout_code", code))
+	if _layout_status:
+		_layout_status.text = "已应用布局码。" if ok else "布局码无效，请检查是否完整（TYL1. 开头，末尾有校验）。"
+	_refresh_vehicle_touch()

@@ -1,4 +1,6 @@
 extends Control
+
+const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
 ## 触屏操作（移植网页 scene.tsx 触摸手势 + overlay.tsx 第一人称虚拟摇杆 / 按钮 + fp-control.ts CrouchHold）。
 ##
 ## 观察（展示互动）模式：
@@ -49,6 +51,11 @@ var _weapon_drag_moved: bool = false
 var _weapon_press_pos: Vector2 = Vector2.ZERO
 ## 最近一次真实 ScreenTouch 的时间戳；这段时间内忽略触摸模拟鼠标，避免同一指被处理两次。
 var _screen_touch_until: int = 0
+## 自定义按键布局（编辑中的工作副本；空则读 TouchLayout 已保存的布局）。
+var layout_edit: bool = false
+var layout_selected: String = ""
+var layout_working: Dictionary = {}
+signal layout_selection_changed(id)
 
 
 func _ready() -> void:
@@ -142,52 +149,228 @@ func _logical_rel(rel: Vector2, pos: Vector2 = Vector2.ZERO) -> Vector2:
 	return rel
 
 
+func _in_drive() -> bool:
+	return player != null and str(player.get("occupancy")) in ["car", "plane"]
+
+
+func _in_vehicle() -> bool:
+	return player != null and str(player.get("occupancy")) != ""
+
+
+func _show_stick() -> bool:
+	if layout_edit:
+		return true
+	return _fp() or _in_drive()
+
+
+func _usable() -> Rect2:
+	return TouchLayout.usable_rect(vp(), safe)
+
+
+func _layout_dict() -> Dictionary:
+	if layout_edit:
+		return layout_working
+	return TouchLayout.current()
+
+
+func _layout_center(id: String, default_c: Vector2) -> Vector2:
+	var data := _layout_dict()
+	if not data.has(id):
+		return default_c
+	var e: Dictionary = data[id]
+	var u := _usable()
+	return Vector2(
+		u.position.x + clampf(float(e.get("x", 0.5)), 0.0, 1.0) * u.size.x,
+		u.position.y + clampf(float(e.get("y", 0.5)), 0.0, 1.0) * u.size.y
+	)
+
+
+func _layout_scale(id: String) -> float:
+	var data := _layout_dict()
+	if not data.has(id):
+		return 1.0
+	return clampf(float(data[id].get("s", 1.0)), TouchLayout.SCALE_MIN, TouchLayout.SCALE_MAX)
+
+
+func _rect_from(id: String, default_pos: Vector2, default_size: Vector2) -> Rect2:
+	var sc := _layout_scale(id)
+	var sz := default_size * sc
+	var c := _layout_center(id, default_pos + default_size * 0.5)
+	return Rect2(c - sz * 0.5, sz)
+
+
 func stick_center() -> Vector2:
-	return Vector2(safe.x + EDGE_X + STICK_SIZE * 0.5, vp().y - safe.w - EDGE_B - STICK_SIZE * 0.5)
+	var raw := Vector2(safe.x + EDGE_X + STICK_SIZE * 0.5, vp().y - safe.w - EDGE_B - STICK_SIZE * 0.5)
+	return _layout_center("stick", raw)
+
+
+func stick_radius() -> float:
+	return STICK_SIZE * 0.5 * _layout_scale("stick")
+
+
+func begin_layout_edit() -> void:
+	layout_edit = true
+	layout_working = TouchLayout.current().duplicate(true)
+	layout_selected = ""
+	queue_redraw()
+
+
+func cancel_layout_edit() -> void:
+	layout_edit = false
+	layout_working = {}
+	layout_selected = ""
+	queue_redraw()
+
+
+func commit_layout_edit() -> void:
+	TouchLayout.set_layout(layout_working, true)
+	layout_edit = false
+	layout_selected = ""
+	queue_redraw()
+
+
+func apply_layout_code(code: String) -> bool:
+	var parsed := TouchLayout.decode(code)
+	if parsed.is_empty() and not TouchLayout.is_valid_code(code):
+		return false
+	# 空载荷也是合法的「全部默认」。
+	if not code.strip_edges().begins_with("TYL"):
+		return false
+	if TouchLayout.decode(code.strip_edges()) == {} and "." not in code:
+		return false
+	var check := code.strip_edges().replace(" ", "")
+	if not check.begins_with("TYL1."):
+		# 仍允许 decode 成功的其他 TYL 版本。
+		if parsed.is_empty() and not check.begins_with("TYL"):
+			return false
+	layout_working = parsed
+	if not layout_edit:
+		TouchLayout.set_layout(parsed, true)
+	queue_redraw()
+	if hud and hud.has_method("_refresh_vehicle_touch"):
+		hud.call("_refresh_vehicle_touch")
+	return true
+
+
+func current_layout_code() -> String:
+	return TouchLayout.encode(layout_working if layout_edit else TouchLayout.current())
+
+
+func set_selected_scale(s: float) -> void:
+	if layout_selected == "":
+		return
+	var u := _usable()
+	var item := _default_item(layout_selected)
+	var c: Vector2 = item["center"]
+	var data := _layout_dict()
+	if data.has(layout_selected):
+		c = _layout_center(layout_selected, c)
+	if not layout_edit:
+		layout_working = TouchLayout.current().duplicate(true)
+	layout_working[layout_selected] = TouchLayout.pack_entry(c, s, u)
+	queue_redraw()
+
+
+func selected_scale() -> float:
+	return _layout_scale(layout_selected) if layout_selected != "" else 1.0
+
+
+func _default_item(id: String) -> Dictionary:
+	var v := vp()
+	var x := v.x - safe.z - EDGE_X - BTN
+	var y := v.y - safe.w - EDGE_B - BTN
+	var top := safe.y + 6.0
+	var right := v.x - safe.z - 16.0
+	var by := v.y - safe.w
+	match id:
+		"stick":
+			var c := Vector2(safe.x + EDGE_X + STICK_SIZE * 0.5, v.y - safe.w - EDGE_B - STICK_SIZE * 0.5)
+			return {"center": c, "size": Vector2(STICK_SIZE, STICK_SIZE), "label": "摇杆"}
+		"mode":
+			var label := "切换·观察" if _fp() else "切换·控制"
+			if _in_drive() and not layout_edit:
+				var cam := "third"
+				if hud and hud.get("_vehicle_system"):
+					cam = str(hud.get("_vehicle_system").get("vehicle_cam"))
+				label = "第一人称" if cam == "first" else "第三人称"
+			return {"center": Vector2(v.x * 0.5, top + 22.0), "size": Vector2(112, 44), "label": label}
+		"crouch":
+			return {"center": Vector2(x + 8.0, y + 8.0) + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "下蹲"}
+		"jump":
+			return {"center": Vector2(x, y - BTN - GAP) + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "跳跃"}
+		"interact":
+			return {"center": Vector2(x, y - 2.0 * (BTN + GAP)) + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "互动"}
+		"weapon":
+			var x2 := x - BTN - GAP
+			return {"center": Vector2(x2, y - 2.0 * (BTN + GAP) - 8.0) + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "武器"}
+		"fire", "drag":
+			var fire_pos := Vector2(x - BTN - GAP - 8.0, y - 20.0)
+			var fire_sz := Vector2(BTN + 16.0, BTN + 16.0)
+			return {"center": fire_pos + fire_sz * 0.5, "size": fire_sz, "label": "开火" if id == "fire" else "拖拽"}
+		"ads":
+			var fire_pos2 := Vector2(x - BTN - GAP - 8.0, y - 20.0)
+			var ads_pos := Vector2(fire_pos2.x - BTN - GAP - 10.0, y - (BTN + GAP) - 8.0)
+			return {"center": ads_pos + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "瞄准"}
+		"reload":
+			var x2r := x - BTN - GAP
+			return {"center": Vector2(x2r - 128.0, y) + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "换弹"}
+		"fire_left":
+			var fire_sz2 := Vector2(BTN + 16.0, BTN + 16.0)
+			var lx := safe.x + EDGE_X
+			var ly := v.y * 0.5 - fire_sz2.y * 0.5
+			return {"center": Vector2(lx, ly) + fire_sz2 * 0.5, "size": fire_sz2, "label": "左开火"}
+		"enter":
+			return {"center": Vector2(right - 54.0, safe.y + 72.0 + 24.0), "size": Vector2(108, 48), "label": "上下载具"}
+		"vcam":
+			return {"center": Vector2(right - 54.0, safe.y + 126.0 + 20.0), "size": Vector2(108, 40), "label": "载具视角"}
+		"accel":
+			return {"center": Vector2(right - 44.0, by - 180.0 + 26.0), "size": Vector2(88, 52), "label": "加速"}
+		"brake":
+			return {"center": Vector2(right - 44.0, by - 122.0 + 26.0), "size": Vector2(88, 52), "label": "手刹"}
+		"thrust_up":
+			return {"center": Vector2(right - 44.0, by - 200.0 + 24.0), "size": Vector2(88, 48), "label": "加速"}
+		"thrust_down":
+			return {"center": Vector2(right - 44.0, by - 146.0 + 24.0), "size": Vector2(88, 48), "label": "减速"}
+		"yaw_l":
+			return {"center": Vector2(right - 132.0 + 32.0, by - 250.0 + 20.0), "size": Vector2(64, 40), "label": "Q 偏航"}
+		"yaw_r":
+			return {"center": Vector2(right - 64.0 + 32.0, by - 250.0 + 20.0), "size": Vector2(64, 40), "label": "E 偏航"}
+		"gear":
+			return {"center": Vector2(right - 44.0, by - 300.0 + 20.0), "size": Vector2(88, 40), "label": "起落架"}
+		"thrust":
+			return {"center": Vector2(right - 88.0 - 32.0, by - 200.0 + 90.0), "size": Vector2(40, 180), "label": "油门"}
+		_:
+			return {"center": v * 0.5, "size": Vector2(BTN, BTN), "label": id}
 
 
 ## 按钮布局：id -> [Rect2, 文字]
 func buttons() -> Dictionary:
 	var out := {}
-	var v := vp()
-	var x := v.x - safe.z - EDGE_X - BTN
-	var y := v.y - safe.w - EDGE_B - BTN
-	var mode_txt := "观察" if _fp() else "控制"
-	# 贴上边缘（状态栏 / 安全区下方），不再落在屏幕中部。
-	var top := safe.y + 6.0
-	out["mode"] = [Rect2(Vector2(v.x * 0.5 - 56.0, top), Vector2(112, 44)), "切换·" + mode_txt]
-	if _fp():
-		# 下蹲与跳跃对调：跳跃占用原来的下蹲位（上），下蹲占用原来的跳跃位（右下）。
-		# 按玩家标注：下蹲略向右下靠角；武器再向左收到红圈；开火继续下移，上方留给划屏。
-		var crouch_txt := "匍匐" if str(player.call("get_stance")) == "prone" else "下蹲"
-		out["crouch"] = [Rect2(Vector2(x + 8.0, y + 8.0), Vector2(BTN, BTN)), crouch_txt]
-		out["jump"] = [Rect2(Vector2(x, y - BTN - GAP), Vector2(BTN, BTN)), "跳跃"]
-		out["interact"] = [Rect2(Vector2(x, y - 2.0 * (BTN + GAP)), Vector2(BTN, BTN)), "互动"]
-		var x2 := x - BTN - GAP
-		# 0.2.12：武器 与 换弹 对调。开火键位置保持 0.2.11，收枪时该槽显示拖拽。
-		var fire := Rect2(Vector2(x2 - 8.0, y - 20.0), Vector2(BTN + 16.0, BTN + 16.0))
-		out["weapon"] = [Rect2(Vector2(x2, y - 2.0 * (BTN + GAP) - 8.0), Vector2(BTN, BTN)), "武器"]
-		if _armed():
-			out["fire"] = [fire, "开火"]
-			out["ads"] = [Rect2(Vector2(fire.position.x - BTN - GAP - 10.0, y - (BTN + GAP) - 8.0), Vector2(BTN, BTN)), "瞄准"]
-			out["reload"] = [Rect2(Vector2(x2 - 128.0, y), Vector2(BTN, BTN)), "换弹"]
-			# 左侧中间开火键（与右侧开火同一把武器），不要挡住左下摇杆。
-			var fire_sz := Vector2(BTN + 16.0, BTN + 16.0)
-			var lx := safe.x + EDGE_X
-			var ly := v.y * 0.5 - fire_sz.y * 0.5
-			var stick_top := stick_center().y - STICK_SIZE * 0.5
-			if ly + fire_sz.y + GAP > stick_top:
-				ly = stick_top - fire_sz.y - GAP
-			if ly < safe.y + 56.0:
-				ly = safe.y + 56.0
-			# 摄像机缩放条打开时，把左开火键挪到竖条右侧，避免重叠。
-			if zoom_visible():
-				var zr := zoom_rect()
-				if zr.size.x > 1.0:
-					lx = maxf(lx, zr.end.x + GAP)
-			out["fire_left"] = [Rect2(Vector2(lx, ly), fire_sz), "开火"]
+	var item_mode := _default_item("mode")
+	out["mode"] = [_rect_from("mode", item_mode["center"] - item_mode["size"] * 0.5, item_mode["size"]), item_mode["label"]]
+	var walk := layout_edit or (_fp() and not _in_drive())
+	if walk:
+		var crouch_txt := "下蹲"
+		if player and player.has_method("get_stance"):
+			crouch_txt = "匍匐" if str(player.call("get_stance")) == "prone" else "下蹲"
+		for id in ["crouch", "jump", "interact", "weapon"]:
+			var it := _default_item(id)
+			var label: String = it["label"]
+			if id == "crouch":
+				label = crouch_txt
+			out[id] = [_rect_from(id, it["center"] - it["size"] * 0.5, it["size"]), label]
+		if layout_edit or _armed():
+			for id in ["fire", "ads", "reload", "fire_left"]:
+				var it := _default_item(id)
+				out[id] = [_rect_from(id, it["center"] - it["size"] * 0.5, it["size"]), it["label"]]
 		elif _drag_available():
-			out["drag"] = [fire, "放下" if _drag_holding() else "拖拽"]
+			var it := _default_item("drag")
+			out["drag"] = [_rect_from("drag", it["center"] - it["size"] * 0.5, it["size"]), "放下" if _drag_holding() else "拖拽"]
+	if layout_edit:
+		# 载具按键也画出来，方便一次编好行走和载具两套位置。
+		for id in ["enter", "vcam", "accel", "brake", "thrust_up", "thrust_down", "yaw_l", "yaw_r", "gear", "thrust"]:
+			var it := _default_item(id)
+			out[id] = [_rect_from(id, it["center"] - it["size"] * 0.5, it["size"]), it["label"]]
 	return out
 
 
@@ -295,6 +478,18 @@ func _on_down(idx: int, p: Vector2) -> void:
 		_on_up(idx, p)
 	var f := {"role": "none", "start": p, "pos": p, "t0": Time.get_ticks_msec()}
 	fingers[idx] = f
+	if layout_edit:
+		# 选中并拖拽按键 / 摇杆，不触发原来的功能。
+		var bid := _hit_button(p)
+		if bid == "" and p.distance_to(stick_center()) <= stick_radius() + 10.0:
+			bid = "stick"
+		if bid != "":
+			layout_selected = bid
+			f["role"] = "layout:" + bid
+			layout_selection_changed.emit(bid)
+			queue_redraw()
+		get_viewport().set_input_as_handled()
+		return
 	if hud and hud.has_method("point_over_ui") and bool(hud.call("point_over_ui", p)):
 		f["role"] = "ui"
 		return
@@ -309,17 +504,37 @@ func _on_down(idx: int, p: Vector2) -> void:
 		_button(bid, true)
 		get_viewport().set_input_as_handled()
 		return
-	if _fp():
-		if p.distance_to(stick_center()) <= STICK_SIZE * 0.5 + 8.0 and not _has_role("stick"):
-			f["role"] = "stick"
-			_stick_to(p)
-		elif zoom_visible() and zoom_rect().grow(8.0).has_point(p):
+	# 摇杆优先：只要点在摇杆上，就只开车杆，绝不转视角。
+	if _show_stick() and p.distance_to(stick_center()) <= stick_radius() + 8.0 and not _has_role("stick"):
+		f["role"] = "stick"
+		_stick_to(p)
+		get_viewport().set_input_as_handled()
+		queue_redraw()
+		return
+	if _fp() and not _in_drive():
+		if zoom_visible() and zoom_rect().grow(8.0).has_point(p):
 			f["role"] = "zoom"
 			_zoom_to(p)
 		else:
 			f["role"] = "look"
 		get_viewport().set_input_as_handled()
 		queue_redraw()
+		return
+	if _in_drive():
+		# 第二根手指：载具里按住滑动旋转视角。
+		var scene_fingers := _scene_fingers()
+		if scene_fingers.size() >= 2:
+			for k in scene_fingers:
+				if str(fingers[k]["role"]) != "stick":
+					fingers[k]["role"] = "orbit"
+			get_viewport().set_input_as_handled()
+			return
+		# 飞机：屏幕右侧左右划屏控制偏航幅度。
+		if str(player.get("occupancy")) == "plane" and p.x >= vp().x * 0.55:
+			f["role"] = "yaw"
+		else:
+			f["role"] = "none"
+		get_viewport().set_input_as_handled()
 		return
 	# ---- 观察模式
 	var scene_fingers := _scene_fingers()
@@ -353,7 +568,26 @@ func _on_drag(idx: int, p: Vector2, rel: Vector2) -> void:
 		return
 	var f: Dictionary = fingers[idx]
 	f["pos"] = p
-	match str(f["role"]):
+	var role := str(f["role"])
+	if role.begins_with("layout:"):
+		_drag_layout(role.substr(7), p)
+		get_viewport().set_input_as_handled()
+		return
+	if role == "yaw":
+		# Horizontal swipe: left = yaw left (touch_yaw -1), right = +1.
+		# Distance from the press start sets magnitude; vertical is ignored.
+		var dx: float = p.x - float(f["start"].x)
+		var mag := clampf(dx / 90.0, -1.0, 1.0)
+		if hud and hud.has_method("_set_vs"):
+			hud.call("_set_vs", "touch_yaw", mag)
+		elif player and player.get_parent() and player.get_parent().get("vehicle_system"):
+			player.get_parent().get("vehicle_system").set("touch_yaw", mag)
+		get_viewport().set_input_as_handled()
+		return
+	if role == "orbit":
+		# Two-finger (or later orbit role) already handled below.
+		pass
+	match role:
 		"stick":
 			_stick_to(p)
 		"look":
@@ -391,6 +625,11 @@ func _on_up(idx: int, p: Vector2) -> void:
 	if role == "look" or role == "orbit":
 		if player and player.has_method("touch_look_end"):
 			player.call("touch_look_end")
+	if role == "yaw":
+		if hud and hud.has_method("_set_vs"):
+			hud.call("_set_vs", "touch_yaw", 0.0)
+		elif player and player.get_parent() and player.get_parent().get("vehicle_system"):
+			player.get_parent().get("vehicle_system").set("touch_yaw", 0.0)
 	if role == "ui" or role.begins_with("btn:"):
 		return
 	# 短按且没怎么动 = 一次点按（用于双击环绕）。
@@ -524,7 +763,12 @@ func _button(id: String, down: bool) -> void:
 	match id:
 		"mode":
 			if down:
-				player.call("toggle_play_mode")
+				if _in_drive() and hud and hud.get("_vehicle_system") and hud.get("_vehicle_system").has_method("toggle_vehicle_cam"):
+					hud.get("_vehicle_system").call("toggle_vehicle_cam")
+					if hud.has_method("_refresh_vehicle_touch"):
+						hud.call("_refresh_vehicle_touch")
+				else:
+					player.call("toggle_play_mode")
 				_release_all_except_buttons()
 		"jump":
 			if down:
@@ -589,43 +833,58 @@ func _process(_dt: float) -> void:
 	if _crouch_t0 >= 0 and not _crouch_long and Time.get_ticks_msec() - _crouch_t0 >= CROUCH_LONG_MS:
 		_crouch_long = true
 		player.call("toggle_prone")
-	if not _fp() and _has_role("stick"):
+	if not _show_stick() and _has_role("stick"):
 		_release_all_except_buttons()
 	queue_redraw()
 
 
 # ------------------------------------------------------------------ draw
+func _drag_layout(id: String, p: Vector2) -> void:
+	var u := _usable()
+	var s := _layout_scale(id)
+	p = Vector2(clampf(p.x, u.position.x, u.end.x), clampf(p.y, u.position.y, u.end.y))
+	layout_working[id] = TouchLayout.pack_entry(p, s, u)
+	queue_redraw()
+	if hud and hud.has_method("_refresh_vehicle_touch"):
+		hud.call("_refresh_vehicle_touch")
+
+
 func _draw() -> void:
-	if not enabled or _blocked():
+	if not enabled:
 		return
-	var fg := Color(0.95, 0.96, 0.98, 0.9)
-	var surf := Color(0.12, 0.13, 0.16, 0.45)
-	var line := Color(1, 1, 1, 0.35)
-	var accent := Color(0.93, 0.55, 0.42, 0.9)
+	if _blocked() and not layout_edit:
+		return
+	# 与 HUD 按钮统一：圆角矩形、深底、选中偏蓝。摇杆仍是圆的。
+	var fg := Color(0.95, 0.96, 0.98, 0.95)
+	var surf := Color(0.14, 0.16, 0.2, 0.88)
+	var line := Color(1, 1, 1, 0.28)
+	var accent := Color(0.28, 0.48, 0.78, 0.95)
 	var b := buttons()
 	for id in b.keys():
 		var r: Rect2 = b[id][0]
 		var interact_on := false
 		if id == "interact" and player and player.has_method("is_touch_interact_on"):
 			interact_on = bool(player.call("is_touch_interact_on"))
-		var on: bool = _pressed_btn.has(id) or interact_on or (id == "crouch" and str(player.call("get_stance")) != "stand") or (id == "drag" and _drag_holding())
+		var on: bool = _pressed_btn.has(id) or interact_on or (id == "crouch" and player and str(player.call("get_stance")) != "stand") or (id == "drag" and _drag_holding())
 		if id == "ads":
 			var wads := _weapons()
 			on = on or (wads != null and bool(wads.get("ads")))
-		if id == "mode":
-			draw_style_box(_box(Color(0.12, 0.13, 0.16, 0.6), line, 22.0), r)
-		else:
-			draw_circle(r.get_center(), r.size.x * 0.5, accent if on else surf)
-			draw_arc(r.get_center(), r.size.x * 0.5, 0.0, TAU, 40, line, 1.5, true)
+		var selected: bool = layout_edit and layout_selected == id
+		var bg := Color(0.28, 0.48, 0.78, 0.95) if (on or selected) else surf
+		var rad := 10.0 if id != "thrust" else 8.0
+		draw_style_box(_box(bg, Color(0.95, 0.85, 0.35, 0.95) if selected else line, rad), r)
 		_text_center(str(b[id][1]), r.get_center(), 14 if id != "mode" else 13, fg)
-	if _fp():
+	if _show_stick():
 		var c := stick_center()
+		var rads := stick_radius()
 		var sprint := stick_vec.length() >= STICK_SPRINT
-		draw_circle(c, STICK_SIZE * 0.5, Color(0.93, 0.55, 0.42, 0.25) if sprint else surf)
-		draw_arc(c, STICK_SIZE * 0.5, 0.0, TAU, 48, accent if sprint else line, 1.5, true)
-		draw_arc(c, STICK_SIZE * 0.23, 0.0, TAU, 32, Color(1, 1, 1, 0.25), 1.0, true)
-		draw_circle(c + stick_vec * STICK_MAX, KNOB * 0.5, accent)
-		_text_center("奔跑" if sprint else "外圈奔跑", c + Vector2(0, STICK_SIZE * 0.5 + 12.0), 11, Color(0.8, 0.82, 0.86, 0.8))
+		var selected_stick: bool = layout_edit and layout_selected == "stick"
+		draw_circle(c, rads, Color(0.28, 0.48, 0.78, 0.28) if sprint or selected_stick else Color(0.14, 0.16, 0.2, 0.45))
+		draw_arc(c, rads, 0.0, TAU, 48, Color(0.95, 0.85, 0.35, 0.95) if selected_stick else (accent if sprint else line), 2.0 if selected_stick else 1.5, true)
+		draw_arc(c, rads * 0.46, 0.0, TAU, 32, Color(1, 1, 1, 0.25), 1.0, true)
+		draw_circle(c + stick_vec * (STICK_MAX * _layout_scale("stick")), KNOB * 0.5 * _layout_scale("stick"), accent)
+		if not layout_edit:
+			_text_center("奔跑" if sprint else "外圈奔跑", c + Vector2(0, rads + 12.0), 11, Color(0.8, 0.82, 0.86, 0.8))
 		# 缩放竖条：只在摄像机面板打开时显示
 		var zr := zoom_rect()
 		if zr.size.y > 1.0:

@@ -1904,11 +1904,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	# 只处理鼠标；离散按键统一由 game_root.run_action 路由（每个键只在一处处理）。
 	if input_locked:
 		return
+	# Touch-emulated mouse must not also orbit the vehicle camera or steal
+	# the enter/exit tap — the stick / HUD already owns that finger.
+	if touch_active and event is InputEventMouse and event.device == InputEvent.DEVICE_ID_EMULATION:
+		return
 	if occupancy == "car" or occupancy == "plane":
 		if _handle_vehicle_look(event):
 			return
-	if touch_active and event is InputEventMouse and event.device == InputEvent.DEVICE_ID_EMULATION:
-		return
 	# 脏器互动：左键（捕获鼠标时取屏幕中心，否则取光标）。HUD 面板打开时也可以互动——
 	# 面板本身吃掉落在面板矩形内的点击，面板外的点击会走到这里。
 	# 武器：左键射击 / 右键开镜 / 滚轮切枪（第一人称持枪时代替身体互动）
