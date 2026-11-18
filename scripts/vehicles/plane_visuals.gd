@@ -73,25 +73,33 @@ func _mount_wheels(regex: String) -> Array:
 		if not (obj is Node3D):
 			continue
 		var n := obj as Node3D
-		if n.get_parent() and str(n.get_parent().name).begins_with("WheelHub"):
+		if n.get_parent() and (str(n.get_parent().name).begins_with("WheelHub") \
+				or str(n.get_parent().name).begins_with("WheelSteer") \
+				or str(n.get_parent().name).begins_with("WheelSpin")):
 			continue
 		if n.name.ends_with("_hub") or n.name.contains("Hub"):
 			continue
 		var world_pos := n.global_position
-		# Hub is identity in airframe space; roll axle is always local X.
-		# World AABB would pick a tilted axis when the fighter is spawned yawed.
+		# Chassis → steer hinge (body-up kingpin) → spin child (axle roll).
+		# Same composition as the sports car so a steered nose wheel does not
+		# tumble its steer axis as it rolls.
 		var spin_sign := 1.0
-		var hub := Node3D.new()
-		hub.name = "WheelHub_%s" % n.name
-		wrap.add_child(hub)
-		hub.global_position = world_pos
-		hub.quaternion = Quaternion.IDENTITY
-		hub.scale = Vector3.ONE
-		VehicleCommon.reparent_keep_global(n, hub)
-		var off := hub.position
+		var hinge := Node3D.new()
+		hinge.name = "WheelSteer_%s" % n.name
+		wrap.add_child(hinge)
+		hinge.global_position = world_pos
+		hinge.quaternion = Quaternion.IDENTITY
+		hinge.scale = Vector3.ONE
+		var spin := Node3D.new()
+		spin.name = "WheelSpin_%s" % n.name
+		hinge.add_child(spin)
+		spin.position = Vector3.ZERO
+		spin.quaternion = Quaternion.IDENTITY
+		VehicleCommon.reparent_keep_global(n, spin)
+		var off := hinge.position
 		var steer := off.z < 0.0
 		out.append({
-			"root": hub, "rest_pos": off, "rest_quat": hub.quaternion,
+			"root": hinge, "spin": spin, "rest_pos": off, "rest_quat": hinge.quaternion,
 			"steer": steer, "axle": "x", "spin_sign": spin_sign, "offset": off,
 		})
 	out.sort_custom(func(a, b):
@@ -410,20 +418,26 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 	var susp: Array = st.get("susp", [0.4, 0.4, 0.4, 0.4])
 	for i in wheels.size():
 		var w: Dictionary = wheels[i]
-		var hub: Node3D = w["root"]
+		var hinge: Node3D = w["root"]
+		var spin_n: Node3D = w["spin"] if w.has("spin") else hinge
 		var in_bay := gear_down < 0.18
-		hub.visible = not in_bay
+		hinge.visible = not in_bay
 		if in_bay:
-			hub.position = w["rest_pos"]
-			hub.quaternion = w["rest_quat"]
+			hinge.position = w["rest_pos"]
+			hinge.quaternion = w["rest_quat"]
+			if spin_n != hinge:
+				spin_n.quaternion = Quaternion.IDENTITY
 			continue
 		var sag := ((float(susp[i]) if i < susp.size() else 0.4) - 0.4) if gear_down > 0.35 else 0.0
-		hub.position = w["rest_pos"] + Vector3(0.0, sag * 0.2, 0.0)
-		hub.quaternion = w["rest_quat"]
+		hinge.position = w["rest_pos"] + Vector3(0.0, sag * 0.2, 0.0)
+		hinge.quaternion = w["rest_quat"]
 		if w["steer"] and gear_down > 0.4:
-			hub.rotate_y(steer_angle * 0.9)
-		var spin: float = wheel_spin * float(w["spin_sign"])
-		hub.rotate_x(spin)
+			hinge.rotate_object_local(Vector3.UP, steer_angle * 0.9)
+		var spin_a: float = wheel_spin * float(w["spin_sign"])
+		if spin_n != hinge:
+			spin_n.quaternion = Quaternion(Vector3.RIGHT, spin_a)
+		else:
+			spin_n.rotate_object_local(Vector3.RIGHT, spin_a)
 	var door_t := float(st.get("door", 0.0))
 	for d in doors:
 		(d as VehicleHinge).apply(door_t)
@@ -508,7 +522,7 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 		var e := Vector3(-pitch_c * 0.22, 0.0, roll_c * 0.2)
 		sw.quaternion = steer_wheel["rest"] * Quaternion.from_euler(e)
 	for fx in exhausts:
-		(fx as JetExhaust).apply(thrust, time, altitude)
+		(fx as JetExhaust).apply(thrust, time, altitude, delta)
 
 
 func _fin_hinge_line(wrap_n: Node3D, obj: Node3D, a: Dictionary) -> Array:
@@ -579,6 +593,22 @@ func _mesh_points_in(wrap_n: Node3D, n: Node3D) -> Array[Vector3]:
 func _smoothstep(e0: float, e1: float, x: float) -> float:
 	var t := clampf((x - e0) / maxf(e1 - e0, 1e-5), 0.0, 1.0)
 	return t * t * (3.0 - 2.0 * t)
+
+
+func wheel_rig_info() -> Array:
+	var out: Array = []
+	for w in wheels:
+		var hinge: Node3D = w["root"]
+		var spin: Node3D = w["spin"] if w.has("spin") else hinge
+		out.append({
+			"steer": hinge,
+			"spin": spin,
+			"parent_ok": spin.get_parent() == hinge,
+			"kingpin": hinge.global_transform.basis.y.normalized(),
+			"axle": spin.global_transform.basis.x.normalized(),
+			"is_steer": bool(w["steer"]),
+		})
+	return out
 
 
 func wheel_layout() -> Array:

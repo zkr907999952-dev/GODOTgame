@@ -1171,19 +1171,41 @@ func _tp_collide(origin: Vector3, dir: Vector3, dist: float) -> float:
 				var plane := b.end[ax] if c > 0.0 else b.position[ax]
 				d = minf(d, maxf(0.0, (plane - origin[ax]) / c))
 	if is_inside_tree() and _cam_shape != null:
+		var space := get_world_3d().direct_space_state
+		var exclude: Array = [get_rid()]
+		if occupier is CollisionObject3D:
+			exclude.append((occupier as CollisionObject3D).get_rid())
+		# A focus point inside the exam bed / character would otherwise make
+		# cast_motion return 0 and freeze dolly at the 0.12 m floor.
+		var overlap := PhysicsShapeQueryParameters3D.new()
+		overlap.shape = _cam_shape
+		overlap.transform = Transform3D(Basis.IDENTITY, origin)
+		overlap.collision_mask = 1
+		overlap.exclude = exclude
+		for hit in space.intersect_shape(overlap, 16):
+			var rid: Variant = hit.get("rid")
+			if rid:
+				exclude.append(rid)
 		var q := PhysicsShapeQueryParameters3D.new()
 		q.shape = _cam_shape
 		q.transform = Transform3D(Basis.IDENTITY, origin)
 		q.motion = dir * d
 		q.collision_mask = 1
-		q.exclude = [get_rid()]
-		var res := get_world_3d().direct_space_state.cast_motion(q)
+		q.exclude = exclude
+		var res := space.cast_motion(q)
 		if res.size() >= 1 and res[0] < 1.0:
 			d *= res[0]
 	return maxf(d, 0.12)
 
 
 func _update_tp_camera(delta: float, snap: bool = false) -> void:
+	# On the exam bed the orbit center is the posed body (belly / current
+	# focus). Following it every frame keeps dolly and orbit usable, instead
+	# of leaving the target inside the table collision from a standing offset.
+	if occupancy == "exam_bed" and play_mode == GameMode.DISPLAY:
+		var focus := _tp_focus if _tp_focus != "" else "belly"
+		if TP_FOCUS.has(focus):
+			_tp_target_goal = focus_point(focus) - _base_origin()
 	if tp_auto_rotate and not _rmb_down:
 		_tp_yaw_goal += tp_auto_rotate_speed * TAU / 60.0 * delta
 	var k := 1.0 if snap else 1.0 - exp(-TP_DAMP_RATE * delta)
@@ -1829,6 +1851,55 @@ func _handle_vehicle_look(event: InputEvent) -> bool:
 	return false
 
 
+func _hud_consumes_scroll(pos: Vector2) -> bool:
+	var hud := get_parent().get_node_or_null("HUD") if get_parent() else null
+	if hud and hud.has_method("gui_consumes_scroll"):
+		return bool(hud.call("gui_consumes_scroll", pos))
+	return false
+
+
+func _should_dolly_wheel() -> bool:
+	if input_locked:
+		return false
+	# Armed first-person / captured mouse: wheel cycles weapons.
+	if first_person and has_method("weapon_armed") and weapon_armed() \
+			and (Input.mouse_mode == Input.MOUSE_MODE_CAPTURED or touch_active):
+		return false
+	return true
+
+
+func apply_observe_wheel(steps: float) -> void:
+	_tp_dolly(steps)
+
+
+func _try_handle_observe_wheel(event: InputEvent) -> bool:
+	if not (event is InputEventMouseButton):
+		return false
+	var mb := event as InputEventMouseButton
+	if mb.button_index != MOUSE_BUTTON_WHEEL_UP and mb.button_index != MOUSE_BUTTON_WHEEL_DOWN:
+		return false
+	if not mb.pressed:
+		return false
+	if not _should_dolly_wheel():
+		return false
+	if _hud_consumes_scroll(mb.position):
+		return false
+	var dir := 1.0 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0
+	var steps := dir * maxf(1.0, mb.factor if mb.factor > 0.0 else 1.0)
+	# Wheel always dollies distance to the look-at / follow center.
+	# It must not change FOV in observation or character view.
+	_tp_dolly(steps)
+	get_viewport().set_input_as_handled()
+	return true
+
+
+func _input(event: InputEvent) -> void:
+	# Handle the wheel before GUI so an overlay / exam-bed HUD cannot swallow
+	# observation dolly. Open scrollable panels still receive it via the HUD check.
+	if _try_handle_observe_wheel(event):
+		return
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	# 只处理鼠标；离散按键统一由 game_root.run_action 路由（每个键只在一处处理）。
 	if input_locked:
@@ -1924,16 +1995,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			set_rmb_corpse_drag(mb.pressed)
 			get_viewport().set_input_as_handled()
 			return
-		var wheel := mb.button_index == MOUSE_BUTTON_WHEEL_UP or mb.button_index == MOUSE_BUTTON_WHEEL_DOWN
-		if wheel:
-			if not mb.pressed:
-				return
-			var dir := 1.0 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0
-			var steps := dir * maxf(1.0, mb.factor if mb.factor > 0.0 else 1.0)
-			# Wheel always dollies distance to the look-at / follow center.
-			# It must not change FOV in observation or character view.
-			_tp_dolly(steps)
-			get_viewport().set_input_as_handled()
+		if _try_handle_observe_wheel(mb):
 			return
 		if not first_person:
 			if mb.button_index == MOUSE_BUTTON_RIGHT:

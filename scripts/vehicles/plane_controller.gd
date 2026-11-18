@@ -12,8 +12,8 @@ const MASS_KG := 14000.0
 const WING_AREA := 78.0  # m², F-22 class
 const WING_SPAN := 13.6
 const MAC := 5.7  # mean aerodynamic chord
-const THRUST_DRY := 210000.0  # N
-const THRUST_AB := 310000.0
+const THRUST_DRY := 520000.0  # N, Ace Combat-style punch (~3.8 g dry)
+const THRUST_AB := 880000.0  # ~6.4 g with hold-to-afterburner
 const CD0 := 0.028
 const K_INDUCED := 0.11
 const CL_ALPHA := 4.4  # per radian
@@ -30,7 +30,7 @@ const GEAR_AUTO_RETRACT_AGL := 3.4
 const GEAR_AUTO_EXTEND_AGL := 2.6
 const BRAKE_DRAG := 0.05
 const ROTATE_SPEED := 42.0  # m/s, ~150 km/h — taxi then pull stick to rotate
-const TAXI_THRUST_SCALE := 0.70
+const TAXI_THRUST_SCALE := 0.42  # keep ground roll usable with the stronger dry thrust
 const GEAR_TRAVEL := 0.32
 const GEAR_STIFF := 420000.0
 const GEAR_DAMP := 56000.0
@@ -82,7 +82,7 @@ func _ready() -> void:
 	collision_layer = 1
 	collision_mask = 1
 	linear_damp = 0.0
-	angular_damp = 0.15  # residual; most damping comes from aero
+	angular_damp = 0.08  # residual; most damping comes from aero
 	can_sleep = true
 	visuals = PlaneVisuals.new()
 	visuals.name = "Visuals"
@@ -321,24 +321,27 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var force := fwd * thrust_n + lift_dir * lift + drag_dir * drag
 	# Control moments: scale with q, lose authority in stall and at very low speed.
 	var q_norm := clampf(q / (0.5 * RHO_SL * 110.0 * 110.0), 0.0, 1.8)
-	var auth := q_norm * (1.0 - 0.7 * stall) * (0.25 + 0.75 * clampf(airspeed / 40.0, 0.0, 1.0))
-	# Ace Combat: generous but not instant. Units: torque in N·m.
-	var pitch_t := ctrl_pitch * auth * 98000.0
-	var roll_t := ctrl_roll * auth * 140000.0
-	var yaw_t := ctrl_yaw * auth * 52000.0
+	# Arcade / Ace Combat authority: stays lively at moderate speed, snaps
+	# in pitch and roll, with a milder rudder so yaw is not twitchy.
+	var auth := q_norm * (1.0 - 0.55 * stall) * (0.42 + 0.58 * clampf(airspeed / 28.0, 0.0, 1.0))
+	# Units: torque in N·m.
+	var pitch_t := ctrl_pitch * auth * 210000.0
+	var roll_t := ctrl_roll * auth * 320000.0
+	var yaw_t := ctrl_yaw * auth * 28000.0
 	# Speed-brake / rudder + weathercock (beta) stability.
-	yaw_t += -beta * auth * 70000.0
-	pitch_t += -aoa * (0.35 + 1.4 * stall) * auth * 40000.0  # pitch stability + stall nose-drop
-	# Rate damping (stability derivatives).
+	yaw_t += -beta * auth * 52000.0
+	pitch_t += -aoa * (0.28 + 1.2 * stall) * auth * 36000.0  # pitch stability + stall nose-drop
+	# Rate damping (stability derivatives): lighter in roll/pitch, a bit
+	# heavier in yaw so the stronger elevator/aileron don't make the rudder snappy.
 	var w := state.angular_velocity
 	var p := w.dot(fwd)  # roll rate about nose? actually roll is about fwd
 	# Body rates:
 	var rate_roll := w.dot(fwd)
 	var rate_pitch := w.dot(right)
 	var rate_yaw := w.dot(up)
-	var damp_roll := -rate_roll * (18000.0 + q_norm * 42000.0)
-	var damp_pitch := -rate_pitch * (22000.0 + q_norm * 50000.0)
-	var damp_yaw := -rate_yaw * (20000.0 + q_norm * 38000.0)
+	var damp_roll := -rate_roll * (11000.0 + q_norm * 26000.0)
+	var damp_pitch := -rate_pitch * (13000.0 + q_norm * 30000.0)
+	var damp_yaw := -rate_yaw * (26000.0 + q_norm * 50000.0)
 	var torque := right * (pitch_t + damp_pitch) + fwd * (roll_t + damp_roll) + up * (yaw_t + damp_yaw)
 	# Ground handling: ray-spring gear supports the jet so airframe hulls
 	# stay above the pavement (otherwise the fuselage falls in and sticks).

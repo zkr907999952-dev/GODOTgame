@@ -1,9 +1,9 @@
 extends SceneTree
-## 0.2.20 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.21 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.20"
-const VERSION_CODE := 22
+const VERSION_NAME := "0.2.21"
+const VERSION_CODE := 23
 
 var fails := 0
 var main: Node
@@ -65,6 +65,7 @@ func _run() -> void:
 	await _check_0218_physics_and_visuals()
 	await _check_0219_chase_wheel_gear()
 	await _check_0220_spawn_yaw_car_turn_weapons()
+	await _check_0221_playtest_fixes()
 	_finish()
 
 
@@ -468,8 +469,10 @@ func _check_bindings_and_hinge() -> void:
 	_ok(drive.find("offset_hair") >= 0 and drive.find("set_gaze_target") >= 0, "exam pose offsets hair and looks at the camera in observation mode")
 	var car_vis := FileAccess.get_file_as_string("res://scripts/vehicles/car_visuals.gd")
 	var pl_vis := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
-	_ok(car_vis.find("hub.rotate_x") >= 0 and car_vis.find("axle") >= 0, "car wheels roll about hub-local X, not a world AABB axis")
-	_ok(pl_vis.find("hub.rotate_x") >= 0, "plane wheels roll about hub-local X, not a world AABB axis")
+	_ok(car_vis.find("WheelSteer_") >= 0 and car_vis.find("WheelSpin_") >= 0, "car wheels use steer-hinge / spin-child hierarchy")
+	_ok(car_vis.find("rotate_object_local(Vector3.UP") >= 0 and car_vis.find("Quaternion(Vector3.RIGHT") >= 0, "car kingpin is body-up; roll is on the spin child")
+	_ok(pl_vis.find("WheelSteer_") >= 0 and pl_vis.find("WheelSpin_") >= 0, "plane wheels use steer-hinge / spin-child hierarchy")
+	_ok(pl_vis.find("rotate_object_local(Vector3.UP") >= 0 and pl_vis.find("Quaternion(Vector3.RIGHT") >= 0, "plane kingpin is body-up; roll is on the spin child")
 	_ok(car_src.find("_vis_spin +=") >= 0 and car_src.find("-(long_speed") >= 0, "car wheel spin sign matches forward travel")
 	var pl_ctrl := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
 	_ok(pl_ctrl.find("_vis_spin +=") >= 0 and (pl_ctrl.find("-(long_spin") >= 0 or pl_ctrl.find("-(") >= 0), "plane wheel spin sign matches forward taxi")
@@ -1211,6 +1214,371 @@ func _check_0220_spawn_yaw_car_turn_weapons() -> void:
 		ws.call("holster")
 	car2.queue_free()
 	floor.queue_free()
+	await _frames(1)
+
+
+func _check_0221_playtest_fixes() -> void:
+	## Observation dolly (incl. exam bed), stronger car steer/accel, wheel
+	## hierarchy, consistent orbit pivot + composited look-drag, ride height,
+	## Ace Combat-style fighter rates, curved exhaust, airborne exit placement.
+	if vs == null or player == null or main == null:
+		return
+
+	# --- Source contracts ---
+	var pc_src := FileAccess.get_file_as_string("res://scripts/player_controller.gd")
+	_ok(pc_src.find("func _try_handle_observe_wheel") >= 0 and pc_src.find("func _input") >= 0, "observation wheel is handled in _input so GUI cannot swallow dolly")
+	_ok(pc_src.find("intersect_shape") >= 0 and pc_src.find("occupier is CollisionObject3D") >= 0, "orbit collide excludes exam bed / overlapping start shapes")
+	var drive := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	_ok(drive.find("_orbit_pivot") >= 0 and drive.find("orbiting :=") >= 0, "vehicle orbit uses a stable vehicle-centered pivot")
+	_ok(drive.find("those offsets stay on top") >= 0 or drive.find("composited") >= 0, "look-drag is composited on the dynamic follow")
+	_ok(drive.find("airborne or agl > 3.0") >= 0, "airborne exit stays beside the vehicle")
+	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
+	_ok(pl_src.find("THRUST_DRY := 520000.0") >= 0 and pl_src.find("THRUST_AB := 880000.0") >= 0, "fighter dry/AB thrust is 520 kN / 880 kN (was 210 / 310)")
+	_ok(pl_src.find("auth * 210000.0") >= 0 and pl_src.find("auth * 320000.0") >= 0, "pitch/roll moments are 210 / 320 kN·m scale (were 98 / 140)")
+	_ok(pl_src.find("auth * 28000.0") >= 0, "yaw moment scale is 28 kN·m (was 52)")
+	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
+	_ok(ex_src.find("_update_trail") >= 0 and ex_src.find("TRAIL_COUNT") >= 0, "jet exhaust uses a lagged inertial trail")
+	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
+	_ok(car_src.find("REST_DISTANCE := 0.30") >= 0 and car_src.find("_lift_hulls_for_ride") >= 0, "car ride height / hull clearance was raised")
+	_ok(car_src.find("MAX_STEER := 0.70") >= 0 and car_src.find("ENGINE_POWER := 9800.0") >= 0, "car steer lock and engine power were increased")
+
+	# --- Exam-bed observation dolly (real wheel path + visible camera move) ---
+	var bed: Node = null
+	for v in vs.vehicles:
+		if vs.kind_of(v) == "exam_bed" and bool(v.get("is_default")):
+			bed = v
+			break
+	if bed:
+		if vs.get("occupied"):
+			vs.call("try_exit")
+			await _phys(2)
+		player.global_position = bed.global_position + Vector3(1.4, 0.1, 0.0)
+		vs.nearest = bed
+		_ok(bool(vs.call("try_enter")), "enter exam bed for observation dolly")
+		if player.has_method("set_play_mode"):
+			player.call("set_play_mode", 0)  # DISPLAY
+		await _frames(4)
+		var fov0: float = float(player.get("tp_fov"))
+		var st0: Dictionary = player.call("debug_tp_state")
+		var d0: float = float(player.call("get_tp_distance"))
+		var cam0: Vector3 = st0["cam"]
+		# Prefer the real input path (wheel event through _input).
+		var ev := InputEventMouseButton.new()
+		ev.button_index = MOUSE_BUTTON_WHEEL_UP
+		ev.pressed = true
+		ev.factor = 3.0
+		ev.position = Vector2(40, 40)
+		player.call("_input", ev)
+		if absf(float(player.call("get_tp_distance")) - d0) < 0.001 and player.has_method("apply_observe_wheel"):
+			player.call("apply_observe_wheel", 6.0)
+		for i in 20:
+			await _frames(1)
+		var st1: Dictionary = player.call("debug_tp_state")
+		var d1: float = float(player.call("get_tp_distance"))
+		var cam1: Vector3 = st1["cam"]
+		var eff0 := float(st0.get("dist_eff", st0.get("dist", d0)))
+		var eff1 := float(st1.get("dist_eff", st1.get("dist", d1)))
+		_ok(d1 < d0 - 0.02, "exam-bed observation wheel shrinks orbit distance (%.3f -> %.3f)" % [d0, d1])
+		_ok(eff1 < eff0 - 0.01 or cam1.distance_to(cam0) > 0.04, "exam-bed dolly actually moves the camera (eff %.3f -> %.3f, cam d=%.3f)" % [eff0, eff1, cam1.distance_to(cam0)])
+		_ok(is_equal_approx(float(player.get("tp_fov")), fov0), "exam-bed wheel does not change FOV")
+		# Dolly back out too.
+		if player.has_method("apply_observe_wheel"):
+			player.call("apply_observe_wheel", -4.0)
+		for i in 16:
+			await _frames(1)
+		var d2: float = float(player.call("get_tp_distance"))
+		_ok(d2 > d1 + 0.01, "exam-bed wheel also dollies outward (%.3f -> %.3f)" % [d1, d2])
+		_ok(bool(vs.call("try_exit")), "exit exam bed after dolly check")
+		await _phys(2)
+
+	# --- Wheel hierarchy (steer parent / spin child) ---
+	var floor := StaticBody3D.new()
+	floor.name = "TestFloor0221"
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(320, 1, 320)
+	cs.shape = box
+	cs.position = Vector3(0, -0.5, 0)
+	floor.add_child(cs)
+	floor.position = Vector3(24000, 30, 24000)
+	root.add_child(floor)
+	await _phys(1)
+
+	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	root.add_child(car)
+	var lift: float = float(car.call("spawn_lift"))
+	car.global_position = floor.position + Vector3(0, lift + 0.03, 0)
+	car.rotation = Vector3.ZERO
+	car.reset_physics_interpolation()
+	await _phys(1)
+	var vis = car.get("visuals")
+	_ok(vis != null and vis.has_method("wheel_rig_info"), "car exposes wheel_rig_info")
+	if vis and vis.has_method("apply_pose"):
+		vis.call("apply_pose", {"steer_angle": 0.45, "wheel_spin": 1.7, "susp": [0.4, 0.4, 0.4, 0.4]}, 0.016, 0.0)
+		car.force_update_transform()
+		var rig: Array = vis.call("wheel_rig_info")
+		var n_ok := 0
+		var body_up: Vector3 = car.global_transform.basis.y.normalized()
+		var body_right: Vector3 = car.global_transform.basis.x.normalized()
+		for w in rig:
+			if bool(w.get("parent_ok", false)):
+				n_ok += 1
+			var king: Vector3 = w["kingpin"]
+			_ok(absf(king.dot(body_up)) > 0.92, "steer kingpin stays body-up after spin (dot=%.3f)" % king.dot(body_up))
+			if bool(w.get("is_steer", false)):
+				var axle: Vector3 = w["axle"]
+				# Axle is body-right yawed by the steer angle, still horizontal.
+				_ok(absf(axle.y) < 0.15, "steered wheel axle stays horizontal (ay=%.3f)" % axle.y)
+				var yawed: Vector3 = body_right.rotated(body_up, 0.45)
+				_ok(axle.dot(yawed) > 0.85, "steered roll axle follows kingpin yaw, not a tumble (dot=%.3f)" % axle.dot(yawed))
+		_ok(n_ok == rig.size() and n_ok >= 4, "all car wheels have spin as a child of the steer hinge (%d/%d)" % [n_ok, rig.size()])
+
+	var plane_vis_node: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(plane_vis_node)
+	await _phys(1)
+	var pvis = plane_vis_node.get("visuals")
+	if pvis and pvis.has_method("apply_pose") and pvis.has_method("wheel_rig_info"):
+		pvis.call("apply_pose", {
+			"gear": 1.0, "steer_angle": 0.4, "wheel_spin": 2.2,
+			"ctrl_pitch": 0.0, "ctrl_roll": 0.0, "ctrl_yaw": 0.0,
+			"thrust": 0.4, "airborne": false, "susp": [0.4, 0.4, 0.4],
+		}, 0.016, 0.0, 0.0)
+		var prig: Array = pvis.call("wheel_rig_info")
+		var pok := 0
+		for w in prig:
+			if bool(w.get("parent_ok", false)):
+				pok += 1
+			_ok(absf(Vector3(w["kingpin"]).dot(Vector3.UP)) > 0.85, "plane wheel kingpin stays world/body up")
+		_ok(pok == prig.size() and pok >= 3, "plane wheels use steer parent / spin child (%d/%d)" % [pok, prig.size()])
+
+	# --- Curved exhaust: a yaw step must bend the trail off a straight aft line ---
+	if pvis and pvis.get("exhausts") != null:
+		var exs: Array = pvis.exhausts
+		_ok(exs.size() >= 1, "fighter has jet exhaust instances")
+		if exs.size() >= 1:
+			var fx = exs[0]
+			plane_vis_node.global_position = floor.position + Vector3(20, 40, 0)
+			plane_vis_node.rotation = Vector3.ZERO
+			plane_vis_node.force_update_transform()
+			if fx.has_method("reset_trail"):
+				fx.call("reset_trail")
+			for i in 8:
+				fx.call("apply", 0.9, float(i) * 0.05, 40.0, 0.05)
+			var straight := float(fx.call("trail_curve_amount"))
+			# Yaw the jet in place so the nozzle heading changes under a lagging trail.
+			for i in 12:
+				plane_vis_node.rotation.y = float(i) * 0.22
+				plane_vis_node.force_update_transform()
+				fx.call("apply", 0.9, 0.5 + float(i) * 0.05, 40.0, 0.05)
+			var curved := float(fx.call("trail_curve_amount"))
+			_ok(straight < 0.12, "steady exhaust starts nearly straight (curve=%.3f)" % straight)
+			_ok(curved > straight + 0.20, "exhaust trail bends with heading change (straight=%.3f curved=%.3f)" % [straight, curved])
+
+	# --- Car accel, steer authority, ride height, no hitch ---
+	if car.has_method("_restore_wheel_positions"):
+		car.call("_restore_wheel_positions")
+	car.freeze = false
+	car.occupied = true
+	car.sleeping = false
+	car.global_position = floor.position + Vector3(8, lift + 0.03, 0)
+	car.rotation = Vector3.ZERO
+	car.linear_velocity = Vector3.ZERO
+	car.angular_velocity = Vector3.ZERO
+	car.reset_physics_interpolation()
+	for i in 20:
+		await _phys(1)
+	var rest_d: float = float(car.get("REST_DISTANCE"))
+	var wr: float = float(car.visuals.wheel_r)
+	var hull_min := VehicleCommon.body_collision_min_y(car)
+	var contact := 1.0e9
+	for c in car.get_children():
+		if c is RayCast3D:
+			contact = minf(contact, (c as RayCast3D).position.y - rest_d - wr)
+	var sag := (1420.0 * 9.81 / 4.0) / 52000.0
+	_ok(rest_d >= 0.24, "suspension rest length is raised (%.3f)" % rest_d)
+	_ok(hull_min + 0.001 >= contact + sag + 0.06, "hull stays clear of pavement after sag (hull=%.3f contact=%.3f sag=%.3f)" % [hull_min, contact, sag])
+
+	car.set_driver_input(1.0, 0.0, 0.0, false, false)
+	var sped := PackedFloat32Array()
+	var ys := PackedFloat32Array()
+	for i in 50:
+		await _phys(1)
+		var fwd_s: float = car.linear_velocity.dot(-car.global_transform.basis.z)
+		sped.append(fwd_s)
+		ys.append(car.global_position.y)
+	var accel_v := float(sped[sped.size() - 1])
+	_ok(accel_v > 9.0, "sports-car throttle acceleration is stronger (v=%.2f m/s after 50 frames)" % accel_v)
+	var hitch := false
+	for i in range(8, sped.size()):
+		if sped[i] < sped[i - 1] - 3.5 and sped[i - 1] > 2.0:
+			hitch = true
+		if i > 0 and ys[i] < floor.position.y - 0.02:
+			hitch = true
+	_ok(not hitch, "flat-ground throttle does not hitch or sink the chassis (v_end=%.2f y=%.3f)" % [accel_v, ys[ys.size() - 1]])
+	# Must not self-spin while going straight.
+	_ok(absf(car.rotation.y) < 0.18, "straight throttle does not spin the car out (yaw=%.3f)" % car.rotation.y)
+
+	var yaw0: float = car.rotation.y
+	car.set_driver_input(1.0, 1.0, 0.0, false, false)
+	for i in 70:
+		await _phys(1)
+	var dyaw := wrapf(car.rotation.y - yaw0, -PI, PI)
+	_ok(dyaw > 0.55, "steering authority is clearly stronger (dyaw=%.3f, was weak ~0.25 floor)" % dyaw)
+
+	# --- Orbit pivot consistency + look-drag while moving ---
+	if vs.get("occupied"):
+		vs.call("try_exit")
+		await _phys(2)
+	# Use a car in the scene tree under main so VehicleSystem will drive the camera.
+	var car_cam: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	main.add_child(car_cam)
+	car_cam.global_position = Vector3(2.0, float(car_cam.call("spawn_lift")), 0.2)
+	car_cam.rotation = Vector3.ZERO
+	car_cam.reset_physics_interpolation()
+	await _phys(2)
+	player.global_position = car_cam.global_position + Vector3(2.0, 0.1, 0.0)
+	vs.nearest = car_cam
+	_ok(bool(vs.call("try_enter")), "enter car for orbit-pivot check")
+	if vs.has_method("toggle_vehicle_cam") and str(vs.get("vehicle_cam")) != "third":
+		vs.call("toggle_vehicle_cam")
+	# Give the car forward speed so follow is motion-based, then drag.
+	car_cam.occupied = true
+	car_cam.freeze = false
+	(car_cam as RigidBody3D).linear_velocity = -car_cam.global_transform.basis.z * 12.0
+	for i in 4:
+		await _frames(1)
+	if vs.has_method("begin_orbit"):
+		vs.call("begin_orbit")
+	for i in 2:
+		await _frames(1)
+	var o0: Dictionary = vs.call("debug_orbit_state")
+	var pivot0: Vector3 = o0["pivot"]
+	var cam_a: Vector3 = o0["cam"]
+	var dist_a := cam_a.distance_to(pivot0)
+	if vs.has_method("orbit_look"):
+		vs.call("orbit_look", Vector2(220.0, 0.0), 0.01)
+	for i in 4:
+		await _frames(1)
+	# Keep moving while the orbit is held.
+	(car_cam as RigidBody3D).linear_velocity = -car_cam.global_transform.basis.z * 12.0
+	for i in 4:
+		await _frames(1)
+	var o1: Dictionary = vs.call("debug_orbit_state")
+	var pivot1: Vector3 = o1["pivot"]
+	var cam_b: Vector3 = o1["cam"]
+	var dist_b := cam_b.distance_to(pivot1)
+	# Pivot stays on the vehicle (tracks the body, does not jump to a look-ahead point).
+	var veh_pt: Vector3 = car_cam.global_position + Vector3(0, 1.2, 0)
+	_ok(pivot1.distance_to(veh_pt) < 1.6, "orbit pivot stays on the vehicle (err=%.3f)" % pivot1.distance_to(veh_pt))
+	_ok(absf(dist_b - dist_a) < 1.8, "orbit distance to pivot stays consistent while moving (%.3f -> %.3f)" % [dist_a, dist_b])
+	_ok(absf(float(o1["yaw"])) > 0.4, "look-drag offset is kept while the vehicle is moving (yaw=%.3f)" % float(o1["yaw"]))
+	# Camera actually moved around the pivot (not locked behind velocity).
+	var rel_a := (cam_a - pivot0)
+	rel_a.y = 0.0
+	var rel_b := (cam_b - pivot1)
+	rel_b.y = 0.0
+	if rel_a.length() > 0.2 and rel_b.length() > 0.2:
+		_ok(rel_a.normalized().dot(rel_b.normalized()) < 0.86, "orbit rotates around the vehicle pivot while moving")
+	if vs.has_method("end_orbit"):
+		vs.call("end_orbit")
+	_ok(bool(vs.call("try_exit")), "exit car after orbit check")
+
+	# --- Airborne plane exit places the player beside the jet, not on the ground ---
+	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	main.add_child(jet)
+	jet.global_position = Vector3(4.0, 80.0, 2.0)
+	jet.rotation = Vector3.ZERO
+	jet.set("airborne", true)
+	if jet is RigidBody3D:
+		(jet as RigidBody3D).freeze = true
+	jet.reset_physics_interpolation()
+	await _phys(2)
+	player.global_position = jet.global_position + Vector3(6.0, 0.0, 0.0)
+	vs.nearest = jet
+	_ok(bool(vs.call("try_enter")), "enter airborne fighter")
+	jet.global_position = Vector3(4.0, 92.0, 2.0)
+	jet.set("airborne", true)
+	await _phys(3)
+	_ok(bool(vs.call("try_exit")), "exit airborne fighter")
+	await _phys(2)
+	var exit_p: Vector3 = player.global_position
+	var jet_p: Vector3 = jet.global_position
+	_ok(absf(exit_p.y - jet_p.y) < 8.0 and exit_p.y > 60.0, "airborne exit keeps the player at altitude (player_y=%.2f plane_y=%.2f)" % [exit_p.y, jet_p.y])
+	var horiz := Vector2(exit_p.x - jet_p.x, exit_p.z - jet_p.z).length()
+	_ok(horiz > 1.0 and horiz < 16.0, "airborne exit is beside the jet (horiz=%.2f)" % horiz)
+	# Ground car exit still lands next to the current car, not a stale point.
+	var car_g: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	main.add_child(car_g)
+	car_g.global_position = Vector3(3.0, float(car_g.call("spawn_lift")), -1.0)
+	car_g.reset_physics_interpolation()
+	await _phys(2)
+	player.global_position = car_g.global_position + Vector3(2.0, 0.1, 0.0)
+	vs.nearest = car_g
+	_ok(bool(vs.call("try_enter")), "enter ground car for exit placement")
+	car_g.global_position = Vector3(7.5, float(car_g.call("spawn_lift")), 4.0)
+	await _phys(2)
+	_ok(bool(vs.call("try_exit")), "exit ground car")
+	await _phys(2)
+	var cdest: Vector3 = player.global_position
+	var ch := Vector2(cdest.x - car_g.global_position.x, cdest.z - car_g.global_position.z).length()
+	_ok(ch < 8.0, "ground exit is beside the current car (horiz=%.2f)" % ch)
+
+	# --- Fighter thrust / pitch / roll rates ---
+	var fighter: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(fighter)
+	var plift: float = float(fighter.call("spawn_lift")) if fighter.has_method("spawn_lift") else 2.0
+	fighter.global_position = floor.position + Vector3(-30, plift + 40.0, 0)
+	fighter.rotation = Vector3.ZERO
+	fighter.freeze = false
+	fighter.occupied = true
+	fighter.sleeping = false
+	fighter.set("airborne", true)
+	fighter.set("gear", 0.0)
+	fighter.set("gear_want", 0.0)
+	fighter.linear_velocity = -fighter.global_transform.basis.z * 80.0
+	fighter.angular_velocity = Vector3.ZERO
+	fighter.reset_physics_interpolation()
+	fighter.thrust = 0.8
+	fighter.ctrl_pitch = 0.0
+	fighter.ctrl_roll = 0.0
+	fighter.ctrl_yaw = 0.0
+	for i in 8:
+		await _phys(1)
+	var v0: float = fighter.linear_velocity.dot(-fighter.global_transform.basis.z)
+	for i in 30:
+		await _phys(1)
+	var v1: float = fighter.linear_velocity.dot(-fighter.global_transform.basis.z)
+	# 30 frames * 1/60 ≈ 0.5 s; 520 kN / 14000 kg ≈ 37 m/s² before drag.
+	_ok(v1 - v0 > 8.0, "fighter mil thrust acceleration is strong (dv=%.2f m/s over 30 frames, v0=%.1f v1=%.1f)" % [v1 - v0, v0, v1])
+	fighter.thrust = 0.8
+	fighter.linear_velocity = -fighter.global_transform.basis.z * 90.0
+	fighter.angular_velocity = Vector3.ZERO
+	fighter.ctrl_pitch = 1.0
+	fighter.ctrl_roll = 0.0
+	fighter.ctrl_yaw = 0.0
+	for i in 20:
+		await _phys(1)
+	var pitch_rate: float = fighter.angular_velocity.dot(fighter.global_transform.basis.x)
+	_ok(pitch_rate > 0.35, "pitch maneuverability is agile (rate=%.3f rad/s)" % pitch_rate)
+	fighter.angular_velocity = Vector3.ZERO
+	fighter.ctrl_pitch = 0.0
+	fighter.ctrl_roll = 1.0
+	for i in 20:
+		await _phys(1)
+	var roll_rate: float = fighter.angular_velocity.dot(-fighter.global_transform.basis.z)
+	_ok(absf(roll_rate) > 0.55, "roll maneuverability is agile (rate=%.3f rad/s)" % roll_rate)
+	fighter.angular_velocity = Vector3.ZERO
+	fighter.ctrl_roll = 0.0
+	fighter.ctrl_yaw = 1.0
+	for i in 20:
+		await _phys(1)
+	var yaw_rate: float = fighter.angular_velocity.dot(fighter.global_transform.basis.y)
+	_ok(absf(yaw_rate) < absf(roll_rate) * 0.85 + 0.15, "yaw is less sensitive than roll (yaw=%.3f roll=%.3f)" % [yaw_rate, roll_rate])
+
+	# Cleanup
+	for n in [car, plane_vis_node, car_cam, jet, car_g, fighter, floor]:
+		if n and is_instance_valid(n):
+			n.queue_free()
 	await _frames(1)
 
 

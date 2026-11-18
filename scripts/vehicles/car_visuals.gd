@@ -87,21 +87,28 @@ func _mount_wheels(regex: String) -> Array:
 		if seen.has(n.get_instance_id()):
 			continue
 		seen[n.get_instance_id()] = true
-		if n.get_parent() and str(n.get_parent().name).begins_with("WheelHub"):
+		if n.get_parent() and (str(n.get_parent().name).begins_with("WheelHub") \
+				or str(n.get_parent().name).begins_with("WheelSteer") \
+				or str(n.get_parent().name).begins_with("WheelSpin")):
 			continue
 		var world_pos := n.global_position
-		# Hub is identity in car space. The roll axle is always local X
-		# (left-right), measured in wrap space — never a world AABB, which
-		# tilts when the car is spawned already yawed.
-		var hub := Node3D.new()
-		hub.name = "WheelHub_%s" % n.name
-		wrap.add_child(hub)
-		hub.global_position = world_pos
-		hub.quaternion = Quaternion.IDENTITY
-		VehicleCommon.reparent_keep_global(n, hub)
-		var off := hub.position
+		# Chassis → steer hinge (yaw about body-up / kingpin, fixed to the
+		# body) → spin hub (roll about the axle). Spin must not carry the
+		# steer axis with it, or a turned wheel looks like it is tumbling.
+		var steer := Node3D.new()
+		steer.name = "WheelSteer_%s" % n.name
+		wrap.add_child(steer)
+		steer.global_position = world_pos
+		steer.quaternion = Quaternion.IDENTITY
+		var spin := Node3D.new()
+		spin.name = "WheelSpin_%s" % n.name
+		steer.add_child(spin)
+		spin.position = Vector3.ZERO
+		spin.quaternion = Quaternion.IDENTITY
+		VehicleCommon.reparent_keep_global(n, spin)
+		var off := steer.position
 		out.append({
-			"root": hub, "rest_pos": off, "rest_quat": hub.quaternion,
+			"root": steer, "spin": spin, "rest_pos": off, "rest_quat": steer.quaternion,
 			"steer": off.z < 0.0, "axle": "x", "spin_sign": 1.0, "offset": off,
 		})
 	out.sort_custom(func(a, b):
@@ -139,19 +146,28 @@ func apply_pose(st: Dictionary, _delta: float, _time: float) -> void:
 	var steer_angle := float(st.get("steer_angle", 0.0))
 	var wheel_spin := float(st.get("wheel_spin", 0.0))
 	var susp: Array = st.get("susp", [])
+	var travels: Array = st.get("wheel_travel", [])
 	for i in wheels.size():
 		var w: Dictionary = wheels[i]
-		var hub: Node3D = w["root"]
-		var sag := 0.0
-		if i < susp.size():
-			sag = (float(susp[i]) - 0.4) * 0.2
-		hub.position = w["rest_pos"] + Vector3(0.0, sag, 0.0)
-		hub.quaternion = w["rest_quat"]
+		var hinge: Node3D = w["root"]
+		var spin: Node3D = w["spin"] if w.has("spin") else hinge
+		# Visual travel follows the ray spring so the tire stays on the
+		# pavement when the chassis sits higher on the longer rest length.
+		var y_off := 0.0
+		if i < travels.size():
+			y_off = float(travels[i])
+		elif i < susp.size():
+			y_off = (float(susp[i]) - 0.4) * 0.2
+		hinge.position = w["rest_pos"] + Vector3(0.0, y_off, 0.0)
+		# Kingpin is body-up, applied only on the steer parent.
+		hinge.quaternion = w["rest_quat"]
 		if w["steer"]:
-			hub.rotate_y(steer_angle)
-		# Roll about the hub's local X (car right). wheel_spin is already
-		# signed so forward motion turns the contact patch backward.
-		hub.rotate_x(wheel_spin * float(w.get("spin_sign", 1.0)))
+			hinge.rotate_object_local(Vector3.UP, steer_angle)
+		# Roll lives on the child, about the (already steered) axle.
+		if spin != hinge:
+			spin.quaternion = Quaternion(Vector3.RIGHT, wheel_spin * float(w.get("spin_sign", 1.0)))
+		else:
+			spin.rotate_object_local(Vector3.RIGHT, wheel_spin * float(w.get("spin_sign", 1.0)))
 	if not steer_wheel.is_empty():
 		var sw: Node3D = steer_wheel["obj"]
 		var axis := str(steer_wheel.get("axis", "z"))
@@ -165,6 +181,23 @@ func apply_pose(st: Dictionary, _delta: float, _time: float) -> void:
 			_:
 				e.z = ang
 		sw.quaternion = steer_wheel["rest"] * Quaternion.from_euler(e)
+
+
+func wheel_rig_info() -> Array:
+	## Test helper: steer parent vs spin child, and their world axes.
+	var out: Array = []
+	for w in wheels:
+		var hinge: Node3D = w["root"]
+		var spin: Node3D = w["spin"] if w.has("spin") else hinge
+		out.append({
+			"steer": hinge,
+			"spin": spin,
+			"parent_ok": spin.get_parent() == hinge,
+			"kingpin": hinge.global_transform.basis.y.normalized(),
+			"axle": spin.global_transform.basis.x.normalized(),
+			"is_steer": bool(w["steer"]),
+		})
+	return out
 
 
 func wheel_layout() -> Array:

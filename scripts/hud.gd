@@ -2416,6 +2416,21 @@ func camera_panel_open() -> bool:
 	return _panel_camera != null and _panel_camera.visible
 
 
+func gui_consumes_scroll(pos: Vector2) -> bool:
+	## True when a scrollable HUD sheet under the cursor should keep the
+	## mouse wheel (settings / map / weapon / vehicle / interact). The
+	## camera panel does not consume it — wheel still dollies distance and
+	## the zoom slider follows.
+	if has_method("is_wheel_open") and bool(call("is_wheel_open")):
+		return true
+	if _open == PanelId.NONE or _open == PanelId.CAMERA:
+		return false
+	for panel in [_panel_settings, _panel_map, _panel_vehicle, _panel_interact, _panel_weapon]:
+		if panel and panel.visible and panel.get_global_rect().has_point(pos):
+			return true
+	return false
+
+
 func _on_help_toggled(on: bool) -> void:
 	_show_help = on
 	if _help_label:

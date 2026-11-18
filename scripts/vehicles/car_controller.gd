@@ -9,27 +9,29 @@ class_name CarController
 const KIND := "car"
 const ENTER_RADIUS := 4.2
 const MASS_KG := 1420.0
-const MAX_STEER := 0.48  # rad (~27.5°), custom-3d-car uses 30°
-const STEER_SPEED := 2.4
+const MAX_STEER := 0.70  # rad (~40°); more lock at low and driving speeds
+const STEER_SPEED := 5.2
 const IDLE_RPM := 900.0
 const REDLINE_RPM := 8200.0
 const PEAK_RPM := 5200.0
 const FINAL_DRIVE := 3.54
 const GEAR_RATIOS := [0.0, 3.21, 2.11, 1.47, 1.14, 0.92, 0.74]
 # custom-3d-car: ENGINE_POWER = 15 * HP at ~1000 kg. Scale ~1.42 for this mass.
-const ENGINE_POWER := 5200.0
-const ENGINE_POWER_NITRO := 7000.0
-const ENGINE_POWER_REV := 3400.0
+const ENGINE_POWER := 9800.0
+const ENGINE_POWER_NITRO := 13800.0
+const ENGINE_POWER_REV := 5600.0
 const BRAKE_FORCE_MULT := 1.5
 const HANDBRAKE_MULT := 3.0
-# Suspension: weight/wheel ≈ 3480 N. At ~0.07 m rest sag, k ≈ 50 kN/m.
-const SPRING_STRENGTH := 50000.0
-const SPRING_DAMP := 2100.0
-const REST_DISTANCE := 0.16
-const TIRE_GRIP := 5600.0
-const GRIP_FALLOFF := 0.045
-const MAX_LATERAL_FORCE := 11000.0
-const ROLLING_FRICTION := 28.0
+# Suspension: weight/wheel ≈ 3480 N. Longer travel so the chassis stays
+# clear of the pavement after sag (~0.07 m) instead of bottoming / hitching.
+const SPRING_STRENGTH := 52000.0
+const SPRING_DAMP := 3200.0
+const REST_DISTANCE := 0.30
+const TIRE_GRIP := 7400.0
+const GRIP_FALLOFF := 0.032
+const MAX_LATERAL_FORCE := 14500.0
+const ROLLING_FRICTION := 24.0
+const HULL_CLEARANCE := 0.12
 
 signal occupied_changed(on: bool)
 
@@ -98,8 +100,6 @@ func _build_collision() -> void:
 		baked = n >= 2
 		if not baked:
 			n = VehicleCommon.add_convexes_from_visual(self, visuals.wrap, VehicleCommon.WHEELISH_RE, 0.05)
-	if not baked:
-		_trim_hulls_above_wheels()
 	if n < 2:
 		var wr: float = visuals.wheel_r if visuals else 0.34
 		var hl: float = visuals.half_l if visuals else 2.4
@@ -108,6 +108,9 @@ func _build_collision() -> void:
 		var bottom := wr + 0.06
 		VehicleCommon.add_box_shape(self, "body", Vector3(0.0, bottom + (h - bottom) * 0.38, 0.05), Vector3(hw * 1.7, (h - bottom) * 0.7, hl * 1.55))
 		VehicleCommon.add_box_shape(self, "cabin", Vector3(0.0, bottom + (h - bottom) * 0.7, 0.05), Vector3(hw * 1.25, (h - bottom) * 0.5, hl * 0.8))
+	# Always keep hulls above the equilibrium contact + sag, including baked
+	# or fallback shapes — otherwise the chassis snags the road after sag.
+	_lift_hulls_for_ride()
 
 
 func _build_wheels() -> void:
@@ -189,6 +192,37 @@ func _trim_hulls_above_wheels() -> void:
 				cs.queue_free()
 
 
+func _lift_hulls_for_ride() -> void:
+	## Raise collision hulls so they stay clear of the pavement after the
+	## springs sag under the car's weight. Uses body-space lowest points.
+	var r := visuals.wheel_r if visuals else 0.34
+	var contact := 1.0e9
+	if _wheels:
+		for w in _wheels:
+			contact = minf(contact, w.position.y - REST_DISTANCE - r)
+	elif visuals:
+		for w in visuals.wheel_layout():
+			contact = minf(contact, float(w["y"]) - r)
+	if contact > 1.0e8:
+		contact = -r
+	var sag := (MASS_KG * 9.81 / maxf(float(_wheels.size()), 4.0)) / SPRING_STRENGTH
+	var min_keep := contact + sag + HULL_CLEARANCE
+	for c in get_children():
+		if not (c is CollisionShape3D):
+			continue
+		var cs := c as CollisionShape3D
+		var y := VehicleCommon.shape_lowest_y(cs)
+		if y >= min_keep - 0.001:
+			continue
+		var lift := min_keep - y
+		if cs.shape is BoxShape3D:
+			var box := cs.shape as BoxShape3D
+			cs.position.y += lift * 0.5
+			box.size.y = maxf(0.08, box.size.y - lift)
+		else:
+			cs.position.y += lift
+
+
 func spawn_lift() -> float:
 	var r := visuals.wheel_r if visuals else 0.34
 	var contact := 1.0e9
@@ -229,7 +263,7 @@ func _drive(delta: float) -> void:
 	var speed := linear_velocity.length()
 	var fwd := -global_transform.basis.z
 	var long_speed := linear_velocity.dot(fwd)
-	var steer_limit := MAX_STEER / (1.0 + speed * 0.045)
+	var steer_limit := MAX_STEER / (1.0 + speed * 0.022)
 	var steer_target := steer_in * steer_limit
 	steer_angle = move_toward(steer_angle, steer_target, STEER_SPEED * delta)
 	var wheel_r := visuals.wheel_r if visuals else 0.34
@@ -356,18 +390,27 @@ func _apply_visuals(delta: float) -> void:
 	# (rotate around local X with a negative sign). See custom-3d-car _wheel_spin.
 	_vis_spin += -(long_speed / maxf(visuals.wheel_r, 0.2)) * delta
 	var susp: Array = []
+	var travels: Array = []
 	for i in _wheels.size():
 		var k := 0.4
+		var travel := 0.0
 		if i < _wheel_in_contact.size() and _wheel_in_contact[i]:
-			var sag := (REST_DISTANCE - _wheel_prev_len[i]) / maxf(REST_DISTANCE, 0.05)
+			var spring_len := float(_wheel_prev_len[i])
+			var sag := (REST_DISTANCE - spring_len) / maxf(REST_DISTANCE, 0.05)
 			k = 0.4 + clampf(sag, 0.0, 1.0) * 0.25
+			# Body-space wheel centre sits at rest_y + (REST - spring_len) so
+			# the tire stays on the pavement when the chassis rides higher.
+			travel = REST_DISTANCE - spring_len
 		else:
 			k = 0.25
+			travel = 0.0
 		susp.append(k)
+		travels.append(travel)
 	visuals.apply_pose({
 		"steer_angle": steer_angle,
 		"wheel_spin": _vis_spin,
 		"susp": susp,
+		"wheel_travel": travels,
 	}, delta, Time.get_ticks_msec() * 0.001)
 
 

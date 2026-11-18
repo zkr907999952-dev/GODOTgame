@@ -63,6 +63,7 @@ var _orbit_yaw: float = 0.0
 var _orbit_pitch: float = -0.18
 var _cam_ready: bool = false
 var _chase_dir: Vector3 = Vector3.ZERO  # smoothed motion/heading for the chase cam
+var _orbit_pivot: Vector3 = Vector3.ZERO  # stable vehicle-centered point used while orbiting
 const CAM_PITCH_DEFAULT := -0.18
 const CAM_PITCH_AIR := -0.12
 
@@ -501,12 +502,16 @@ func _sample_road_points(count: int, avoid: Array) -> Array:
 	return out
 
 
-func _ground(x: float, z: float, top: float = 320.0) -> Variant:
-	if game and game.has_method("ground_at"):
+func _ground(x: float, z: float, top: float = 320.0, ignore: Node = null) -> Variant:
+	var exclude: Array = []
+	if player:
+		exclude.append(player.get_rid())
+	if ignore is CollisionObject3D:
+		exclude.append((ignore as CollisionObject3D).get_rid())
+	if game and game.has_method("ground_at") and ignore == null:
 		return game.call("ground_at", x, z, top)
 	var q := PhysicsRayQueryParameters3D.create(Vector3(x, top, z), Vector3(x, -60, z), 1)
-	if player:
-		q.exclude = [player.get_rid()]
+	q.exclude = exclude
 	var hit := get_world_3d().direct_space_state.intersect_ray(q)
 	return null if hit.is_empty() else hit["position"]
 
@@ -733,24 +738,50 @@ func _finish_exit(dest: Vector3, restore_collision: bool) -> bool:
 
 
 func _exit_stand_dest(v: Node) -> Vector3:
-	## Stand beside the vehicle on the real floor (not the ceiling) and,
-	## when leaving the home exam bed, stay inside the room.
-	var off: Vector3 = v.call("exit_offset") if v.has_method("exit_offset") else v.global_transform.basis.x * 2.0
-	var dest: Vector3 = v.global_position + off
-	var in_room := str(game.get("current_map") if game else current_map) == "room" 		or str(v.get("spawn_map")) == "room"
-	if in_room and kind_of(v) == "exam_bed":
+	## Stand beside the *current* vehicle transform — never a stale
+	## spawn/ground point. Airborne exits stay next to the aircraft.
+	## Leaving the home exam bed still stands inside the room with facing restored.
+	var xf := _vehicle_visual_xf(v)
+	var off: Vector3 = v.call("exit_offset") if v.has_method("exit_offset") else xf.basis.x * 2.0
+	var dest: Vector3 = xf.origin + off
+	var k := kind_of(v)
+	var in_room := str(game.get("current_map") if game else current_map) == "room" \
+		or str(v.get("spawn_map")) == "room"
+	if in_room and k == "exam_bed":
 		dest = _safe_room_stand(v, dest)
-	# Cast from just above standing height — a sky-high ray hits the
-	# room roof first (its top face is a valid floor).
-	var top: float = dest.y + 1.85
-	var g: Variant = _ground(dest.x, dest.z, top)
+		# Cast from just above standing height — a sky-high ray hits the
+		# room roof first (its top face is a valid floor).
+		var top: float = dest.y + 1.85
+		var g_bed: Variant = _ground(dest.x, dest.z, top, v)
+		if g_bed != null:
+			dest.y = (g_bed as Vector3).y + 0.04
+		else:
+			dest.y = xf.origin.y
+		# If a ceiling was somehow still chosen, fall back to the room spawn.
+		if dest.y > 1.6:
+			dest = _room_spawn_floor()
+		return dest
+	# High / airborne: keep the player beside the live vehicle, do not snap
+	# down to the pavement under the flight path.
+	var g: Variant = _ground(dest.x, dest.z, maxf(xf.origin.y + 8.0, 8.0), v)
+	var ground_y := (g as Vector3).y if g != null else (xf.origin.y - 1000.0)
+	var agl := xf.origin.y - ground_y
+	var airborne := k == "plane" and bool(v.get("airborne"))
+	if airborne or agl > 3.0:
+		var lateral := Vector3(off.x, 0.0, off.z)
+		if lateral.length_squared() < 0.04:
+			var side := Vector3(xf.basis.x.x, 0.0, xf.basis.x.z)
+			if side.length_squared() < 1e-6:
+				side = Vector3.RIGHT
+			lateral = side.normalized() * 3.2
+		dest = xf.origin + lateral
+		dest.y = xf.origin.y
+		return dest
+	# Ground vehicles: beside the current body, feet on the pavement.
 	if g != null:
-		dest.y = (g as Vector3).y + 0.04
+		dest.y = ground_y + 0.04
 	else:
-		dest.y = v.global_position.y
-	# If a ceiling was somehow still chosen, fall back to the room spawn.
-	if in_room and dest.y > 1.6:
-		dest = _room_spawn_floor()
+		dest.y = xf.origin.y
 	return dest
 
 
@@ -867,6 +898,7 @@ func _reset_vehicle_cam() -> void:
 	_orbit_yaw = 0.0
 	_orbit_pitch = CAM_PITCH_DEFAULT
 	_chase_dir = Vector3.ZERO
+	_orbit_pivot = Vector3.ZERO
 
 
 func toggle_occupied_gear() -> void:
@@ -916,6 +948,20 @@ func chase_heading_error() -> float:
 		return 99.0
 	look_h = look_h.normalized()
 	return absf(acos(clampf(look_h.dot(nose_h), -1.0, 1.0)))
+
+
+func debug_orbit_state() -> Dictionary:
+	var cam_pos := Vector3.ZERO
+	if player and player.has_node("CameraPivot/Camera3D"):
+		cam_pos = (player.get_node("CameraPivot/Camera3D") as Camera3D).global_position
+	return {
+		"held": _orbit_held,
+		"yaw": _orbit_yaw,
+		"pitch": _orbit_pitch,
+		"pivot": _orbit_pivot,
+		"cam": cam_pos,
+		"chase": _chase_dir,
+	}
 
 
 func _process_occupied(delta: float) -> void:
@@ -1128,18 +1174,19 @@ func _vehicle_camera(delta: float) -> void:
 		cam.near = 0.08
 		cam.current = true
 		return
-	# Third person: dynamic chase based on motion, not locked to the vehicle
-	# heading / roll (custom-3d-car auto-rotate + Ace Combat flight-path chase).
-	# Slow or stationary: fall back to the visual nose. Hold LMB / swipe to
-	# orbit; release recenters behind the current motion (or heading).
+	# Third person: dynamic chase based on motion, composited with the user's
+	# orbit / look-drag. Slow or stationary: fall back to the visual nose.
+	# Hold LMB / swipe to orbit around a stable vehicle-centered pivot;
+	# those offsets stay on top of the follow even while moving. Release recenters.
 	var dt := maxf(delta, 0.0001)
-	var held := _touch_orbit or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+	var held := _orbit_held or _touch_orbit or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 	if bool(player.get("ui_blocks_capture")):
-		held = _touch_orbit
+		held = _orbit_held or _touch_orbit
 	_orbit_held = held
 	var airborne := k == "plane" and bool(occupied.get("airborne"))
 	var want_pitch := CAM_PITCH_AIR if airborne else CAM_PITCH_DEFAULT
-	if not _cam_ready:
+	var just_ready := not _cam_ready
+	if just_ready:
 		_orbit_yaw = 0.0
 		_orbit_pitch = want_pitch
 		_chase_dir = Vector3.ZERO
@@ -1158,6 +1205,8 @@ func _vehicle_camera(delta: float) -> void:
 	if occupied is RigidBody3D:
 		vel = (occupied as RigidBody3D).linear_velocity
 	# Motion direction; at low speed use the nose. Never lock to fuselage roll.
+	# Keep updating while the user is dragging so look offsets composite on
+	# top of the live follow rather than freezing or overwriting it.
 	var motion := vel
 	if not airborne:
 		motion.y = 0.0
@@ -1167,36 +1216,39 @@ func _vehicle_camera(delta: float) -> void:
 		# Reverse: keep the camera behind the visual nose, not ahead of the boot.
 		if motion_dir.dot(fwd) < -0.15:
 			motion_dir = fwd
-	if _chase_dir.length_squared() < 1e-6:
+	if just_ready or _chase_dir.length_squared() < 1e-6 or motion.length() <= (3.5 if airborne else 1.4):
+		# Parked / slow: sit on the visual nose so the default chase stays
+		# heading-aligned. Motion slerp only kicks in once actually moving.
 		_chase_dir = motion_dir
 	else:
 		_chase_dir = _chase_dir.slerp(motion_dir, 1.0 - exp(-2.6 * dt)).normalized()
 	var chase := _chase_dir
 	var pivot_pt := origin + Vector3(0.0, look_y_off, 0.0)
-	var cam_pos: Vector3
-	var look_pt: Vector3
+	_orbit_pivot = pivot_pt
 	var up_ref := Vector3.UP
 	var yaw := _heading_yaw(chase, _heading_yaw(fwd)) + _orbit_yaw
 	var cy := cos(_orbit_pitch)
 	var look_dir := Vector3(-sin(yaw) * cy, sin(_orbit_pitch), -cos(yaw) * cy)
-	if airborne:
-		# Follow the flight path, not the banked fuselage.
-		cam_pos = origin - chase * dist + up_ref * (height * 0.55 - look_dir.y * dist * 0.25)
-		look_pt = origin + chase * look_ahead + up_ref * 0.4 if not held else pivot_pt
-	else:
-		cam_pos = origin - look_dir * dist
-		cam_pos.y = pivot_pt.y - look_dir.y * dist + height * 0.12
+	# Always place the camera relative to the stable vehicle pivot. Look-ahead
+	# is only a default follow target, never the orbit rotation center.
+	var orbiting := held or absf(_orbit_yaw) > 0.002 or absf(_orbit_pitch - want_pitch) > 0.015
+	var cam_pos: Vector3 = pivot_pt - look_dir * dist
+	cam_pos.y = pivot_pt.y - look_dir.y * dist + height * 0.12
+	var look_pt: Vector3 = pivot_pt
+	if not orbiting:
 		var fwd_h := Vector3(chase.x, 0.0, chase.z)
 		if fwd_h.length_squared() < 1e-8:
 			fwd_h = Vector3(fwd.x, 0.0, fwd.z)
 		if fwd_h.length_squared() > 1e-8:
 			fwd_h = fwd_h.normalized()
-		look_pt = pivot_pt if held else (pivot_pt + fwd_h * look_ahead)
+		look_pt = pivot_pt + fwd_h * look_ahead
+		if airborne:
+			cam_pos += up_ref * height * 0.18
 	var to_tgt := look_pt - cam_pos
 	if to_tgt.length_squared() < 1e-8:
 		to_tgt = chase if chase.length_squared() > 1e-8 else Vector3(0, 0, -1)
 	var want_xf := Transform3D(Basis.looking_at(to_tgt, up_ref), cam_pos)
-	_apply_vehicle_cam_xform(pivot, cam, want_xf, not _cam_ready)
+	_apply_vehicle_cam_xform(pivot, cam, want_xf, just_ready)
 	cam.fov = 55.0 if k == "car" else 62.0
 	cam.near = 0.15
 	cam.current = true
