@@ -545,19 +545,19 @@ func _on_down(idx: int, p: Vector2) -> void:
 		queue_redraw()
 		return
 	if _in_drive():
-		# 第二根手指：载具里按住滑动旋转视角。
+		# 载具内取消双指拖拽旋转视角，避免和右侧划屏偏航冲突。
+		# 观察键打开时，只用单指拖动旋转，松手回正。摇杆仍不得环绕。
 		var scene_fingers := _scene_fingers()
 		if scene_fingers.size() >= 2:
-			for k in scene_fingers:
-				if str(fingers[k]["role"]) != "stick":
-					fingers[k]["role"] = "orbit"
+			# Second finger must not convert an existing yaw/look into orbit.
+			f["role"] = "none"
 			get_viewport().set_input_as_handled()
 			return
 		var orbit_mode := false
 		if hud and hud.get("_vehicle_system") and hud.get("_vehicle_system").has_method("is_observe_orbit"):
 			orbit_mode = bool(hud.get("_vehicle_system").call("is_observe_orbit"))
 		if orbit_mode:
-			# 观察键打开：单指拖动旋转视角，松手回正。
+			# 观察键打开：单指拖动旋转视角，松手回正（第一/第三人称都如此）。
 			f["role"] = "orbit"
 		elif str(player.get("occupancy")) == "plane" and p.x >= vp().x * 0.55:
 			# 飞机：屏幕右侧左右划屏控制偏航幅度。

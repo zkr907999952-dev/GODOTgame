@@ -19,9 +19,9 @@ void fragment() {
 	float disk = 1.0 - smoothstep(0.0, 0.16, abs(along));
 	float cone = 1.0 - smoothstep(0.02, 0.55, radial + abs(along) * 0.35);
 	float ring = smoothstep(0.08, 0.0, abs(radial - (0.22 - abs(along) * 0.18)));
-	float a = (disk * 0.85 + cone * 0.35 + ring * 0.55) * u_alpha;
-	a *= 1.0 - u_index * 0.14;
-	vec3 col = mix(u_color, u_color * 1.8, disk);
+	float a = (disk * 1.15 + cone * 0.45 + ring * 0.80) * u_alpha;
+	a *= 1.0 - u_index * 0.10;
+	vec3 col = mix(u_color * 1.15, u_color * 2.15, disk);
 	ALBEDO = col;
 	ALPHA = a;
 }

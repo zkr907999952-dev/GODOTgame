@@ -1,11 +1,11 @@
 extends SceneTree
 
 const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
-## 0.2.25 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.26 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.25"
-const VERSION_CODE := 27
+const VERSION_NAME := "0.2.26"
+const VERSION_CODE := 28
 
 var fails := 0
 var main: Node
@@ -78,6 +78,7 @@ func _run() -> void:
 	await _check_0223_playtest_fixes()
 	await _check_0224_playtest_fixes()
 	await _check_0225_playtest_fixes()
+	await _check_0226_playtest_fixes()
 	_finish()
 
 
@@ -213,10 +214,10 @@ func _check_f_routing() -> void:
 			var hip_w: Vector3 = body.to_global(hip_l)
 			# Just meeting the seat: hip may sit a little above the cushion for skin
 			# clearance, but must not sink clearly below it or hover high.
-			# 0.2.23 raised ischial clearance so the mesh no longer clips the seat;
-			# allow up to 0.22 m above the seat marker (hip bone sits above the flesh).
-			_ok(hip_w.y >= seat.y - 0.02, "hip is not below the seat surface (hip.y=%.3f seat.y=%.3f)" % [hip_w.y, seat.y])
-			_ok(hip_w.y <= seat.y + 0.22, "hip just meets the seat, not floating high (hip.y=%.3f seat.y=%.3f)" % [hip_w.y, seat.y])
+			# 0.2.26 raises the crotch so the mesh sits ON the cushion (hip bone
+			# is above the flesh). Must not sink through, must not hover a lot.
+			_ok(hip_w.y >= seat.y - 0.01, "hip is not below the seat surface (hip.y=%.3f seat.y=%.3f)" % [hip_w.y, seat.y])
+			_ok(hip_w.y <= seat.y + 0.34, "hip sits on the cushion, not floating high (hip.y=%.3f seat.y=%.3f)" % [hip_w.y, seat.y])
 			_ok(hip_w.y > 0.45, "hip is above the floor, not hanging under the table (y=%.2f)" % hip_w.y)
 			_ok(body.global_position.y > 0.15, "Body origin is not under the table (y=%.2f)" % body.global_position.y)
 		# Pose: loco frozen, skeleton exists.
@@ -1301,13 +1302,13 @@ func _check_0221_playtest_fixes() -> void:
 	_ok(pc_src.find("func _try_handle_observe_wheel") >= 0 and pc_src.find("func _input") >= 0, "observation wheel is handled in _input so GUI cannot swallow dolly")
 	_ok(pc_src.find("intersect_shape") >= 0 and pc_src.find("occupier is CollisionObject3D") >= 0, "orbit collide excludes exam bed / overlapping start shapes")
 	var drive := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
-	_ok(drive.find("_orbit_pivot") >= 0 and drive.find("orbiting :=") >= 0, "vehicle orbit uses a stable vehicle-centered pivot")
-	_ok(drive.find("those offsets stay on top") >= 0 or drive.find("composited") >= 0, "look-drag is composited on the dynamic follow")
+	_ok(drive.find("_orbit_pivot") >= 0 and drive.find("Shared pivot") >= 0, "vehicle orbit uses a stable vehicle-centered pivot")
+	_ok(drive.find("_orbit_yaw") >= 0 and drive.find("Recenter target is vehicle-forward") >= 0, "look-drag is composited on the dynamic follow and recenters to the heading")
 	_ok(drive.find("airborne or agl > 3.0") >= 0, "airborne exit stays beside the vehicle")
 	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
 	_ok(pl_src.find("THRUST_DRY := 680000.0") >= 0 and pl_src.find("THRUST_AB := 1120000.0") >= 0, "fighter dry/AB thrust is 680 kN / 1120 kN")
 	_ok(pl_src.find("ctrl_pitch * 1.90") >= 0 and pl_src.find("ctrl_roll * 2.15") >= 0, "pitch rate is 1.90, roll stays 2.15")
-	_ok(pl_src.find("ctrl_yaw * 0.62") >= 0, "yaw rate is milder than pitch/roll (0.62 from vehicle-sim.ts)")
+	_ok(pl_src.find("0.62 + boost") >= 0 or pl_src.find("ctrl_yaw * 0.62") >= 0, "yaw rate is milder than pitch/roll (0.62 from vehicle-sim.ts)")
 	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
 	_ok(ex_src.find("_update_trail") >= 0 and ex_src.find("TRAIL_COUNT") >= 0, "jet exhaust uses a lagged inertial trail")
 	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
@@ -1519,6 +1520,7 @@ func _check_0221_playtest_fixes() -> void:
 	(car_cam as RigidBody3D).linear_velocity = -car_cam.global_transform.basis.z * 12.0
 	for i in 4:
 		await _frames(1)
+	vs.set("vehicle_look_mode", "orbit")
 	if vs.has_method("begin_orbit"):
 		vs.call("begin_orbit")
 	for i in 2:
@@ -1673,7 +1675,7 @@ func _check_0222_playtest_fixes() -> void:
 	_ok(ex_src.find("plume_body_visible") >= 0, "exhaust exposes a visibility helper for tests")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
 	_ok(pose_src.find("L_UpperLeg_a") >= 0, "exam pose still has thigh FK")
-	_ok(pose_src.find("L_UpperArm_a") >= 0 and pose_src.find("0.38") >= 0, "arm FK rests naturally on the armrests")
+	_ok(pose_src.find("L_UpperArm_a") >= 0 and pose_src.find("0.22") >= 0, "arm FK rests naturally on the armrests")
 
 	# Visible exhaust body at military and afterburner thrust.
 	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
@@ -1767,7 +1769,7 @@ func _check_0223_playtest_fixes() -> void:
 	_ok(vs_src.find("_chase_basis") >= 0 and vs_src.find("slerp(want_b") >= 0, "plane chase cam follows aircraft attitude with lag")
 	_ok(vs_src.find("left * 0.22") < 0, "exam calves are no longer IK'd outward off the stirrup pads")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
-	_ok(pose_src.find("Vector3(-0.36, 0.04, 0.38)") >= 0, "thigh abduction opened so calves can follow the stirrups")
+	_ok(pose_src.find("L_UpperLeg_a") >= 0 and pose_src.find("0.36") >= 0, "thigh abduction stays open so calves can follow the stirrups")
 	var bed_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_bed.gd")
 	_ok(bed_src.find("TARGET_LENGTH := 1.72") >= 0, "exam bed TARGET_LENGTH shrank again (1.86 → 1.72)")
 	var vis_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
@@ -1910,11 +1912,11 @@ func _check_0224_playtest_fixes() -> void:
 	_ok(pl_src.find("ctrl_pitch * 1.90") >= 0, "pitch command rate raised to 1.90")
 	_ok(pl_src.find("airspeed > 18.0") >= 0 and pl_src.find("GEAR_AUTO_RETRACT_AGL") >= 0, "auto gear retracts on AGL without waiting only on the airborne flag")
 	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
-	_ok(ex_src.find("EXIT_DIAMETER * 0.22") >= 0 or ex_src.find("EXIT_DIAMETER * 0.62") >= 0, "mach diamond spacing is compressed")
+	_ok(ex_src.find("EXIT_DIAMETER") >= 0 and ex_src.find("func _apply_diamonds") >= 0, "mach diamonds have a physical spacing model")
 	var vap_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_vapor.gd")
 	_ok(vap_src.find("ARRAY_VERTEX") >= 0 and vap_src.find("min_x") >= 0, "wingtip vapor uses actual tip vertices")
 	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
-	_ok(car_src.find("ENGINE_POWER := 15200.0") >= 0, "car engine power was raised")
+	_ok(car_src.find("ENGINE_POWER := 18800.0") >= 0, "car engine power was raised")
 	_ok(car_src.find("_wheel_omega") >= 0 and car_src.find("TIRE_MU") >= 0, "car has a wheel-spin / burnout slip model")
 	var hud_src := FileAccess.get_file_as_string("res://scripts/hud.gd")
 	_ok(hud_src.find("func is_map_open") >= 0 and hud_src.find("_hp_box.visible = not is_map_open()") >= 0, "map open hides the health bar")
@@ -1942,7 +1944,7 @@ func _check_0224_playtest_fixes() -> void:
 		alongs.sort()
 		if alongs.size() >= 2:
 			var gap := alongs[1] - alongs[0]
-			_ok(gap < 0.85, "mach diamond spacing is tight (gap=%.2f m, tip=%.2f)" % [gap, tip])
+			_ok(gap > 0.20 and gap < 1.40, "mach diamond spacing is visible (gap=%.2f m, tip=%.2f)" % [gap, tip])
 		var far := alongs[alongs.size() - 1] if alongs.size() else 0.0
 		if tip > 0.0:
 			_ok(far <= tip * 1.05 + 0.05, "diamonds still stay within the plume tip (far=%.2f tip=%.2f)" % [far, tip])
@@ -1999,23 +2001,23 @@ func _check_0225_playtest_fixes() -> void:
 	_ok(vs_src.find("exp(-1.3 * dt)") >= 0 and vs_src.find("exp(-1.2 * dt)") >= 0, "vehicle camera recenter is softer / slower")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
 	_ok(pose_src.find("look_world") >= 0 and pose_src.find("L_Eye") >= 0, "apply_look aims the visible head and eyes at the camera")
-	_ok(pose_src.find("Vector3(-0.36, 0.04, 0.38)") >= 0, "exam thighs abduct 0.38 rad with a flatter shin")
+	_ok(pose_src.find("L_Foreleg_a") >= 0, "exam pose still sets a flatter shin")
 	var sec_src := FileAccess.get_file_as_string("res://scripts/soft_secondary.gd")
 	_ok(sec_src.find("func clear_gaze_intent") >= 0, "SoftSecondary can drop gaze without resetting look bones")
 	var cv_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_visuals.gd")
-	_ok(cv_src.find("func _make_scissor_doors") >= 0 and cv_src.find("\"z\", sign, 1.35") >= 0, "car builds upward-rotating scissor doors")
+	_ok(cv_src.find("func _make_scissor_doors") >= 0, "car builds scissor doors")
 	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
 	_ok(car_src.find("_launch_slip") >= 0 and car_src.find("0.18") >= 0, "burnout is a brief slight slip, then grip returns")
 	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
 	_ok(pl_src.find("const STALL_SPEED := 52.0") >= 0, "plane has a 52 m/s speed stall")
-	_ok(pl_src.find("DECEL_AGILITY := 1.70") >= 0, "decelerating raises pitch/roll agility by 1.70")
+	_ok(pl_src.find("DECEL_AGILITY") >= 0, "decelerating still raises pitch/roll agility")
 	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
-	_ok(ex_src.find("EXIT_DIAMETER * 0.22") >= 0, "mach diamond spacing is very tight")
-	_ok(ex_src.find("tip * 0.62") >= 0, "diamond chain is capped well short of the plume tip")
+	_ok(ex_src.find("EXIT_DIAMETER") >= 0, "mach diamonds still use a nozzle-diameter spacing model")
+	_ok(ex_src.find("along = minf(along, cap)") >= 0, "diamond chain is still capped to the plume")
 	var vap_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_vapor.gd")
 	_ok(vap_src.find("func cloud_min_height") >= 0, "vapor exposes volume height for tests")
 	var sh_src := FileAccess.get_file_as_string("res://shaders/vapor_cloud.gdshader")
-	_ok(sh_src.find("v_local") >= 0 and sh_src.find("thick") >= 0, "vapor shader is a 3D volume, not a UV paper disc")
+	_ok(sh_src.find("v_uv") >= 0 or sh_src.find("v_local") >= 0, "vapor shader drives a soft-edged sheet / volume")
 	var hud_src := FileAccess.get_file_as_string("res://scripts/hud.gd")
 	_ok(hud_src.find("_btn_vehicle_cam") >= 0 and hud_src.find("toggle_vehicle_cam") >= 0, "mobile 1st/3rd view-switch is back")
 	_ok(hud_src.find("immediately left of 透视") >= 0 or hud_src.find("_btn_xray.get_global_rect") >= 0, "观察 is placed at the top, left of 透视")
@@ -2081,7 +2083,7 @@ func _check_0225_playtest_fixes() -> void:
 	_ok(cvis != null and cvis.doors.size() >= 2, "sports car has two scissor doors (got %s)" % (cvis.doors.size() if cvis else 0))
 	if cvis and cvis.doors.size() >= 2:
 		var d0 = cvis.doors[0]
-		_ok(str(d0.axis) == "z" and d0.max_angle >= 1.2, "scissor hinge rotates upward about Z (axis=%s max=%.2f)" % [d0.axis, d0.max_angle])
+		_ok(d0.max_angle >= 1.2, "scissor hinge has a large open angle (axis=%s max=%.2f)" % [d0.axis, d0.max_angle])
 		var rest_y: float = (d0.obj as Node3D).rotation.z if d0.obj else 0.0
 		cvis.call("apply_pose", {"door": 1.0, "steer_angle": 0, "wheel_spin": 0, "nitro": false}, 0.016, 0.0)
 		var open_a := 0.0
@@ -2109,13 +2111,13 @@ func _check_0225_playtest_fixes() -> void:
 		alongs.sort()
 		if alongs.size() >= 2:
 			var gap := alongs[1] - alongs[0]
-			_ok(gap < 0.40, "mach diamond gaps are very small (gap=%.2f m, tip=%.2f)" % [gap, tip])
+			_ok(gap > 0.20 and gap < 1.40, "mach diamonds are spaced visibly (gap=%.2f m, tip=%.2f)" % [gap, tip])
 		var far := alongs[alongs.size() - 1] if alongs.size() else 0.0
 		if tip > 0.0:
 			_ok(far <= tip * 0.75 + 0.08, "diamond chain stays short of the plume tip (far=%.2f tip=%.2f)" % [far, tip])
 	if pvis and pvis.vapor:
 		var h := float(pvis.vapor.call("cloud_min_height")) if pvis.vapor.has_method("cloud_min_height") else 0.0
-		_ok(h >= 1.0, "vapor clouds are volumetric (min Y scale=%.2f, not paper-thin)" % h)
+		_ok(h > 0.0, "vapor clouds still expose a scale/height (min Y scale=%.2f)" % h)
 		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 6.5, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
 		_ok(float(pvis.vapor.call("cloud_intensity")) > 0.0, "high-G pull-up still produces volumetric vapor")
 		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 1.1, "ctrl_pitch": 0.0, "aoa": 0.0}, 0.5)
@@ -2133,6 +2135,234 @@ func _check_0225_playtest_fixes() -> void:
 			vs.set("vehicle_cam", "third")
 			# Without an occupied vehicle is_drive_third is false; just check the source path ran.
 			_ok(hud_src.find("is_drive_third") >= 0, "reticle_mode consults vehicle third-person")
+
+
+func _check_0226_playtest_fixes() -> void:
+	## Raised exam-bed hips / straighter calves on the stirrups, heavier
+	## planted car, vehicle-space first-person camera, Lambo scissor doors
+	## about +X, restored visible Mach diamonds vs a capped fireball chain,
+	## no two-finger vehicle orbit, polygonal vapor sheets, decel pitch snap.
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	_ok(vs_src.find("const HIP_LIFT") >= 0, "exam pose raises the hips along the bed up")
+	_ok(vs_src.find("bed_up * 0.048") >= 0 or vs_src.find("bed_up *") >= 0, "calves are planted on the stirrup tops, not through them")
+	_ok(vs_src.find("- lie.y * 0.10") >= 0, "forearms reach forward along the armrests")
+	_ok(vs_src.find("xf.basis.orthonormalized() * Basis.from_euler") >= 0, "vehicle first-person look is composed in the vehicle basis")
+	_ok(vs_src.find("is_drive_occupied()") >= 0 and vs_src.find("vehicle_look_mode == \"orbit\"") >= 0, "观察 works in first- and third-person")
+	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
+	_ok(pose_src.find("Vector3(0.18, 0.0, 0.02)") >= 0, "exam shins are flatter / straighter (FK 0.18)")
+	_ok(pose_src.find("Vector3(0.02, 0.08, 0.22)") >= 0, "upper-arm angle is more gradual / flatter")
+	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
+	_ok(car_src.find("const MASS_KG := 1760.0") >= 0, "sports-car mass is in the GT ballpark (1760 kg)")
+	_ok(car_src.find("gravity_scale = 1.18") >= 0, "car gravity_scale is raised so it feels planted")
+	_ok(car_src.find("const TIRE_MU := 1.62") >= 0 and car_src.find("const ARCADE_GRIP := 5.4") >= 0, "tire grip is substantially higher")
+	_ok(car_src.find("0.18") >= 0 and car_src.find("_launch_slip") >= 0, "brief 0.18 s launch slip is kept")
+	var cv_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_visuals.gd")
+	_ok(cv_src.find('\"x\", -1.0, 1.48') >= 0, "scissor doors rotate about body +X with a shared upward sign")
+	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
+	_ok(pl_src.find("const STALL_SPEED := 52.0") >= 0, "speed stall is still 52 m/s")
+	_ok(pl_src.find("DECEL_AGILITY := 2.85") >= 0, "decel pitch boost peak is 2.85")
+	_ok(pl_src.find("_decel_boost") >= 0 and pl_src.find("DECEL_BOOST_FADE") >= 0, "decel boost is a short window, not a permanent super-pitch")
+	_ok(pl_src.find("DECEL_YAW_COUPLE") >= 0, "decel boost couples yaw for an aerial-drift feel")
+	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
+	_ok(ex_src.find("FIREBALL_COUNT := 4") >= 0 and ex_src.find("FIREBALL_MAX_ALONG := 0.92") >= 0, "fireball chain is a short, hard-capped set")
+	_ok(ex_src.find("FIREBALL_SPACING := 0.20") >= 0, "fireball spacing is tight (0.20 m)")
+	_ok(ex_src.find("EXIT_DIAMETER * 1.15") >= 0, "mach diamond spacing is restored to a visible physical model")
+	_ok(ex_src.find("func fireball_span") >= 0, "exhaust exposes fireball span for tests")
+	var vap_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_vapor.gd")
+	_ok(vap_src.find("func _make_sheet_mesh") >= 0, "vortex clouds are built as polygonal sheets")
+	_ok(vap_src.find("SphereMesh.new()") < 0, "vapor body clouds are no longer SphereMesh")
+	var sh_src := FileAccess.get_file_as_string("res://shaders/vapor_cloud.gdshader")
+	_ok(sh_src.find("v_uv") >= 0 and sh_src.find("smoothstep(0.0, 0.20, v_uv.x)") >= 0, "vapor shader fades sheet edges with a soft falloff")
+	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
+	_ok(tc_src.find("载具内取消双指拖拽旋转视角") >= 0, "two-finger vehicle orbit is cancelled in touch controls")
+	_ok(tc_src.find('fingers[k]["role"] = "orbit"') < 0 or tc_src.find("第二根手指：载具里按住滑动旋转视角") < 0, "drive two-finger path no longer assigns orbit")
+
+	# Live: raised hips / calves on stirrups, doors swing up, camera follows
+	# vehicle basis, visible diamonds, capped fireballs, sheet vapor, decel.
+	if vs and player and player.has_method("get_skeleton"):
+		var bed: Node = null
+		for v in vs.vehicles:
+			if str(vs.call("kind_of", v)) == "exam_bed" and bool(v.get("is_default")):
+				bed = v
+				break
+		if bed:
+			player.global_position = bed.global_position + Vector3(1.2, 0.1, 0.0)
+			vs.set("nearest", bed)
+			_ok(bool(vs.call("try_enter")), "can board the exam bed for pose measurement")
+			await _frames(2)
+			if vs.has_method("_apply_exam_pose"):
+				vs.call("_apply_exam_pose", 0.016)
+			var body: Node3D = player.get_node_or_null("Body")
+			var skel: Skeleton3D = player.call("get_skeleton")
+			if body and skel and bed.has_method("seat_global"):
+				var seat: Vector3 = bed.call("seat_global")
+				var hip_l: Vector3 = ExamPose.hip_local(skel, body)
+				var hip_w: Vector3 = body.to_global(hip_l)
+				_ok(hip_w.y >= seat.y + 0.02, "0.2.26 hip/crotch is raised onto the cushion (hip.y=%.3f seat.y=%.3f)" % [hip_w.y, seat.y])
+				var i_sh := skel.find_bone("L_Foreleg_a")
+				var st: Vector3 = bed.call("stirrup_l_global")
+				if i_sh >= 0:
+					var shin_w: Vector3 = skel.global_transform * skel.get_bone_global_pose(i_sh).origin
+					_ok(shin_w.y >= st.y - 0.04, "left shin sits on/above the stirrup pad (shin.y=%.3f pad.y=%.3f)" % [shin_w.y, st.y])
+			if vs.has_method("try_exit"):
+				vs.call("try_exit")
+			await _frames(1)
+
+	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	root.add_child(car)
+	await _frames(2)
+	_ok(is_equal_approx(float(car.MASS_KG), 1760.0) or float(car.mass) >= 1700.0, "instanced car mass is ~1760 kg (got %.1f)" % float(car.mass))
+	_ok(float(car.gravity_scale) >= 1.15, "instanced car gravity_scale is planted (%.2f)" % float(car.gravity_scale))
+	var cvis = car.get("visuals")
+	_ok(cvis != null and cvis.doors.size() >= 2, "sports car still has two scissor doors")
+	if cvis and cvis.doors.size() >= 2:
+		var d0 = cvis.doors[0]
+		_ok(str(d0.axis) == "x" and d0.max_angle >= 1.4, "scissor hinge is lateral +X (axis=%s max=%.2f)" % [d0.axis, d0.max_angle])
+		# Measure the aft edge in wrap space: opening must RAISE it, not bury it.
+		var hub: Node3D = d0.obj
+		var wrap: Node3D = cvis.wrap
+		var rest_rear := _door_rear_y(hub, wrap)
+		cvis.call("apply_pose", {"door": 1.0, "steer_angle": 0, "wheel_spin": 0, "nitro": false}, 0.016, 0.0)
+		var open_rear := _door_rear_y(hub, wrap)
+		var open_a := 0.0
+		if hub:
+			open_a = absf(hub.quaternion.angle_to(d0.rest))
+		_ok(open_a > 0.9, "scissor door opens a large angle (%.2f rad)" % open_a)
+		_ok(open_rear > rest_rear + 0.60, "scissor door raises the aft edge (rest_y=%.3f open_y=%.3f)" % [rest_rear, open_rear])
+		cvis.call("apply_pose", {"door": 0.0, "steer_angle": 0, "wheel_spin": 0, "nitro": false}, 0.016, 0.0)
+
+	# Camera is bound to the vehicle basis (car and plane, first-person).
+	if vs and player:
+		var spawned: Node = vs.call("spawn_at_aim", "car") if vs.has_method("spawn_at_aim") else null
+		# Prefer the just-built car if menu spawn is awkward in the room.
+		var drive: Node = spawned if spawned else car
+		if drive:
+			player.global_position = drive.global_position + Vector3(2.0, 0.1, 0.0)
+			vs.set("nearest", drive)
+			if vs.has_method("try_enter"):
+				vs.call("try_enter")
+			_flush_board()
+			await _frames(2)
+			if vs.get("occupied") == drive:
+				vs.set("vehicle_cam", "first")
+				if vs.has_method("_sync_vehicle_look_from_heading"):
+					vs.call("_sync_vehicle_look_from_heading")
+				if vs.has_method("_reset_vehicle_cam"):
+					vs.call("_reset_vehicle_cam")
+				if vs.has_method("_vehicle_camera"):
+					vs.call("_vehicle_camera", 0.016)
+				await _frames(1)
+				var cam: Camera3D = player.get_node_or_null("CameraPivot/Camera3D")
+				# Yaw the car 70° and confirm the cockpit view yaws with it.
+				var xf0: Transform3D = drive.global_transform
+				drive.global_rotate(Vector3.UP, 1.22)
+				if vs.has_method("_vehicle_camera"):
+					vs.call("_vehicle_camera", 0.016)
+				await _frames(1)
+				if cam:
+					var nose: Vector3 = -drive.global_transform.basis.z
+					var look: Vector3 = -cam.global_transform.basis.z
+					var ang := look.angle_to(nose)
+					_ok(ang < 0.35, "car first-person look follows the vehicle basis after yaw (err=%.3f rad)" % ang)
+				drive.global_transform = xf0
+				if vs.has_method("try_exit"):
+					vs.call("try_exit")
+				_flush_board()
+				await _frames(1)
+		if spawned and spawned != car:
+			spawned.queue_free()
+
+	car.queue_free()
+	await _frames(1)
+
+	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(jet)
+	await _frames(2)
+	_ok(float(jet.STALL_SPEED) >= 50.0, "STALL_SPEED remains 52 m/s")
+	_ok(float(jet.DECEL_AGILITY) >= 2.5, "DECEL_AGILITY peak is substantially higher (%.2f)" % float(jet.DECEL_AGILITY))
+	# Plane FP camera follows pitch/roll of the airframe.
+	if vs and player:
+		player.global_position = jet.global_position + Vector3(3.0, 0.2, 0.0)
+		vs.set("nearest", jet)
+		if vs.has_method("try_enter"):
+			vs.call("try_enter")
+		await _frames(2)
+		if vs.get("occupied") == jet:
+			vs.set("vehicle_cam", "first")
+			if vs.has_method("_reset_vehicle_cam"):
+				vs.call("_reset_vehicle_cam")
+			if vs.has_method("_sync_vehicle_look_from_heading"):
+				vs.call("_sync_vehicle_look_from_heading")
+			if vs.has_method("_vehicle_camera"):
+				vs.call("_vehicle_camera", 0.016)
+			var cam2: Camera3D = player.get_node_or_null("CameraPivot/Camera3D")
+			jet.rotation = Vector3(0.40, 0.30, 0.35)
+			if vs.has_method("_vehicle_camera"):
+				vs.call("_vehicle_camera", 0.016)
+			await _frames(1)
+			if cam2:
+				var nose2: Vector3 = -jet.global_transform.basis.z
+				var look2: Vector3 = -cam2.global_transform.basis.z
+				var ang2 := look2.angle_to(nose2)
+				_ok(ang2 < 0.40, "plane first-person look follows airframe pitch/roll (err=%.3f rad)" % ang2)
+				# Camera up should be close to the jet up (not horizon-locked).
+				var up_err := cam2.global_transform.basis.y.angle_to(jet.global_transform.basis.y)
+				_ok(up_err < 0.45, "plane first-person rolls with the jet (up err=%.3f rad)" % up_err)
+			if vs.has_method("try_exit"):
+				vs.call("try_exit")
+			await _frames(1)
+		jet.rotation = Vector3.ZERO
+
+	var pvis = jet.get("visuals")
+	if pvis and pvis.exhausts.size():
+		var fx = pvis.exhausts[0]
+		fx.call("apply", 1.0, 1.0, 0.0, 0.016)
+		_ok(int(fx.call("diamond_visible_count")) >= 3, "mach diamonds are visible at afterburner (%d)" % int(fx.call("diamond_visible_count")))
+		var gap := float(fx.call("diamond_spacing"))
+		_ok(gap >= 0.28, "mach diamonds are not crushed to invisibility (gap=%.2f)" % gap)
+		_ok(int(fx.call("fireball_visible_count")) >= 3, "fireball chain is visible (%d)" % int(fx.call("fireball_visible_count")))
+		var span := float(fx.call("fireball_span"))
+		_ok(span > 0.15 and span <= 1.05, "fireball chain is short and tight (span=%.2f m)" % span)
+		# Simulate many applies as if flying: span must not grow without bound.
+		for i in 40:
+			fx.call("apply", 1.0, 1.0 + float(i) * 0.05, 0.0, 0.016)
+		var span2 := float(fx.call("fireball_span"))
+		_ok(span2 <= 1.05, "fireball chain cannot grow without bound (span=%.2f after 40 ticks)" % span2)
+	if pvis and pvis.vapor:
+		_ok(not bool(pvis.vapor.call("cloud_uses_spheres")), "high-G vapor is not a set of spheres")
+		_ok(int(pvis.vapor.call("cloud_sheet_count")) >= 6, "vapor uses several polygonal sheets (%d)" % int(pvis.vapor.call("cloud_sheet_count")))
+		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 6.5, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
+		_ok(float(pvis.vapor.call("cloud_intensity")) > 0.0, "high-G pull-up still produces sheet vapor")
+		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 1.1, "ctrl_pitch": 0.0, "aoa": 0.0}, 0.5)
+		_ok(float(pvis.vapor.call("cloud_intensity")) < 0.25, "low-G still hides the vapor sheets")
+	jet.queue_free()
+	await _frames(1)
+
+
+func _door_rear_y(hub: Node3D, wrap: Node3D) -> float:
+	if hub == null or wrap == null:
+		return 0.0
+	var rear_y := -1.0e9
+	var rear_z := -1.0e9
+	for n in hub.find_children("*", "MeshInstance3D", true, false):
+		var mi := n as MeshInstance3D
+		if mi == null or mi.mesh == null:
+			continue
+		var xf: Transform3D = wrap.global_transform.affine_inverse() * mi.global_transform
+		for s in mi.mesh.get_surface_count():
+			var arr: Array = mi.mesh.surface_get_arrays(s)
+			if arr.is_empty() or arr[Mesh.ARRAY_VERTEX] == null:
+				continue
+			var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+			for v in verts:
+				var pnt: Vector3 = xf * v
+				if pnt.z >= rear_z - 0.02:
+					if pnt.z > rear_z:
+						rear_z = pnt.z
+						rear_y = pnt.y
+					else:
+						rear_y = maxf(rear_y, pnt.y)
+	return rear_y
 
 func _finish() -> void:
 	if fails == 0:

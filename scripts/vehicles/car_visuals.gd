@@ -273,10 +273,12 @@ func _apply_nitro(on: bool, time: float) -> void:
 
 
 func _make_scissor_doors() -> void:
-	## Port of rouchangmoniqi3 makeScissorDoors: split Interior_doors / side
-	## windows / mirrors / the door-skin region of the hood, and hang each
-	## half on a pivot near the A-pillar / front of the roof. The doors
-	## rotate upward about local +Z (aft), not a conventional side swing.
+	## Split Interior_doors / side windows / mirrors / the door-skin region
+	## of the hood, and hang each half on a pivot near the A-pillar / front
+	## of the roof (windshield). Lamborghini scissor: rotate about body +X
+	## (lateral) so the aft edge swings UP and the door stands nearly
+	## vertical, with a slight outward cant. Not a Z-axis book-fold and not
+	## a conventional yaw swing about +Y.
 	doors.clear()
 	if wrap == null:
 		return
@@ -355,13 +357,16 @@ func _make_scissor_doors() -> void:
 		var hx := outer_x * 0.72
 		var hy := mx.y - 0.02
 		var hz := mn.z + 0.08
-		var sign := -1.0 if left else 1.0
+		# Both sides share sign -1 about +X: that raises the aft edge.
+		# A small yaw cant tilts the open door slightly outward.
+		var cant := 0.14 if left else -0.14
+		var pre := Quaternion(Vector3.UP, cant)
 		# Pivot first half as the hinge target; the rest ride as extras.
 		var target: Node3D = made[0]
 		var extras_n: Array = []
 		for i in range(1, made.size()):
 			extras_n.append(made[i])
-		doors.append(VehicleHinge.mount(wrap, target, Vector3(hx, hy, hz), "z", sign, 1.35, "scissor", extras_n))
+		doors.append(VehicleHinge.mount(wrap, target, Vector3(hx, hy, hz), "x", -1.0, 1.48, "scissor", extras_n, null, pre))
 	if doors.size():
 		for src in sources:
 			if src is Node3D:

@@ -1190,36 +1190,51 @@ func toggle_vehicle_cam() -> String:
 
 
 func toggle_observe_mode() -> String:
-	## Mobile 观察: first press = right-side / look drag orbits (release recenters);
-	## press again = right-side horizontal swipe is yaw. Default is yaw.
+	## Mobile 观察: first press = look drag orbits (release recenters onto
+	## the vehicle heading); press again = right-side horizontal swipe is
+	## yaw. Works in first- and third-person. Default is yaw.
 	vehicle_look_mode = "orbit" if vehicle_look_mode != "orbit" else "yaw"
 	if vehicle_look_mode == "yaw":
 		end_orbit()
 	return vehicle_look_mode
 
 
+func is_drive_occupied() -> bool:
+	var k := kind_of(occupied)
+	return occupied != null and (k == "car" or k == "plane")
+
+
 func is_observe_orbit() -> bool:
-	return is_drive_third() and vehicle_look_mode == "orbit"
+	## 观察 mode on a car/plane, in first- or third-person.
+	return is_drive_occupied() and vehicle_look_mode == "orbit"
+
+
+func _fp_default_pitch() -> float:
+	return 0.04 if kind_of(occupied) == "plane" else -0.06
 
 
 func _sync_vehicle_look_from_heading() -> void:
-	## First-person inside a vehicle is cockpit-aligned: look starts on the
-	## vehicle basis (visual nose -Z), not a leftover world / character yaw.
+	## First-person inside a vehicle is cockpit-aligned: look lives in
+	## vehicle space (visual nose -Z). Do not store an absolute world yaw
+	## on the player — that is what kept the view from rolling/yawing
+	## with the vehicle.
 	if player == null or occupied == null:
 		return
-	var xf := _vehicle_visual_xf()
-	var heading := _heading_yaw(_vehicle_forward(xf))
-	player.set("_yaw", heading)
-	var k := kind_of(occupied)
-	player.set("_pitch", 0.04 if k == "plane" else -0.06)
+	_orbit_yaw = 0.0
+	_orbit_pitch = _fp_default_pitch() if vehicle_cam == "first" else CAM_PITCH_DEFAULT
+	# Keep player look extras at zero; the vehicle camera composes its own
+	# offsets in the vehicle basis and does not read _yaw/_pitch.
+	player.set("_yaw", 0.0)
+	player.set("_pitch", _orbit_pitch)
 
 
 func is_drive_third() -> bool:
-	var k := kind_of(occupied)
-	return occupied != null and (k == "car" or k == "plane") and vehicle_cam == "third"
+	return is_drive_occupied() and vehicle_cam == "third"
 
 
 func begin_orbit() -> void:
+	if not is_observe_orbit():
+		return
 	_orbit_held = true
 	_touch_orbit = true
 
@@ -1230,11 +1245,13 @@ func end_orbit() -> void:
 
 
 func orbit_look(rel: Vector2, sens: float = 0.004) -> void:
-	if not is_drive_third():
+	if not is_observe_orbit():
 		return
 	_orbit_held = true
 	_orbit_yaw -= rel.x * sens
-	_orbit_pitch = clampf(_orbit_pitch - rel.y * sens, -1.25, 0.55)
+	var pmin := -1.25
+	var pmax := 0.85 if vehicle_cam == "first" else 0.55
+	_orbit_pitch = clampf(_orbit_pitch - rel.y * sens, pmin, pmax)
 
 
 func _reset_vehicle_cam() -> void:
@@ -1357,12 +1374,14 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 	# Raise the ischial contact off the cushion (0.2.22 sat too low and clipped)
 	# without floating: a thicker seat skin and a slight hip lift.
 	const BUTTOCK := Vector3(0.0, 0.03, -0.08)
-	const SEAT_SKIN := 0.12
+	const SEAT_SKIN := 0.10
+	# Face-up (lie.z) is the backrest normal, not world-up, so a seat-skin
+	# offset alone still lets the crotch sink through the horizontal cushion.
+	# 0.2.26: lift along the bed/world up so the ischia sit ON the pad.
+	const HIP_LIFT := 0.085
 	# A little along the spine plus a horizontal slide toward the headrest
 	# (bed -Z) so the torso sits farther back without lifting the hips off
 	# the cushion (playtest "身体向后一些").
-	# 0.2.25: shift the whole body farther toward the headrest so the calves
-	# can reach and drape onto the stirrups instead of bracing on top of them.
 	# The first-person eye offset is still derived from the head bone, so it
 	# travels with the body (do not retune the eye independently).
 	const BACK_SHIFT := 0.05
@@ -1370,21 +1389,24 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 	var sit := hip_local + BUTTOCK
 	var headward := -bed.global_transform.basis.z * HEADWARD
 	headward.y = 0.0
-	body.global_transform = Transform3D(lie, seat - lie * sit + lie.z * SEAT_SKIN + lie.y * BACK_SHIFT + headward)
+	var hip_up := bed.global_transform.basis.y.normalized() * HIP_LIFT
+	body.global_transform = Transform3D(lie, seat - lie * sit + lie.z * SEAT_SKIN + lie.y * BACK_SHIFT + headward + hip_up)
 	if skel:
 		var al: Vector3 = bed.armrest_l_global() if bed.has_method("armrest_l_global") else bed.stirrup_l_global()
 		var ar: Vector3 = bed.armrest_r_global() if bed.has_method("armrest_r_global") else bed.stirrup_r_global()
-		# Hands rest along the armrests, slightly toward the head so the
-		# forearms lie flatter; a touch of face-up so the elbow can sit raised.
-		al = al + lie.y * 0.04 + lie.z * 0.02
-		ar = ar + lie.y * 0.04 + lie.z * 0.02
-		# Plant the calves ON the stirrup pads (not propped on top): reach
-		# farther toward the feet and sit the shin on the pad surface.
+		# Forearms reach forward (toward the feet, -spine) and rest on the
+		# armrest top (face-up), for a flatter upper-arm angle.
+		al = al - lie.y * 0.10 + lie.z * 0.016
+		ar = ar - lie.y * 0.10 + lie.z * 0.016
+		# Plant the calves ON the stirrup pad tops (not through the bar):
+		# a short reach along the pad plus a world-up skin so the shin
+		# rests on the surface. 0.2.25's feet*0.32 - up*0.015 overshot
+		# the short pad and pushed the calf into it.
 		var left := lie.x
 		var feet := -lie.y
-		var up := lie.z
-		var sl: Vector3 = bed.stirrup_l_global() + left * 0.10 + feet * 0.32 - up * 0.015
-		var sr: Vector3 = bed.stirrup_r_global() - left * 0.10 + feet * 0.32 - up * 0.015
+		var bed_up := bed.global_transform.basis.y.normalized()
+		var sl: Vector3 = bed.stirrup_l_global() + left * 0.08 + feet * 0.10 + bed_up * 0.048
+		var sr: Vector3 = bed.stirrup_r_global() - left * 0.08 + feet * 0.10 + bed_up * 0.048
 		ExamPose.apply(skel, sl, sr, bed.backrest_angle, al, ar)
 		# First-person: the visible head follows the camera look (after IK).
 		# Clamp first, then apply look, and do NOT call clear_gaze afterwards
@@ -1588,33 +1610,18 @@ func _vehicle_camera(delta: float) -> void:
 	var k := kind_of(occupied)
 	var xf := _vehicle_visual_xf()
 	var fp := vehicle_cam == "first"
-	if fp:
-		var eye_off: Vector3 = occupied.call("cockpit_offset") if occupied.has_method("cockpit_offset") else Vector3(0, 1.2, 0)
-		var eye: Vector3 = xf * eye_off
-		var yaw := float(player.get("_yaw"))
-		var pitch := float(player.get("_pitch"))
-		var heading := _heading_yaw(_vehicle_forward(xf))
-		var rel_yaw := wrapf(yaw - heading, -PI, PI)
-		var look: Basis = xf.basis * Basis.from_euler(Vector3(pitch, rel_yaw, 0.0))
-		_apply_vehicle_cam_xform(pivot, cam, Transform3D(look, eye))
-		cam.fov = float(player.get("fp_fov"))
-		cam.near = 0.08
-		cam.current = true
-		return
-	# Third person: the same vehicle-centered pivot is used for the default
-	# follow and for drag-to-orbit. For the plane, the camera follows the
-	# nose attitude (with a little lag on hard turns) and rolls with the
-	# airframe — a hardcore fighter view, not a horizon-locked inertia cam.
 	var dt := maxf(delta, 0.0001)
-	var held := _orbit_held or _touch_orbit or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
-	if bool(player.get("ui_blocks_capture")):
-		held = _orbit_held or _touch_orbit
+	# Observe-mode drag holds the look offset; anything else (including
+	# two-finger leftovers) must not orbit. Recenter is always to the
+	# vehicle heading (car body forward / plane nose).
+	var held := is_observe_orbit() and (_orbit_held or _touch_orbit)
+	if is_observe_orbit() and not fp and not bool(player.get("ui_blocks_capture")) and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		held = true
+	if not is_observe_orbit():
+		held = false
 	_orbit_held = held
-	# Look-drag yaw/pitch are composited on the dynamic follow; those offsets stay on top
-	# of the lagged attitude / chase direction, and the same _orbit_pivot is used either way.
-	var orbiting := held
 	var airborne := k == "plane" and bool(occupied.get("airborne"))
-	var want_pitch := CAM_PITCH_AIR if airborne else CAM_PITCH_DEFAULT
+	var want_pitch := _fp_default_pitch() if fp else (CAM_PITCH_AIR if airborne else CAM_PITCH_DEFAULT)
 	var just_ready := not _cam_ready
 	if just_ready:
 		_orbit_yaw = 0.0
@@ -1623,11 +1630,28 @@ func _vehicle_camera(delta: float) -> void:
 		_chase_basis = xf.basis.orthonormalized()
 		_cam_ready = true
 	if not held:
-		# 0.2.25: softer, slightly slower recenter from a dragged orbit or
-		# a sliding heading, not a sudden snap (tau ≈ 0.77 s / 0.83 s).
+		# Soft, slightly slower recenter from a dragged orbit, not a snap
+		# (tau ≈ 0.77 s / 0.83 s). Recenter target is vehicle-forward.
 		_orbit_yaw += wrapf(0.0 - _orbit_yaw, -PI, PI) * (1.0 - exp(-1.3 * dt))
 		_orbit_pitch += (want_pitch - _orbit_pitch) * (1.0 - exp(-1.2 * dt))
-	_orbit_pitch = clampf(_orbit_pitch, -1.25, 0.55)
+	_orbit_pitch = clampf(_orbit_pitch, -1.25, 0.85 if fp else 0.55)
+	if fp:
+		# Cockpit camera is parented in vehicle space: the eye rides the
+		# seat offset, and the basis is the vehicle basis times a look
+		# offset (observe drag). Default look is along the visual nose
+		# (-Z), so pitch/roll/yaw of the vehicle are followed 1:1.
+		var eye_off: Vector3 = occupied.call("cockpit_offset") if occupied.has_method("cockpit_offset") else Vector3(0, 1.2, 0)
+		var eye: Vector3 = xf * eye_off
+		var look: Basis = xf.basis.orthonormalized() * Basis.from_euler(Vector3(_orbit_pitch, _orbit_yaw, 0.0))
+		_apply_vehicle_cam_xform(pivot, cam, Transform3D(look, eye), just_ready)
+		cam.fov = float(player.get("fp_fov"))
+		cam.near = 0.08
+		cam.current = true
+		return
+	# Third person: the same vehicle-centered pivot is used for the default
+	# follow and for drag-to-orbit. For the plane, the camera follows the
+	# nose attitude (with a little lag on hard turns) and rolls with the
+	# airframe — a hardcore fighter view, not a horizon-locked inertia cam.
 	var dist := 8.5 if k == "car" else 16.0
 	var height := 2.4 if k == "car" else 4.6
 	var look_y_off := 1.2 if k == "car" else 1.8

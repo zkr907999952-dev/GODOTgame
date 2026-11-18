@@ -10,7 +10,12 @@ extends Node3D
 class_name JetExhaust
 
 const DIAMOND_COUNT := 5
-const TRAIL_COUNT := 7
+## Short tight chain of spherical fireballs behind the nozzle — NOT the
+## Mach diamonds, and not a trail that can grow without bound.
+const FIREBALL_COUNT := 4
+const FIREBALL_SPACING := 0.20
+const FIREBALL_MAX_ALONG := 0.92
+const TRAIL_COUNT := 4
 ## Approx nozzle exit diameter used for diamond spacing (metres).
 const EXIT_DIAMETER := 0.55
 const SEA_LEVEL_RHO := 1.225
@@ -19,6 +24,7 @@ var core: MeshInstance3D
 var mid: MeshInstance3D
 var glow: MeshInstance3D
 var diamonds: Array[MeshInstance3D] = []
+var fireballs: Array[MeshInstance3D] = []
 var _segs_core: Array[MeshInstance3D] = []
 var _segs_mid: Array[MeshInstance3D] = []
 var light: OmniLight3D
@@ -65,21 +71,22 @@ func _build() -> void:
 		d.visible = false
 		diamonds.append(d)
 		add_child(d)
-	for i in TRAIL_COUNT:
-		var aim_c := Node3D.new()
-		aim_c.name = "CoreAim_%d" % i
-		add_child(aim_c)
-		var sc := _plume(0.18, Color(0.847, 0.965, 1.0), 0.5)
-		sc.name = "CoreSeg_%d" % i
-		aim_c.add_child(sc)
-		_segs_core.append(sc)
-		var aim_m := Node3D.new()
-		aim_m.name = "MidAim_%d" % i
-		add_child(aim_m)
-		var sm := _plume(0.28, Color(0.227, 0.627, 1.0), 0.4)
-		sm.name = "MidSeg_%d" % i
-		aim_m.add_child(sm)
-		_segs_mid.append(sm)
+	# Short, capped chain of spherical fire lights behind the nozzle.
+	# These are separate from the Mach diamonds and from the main teardrop plume.
+	for i in FIREBALL_COUNT:
+		var fb := MeshInstance3D.new()
+		fb.name = "Fireball_%d" % i
+		var ball := SphereMesh.new()
+		ball.radius = 0.22
+		ball.height = 0.44
+		ball.radial_segments = 14
+		ball.rings = 10
+		fb.mesh = ball
+		fb.material_override = _flame_mat(Color(1.0, 0.55, 0.16), 0.0)
+		fb.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		fb.visible = false
+		fireballs.append(fb)
+		add_child(fb)
 	light = OmniLight3D.new()
 	light.name = "ExhaustLight"
 	light.light_color = Color(0.4, 0.878, 1.0)
@@ -164,7 +171,7 @@ func apply(thrust: float, time: float, altitude: float = 0.0, delta: float = 0.0
 		dt = maxf(delta, 0.008)
 	_last_time = time
 	_update_trail(length, dt)
-	_pose_segments(length, rad, cr, ab, flicker, core_col, mid_col)
+	_pose_fireballs(thrust, cr, ab, rad, flicker, mid_col if ab > 0.01 else Color(1.0, 0.42, 0.08))
 	_apply_diamonds(thrust, cr, ab, rad, flicker, altitude)
 
 
@@ -181,76 +188,60 @@ func reset_trail() -> void:
 	_trail = PackedVector3Array()
 
 
-func _update_trail(length: float, dt: float) -> void:
+func _update_trail(_length: float, dt: float) -> void:
 	var origin := global_position
 	var aft := _aft_world()
-	var spacing := length / float(maxi(TRAIL_COUNT - 1, 1))
-	# A teleport / spawn jump would otherwise leave a huge leftover streak.
-	if _trail_ready and _trail.size() == TRAIL_COUNT and _trail[0].distance_to(origin) > 8.0:
+	# Fireball chain length is hard-capped. Never inherit a spacing from the
+	# (much longer) plume body — that is what stretched the balls into an
+	# endlessly stacking streak.
+	var spacing := FIREBALL_SPACING
+	var max_along := FIREBALL_MAX_ALONG
+	# A teleport / spawn jump would otherwise leave a leftover streak.
+	if _trail_ready and _trail.size() == FIREBALL_COUNT and _trail[0].distance_to(origin) > 4.0:
 		_trail_ready = false
-	if not _trail_ready or _trail.size() != TRAIL_COUNT:
+	if not _trail_ready or _trail.size() != FIREBALL_COUNT:
 		_trail = PackedVector3Array()
-		_trail.resize(TRAIL_COUNT)
-		for i in TRAIL_COUNT:
-			_trail[i] = origin + aft * spacing * float(i)
+		_trail.resize(FIREBALL_COUNT)
+		for i in FIREBALL_COUNT:
+			var along := minf(0.16 + float(i) * spacing, max_along)
+			_trail[i] = origin + aft * along
 		_trail_ready = true
 		return
-	# Head is glued to the nozzle. Later points chase the previous one like a
-	# soft rope, so a turn leaves a gently curved lag along the flight path.
-	_trail[0] = origin
-	var follow := 1.0 - exp(-3.4 * dt)
-	for i in range(1, TRAIL_COUNT):
-		var inherit: Vector3 = _trail[i] - _trail[i - 1]
-		if inherit.length_squared() < 1e-6:
-			inherit = aft * spacing
-		else:
-			inherit = inherit.normalized() * spacing
-		# Mostly keep the inherited direction (inertia), with a gentle pull to aft.
-		var want: Vector3 = _trail[i - 1] + inherit.lerp(aft * spacing, 0.28)
+	var follow := 1.0 - exp(-8.0 * dt)
+	for i in FIREBALL_COUNT:
+		var along := minf(0.16 + float(i) * spacing, max_along)
+		var want: Vector3 = origin + aft * along
+		# Tiny lag for a soft curve, but clamp so the chain cannot lengthen.
 		_trail[i] = _trail[i].lerp(want, follow)
+		if _trail[i].distance_to(origin) > max_along + 0.08:
+			_trail[i] = want
 
 
-func _pose_segments(
-	length: float, rad: float, cr: float, ab: float, flicker: float,
-	core_col: Color, mid_col: Color
-) -> void:
+func _pose_fireballs(thrust: float, cr: float, ab: float, rad: float, flicker: float, col: Color) -> void:
+	var on := visible and thrust > 0.02
 	var inv := global_transform.affine_inverse()
-	var seg_len := length / float(maxi(TRAIL_COUNT, 1))
-	for i in TRAIL_COUNT:
-		var a: Vector3 = inv * _trail[i]
-		var b_world: Vector3 = _trail[i + 1] if i + 1 < TRAIL_COUNT else (_trail[i] + _aft_world())
-		var b: Vector3 = inv * b_world
-		var tangent := b - a
-		if tangent.length_squared() < 1e-8:
-			tangent = Vector3(0, 0, 1)
+	var n := fireballs.size()
+	for i in n:
+		var fb := fireballs[i]
+		if not on:
+			fb.visible = false
+			continue
+		var along := minf(0.16 + float(i) * FIREBALL_SPACING, FIREBALL_MAX_ALONG)
+		var pos: Vector3
+		if _trail_ready and i < _trail.size():
+			pos = inv * _trail[i]
+			# Hard cap in local space so a lagged point cannot run away.
+			if pos.length() > FIREBALL_MAX_ALONG + 0.08:
+				pos = Vector3(0.0, 0.0, along)
 		else:
-			tangent = tangent.normalized()
-		# Aim parent +Z along the trail; the teardrop child keeps its +90° X
-		# so the long axis follows that +Z.
-		var up := Vector3.UP
-		if absf(tangent.dot(up)) > 0.94:
-			up = Vector3.RIGHT
-		var basis := Basis.looking_at(-tangent, up)  # looking_at aims -Z at the arg, so -tangent → +Z along tangent
-		var taper := 1.0 - float(i) / float(maxi(TRAIL_COUNT, 1))
-		var sc: MeshInstance3D = _segs_core[i]
-		var sm: MeshInstance3D = _segs_mid[i]
-		var aim_c: Node3D = sc.get_parent()
-		var aim_m: Node3D = sm.get_parent()
-		var visible_seg := visible
-		aim_c.visible = visible_seg
-		aim_m.visible = visible_seg
-		aim_c.transform = Transform3D(basis, a)
-		aim_m.transform = Transform3D(basis, a)
-		var rad_c := rad * (0.72 + taper * 0.28) * (0.9 + cr * 0.08)
-		var rad_m := rad * (1.05 + taper * 0.2) * 1.08
-		sc.position = Vector3.ZERO
-		sm.position = Vector3.ZERO
-		sc.scale = Vector3(rad_c, seg_len * 1.35, rad_c)
-		sm.scale = Vector3(rad_m, seg_len * 1.55, rad_m)
-		var fade := (0.22 + cr * 0.20 + ab * 0.16) * flicker * (0.35 + taper * 0.45)
-		var fade_m := (0.12 + cr * 0.12 + ab * 0.14) * flicker * (0.30 + taper * 0.40)
-		_set_flame(sc, core_col, fade)
-		_set_flame(sm, mid_col, fade_m)
+			pos = Vector3(0.0, 0.0, along)
+		fb.visible = true
+		fb.position = pos
+		var taper := 1.0 - float(i) / float(maxi(n, 1))
+		var s := rad * (0.42 + taper * 0.22) * (0.85 + cr * 0.10 + ab * 0.16)
+		fb.scale = Vector3(s, s, s)
+		var alpha := (0.28 + cr * 0.22 + ab * 0.34) * flicker * (0.55 + taper * 0.45)
+		_set_flame(fb, col, alpha)
 
 
 func trail_curve_amount() -> float:
@@ -275,40 +266,41 @@ func _apply_diamonds(thrust: float, cr: float, ab: float, rad: float, flicker: f
 	# Nozzle pressure ratio grows with dry thrust and afterburner.
 	var npr := 1.0 + cr * 1.6 + ab * 3.4
 	npr /= maxf(p_ratio, 0.2)
-	# Spacing of Mach disks. 0.2.25 tightens the gaps a lot more and keeps
-	# the chain short — very small gaps, not a long stretched string.
-	var spacing := EXIT_DIAMETER * 0.22 * sqrt(maxf(npr - 1.0, 0.0)) * flicker
-	spacing = clampf(spacing, 0.08, 0.26)
-	# Visible once the jet is clearly underexpanded (high dry or any AB).
-	var vis := clampf((thrust - 0.55) / 0.25, 0.0, 1.0)
-	vis *= clampf(0.35 + ab * 0.9, 0.0, 1.0)
+	# Restore a physical, clearly visible Mach-diamond spacing. Tight spacing
+	# was applied to the fireball chain (not the diamonds) in 0.2.26.
+	var spacing := EXIT_DIAMETER * 1.15 * sqrt(maxf(npr - 1.0, 0.0)) * flicker
+	spacing = clampf(spacing, 0.38, 1.15)
+	# Visible once dry thrust is clearly up, and obviously on afterburner.
+	var vis := clampf((thrust - 0.38) / 0.28, 0.0, 1.0)
+	vis *= clampf(0.55 + ab * 0.8, 0.0, 1.0)
 	# Fade in very thin air (plume barely scatters) and at low thrust.
-	vis *= clampf(density * 1.15, 0.15, 1.0)
-	var inv := global_transform.affine_inverse()
-	# Mach diamonds must not run past the visible plume tip, even at high thrust
-	# when NPR spacing would otherwise stretch the trail too far.
+	vis *= clampf(density * 1.20, 0.22, 1.0)
+	# Mach diamonds stay inside the visible plume, but are no longer crushed
+	# into a short invisible stack.
 	var tip := plume_tip_length()
-	var last_along := 0.18 + float(maxi(diamonds.size() - 1, 0)) * spacing
-	var cap := maxf(tip * 0.62, 0.28)
+	var last_along := 0.42 + float(maxi(diamonds.size() - 1, 0)) * spacing
+	var cap := maxf(tip * 0.92, 1.15)
 	if last_along > cap and last_along > 1e-4:
 		spacing *= cap / last_along
+		spacing = maxf(spacing, 0.32)
 	for i in diamonds.size():
 		var d := diamonds[i]
-		if vis < 0.04:
+		if vis < 0.05:
 			d.visible = false
 			continue
-		# Place disks along the lagged trail, not a straight aft line.
-		var along := 0.18 + float(i) * spacing
+		var along := 0.42 + float(i) * spacing
 		along = minf(along, cap)
-		if along > cap - 0.02 and tip < 0.5:
+		if tip > 0.4 and along > tip - 0.04:
 			d.visible = false
 			continue
 		d.visible = true
-		d.position = inv * _point_along_trail(along)
+		# Diamonds sit on a straight aft line (the shock train), not on the
+		# lagged fireball trail — mixing the two hid the disks.
+		d.position = Vector3(0.0, 0.0, along)
 		d.rotation = Vector3(PI * 0.5, 0.0, 0.0)
-		var s := rad * (0.55 - float(i) * 0.06)
-		d.scale = Vector3(s, s * 0.42, s)
-		var alpha := vis * (0.16 + ab * 0.34) * (1.0 - float(i) * 0.16) * flicker
+		var s := rad * (0.92 - float(i) * 0.08)
+		d.scale = Vector3(s, s * 0.55, s)
+		var alpha := vis * (0.55 + ab * 0.55) * (1.0 - float(i) * 0.10) * flicker
 		var m := d.material_override as ShaderMaterial
 		if m:
 			m.set_shader_parameter("u_alpha", alpha)
@@ -346,3 +338,41 @@ func plume_tip_length() -> float:
 
 func plume_body_visible() -> bool:
 	return visible and core != null and core.visible and mid != null and mid.visible
+
+func fireball_span() -> float:
+	## Local-Z distance from the first visible fireball to the last.
+	var zs: Array[float] = []
+	for fb in fireballs:
+		if fb and fb.visible:
+			zs.append(absf(fb.position.z))
+	if zs.size() < 2:
+		return 0.0 if zs.is_empty() else zs[0]
+	zs.sort()
+	return zs[zs.size() - 1] - zs[0]
+
+
+func fireball_visible_count() -> int:
+	var n := 0
+	for fb in fireballs:
+		if fb and fb.visible:
+			n += 1
+	return n
+
+
+func diamond_visible_count() -> int:
+	var n := 0
+	for d in diamonds:
+		if d and d.visible:
+			n += 1
+	return n
+
+
+func diamond_spacing() -> float:
+	var alongs: Array[float] = []
+	for d in diamonds:
+		if d and d.visible:
+			alongs.append(d.position.z)
+	alongs.sort()
+	if alongs.size() < 2:
+		return 0.0
+	return alongs[1] - alongs[0]

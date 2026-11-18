@@ -22,6 +22,7 @@ static func mount(
 	kind: String,
 	extras: Array = [],
 	parent: Node3D = null,
+	pre_rot: Quaternion = Quaternion.IDENTITY,
 ) -> VehicleHinge:
 	if parent == null:
 		parent = wrap
@@ -32,7 +33,7 @@ static func mount(
 	if parent != wrap:
 		hp = parent.to_local(wrap.to_global(hinge))
 	hub.position = hp
-	hub.quaternion = Quaternion.IDENTITY
+	hub.quaternion = pre_rot
 	hub.scale = Vector3.ONE
 	VehicleCommon.reparent_keep_global(target, hub)
 	for ex in extras:

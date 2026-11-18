@@ -28,7 +28,13 @@ const ALPHA_STALL := 0.28  # rad ≈ 16°
 # Speed stall (arcade-realistic): below this airspeed the jet loses authority
 # and the nose drops. Decelerating above this quickly raises pitch/roll agility.
 const STALL_SPEED := 52.0  # m/s ≈ 187 km/h
-const DECEL_AGILITY := 1.70
+# Short-window pitch boost while (and briefly after) decelerating. Peak is
+# a large snap / aerial-drift, then it settles; a stall still happens if
+# airspeed bleeds below STALL_SPEED.
+const DECEL_AGILITY := 2.85
+const DECEL_BOOST_HOLD := 0.85  # seconds at peak while held
+const DECEL_BOOST_FADE := 0.32  # seconds of leftover boost after release
+const DECEL_YAW_COUPLE := 0.62
 const RHO_SL := 1.225
 # Gear-down parasite drag. Raised a little so a hanging gear is noticeable
 # (Ace Combat / old web project: gear adds measurable drag).
@@ -73,6 +79,8 @@ var stall_amount: float = 0.0
 var aoa: float = 0.0
 var airspeed: float = 0.0
 var g_load: float = 1.0  # body-up load factor, ~1 on the runway
+var _decel_boost: float = 0.0  # 0..1 short-window decel pitch boost
+var _decel_hold_t: float = 0.0
 var visuals: PlaneVisuals
 var _vis_spin: float = 0.0
 var _gear_rays: Array[Vector3] = [
@@ -365,26 +373,45 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	# displacement so a pull-up at speed actually climbs.
 	if airborne and airspeed > 8.0:
 		var track_k := (TRACK_K0 + airspeed * TRACK_K_SPD) * TRACK_BLEND
+		# While the decel-boost window is live, loosen path-tracking a little
+		# so a hard pull can slide the nose (aerial drift) instead of staying
+		# glued to the velocity vector.
+		track_k *= lerpf(1.0, 0.62, _decel_boost if airborne else 0.0)
 		force += (fwd * airspeed - vel) * track_k * MASS_KG
 	# Control: track the old project's desired body rates (Ace Combat agility)
 	# with a torque servo, plus stability-derivative damping and weathercock.
 	# Rates: pitch 1.45*ctrl, roll 2.15*ctrl, yaw 0.62, with ctrl = clamp(V/42, 0.22, 1.55).
 	var ctrl_s := clampf(airspeed / 42.0, 0.22, 1.55) * (1.0 - 0.55 * stall)
-	# Decelerate to trade airspeed for a quick agility bump — but not while stalling.
+	# Decelerate to trade airspeed for a short-window pitch snap / aerial
+	# drift. While the brake is held the boost stays high; it then fades
+	# quickly so a tap is not a permanent super-pitch. Stall still bites
+	# if speed drops too far.
 	var decelerating := bool(get_meta("decelerating", false)) or speed_brake > 0.15
-	if decelerating and airborne and speed_stall < 0.15:
-		ctrl_s *= DECEL_AGILITY
+	if decelerating and airborne and speed_stall < 0.22:
+		_decel_hold_t = minf(_decel_hold_t + dt, DECEL_BOOST_HOLD)
+		_decel_boost = 1.0
+	else:
+		_decel_hold_t = 0.0
+		_decel_boost = maxf(_decel_boost - dt / maxf(DECEL_BOOST_FADE, 0.05), 0.0)
+	var boost := _decel_boost * (1.0 - clampf(speed_stall / 0.22, 0.0, 1.0)) if airborne else 0.0
 	if not airborne and airspeed < ROTATE_SPEED * 0.70:
 		ctrl_s *= 0.15
 	# Low-speed stall: lose most pitch/roll authority.
 	if speed_stall > 0.0:
 		ctrl_s *= lerpf(1.0, 0.18, speed_stall)
-	var want_pitch := ctrl_pitch * 1.90 * ctrl_s
-	var want_roll := ctrl_roll * 2.15 * ctrl_s
-	var want_yaw := ctrl_yaw * 0.62 * ctrl_s
+	var pitch_agi := 1.0 + boost * (DECEL_AGILITY - 1.0)
+	var roll_agi := 1.0 + boost * 0.55
+	var want_pitch := ctrl_pitch * 1.90 * ctrl_s * pitch_agi
+	var want_roll := ctrl_roll * 2.15 * ctrl_s * roll_agi
+	var want_yaw := ctrl_yaw * (0.62 + boost * 0.70) * ctrl_s
+	# Aerial-drift: a hard pull + decel can slide/yaw the nose a little.
+	if boost > 0.05:
+		want_yaw += ctrl_roll * DECEL_YAW_COUPLE * boost * ctrl_s * 0.45
+		want_yaw += ctrl_yaw * 0.38 * boost * ctrl_s
 	# Weathercock / AoA stability (godot-simplified-flightsim tail: drag aft).
-	want_yaw += -beta * 1.15 * clampf(airspeed / 50.0, 0.0, 1.0)
-	want_pitch += -aoa * (0.35 + 1.4 * stall)
+	var weather := 1.0 - boost * 0.55
+	want_yaw += -beta * 1.15 * weather * clampf(airspeed / 50.0, 0.0, 1.0)
+	want_pitch += -aoa * (0.35 + 1.4 * stall) * (1.0 - boost * 0.25)
 	# Speed stall: buffet + a nose-down moment so the jet falls off the stall.
 	if speed_stall > 0.05:
 		want_pitch -= 0.85 * speed_stall
@@ -574,6 +601,8 @@ func on_exit() -> void:
 	ctrl_roll = 0.0
 	ctrl_yaw = 0.0
 	speed_brake = 1.0
+	_decel_boost = 0.0
+	_decel_hold_t = 0.0
 	get_tree().create_timer(0.9).timeout.connect(func():
 		if not occupied:
 			door_target = 0.0

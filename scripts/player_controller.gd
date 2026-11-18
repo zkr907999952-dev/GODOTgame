@@ -1704,24 +1704,29 @@ const FP_TOUCH_SENS_LEGACY := 0.00305 * 0.9
 
 func touch_look(rel: Vector2) -> void:
 	var vs := _vehicle_system_node()
-	if vs and vs.has_method("is_drive_third") and bool(vs.call("is_drive_third")):
+	if vs and vs.has_method("is_observe_orbit") and bool(vs.call("is_observe_orbit")):
 		vs.call("orbit_look", rel, touch_look_sensitivity)
 		if vs.has_method("begin_orbit"):
 			vs.call("begin_orbit")
 		return
+	if occupancy == "car" or occupancy == "plane":
+		# Without 观察, look drag must not orbit the vehicle camera
+		# (right-side swipe is yaw; the view is bound to the vehicle).
+		return
 	var k := touch_look_sensitivity
 	_yaw -= rel.x * k
 	_pitch = clampf(_pitch - rel.y * k, min_pitch, max_pitch)
-	if occupancy != "car" and occupancy != "plane":
-		_apply_camera()
+	_apply_camera()
 
 
 func touch_orbit(rel: Vector2) -> void:
 	var vs := _vehicle_system_node()
-	if vs and vs.has_method("is_drive_third") and bool(vs.call("is_drive_third")):
+	if vs and vs.has_method("is_observe_orbit") and bool(vs.call("is_observe_orbit")):
 		vs.call("orbit_look", rel, touch_look_sensitivity)
 		if vs.has_method("begin_orbit"):
 			vs.call("begin_orbit")
+		return
+	if occupancy == "car" or occupancy == "plane":
 		return
 	_tp_orbit_pixels(rel)
 
@@ -1825,9 +1830,10 @@ func _handle_vehicle_look(event: InputEvent) -> bool:
 	if vs == null:
 		return false
 	var third := vs.has_method("is_drive_third") and bool(vs.call("is_drive_third"))
+	var observe := vs.has_method("is_observe_orbit") and bool(vs.call("is_observe_orbit"))
 	if event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
 		var mb := event as InputEventMouseButton
-		if third:
+		if observe:
 			if mb.pressed:
 				vs.call("begin_orbit")
 			else:
@@ -1836,16 +1842,12 @@ func _handle_vehicle_look(event: InputEvent) -> bool:
 			return true
 	if event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
-		if third and (mm.button_mask & MOUSE_BUTTON_MASK_LEFT):
+		if observe and (mm.button_mask & MOUSE_BUTTON_MASK_LEFT or Input.mouse_mode == Input.MOUSE_MODE_CAPTURED):
 			vs.call("orbit_look", mm.relative, mouse_sensitivity)
 			get_viewport().set_input_as_handled()
 			return true
-		if not third and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-			# First-person cockpit look; VehicleSystem writes the camera.
-			_yaw -= mm.relative.x * mouse_sensitivity
-			_pitch = clampf(_pitch - mm.relative.y * mouse_sensitivity, min_pitch, max_pitch)
-			get_viewport().set_input_as_handled()
-			return true
+		# Without 观察, first-person is locked to the vehicle basis;
+		# do not accumulate a world-space _yaw/_pitch that would fight it.
 		# Don't let the walking camera overwrite the vehicle chase/cockpit cam.
 		return occupancy == "car" or occupancy == "plane"
 	return false

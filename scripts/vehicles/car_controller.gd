@@ -2,7 +2,7 @@ extends RigidBody3D
 ## Sports-car physics: RigidBody3D + per-wheel RayCast3D suspension, ported
 ## from the mature Godot 4.6 + Jolt project simonfruehauf/custom-3d-car
 ## (https://github.com/simonfruehauf/custom-3d-car) and retuned for this
-## 1420 kg coupe (shorter travel, stiffer springs, nitro, existing W/S A/D
+## 1760 kg GT-weight coupe (shorter travel, stiffer springs, nitro, existing W/S A/D
 ## Shift/Space binds). Lateral tire force is what lets the car actually turn.
 class_name CarController
 
@@ -10,7 +10,7 @@ const CarSkidMarksScript := preload("res://scripts/vehicles/car_skids.gd")
 
 const KIND := "car"
 const ENTER_RADIUS := 4.2
-const MASS_KG := 1420.0
+const MASS_KG := 1760.0
 const MAX_STEER := 0.70  # rad (~40°); more lock at low and driving speeds
 const STEER_SPEED := 5.2
 const IDLE_RPM := 900.0
@@ -22,25 +22,25 @@ const GEAR_RATIOS := [0.0, 3.21, 2.11, 1.47, 1.14, 0.92, 0.74]
 # 0.2.24: more power / torque so a hard launch can spin the drive wheels
 # (burnout). Holding accelerate uses nitro (blue flames + extra power);
 # PC Shift still adds a slightly stronger manual punch on top.
-const ENGINE_POWER := 15200.0
-const ENGINE_POWER_NITRO := 20500.0
-const ENGINE_POWER_SHIFT := 24000.0
-const ENGINE_POWER_REV := 7800.0
-const TIRE_MU := 1.15
-const ARCADE_GRIP := 3.4
-const LONG_SLIP_STIFF := 2200.0
+const ENGINE_POWER := 18800.0
+const ENGINE_POWER_NITRO := 25200.0
+const ENGINE_POWER_SHIFT := 29200.0
+const ENGINE_POWER_REV := 9600.0
+const TIRE_MU := 1.62
+const ARCADE_GRIP := 5.4
+const LONG_SLIP_STIFF := 2800.0
 const WHEEL_INERTIA := 1.15
 const BRAKE_FORCE_MULT := 1.5
 const HANDBRAKE_MULT := 3.0
 # Suspension: weight/wheel ≈ 3480 N. 0.2.23 raises the rest length again
 # (0.30 → 0.36) so the wheels sit clear of the body instead of sinking in.
-const SPRING_STRENGTH := 50000.0
-const SPRING_DAMP := 3300.0
+const SPRING_STRENGTH := 72000.0
+const SPRING_DAMP := 4600.0
 const REST_DISTANCE := 0.36
-const TIRE_GRIP := 7400.0
-const GRIP_FALLOFF := 0.032
-const MAX_LATERAL_FORCE := 14500.0
-const ROLLING_FRICTION := 24.0
+const TIRE_GRIP := 11800.0
+const GRIP_FALLOFF := 0.018
+const MAX_LATERAL_FORCE := 23000.0
+const ROLLING_FRICTION := 28.0
 const HULL_CLEARANCE := 0.12
 
 signal occupied_changed(on: bool)
@@ -84,19 +84,19 @@ var spawn_map: String = "city"
 func _ready() -> void:
 	mass = MASS_KG
 	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
-	center_of_mass = Vector3(0.0, -0.22, 0.08)
-	gravity_scale = 1.0
+	center_of_mass = Vector3(0.0, -0.30, 0.06)
+	gravity_scale = 1.18
 	continuous_cd = true
 	contact_monitor = true
 	max_contacts_reported = 8
 	collision_layer = 1
 	collision_mask = 1
 	can_sleep = true
-	linear_damp = 0.03
-	angular_damp = 0.08
+	linear_damp = 0.06
+	angular_damp = 0.14
 	if physics_material_override == null:
 		var mat := PhysicsMaterial.new()
-		mat.friction = 0.12
+		mat.friction = 0.28
 		mat.bounce = 0.0
 		physics_material_override = mat
 	freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC

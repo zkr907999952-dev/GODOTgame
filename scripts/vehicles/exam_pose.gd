@@ -17,24 +17,23 @@ const FK := {
 	"C_Spine_d": Vector3(0.02, 0.0, 0.0),
 	"C_Neck_a": Vector3(-0.10, 0.0, 0.0),
 	"C_Head_a": Vector3(-0.06, 0.0, 0.0),
-	# Legs: x = flex, y = twist, z = abduct. 0.2.24: open the thighs just
-	# enough that the calves can extend outward along the (smaller) stirrup
-	# pads, and stretch the shins forward so they share the pad axis.
-	# 0.2.25: a little more abduction so the calves can drape outward onto
-	# the stirrups, with a flatter (less sharply bent) shin.
-	"L_UpperLeg_a": Vector3(-0.36, 0.04, 0.38),
-	"R_UpperLeg_a": Vector3(-0.36, -0.04, -0.38),
-	"L_Foreleg_a": Vector3(0.32, 0.0, 0.02),
-	"R_Foreleg_a": Vector3(0.32, 0.0, -0.02),
+	# Legs: x = flex, y = twist, z = abduct. 0.2.26: slightly less hip flex
+	# and a flatter shin so the calves rest along the stirrup pads instead
+	# of plunging through them.
+	"L_UpperLeg_a": Vector3(-0.28, 0.04, 0.36),
+	"R_UpperLeg_a": Vector3(-0.28, -0.04, -0.36),
+	"L_Foreleg_a": Vector3(0.18, 0.0, 0.02),
+	"R_Foreleg_a": Vector3(0.18, 0.0, -0.02),
 	"L_Foot_a": Vector3(0.10, 0.06, 0.03),
 	"R_Foot_a": Vector3(0.10, -0.06, -0.03),
-	# Arms: gradual, naturally flush with the armrests; elbows slightly raised.
-	"L_Shoulder_a": Vector3(0.00, 0.03, 0.05),
-	"R_Shoulder_a": Vector3(0.00, -0.03, -0.05),
-	"L_UpperArm_a": Vector3(0.04, 0.12, 0.38),
-	"R_UpperArm_a": Vector3(0.04, -0.12, -0.38),
-	"L_Forearm_a": Vector3(0.08, 0.0, 0.03),
-	"R_Forearm_a": Vector3(0.08, 0.0, -0.03),
+	# Arms: flatter, more gradual upper-arm angle; forearms reach forward
+	# along the armrests rather than tucking in at the elbow.
+	"L_Shoulder_a": Vector3(0.00, 0.02, 0.03),
+	"R_Shoulder_a": Vector3(0.00, -0.02, -0.03),
+	"L_UpperArm_a": Vector3(0.02, 0.08, 0.22),
+	"R_UpperArm_a": Vector3(0.02, -0.08, -0.22),
+	"L_Forearm_a": Vector3(0.04, 0.0, 0.02),
+	"R_Forearm_a": Vector3(0.04, 0.0, -0.02),
 	"L_Hand_a": Vector3(0.04, 0.0, 0.0),
 	"R_Hand_a": Vector3(0.04, 0.0, 0.0),
 }
@@ -175,7 +174,7 @@ static func _ik_arm(skel: Skeleton3D, left: bool, target: Vector3) -> void:
 	var axis_dir := to_t.normalized()
 	# Pole: slightly out and up (face +Z while lying) so the elbow is a
 	# little raised while the forearm still rests along the armrest.
-	var pole := Vector3(0.30 if left else -0.30, -0.02, 0.16)
+	var pole := Vector3(0.22 if left else -0.22, -0.04, 0.10)
 	var pole_n := pole - axis_dir * pole.dot(axis_dir)
 	if pole_n.length_squared() < 1e-6:
 		pole_n = Vector3(0, 0, 1)

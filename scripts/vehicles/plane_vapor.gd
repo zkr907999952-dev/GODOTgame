@@ -206,44 +206,76 @@ func _measure_wingtips() -> void:
 		_tip_local_r = right
 
 
+func _make_sheet_mesh(length: float, width: float, camber: float = 0.10) -> ArrayMesh:
+	## Smooth subdivided polygonal sheet in the XZ plane, slightly cambered
+	## in Y, flowing along -Z (visual nose). Soft UV edges are shaded later.
+	var nu := 10
+	var nv := 16
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	for j in nv + 1:
+		var v := float(j) / float(nv)
+		var z := (0.5 - v) * length
+		var arch := camber * sin(v * PI)
+		# Taper slightly toward the trailing end.
+		var w := width * (0.72 + 0.28 * (1.0 - v))
+		for i in nu + 1:
+			var u := float(i) / float(nu)
+			var x := (u - 0.5) * w
+			verts.append(Vector3(x, arch, z))
+			norms.append(Vector3(0, 1, 0))
+			uvs.append(Vector2(u, v))
+	var idx := PackedInt32Array()
+	for j in nv:
+		for i in nu:
+			var a := j * (nu + 1) + i
+			var b := a + 1
+			var c := a + (nu + 1)
+			var d := c + 1
+			idx.append_array([a, c, b, b, c, d])
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = norms
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_INDEX] = idx
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	return mesh
+
+
 func _build_clouds() -> void:
-	# Soft additive discs / ellipsoids on the upper fuselage, LEX and wing roots.
+	# Smooth polygonal / sheet-like LEX, dorsal and wing-root vapor, matching
+	# the F-22 high-G condensation photos: stretching translucent flow
+	# structures along the body and wing roots, not a handful of spheres.
 	# Local positions are in wrap space (visual nose -Z, up +Y).
-	# Volumetric 3D region (not paper-thin cards): fatter ellipsoids stacked
-	# over the upper fuselage / LEX / wing-root, with real Y thickness.
 	var placements: Array = [
-		# Dorsal / spine / LEX
-		{"pos": Vector3(0.0, 1.20, -1.5), "size": Vector3(1.9, 1.45, 2.5), "mode": 0.08},
-		{"pos": Vector3(0.0, 1.55, -0.4), "size": Vector3(1.5, 1.20, 2.1), "mode": 0.12},
-		{"pos": Vector3(0.0, 1.05, 0.5), "size": Vector3(1.5, 1.15, 2.0), "mode": 0.10},
-		{"pos": Vector3(-0.70, 1.15, -0.5), "size": Vector3(1.35, 1.05, 1.9), "mode": 0.16},
-		{"pos": Vector3(0.70, 1.15, -0.5), "size": Vector3(1.35, 1.05, 1.9), "mode": 0.16},
-		# Wing-root / LEX / leading-edge volumes
-		{"pos": Vector3(-2.3, 0.95, -0.15), "size": Vector3(2.3, 1.35, 2.6), "mode": 0.05},
-		{"pos": Vector3(2.3, 0.95, -0.15), "size": Vector3(2.3, 1.35, 2.6), "mode": 0.05},
-		{"pos": Vector3(-1.55, 1.20, -1.7), "size": Vector3(1.7, 1.15, 1.9), "mode": 0.12},
-		{"pos": Vector3(1.55, 1.20, -1.7), "size": Vector3(1.7, 1.15, 1.9), "mode": 0.12},
-		{"pos": Vector3(-1.8, 0.70, 0.6), "size": Vector3(1.6, 1.05, 1.8), "mode": 0.10},
-		{"pos": Vector3(1.8, 0.70, 0.6), "size": Vector3(1.6, 1.05, 1.8), "mode": 0.10},
+		# Dorsal / spine sheet
+		{"pos": Vector3(0.0, 1.28, -0.6), "len": 4.6, "wid": 1.55, "camber": 0.16, "yaw": 0.0, "roll": 0.0, "mode": 0.08},
+		{"pos": Vector3(0.0, 1.48, -1.8), "len": 3.2, "wid": 1.15, "camber": 0.12, "yaw": 0.0, "roll": 0.0, "mode": 0.10},
+		# LEX / leading-edge extension sheets (left / right)
+		{"pos": Vector3(-1.15, 1.12, -1.15), "len": 3.4, "wid": 1.35, "camber": 0.10, "yaw": 0.28, "roll": -0.18, "mode": 0.16},
+		{"pos": Vector3(1.15, 1.12, -1.15), "len": 3.4, "wid": 1.35, "camber": 0.10, "yaw": -0.28, "roll": 0.18, "mode": 0.16},
+		# Wing-root / strake sheets, stretching aft along the root
+		{"pos": Vector3(-2.15, 0.92, -0.15), "len": 3.8, "wid": 1.85, "camber": 0.08, "yaw": 0.42, "roll": -0.12, "mode": 0.08},
+		{"pos": Vector3(2.15, 0.92, -0.15), "len": 3.8, "wid": 1.85, "camber": 0.08, "yaw": -0.42, "roll": 0.12, "mode": 0.08},
+		{"pos": Vector3(-1.70, 0.78, 0.85), "len": 3.0, "wid": 1.45, "camber": 0.06, "yaw": 0.22, "roll": -0.08, "mode": 0.12},
+		{"pos": Vector3(1.70, 0.78, 0.85), "len": 3.0, "wid": 1.45, "camber": 0.06, "yaw": -0.22, "roll": 0.08, "mode": 0.12},
 	]
 	_cloud_alpha.resize(placements.size())
 	for i in placements.size():
 		var p: Dictionary = placements[i]
 		var mi := MeshInstance3D.new()
 		mi.name = "VaporCloud_%d" % i
-		var mesh := SphereMesh.new()
-		mesh.radius = 0.5
-		mesh.height = 1.0
-		mesh.radial_segments = 24
-		mesh.rings = 16
-		mi.mesh = mesh
+		mi.mesh = _make_sheet_mesh(float(p["len"]), float(p["wid"]), float(p["camber"]))
 		var mat := ShaderMaterial.new()
 		if _shader:
 			mat.shader = _shader
-			mat.set_shader_parameter("u_color", Vector3(0.83, 0.92, 1.0))
+			mat.set_shader_parameter("u_color", Vector3(0.86, 0.93, 1.0))
 			mat.set_shader_parameter("u_alpha", 0.0)
 			mat.set_shader_parameter("u_mode", float(p["mode"]))
-			mat.set_shader_parameter("u_noise", 0.35)
+			mat.set_shader_parameter("u_noise", 0.40)
 			mi.material_override = mat
 		else:
 			var sm := StandardMaterial3D.new()
@@ -251,7 +283,7 @@ func _build_clouds() -> void:
 			sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 			sm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 			sm.cull_mode = BaseMaterial3D.CULL_DISABLED
-			sm.albedo_color = Color(0.83, 0.92, 1.0, 0.0)
+			sm.albedo_color = Color(0.86, 0.93, 1.0, 0.0)
 			mi.material_override = sm
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mi.visible = false
@@ -261,7 +293,8 @@ func _build_clouds() -> void:
 		else:
 			add_child(mi)
 		mi.position = p["pos"]
-		mi.scale = p["size"]
+		mi.rotation = Vector3(0.0, float(p["yaw"]), float(p["roll"]))
+		mi.scale = Vector3.ONE
 		_clouds.append(mi)
 		_cloud_alpha[i] = 0.0
 
@@ -331,7 +364,7 @@ func _update_clouds(intensity: float, _delta: float) -> void:
 		# Slight per-cloud variation so the sheet is not a uniform blob.
 		var k := intensity * (0.75 + 0.25 * sin(float(i) * 1.7 + intensity * 4.0))
 		_cloud_alpha[i] = k
-		var a := k * (0.20 if i >= 5 else 0.30)
+		var a := k * (0.34 if i >= 4 else 0.46)
 		mi.visible = on and a > 0.02
 		var mat := mi.material_override
 		if mat is ShaderMaterial:
@@ -365,10 +398,25 @@ func tip_local_right() -> Vector3:
 
 
 func cloud_min_height() -> float:
-	## Smallest Y scale of the body-vapor volumes. Paper-thin cards are << 1.
+	## Kept for older tests. Sheets use unit scale; thickness is in the mesh camber.
 	var h := 0.0
 	for mi in _clouds:
 		if mi == null:
 			continue
 		h = mi.scale.y if h <= 0.0 else minf(h, mi.scale.y)
 	return h
+
+
+func cloud_uses_spheres() -> bool:
+	for mi in _clouds:
+		if mi and mi.mesh is SphereMesh:
+			return true
+	return false
+
+
+func cloud_sheet_count() -> int:
+	var n := 0
+	for mi in _clouds:
+		if mi and mi.mesh is ArrayMesh:
+			n += 1
+	return n
