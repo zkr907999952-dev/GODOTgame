@@ -266,31 +266,31 @@ func _apply_diamonds(thrust: float, cr: float, ab: float, rad: float, flicker: f
 	# Nozzle pressure ratio grows with dry thrust and afterburner.
 	var npr := 1.0 + cr * 1.6 + ab * 3.4
 	npr /= maxf(p_ratio, 0.2)
-	# Restore a physical, clearly visible Mach-diamond spacing. Tight spacing
-	# was applied to the fireball chain (not the diamonds) in 0.2.26.
-	var spacing := EXIT_DIAMETER * 1.15 * sqrt(maxf(npr - 1.0, 0.0)) * flicker
-	spacing = clampf(spacing, 0.38, 1.15)
+	# 0.2.27: smaller diamonds that sit inside and are wrapped by the plume,
+	# not giant rings sticking out of the flame. Tight fireball-chain spacing
+	# is unchanged and still separate from this shock train.
+	var spacing := EXIT_DIAMETER * 0.85 * sqrt(maxf(npr - 1.0, 0.0)) * flicker
+	spacing = clampf(spacing, 0.30, 0.70)
 	# Visible once dry thrust is clearly up, and obviously on afterburner.
 	var vis := clampf((thrust - 0.38) / 0.28, 0.0, 1.0)
 	vis *= clampf(0.55 + ab * 0.8, 0.0, 1.0)
 	# Fade in very thin air (plume barely scatters) and at low thrust.
 	vis *= clampf(density * 1.20, 0.22, 1.0)
-	# Mach diamonds stay inside the visible plume, but are no longer crushed
-	# into a short invisible stack.
+	# Keep the train clearly inside the visible teardrop body.
 	var tip := plume_tip_length()
-	var last_along := 0.42 + float(maxi(diamonds.size() - 1, 0)) * spacing
-	var cap := maxf(tip * 0.92, 1.15)
+	var last_along := 0.32 + float(maxi(diamonds.size() - 1, 0)) * spacing
+	var cap := maxf(tip * 0.72, 0.95)
 	if last_along > cap and last_along > 1e-4:
 		spacing *= cap / last_along
-		spacing = maxf(spacing, 0.32)
+		spacing = maxf(spacing, 0.24)
 	for i in diamonds.size():
 		var d := diamonds[i]
 		if vis < 0.05:
 			d.visible = false
 			continue
-		var along := 0.42 + float(i) * spacing
+		var along := 0.32 + float(i) * spacing
 		along = minf(along, cap)
-		if tip > 0.4 and along > tip - 0.04:
+		if tip > 0.4 and along > tip - 0.08:
 			d.visible = false
 			continue
 		d.visible = true
@@ -298,9 +298,10 @@ func _apply_diamonds(thrust: float, cr: float, ab: float, rad: float, flicker: f
 		# lagged fireball trail — mixing the two hid the disks.
 		d.position = Vector3(0.0, 0.0, along)
 		d.rotation = Vector3(PI * 0.5, 0.0, 0.0)
-		var s := rad * (0.92 - float(i) * 0.08)
-		d.scale = Vector3(s, s * 0.55, s)
-		var alpha := vis * (0.55 + ab * 0.55) * (1.0 - float(i) * 0.10) * flicker
+		# Unit diamond mesh radius is 0.5; keep world radius inside the mid plume.
+		var s := rad * (0.48 - float(i) * 0.05)
+		d.scale = Vector3(s, s * 0.50, s)
+		var alpha := vis * (0.32 + ab * 0.28) * (1.0 - float(i) * 0.10) * flicker
 		var m := d.material_override as ShaderMaterial
 		if m:
 			m.set_shader_parameter("u_alpha", alpha)
@@ -376,3 +377,20 @@ func diamond_spacing() -> float:
 	if alongs.size() < 2:
 		return 0.0
 	return alongs[1] - alongs[0]
+
+
+func diamond_world_radius(index: int = 0) -> float:
+	## World-ish radius of a visible diamond (unit mesh radius is 0.5).
+	if index < 0 or index >= diamonds.size():
+		return 0.0
+	var d := diamonds[index]
+	if d == null or not d.visible:
+		return 0.0
+	return 0.5 * maxf(d.scale.x, d.scale.z)
+
+
+func plume_mid_radius() -> float:
+	## Mid teardrop radius at the nozzle-scale (r_base 0.34 * scale.xz).
+	if mid == null or not visible:
+		return 0.0
+	return 0.34 * maxf(mid.scale.x, mid.scale.z)

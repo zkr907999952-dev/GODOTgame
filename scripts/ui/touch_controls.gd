@@ -51,6 +51,9 @@ var _weapon_drag_moved: bool = false
 var _weapon_press_pos: Vector2 = Vector2.ZERO
 ## 最近一次真实 ScreenTouch 的时间戳；这段时间内忽略触摸模拟鼠标，避免同一指被处理两次。
 var _screen_touch_until: int = 0
+## 当前仍按下的真实触控 index。只要还有真实触控在，就忽略触摸模拟鼠标，
+## 避免第二指被当成 index 0 或把已按下的摇杆结束掉。
+var _live_touches: Dictionary = {}
 ## 自定义按键布局（编辑中的工作副本；空则读 TouchLayout 已保存的布局）。
 var layout_edit: bool = false
 var layout_selected: String = ""
@@ -62,6 +65,8 @@ func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	set_process(true)
+	set_process_input(true)
+	set_process_unhandled_input(true)
 	_font = ThemeDB.fallback_font
 	visible = false
 
@@ -85,6 +90,7 @@ func _release_all() -> void:
 	for idx in fingers.keys():
 		_end_finger(idx, fingers[idx]["pos"])
 	fingers.clear()
+	_live_touches.clear()
 	stick_vec = Vector2.ZERO
 	_push_stick()
 
@@ -461,23 +467,39 @@ func _hit_button(p: Vector2) -> String:
 
 # ------------------------------------------------------------------ input
 func _input(event: InputEvent) -> void:
+	_handle_pointer_event(event)
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	# 兜底：若某个 GUI 控件把第二指当成未处理事件丢掉，这里仍按 index 收下。
+	# _handle_pointer_event 对已跟踪的同一指是幂等的。
+	if event is InputEventScreenTouch or event is InputEventScreenDrag:
+		_handle_pointer_event(event)
+
+
+func _handle_pointer_event(event: InputEvent) -> void:
 	if not enabled or not is_visible_in_tree():
 		return
 	if event is InputEventScreenTouch:
 		_screen_touch_until = Time.get_ticks_msec() + 120
 		var st := event as InputEventScreenTouch
 		if st.pressed:
+			_live_touches[st.index] = true
 			_on_down(st.index, _logical_pos(st.position))
 		else:
+			_live_touches.erase(st.index)
 			_on_up(st.index, _logical_pos(st.position))
+		get_viewport().set_input_as_handled()
 	elif event is InputEventScreenDrag:
 		_screen_touch_until = Time.get_ticks_msec() + 120
+		_live_touches[event.index] = true
 		var sd := event as InputEventScreenDrag
 		_on_drag(sd.index, _logical_pos(sd.position), _logical_rel(sd.relative, sd.position))
+		get_viewport().set_input_as_handled()
 	elif event is InputEventMouseButton and event.device == InputEvent.DEVICE_ID_EMULATION:
-		# 真机若同时派发 ScreenTouch 与模拟鼠标：模拟鼠标常晚一帧到达，
-		# 会把已经开始的单击工具结束并误判成双击环绕。刚收到 ScreenTouch 则忽略。
-		if Time.get_ticks_msec() < _screen_touch_until:
+		# 真机若同时派发 ScreenTouch 与模拟鼠标：只要还有真实触控在按，
+		# 就忽略模拟鼠标，避免第二指被映射成 index 0 而冲掉摇杆。
+		if Time.get_ticks_msec() < _screen_touch_until or not _live_touches.is_empty():
 			return
 		var mb := event as InputEventMouseButton
 		if mb.button_index != MOUSE_BUTTON_LEFT:
@@ -487,7 +509,7 @@ func _input(event: InputEvent) -> void:
 		else:
 			_on_up(0, _logical_pos(mb.position))
 	elif event is InputEventMouseMotion and event.device == InputEvent.DEVICE_ID_EMULATION:
-		if Time.get_ticks_msec() < _screen_touch_until or not fingers.has(0):
+		if Time.get_ticks_msec() < _screen_touch_until or not _live_touches.is_empty() or not fingers.has(0):
 			return
 		var mm := event as InputEventMouseMotion
 		_on_drag(0, _logical_pos(mm.position), _logical_rel(mm.relative, mm.position))
@@ -547,12 +569,8 @@ func _on_down(idx: int, p: Vector2) -> void:
 	if _in_drive():
 		# 载具内取消双指拖拽旋转视角，避免和右侧划屏偏航冲突。
 		# 观察键打开时，只用单指拖动旋转，松手回正。摇杆仍不得环绕。
-		var scene_fingers := _scene_fingers()
-		if scene_fingers.size() >= 2:
-			# Second finger must not convert an existing yaw/look into orbit.
-			f["role"] = "none"
-			get_viewport().set_input_as_handled()
-			return
+		# 每根手指独立：按住摇杆时另一侧仍可偏航 / 点按按钮，不再因为
+		# 已有一根场景手指就把第二指丢掉。
 		var orbit_mode := false
 		if hud and hud.get("_vehicle_system") and hud.get("_vehicle_system").has_method("is_observe_orbit"):
 			orbit_mode = bool(hud.get("_vehicle_system").call("is_observe_orbit"))

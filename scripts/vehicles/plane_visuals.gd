@@ -390,7 +390,8 @@ func _measure_cockpit() -> Dictionary:
 	var stick := VehicleCommon.first_named(wrap, "steeringwheel")
 	if stick is Node3D:
 		var a := VehicleCommon.aabb_in(wrap, stick as Node3D)
-		x = a["cx"] * 0.2
+		# Height / station from the stick, but X is forced to the centerline
+		# below so the first-person view matches the HUD / boresight.
 		y = a["cy"] + 0.42
 		z = a["cz"] + 0.4
 	var canopy := VehicleCommon.first_named(wrap, "^door_dside_f")
@@ -400,7 +401,9 @@ func _measure_cockpit() -> Dictionary:
 		var a := VehicleCommon.aabb_in(wrap, canopy as Node3D)
 		y = clampf(y, a["minY"] + (a["maxY"] - a["minY"]) * 0.42, a["maxY"] - 0.16)
 		z = clampf(z, a["minZ"] + 0.7, a["maxZ"] - 0.45)
-	return {"x": x, "y": y - ORIGIN_Y + 0.16, "z": z}
+	# Aircraft centerline (wrap X = 0). The stick is offset to the right;
+	# leaving a fraction of that offset made the HUD sit off the view center.
+	return {"x": 0.0, "y": y - ORIGIN_Y + 0.16, "z": z}
 
 
 static func petal_gap(thrust: float) -> float:

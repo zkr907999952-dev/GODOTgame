@@ -81,6 +81,8 @@ var _cam_ready: bool = false
 var _chase_dir: Vector3 = Vector3.ZERO  # smoothed motion/heading for the chase cam
 var _orbit_pivot: Vector3 = Vector3.ZERO  # stable vehicle-centered point used while orbiting
 var _chase_basis: Basis = Basis.IDENTITY  # lagged full attitude (plane rolls with this)
+var _exam_eye_origin: Vector3 = Vector3.ZERO  # head origin after IK, before look
+var _exam_eye_ready: bool = false
 const CAM_PITCH_DEFAULT := -0.18
 const CAM_PITCH_AIR := -0.12
 
@@ -1394,28 +1396,30 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 	if skel:
 		var al: Vector3 = bed.armrest_l_global() if bed.has_method("armrest_l_global") else bed.stirrup_l_global()
 		var ar: Vector3 = bed.armrest_r_global() if bed.has_method("armrest_r_global") else bed.stirrup_r_global()
-		# Forearms reach forward (toward the feet, -spine) and rest on the
-		# armrest top (face-up), for a flatter upper-arm angle.
-		al = al - lie.y * 0.10 + lie.z * 0.016
-		ar = ar - lie.y * 0.10 + lie.z * 0.016
-		# Plant the calves ON the stirrup pad tops (not through the bar):
-		# a short reach along the pad plus a world-up skin so the shin
-		# rests on the surface. 0.2.25's feet*0.32 - up*0.015 overshot
-		# the short pad and pushed the calf into it.
+		# Forearms run parallel to the armrest (along the head-foot axis)
+		# and rest on top of the pad — not diagonally through it.
+		# A little inward of the outer lip so the forearm sits on the rail.
 		var left := lie.x
 		var feet := -lie.y
+		al = al - lie.y * 0.22 + lie.z * 0.030 - left * 0.04
+		ar = ar - lie.y * 0.22 + lie.z * 0.030 + left * 0.04
+		# Plant the calves ON the stirrup pad tops (not through the bar),
+		# reaching a little farther outward so the legs match the stirrups.
 		var bed_up := bed.global_transform.basis.y.normalized()
-		var sl: Vector3 = bed.stirrup_l_global() + left * 0.08 + feet * 0.10 + bed_up * 0.048
-		var sr: Vector3 = bed.stirrup_r_global() - left * 0.08 + feet * 0.10 + bed_up * 0.048
+		var sl: Vector3 = bed.stirrup_l_global() + left * 0.16 + feet * 0.13 + bed_up * 0.050
+		var sr: Vector3 = bed.stirrup_r_global() - left * 0.16 + feet * 0.13 + bed_up * 0.050
 		ExamPose.apply(skel, sl, sr, bed.backrest_angle, al, ar)
+		# Capture the eye from the posed head *before* look rotation, so
+		# turning the view cannot hitch the camera origin.
+		_exam_eye_origin = ExamPose.head_world(skel).origin
+		_exam_eye_ready = true
 		# First-person: the visible head follows the camera look (after IK).
-		# Clamp first, then apply look, and do NOT call clear_gaze afterwards
-		# — that reset C_Head_a to rest and made the mirror look frozen.
+		# Use the continuous yaw/pitch extras (not look_world aiming) so mid
+		# angles stay smooth. Do NOT call clear_gaze afterwards.
 		var fp_now := bool(player.get("first_person")) and not (player.has_method("is_display_mode") and bool(player.call("is_display_mode")))
 		if fp_now:
 			var yp := _clamp_exam_look()
-			var look_fwd := _exam_look_forward(yp.x, yp.y, lie)
-			ExamPose.apply_look(skel, yp.x, yp.y, look_fwd)
+			ExamPose.apply_look(skel, yp.x, yp.y)
 		ExamPose.offset_hair(skel, Vector3(0.0, 0.02, -0.10))
 		# Observation mode: head / eyes look at the orbit camera.
 		if player.has_method("is_display_mode") and bool(player.call("is_display_mode")) and player.has_method("get_secondary"):
@@ -1453,7 +1457,6 @@ func _exam_camera(_delta: float) -> void:
 	if skel == null or not player.has_node("CameraPivot/Camera3D"):
 		return
 	var cam: Camera3D = player.get_node("CameraPivot/Camera3D")
-	var head := ExamPose.head_world(skel)
 	var bed := occupied as ExamBed
 	if bed == null:
 		return
@@ -1470,23 +1473,12 @@ func _exam_camera(_delta: float) -> void:
 	var yp := _clamp_exam_look()
 	var yaw := yp.x
 	var pitch := yp.y
-	# Untilted origin: world-up so the first-person camera has no roll
-	# from the lying basis. The CharacterBody stays identity.
-	var up_ref := Vector3.UP
-	if absf(look_dir.dot(up_ref)) > 0.94:
-		up_ref = lie.x if absf(lie.x.dot(Vector3.UP)) < 0.9 else Vector3.RIGHT
-	var base := Basis.looking_at(look_dir, up_ref)
-	var extra := Basis.from_euler(Vector3(pitch, yaw, 0.0))
-	# Sit the eye slightly in front of the face (along the default look and
-	# the face-up axis) so the neck stump stays behind the near plane.
-	var eye := head.origin + Vector3.UP * 0.03 + lie.z * 0.12 + look_dir * 0.10
-	var look := (base * extra).orthonormalized()
-	# Strip residual roll: rebuild with world up.
-	var fwd2 := -look.z
-	var up2 := Vector3.UP
-	if absf(fwd2.dot(up2)) > 0.94:
-		up2 = look.y
-	cam.global_transform = Transform3D(Basis.looking_at(fwd2, up2), eye)
+	# Eye comes from the IK head, captured before apply_look, so rotating
+	# the neck cannot hitch the camera origin mid-swing.
+	var head_o := _exam_eye_origin if _exam_eye_ready else ExamPose.head_world(skel).origin
+	var eye := head_o + Vector3.UP * 0.03 + lie.z * 0.12 + look_dir * 0.10
+	var look := _exam_look_basis(look_dir, yaw, pitch)
+	cam.global_transform = Transform3D(look, eye)
 	cam.fov = float(player.get("fp_fov"))
 	cam.near = 0.08
 	cam.current = true
@@ -1511,16 +1503,47 @@ func _exam_look_forward(yaw: float, pitch: float, lie: Basis) -> Vector3:
 	if look_dir.length_squared() < 1e-6:
 		look_dir = Vector3(0, 0, 1)
 	look_dir = look_dir.normalized()
-	var up_ref := Vector3.UP
-	if absf(look_dir.dot(up_ref)) > 0.94:
-		up_ref = lie.x if absf(lie.x.dot(Vector3.UP)) < 0.9 else Vector3.RIGHT
-	var base := Basis.looking_at(look_dir, up_ref)
-	var extra := Basis.from_euler(Vector3(pitch, yaw, 0.0))
-	var look := (base * extra).orthonormalized()
-	var fwd := -look.z
+	var fwd := -_exam_look_basis(look_dir, yaw, pitch).z
 	if fwd.length_squared() < 1e-8:
 		return look_dir
 	return fwd.normalized()
+
+
+func _exam_look_basis(look_dir: Vector3, yaw: float, pitch: float) -> Basis:
+	## Continuous first-person look: yaw about world-up, then pitch about the
+	## resulting right vector. No looking_at rebuild and no up-vector switch
+	## that used to hitch around mid angles / near-vertical looks.
+	if look_dir.length_squared() < 1e-8:
+		look_dir = Vector3(0, 0, 1)
+	else:
+		look_dir = look_dir.normalized()
+	var world_up := Vector3.UP
+	var base_right := world_up.cross(look_dir)
+	if base_right.length_squared() < 1e-8:
+		base_right = Vector3.RIGHT
+	base_right = base_right.normalized()
+	var fwd := look_dir.rotated(world_up, yaw)
+	var right := base_right.rotated(world_up, yaw)
+	if right.length_squared() < 1e-8:
+		right = world_up.cross(fwd)
+		if right.length_squared() < 1e-8:
+			right = Vector3.RIGHT
+		right = right.normalized()
+	else:
+		right = right.normalized()
+	# Positive pitch looks UP (rotate forward toward world-up about right).
+	fwd = fwd.rotated(right, pitch)
+	if fwd.length_squared() < 1e-8:
+		fwd = look_dir
+	else:
+		fwd = fwd.normalized()
+	var up := right.cross(fwd)
+	if up.length_squared() < 1e-8:
+		up = world_up
+	else:
+		up = up.normalized()
+	right = fwd.cross(up).normalized()
+	return Basis(right, up, -fwd).orthonormalized()
 
 
 func _attach_player_to_vehicle() -> void:

@@ -32,9 +32,10 @@ const STALL_SPEED := 52.0  # m/s ≈ 187 km/h
 # a large snap / aerial-drift, then it settles; a stall still happens if
 # airspeed bleeds below STALL_SPEED.
 const DECEL_AGILITY := 2.85
-const DECEL_BOOST_HOLD := 0.85  # seconds at peak while held
-const DECEL_BOOST_FADE := 0.32  # seconds of leftover boost after release
+const DECEL_BOOST_HOLD := 1.15  # seconds at peak while held (0.2.27: a little longer)
+const DECEL_BOOST_FADE := 0.48  # seconds of leftover boost after release
 const DECEL_YAW_COUPLE := 0.62
+const ROLL_RATE := 2.60  # 0.2.27: snappier roll; yaw stays 0.62
 const RHO_SL := 1.225
 # Gear-down parasite drag. Raised a little so a hanging gear is noticeable
 # (Ace Combat / old web project: gear adds measurable drag).
@@ -354,10 +355,9 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 			if lift_dir.dot(up) < 0.0:
 				lift_dir = -lift_dir
 	var drag_dir := -vel.normalized() if airspeed > 0.3 else -fwd
-	# Thrust along nozzle / body forward. Afterburner kicks in above 0.8.
-	var mil := clampf(thrust / 0.8, 0.0, 1.0)
-	var ab := clampf((thrust - 0.8) / 0.2, 0.0, 1.0)
-	var thrust_n := mil * THRUST_DRY + ab * (THRUST_AB - THRUST_DRY)
+	# Thrust along nozzle / body forward. Afterburner is a distinct surge
+	# when it lights, not a linear ramp from dry to AB.
+	var thrust_n := thrust_newtons(thrust)
 	if _on_wheels and not airborne:
 		thrust_n *= lerpf(TAXI_THRUST_SCALE, 1.0, clampf(airspeed / ROTATE_SPEED, 0.0, 1.0))
 	# Extra lift only when rotating at speed — never from a standstill.
@@ -380,7 +380,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 		force += (fwd * airspeed - vel) * track_k * MASS_KG
 	# Control: track the old project's desired body rates (Ace Combat agility)
 	# with a torque servo, plus stability-derivative damping and weathercock.
-	# Rates: pitch 1.45*ctrl, roll 2.15*ctrl, yaw 0.62, with ctrl = clamp(V/42, 0.22, 1.55).
+	# Rates: pitch 1.90*ctrl, roll ROLL_RATE*ctrl, yaw 0.62, with ctrl = clamp(V/42, 0.22, 1.55).
 	var ctrl_s := clampf(airspeed / 42.0, 0.22, 1.55) * (1.0 - 0.55 * stall)
 	# Decelerate to trade airspeed for a short-window pitch snap / aerial
 	# drift. While the brake is held the boost stays high; it then fades
@@ -402,7 +402,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var pitch_agi := 1.0 + boost * (DECEL_AGILITY - 1.0)
 	var roll_agi := 1.0 + boost * 0.55
 	var want_pitch := ctrl_pitch * 1.90 * ctrl_s * pitch_agi
-	var want_roll := ctrl_roll * 2.15 * ctrl_s * roll_agi
+	var want_roll := ctrl_roll * ROLL_RATE * ctrl_s * roll_agi
 	var want_yaw := ctrl_yaw * (0.62 + boost * 0.70) * ctrl_s
 	# Aerial-drift: a hard pull + decel can slide/yaw the nose a little.
 	if boost > 0.05:
@@ -567,6 +567,22 @@ func _taxi_torque(state: PhysicsDirectBodyState3D, fwd: Vector3, up: Vector3, ri
 	# Damp roll/pitch on the ground so the jet sits planted.
 	var w := state.angular_velocity
 	return up * yaw - right * w.dot(right) * 18000.0 - fwd * w.dot(fwd) * 14000.0 - up * w.dot(up) * 8000.0
+
+
+func thrust_newtons(t: float = -1.0) -> float:
+	## Dry thrust is linear to military (0.8). Crossing into afterburner
+	## delivers an immediate kick (~62% of the AB increment), then the rest
+	## eases in to full AB at 1.0. Hold-to-AB and release decay stay in the
+	## input layer.
+	if t < 0.0:
+		t = thrust
+	var mil := clampf(t / 0.8, 0.0, 1.0)
+	var ab := clampf((t - 0.8) / 0.2, 0.0, 1.0)
+	var ab_shaped := 0.0
+	if ab > 0.0:
+		var rest := ab * ab * (3.0 - 2.0 * ab)
+		ab_shaped = 0.62 + 0.38 * rest
+	return mil * THRUST_DRY + ab_shaped * (THRUST_AB - THRUST_DRY)
 
 
 func cockpit_offset() -> Vector3:

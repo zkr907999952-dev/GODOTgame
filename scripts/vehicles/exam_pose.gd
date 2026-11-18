@@ -20,8 +20,8 @@ const FK := {
 	# Legs: x = flex, y = twist, z = abduct. 0.2.26: slightly less hip flex
 	# and a flatter shin so the calves rest along the stirrup pads instead
 	# of plunging through them.
-	"L_UpperLeg_a": Vector3(-0.28, 0.04, 0.36),
-	"R_UpperLeg_a": Vector3(-0.28, -0.04, -0.36),
+	"L_UpperLeg_a": Vector3(-0.28, 0.04, 0.46),
+	"R_UpperLeg_a": Vector3(-0.28, -0.04, -0.46),
 	"L_Foreleg_a": Vector3(0.18, 0.0, 0.02),
 	"R_Foreleg_a": Vector3(0.18, 0.0, -0.02),
 	"L_Foot_a": Vector3(0.10, 0.06, 0.03),
@@ -126,7 +126,7 @@ static func _ik_leg(skel: Skeleton3D, left: bool, target: Vector3) -> void:
 	# Pole: out to the patient's side (mesh +X is left) and slightly "up" (face).
 	# In skeleton/Body space after lying: +X = left, +Y = toward head, +Z = face/up.
 	# A little more side so the shin stays coaxial with the outward stirrup pad.
-	var pole := Vector3(0.42 if left else -0.42, 0.02, 0.70)
+	var pole := Vector3(0.55 if left else -0.55, 0.02, 0.62)
 	var pole_n := pole - axis_dir * pole.dot(axis_dir)
 	if pole_n.length_squared() < 1e-6:
 		pole_n = Vector3(0, 0, 1)
@@ -174,7 +174,7 @@ static func _ik_arm(skel: Skeleton3D, left: bool, target: Vector3) -> void:
 	var axis_dir := to_t.normalized()
 	# Pole: slightly out and up (face +Z while lying) so the elbow is a
 	# little raised while the forearm still rests along the armrest.
-	var pole := Vector3(0.22 if left else -0.22, -0.04, 0.10)
+	var pole := Vector3(0.08 if left else -0.08, -0.14, 0.08)
 	var pole_n := pole - axis_dir * pole.dot(axis_dir)
 	if pole_n.length_squared() < 1e-6:
 		pole_n = Vector3(0, 0, 1)
@@ -243,19 +243,26 @@ static func apply_look(skel: Skeleton3D, yaw: float, pitch: float, look_world: V
 	var neck_y := 0.0
 	var head_p := 0.0
 	var head_y := 0.0
-	if look_world.length_squared() > 1e-8:
+	# Prefer the continuous camera extras. Aiming via look_world is unstable
+	# when the view points toward the feet (body -Y): the XZ projection of
+	# the direction is tiny and atan2(d.x, d.z) flips around mid angles.
+	var use_world := look_world.length_squared() > 1e-8
+	if use_world:
 		var inv := skel.global_transform.basis.orthonormalized().inverse()
 		var d := (inv * look_world.normalized()).normalized()
-		# Body / skeleton space: +Z face, +Y toward the crown, +X left.
-		var yaw_s := atan2(d.x, d.z)
-		var pitch_s := atan2(-d.y, maxf(Vector2(d.x, d.z).length(), 1e-5))
-		yaw_s = clampf(yaw_s, -1.15, 1.15)
-		pitch_s = clampf(pitch_s, -1.05, 1.20)
-		neck_y = yaw_s * 0.42
-		head_y = yaw_s * 0.62
-		neck_p = pitch_s * 0.42
-		head_p = pitch_s * 0.62
-	else:
+		if Vector2(d.x, d.z).length() < 0.20:
+			use_world = false
+		else:
+			# Body / skeleton space: +Z face, +Y toward the crown, +X left.
+			var yaw_s := atan2(d.x, d.z)
+			var pitch_s := atan2(-d.y, maxf(Vector2(d.x, d.z).length(), 1e-5))
+			yaw_s = clampf(yaw_s, -1.15, 1.15)
+			pitch_s = clampf(pitch_s, -1.05, 1.20)
+			neck_y = yaw_s * 0.42
+			head_y = yaw_s * 0.62
+			neck_p = pitch_s * 0.42
+			head_p = pitch_s * 0.62
+	if not use_world:
 		# Fallback: camera extras. Positive pitch (look up) tilts the head back
 		# (negative local X, matching the lithotomy FK extension).
 		neck_y = yaw * 0.42

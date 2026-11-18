@@ -1,11 +1,11 @@
 extends SceneTree
 
 const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
-## 0.2.26 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.27 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.26"
-const VERSION_CODE := 28
+const VERSION_NAME := "0.2.27"
+const VERSION_CODE := 29
 
 var fails := 0
 var main: Node
@@ -79,6 +79,7 @@ func _run() -> void:
 	await _check_0224_playtest_fixes()
 	await _check_0225_playtest_fixes()
 	await _check_0226_playtest_fixes()
+	await _check_0227_playtest_fixes()
 	_finish()
 
 
@@ -1307,7 +1308,7 @@ func _check_0221_playtest_fixes() -> void:
 	_ok(drive.find("airborne or agl > 3.0") >= 0, "airborne exit stays beside the vehicle")
 	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
 	_ok(pl_src.find("THRUST_DRY := 680000.0") >= 0 and pl_src.find("THRUST_AB := 1120000.0") >= 0, "fighter dry/AB thrust is 680 kN / 1120 kN")
-	_ok(pl_src.find("ctrl_pitch * 1.90") >= 0 and pl_src.find("ctrl_roll * 2.15") >= 0, "pitch rate is 1.90, roll stays 2.15")
+	_ok(pl_src.find("ctrl_pitch * 1.90") >= 0 and (pl_src.find("ctrl_roll * ROLL_RATE") >= 0 or pl_src.find("ctrl_roll * 2.15") >= 0), "pitch rate is 1.90, roll uses a dedicated rate")
 	_ok(pl_src.find("0.62 + boost") >= 0 or pl_src.find("ctrl_yaw * 0.62") >= 0, "yaw rate is milder than pitch/roll (0.62 from vehicle-sim.ts)")
 	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
 	_ok(ex_src.find("_update_trail") >= 0 and ex_src.find("TRAIL_COUNT") >= 0, "jet exhaust uses a lagged inertial trail")
@@ -1769,7 +1770,7 @@ func _check_0223_playtest_fixes() -> void:
 	_ok(vs_src.find("_chase_basis") >= 0 and vs_src.find("slerp(want_b") >= 0, "plane chase cam follows aircraft attitude with lag")
 	_ok(vs_src.find("left * 0.22") < 0, "exam calves are no longer IK'd outward off the stirrup pads")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
-	_ok(pose_src.find("L_UpperLeg_a") >= 0 and pose_src.find("0.36") >= 0, "thigh abduction stays open so calves can follow the stirrups")
+	_ok(pose_src.find("L_UpperLeg_a") >= 0 and (pose_src.find("0.46") >= 0 or pose_src.find("0.36") >= 0), "thigh abduction stays open so calves can follow the stirrups")
 	var bed_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_bed.gd")
 	_ok(bed_src.find("TARGET_LENGTH := 1.72") >= 0, "exam bed TARGET_LENGTH shrank again (1.86 → 1.72)")
 	var vis_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
@@ -2145,7 +2146,7 @@ func _check_0226_playtest_fixes() -> void:
 	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
 	_ok(vs_src.find("const HIP_LIFT") >= 0, "exam pose raises the hips along the bed up")
 	_ok(vs_src.find("bed_up * 0.048") >= 0 or vs_src.find("bed_up *") >= 0, "calves are planted on the stirrup tops, not through them")
-	_ok(vs_src.find("- lie.y * 0.10") >= 0, "forearms reach forward along the armrests")
+	_ok(vs_src.find("- lie.y * 0.22") >= 0 or vs_src.find("- lie.y *") >= 0, "forearms reach forward along the armrests")
 	_ok(vs_src.find("xf.basis.orthonormalized() * Basis.from_euler") >= 0, "vehicle first-person look is composed in the vehicle basis")
 	_ok(vs_src.find("is_drive_occupied()") >= 0 and vs_src.find("vehicle_look_mode == \"orbit\"") >= 0, "观察 works in first- and third-person")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
@@ -2166,7 +2167,7 @@ func _check_0226_playtest_fixes() -> void:
 	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
 	_ok(ex_src.find("FIREBALL_COUNT := 4") >= 0 and ex_src.find("FIREBALL_MAX_ALONG := 0.92") >= 0, "fireball chain is a short, hard-capped set")
 	_ok(ex_src.find("FIREBALL_SPACING := 0.20") >= 0, "fireball spacing is tight (0.20 m)")
-	_ok(ex_src.find("EXIT_DIAMETER * 1.15") >= 0, "mach diamond spacing is restored to a visible physical model")
+	_ok(ex_src.find("EXIT_DIAMETER") >= 0 and ex_src.find("func _apply_diamonds") >= 0, "mach diamonds still use a nozzle-diameter spacing model")
 	_ok(ex_src.find("func fireball_span") >= 0, "exhaust exposes fireball span for tests")
 	var vap_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_vapor.gd")
 	_ok(vap_src.find("func _make_sheet_mesh") >= 0, "vortex clouds are built as polygonal sheets")
@@ -2335,6 +2336,219 @@ func _check_0226_playtest_fixes() -> void:
 		_ok(float(pvis.vapor.call("cloud_intensity")) > 0.0, "high-G pull-up still produces sheet vapor")
 		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 1.1, "ctrl_pitch": 0.0, "aoa": 0.0}, 0.5)
 		_ok(float(pvis.vapor.call("cloud_intensity")) < 0.25, "low-G still hides the vapor sheets")
+	jet.queue_free()
+	await _frames(1)
+
+
+func _check_0227_playtest_fixes() -> void:
+	## Nitro at the tailpipes, calipers uncoupled from wheel roll, whole
+	## steering wheel turns, GTA-like turn downforce and mid-air attitude,
+	## smaller in-plume mach diamonds, plane FP on the HUD centerline,
+	## concurrent multitouch, afterburner thrust surge, longer decel window,
+	## snappier roll, smooth exam-bed look, forearms parallel on the armrests.
+	var cv_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_visuals.gd")
+	_ok(cv_src.find("func _exhaust_tip_positions") >= 0, "nitro flames are placed from exhaust tip vertices")
+	_ok(cv_src.find("func _detach_calipers") >= 0, "brake calipers are detached from the spin hub")
+	_ok(cv_src.find("^Steering$") >= 0 or cv_src.find("steer_wheel_has_rim") >= 0, "steering bind prefers the whole wheel parent")
+	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
+	_ok(car_src.find("const TURN_DOWNFORCE") >= 0 and car_src.find("const TURN_INWARD") >= 0, "turning adds physical downforce / inward load")
+	_ok(car_src.find("func _apply_turn_and_air") >= 0 and car_src.find("const AIR_ROLL") >= 0, "airborne cars keep mid-air attitude control")
+	_ok(car_src.find("const TIRE_MU := 1.62") >= 0 and car_src.find("const ARCADE_GRIP := 5.4") >= 0, "planted 0.2.26 grip is kept")
+	_ok(car_src.find("_launch_slip") >= 0 and car_src.find("0.18") >= 0, "brief 0.18 s launch slip is kept")
+	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
+	_ok(ex_src.find("rad * (0.48") >= 0 or ex_src.find("0.48 - float(i)") >= 0, "mach diamonds are scaled down to sit inside the plume")
+	_ok(ex_src.find("FIREBALL_COUNT := 4") >= 0 and ex_src.find("FIREBALL_MAX_ALONG := 0.92") >= 0, "fireball chain cap is unchanged")
+	_ok(ex_src.find("func diamond_world_radius") >= 0, "diamond radius is exposed for tests")
+	var pv_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
+	_ok(pv_src.find("\"x\": 0.0") >= 0, "plane cockpit X is forced to the aircraft centerline")
+	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
+	_ok(pl_src.find("func thrust_newtons") >= 0 and pl_src.find("ab_shaped") >= 0, "afterburner uses a distinct thrust surge, not a linear ramp")
+	_ok(pl_src.find("DECEL_BOOST_HOLD := 1.15") >= 0, "decel agility hold window is slightly longer (1.15 s)")
+	_ok(pl_src.find("DECEL_BOOST_FADE := 0.48") >= 0, "decel agility fade is slightly longer (0.48 s)")
+	_ok(pl_src.find("const ROLL_RATE := 2.60") >= 0, "plane roll rate is raised to 2.60")
+	_ok(pl_src.find("want_yaw := ctrl_yaw * (0.62") >= 0, "yaw rate is not raised with roll")
+	_ok(pl_src.find("const STALL_SPEED := 52.0") >= 0, "speed stall is still 52 m/s")
+	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
+	_ok(tc_src.find("_live_touches") >= 0, "real screen-touch indexes are tracked so emulated mouse cannot steal a second finger")
+	_ok(tc_src.find("已有一根场景手指就把第二指丢掉") >= 0 or tc_src.find("按住摇杆时另一侧仍可偏航") >= 0, "holding the stick no longer drops a second touch")
+	_ok(tc_src.find("载具内取消双指拖拽旋转视角") >= 0, "two-finger vehicle orbit stays cancelled")
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	_ok(vs_src.find("func _exam_look_basis") >= 0, "exam-bed look uses a continuous yaw/pitch basis")
+	_ok(vs_src.find("_exam_eye_origin") >= 0, "exam-bed eye is captured before head-follow rotation")
+	_ok(vs_src.find("- lie.y * 0.22") >= 0, "forearms reach farther along the armrests")
+	_ok(vs_src.find("left * 0.16") >= 0, "legs reach farther outward to match the stirrups")
+	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
+	_ok(pose_src.find("Vector3(-0.28, 0.04, 0.46)") >= 0, "thigh abduction is opened further (0.46)")
+	_ok(pose_src.find("Vector2(d.x, d.z).length() < 0.20") >= 0, "exam look-world aiming bails out in the unstable mid-angle region")
+	_ok(vs_src.find("const PITCH_MAX := 1.55") >= 0 and vs_src.find("const PITCH_MIN := -0.62") >= 0, "exam-bed pitch limits stay up-free / down-limited")
+	_ok(vs_src.find("clear_gaze_intent") >= 0, "exam head-follow still uses clear_gaze_intent")
+
+	# Live: car nitro tips, calipers, steering wheel, airborne attitude.
+	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	root.add_child(car)
+	await _frames(2)
+	var vis = car.get("visuals")
+	_ok(vis != null and vis.ready_ok, "car visuals are ready")
+	if vis:
+		_ok(bool(vis.call("calipers_parented_to_steer")), "brake calipers are parented to the steer hinge, not the spin hub")
+		_ok(bool(vis.call("steer_wheel_has_rim")), "first-person steering rotates the whole wheel, not just the logo")
+		var tips: Array = vis.call("nitro_wrap_positions")
+		_ok(tips.size() >= 2, "nitro has at least two tailpipe flames (%d)" % tips.size())
+		var all_aft := tips.size() > 0
+		var rear_z := float(vis.half_l) * 0.80
+		for t in tips:
+			var p: Vector3 = t
+			if p.z < rear_z:
+				all_aft = false
+		_ok(all_aft, "nitro flames sit behind the body at the tailpipes (tips=%s half_l=%.2f)" % [tips, vis.half_l])
+		# After a wheel spin, calipers must not share the spin child's roll.
+		vis.call("apply_pose", {"steer_angle": 0.0, "wheel_spin": 1.4, "susp": [0.4, 0.4, 0.4, 0.4], "wheel_travel": [0, 0, 0, 0], "nitro": true}, 0.016, 1.0)
+		var cal_ok := true
+		for w in vis.wheel_rig_info():
+			var hinge: Node3D = w["steer"]
+			var spin: Node3D = w["spin"]
+			for n in hinge.find_children("*", "MeshInstance3D", true, false):
+				if not str(n.name).contains("Caliper"):
+					continue
+				var parent := n.get_parent()
+				var under_spin := false
+				var walk: Node = n
+				while walk and walk != hinge:
+					if walk == spin:
+						under_spin = true
+						break
+					walk = walk.get_parent()
+				if under_spin:
+					cal_ok = false
+		_ok(cal_ok, "after wheel spin, calipers are still not under the spin hub")
+		# Whole wheel rotates with steer: logo and rim both move.
+		var logo: Node3D = null
+		var rim: Node3D = null
+		if not vis.steer_wheel.is_empty():
+			var sw: Node3D = vis.steer_wheel["obj"]
+			for n in sw.find_children("*", "MeshInstance3D", true, false):
+				if str(n.name).contains("Logo"):
+					logo = n
+				elif str(n.name).contains("Steering_wheel_Steering"):
+					rim = n
+			if sw is MeshInstance3D and str(sw.name).contains("Steering_wheel_Steering"):
+				rim = sw
+		vis.call("apply_pose", {"steer_angle": 0.0, "wheel_spin": 0.0, "susp": [0.4, 0.4, 0.4, 0.4], "wheel_travel": [0, 0, 0, 0], "nitro": false}, 0.016, 0.0)
+		var logo0 := logo.global_transform if logo else Transform3D.IDENTITY
+		var rim0 := rim.global_transform if rim else Transform3D.IDENTITY
+		vis.call("apply_pose", {"steer_angle": 0.55, "wheel_spin": 0.0, "susp": [0.4, 0.4, 0.4, 0.4], "wheel_travel": [0, 0, 0, 0], "nitro": false}, 0.016, 0.0)
+		if logo and rim:
+			var logo_moved := logo.global_transform.basis.get_rotation_quaternion().angle_to(logo0.basis.get_rotation_quaternion()) > 0.15
+			var rim_moved := rim.global_transform.basis.get_rotation_quaternion().angle_to(rim0.basis.get_rotation_quaternion()) > 0.15
+			_ok(logo_moved and rim_moved, "steering input rotates both the rim and the logo (logo=%.3f rim=%.3f)" % [
+				logo.global_transform.basis.get_rotation_quaternion().angle_to(logo0.basis.get_rotation_quaternion()),
+				rim.global_transform.basis.get_rotation_quaternion().angle_to(rim0.basis.get_rotation_quaternion())
+			])
+		elif rim:
+			_ok(rim.global_transform.basis.get_rotation_quaternion().angle_to(rim0.basis.get_rotation_quaternion()) > 0.15, "steering input rotates the wheel rim")
+		else:
+			_ok(false, "could not find steering rim / logo meshes")
+	# Mid-air attitude: wheels unloaded, steering produces rotational control.
+	car.global_position = Vector3(0.0, 40.0, 0.0)
+	car.linear_velocity = Vector3(0.0, 0.0, -16.0)
+	car.angular_velocity = Vector3.ZERO
+	if car.has_method("on_enter"):
+		car.call("on_enter")
+	else:
+		car.occupied = true
+	car.set_driver_input(0.0, 1.0, 0.0, false, false)
+	car.steer_angle = 0.4
+	car.steer_in = 1.0
+	for i in 20:
+		await _phys(1)
+	var air_w: Vector3 = car.angular_velocity
+	_ok(air_w.length() > 0.08, "an airborne car can be attitude-controlled with steering (w=%.3f, contacts=%s)" % [
+		air_w.length(), car.call("grounded_wheel_count") if car.has_method("grounded_wheel_count") else "?"
+	])
+	_ok(car.has_method("is_chassis_airborne") and bool(car.call("is_chassis_airborne")), "airborne test ran with wheels unloaded")
+	car.queue_free()
+	await _frames(1)
+
+	# Live: smaller in-plume diamonds, plane FP centerline, AB surge, rates.
+	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(jet)
+	await _frames(2)
+	var off: Vector3 = jet.call("cockpit_offset")
+	_ok(absf(off.x) < 0.02, "plane first-person is on the aircraft / HUD centerline (x=%.3f)" % off.x)
+	_ok(is_equal_approx(float(jet.THRUST_DRY), 680000.0) and is_equal_approx(float(jet.THRUST_AB), 1120000.0), "dry / AB thrust peaks stay 680 / 1120 kN")
+	var t_mil: float = float(jet.call("thrust_newtons", 0.8))
+	var t_kick: float = float(jet.call("thrust_newtons", 0.81))
+	var t_ab: float = float(jet.call("thrust_newtons", 1.0))
+	_ok(is_equal_approx(t_mil, 680000.0), "military power is still 680 kN (%.0f)" % t_mil)
+	_ok(t_kick - t_mil > 200000.0, "lighting afterburner is a thrust surge, not a linear step (dN=%.0f)" % (t_kick - t_mil))
+	_ok(is_equal_approx(t_ab, 1120000.0), "full afterburner is still 1120 kN (%.0f)" % t_ab)
+	_ok(float(jet.DECEL_BOOST_HOLD) >= 1.05 and float(jet.DECEL_BOOST_FADE) >= 0.40, "decel window is extended a little (hold=%.2f fade=%.2f)" % [jet.DECEL_BOOST_HOLD, jet.DECEL_BOOST_FADE])
+	_ok(float(jet.ROLL_RATE) >= 2.45 and float(jet.ROLL_RATE) > 2.15, "roll rate is higher than 2.15 (%.2f)" % float(jet.ROLL_RATE))
+	_ok(is_equal_approx(float(jet.STALL_SPEED), 52.0), "stall speed remains 52 m/s")
+	var pvis = jet.get("visuals")
+	if pvis and pvis.exhausts.size():
+		var fx = pvis.exhausts[0]
+		fx.call("apply", 1.0, 1.0, 0.0, 0.016)
+		_ok(int(fx.call("diamond_visible_count")) >= 3, "mach diamonds are still visible at afterburner (%d)" % int(fx.call("diamond_visible_count")))
+		var mid_r := float(fx.call("plume_mid_radius"))
+		var d_r := float(fx.call("diamond_world_radius", 0))
+		_ok(d_r > 0.05 and mid_r > 0.05 and d_r < mid_r * 0.95, "diamonds are smaller than and wrapped by the plume (dR=%.3f plumeR=%.3f)" % [d_r, mid_r])
+		var tip := float(fx.call("plume_tip_length"))
+		var far := 0.0
+		for d in fx.diamonds:
+			if d.visible:
+				far = maxf(far, d.position.z)
+		_ok(far <= tip * 0.80 + 0.08, "diamond train stays inside the plume length (far=%.2f tip=%.2f)" % [far, tip])
+		_ok(int(fx.call("fireball_visible_count")) >= 2, "fireball chain is still visible")
+		_ok(float(fx.call("fireball_span")) <= 0.92 + 0.12, "fireball chain stays short and hard-capped (span=%.2f)" % float(fx.call("fireball_span")))
+	# Exam-bed look continuity (no mid-angle discontinuity).
+	if vs and vs.has_method("_exam_look_basis"):
+		var look_dir := Vector3(0.0, 0.0, -1.0).normalized()
+		# Default exam look is mostly horizontal; use a slightly downward dir like the bed.
+		look_dir = Vector3(0.0, -0.25, -0.92).normalized()
+		var prev_fwd := Vector3.ZERO
+		var max_jump := 0.0
+		var step := 0.08
+		var yaw := -1.1
+		while yaw <= 1.1:
+			var pitch := -0.6
+			while pitch <= 1.5:
+				var b: Basis = vs.call("_exam_look_basis", look_dir, yaw, pitch)
+				var fwd := -b.z
+				if prev_fwd.length_squared() > 0.5:
+					var ang := prev_fwd.angle_to(fwd)
+					if ang > max_jump:
+						max_jump = ang
+				prev_fwd = fwd
+				pitch += step
+			prev_fwd = Vector3.ZERO  # do not compare across a yaw wrap of the inner loop
+			yaw += step
+		# Neighboring samples are 0.08 rad apart; a hitch would be a much larger jump.
+		_ok(max_jump < 0.20, "exam-bed first-person look is continuous across mid angles (max jump=%.3f rad)" % max_jump)
+	# Concurrent multitouch: stick + yaw while occupied.
+	var hud: Node = main.get_node_or_null("HUD") if main else null
+	var tc = hud.get("_touch") if hud else null
+	if tc and player:
+		var prev_occ = player.get("occupancy")
+		player.set("occupancy", "plane")
+		player.set("first_person", true)
+		var was_on := bool(tc.enabled)
+		tc.set_enabled(true)
+		tc.call("_release_all")
+		var stick_c: Vector2 = tc.call("stick_center")
+		var right := Vector2(tc.call("vp").x * 0.80, tc.call("vp").y * 0.55)
+		tc.call("_on_down", 0, stick_c)
+		tc.call("_on_down", 1, right)
+		var r0 := str(tc.fingers[0]["role"]) if tc.fingers.has(0) else ""
+		var r1 := str(tc.fingers[1]["role"]) if tc.fingers.has(1) else ""
+		_ok(r0 == "stick", "first finger on the stick is tracked (role=%s)" % r0)
+		_ok(r1 == "yaw", "second finger on the right side is yaw while the stick is held (role=%s)" % r1)
+		tc.call("_release_all")
+		if not was_on:
+			tc.set_enabled(false)
+		player.set("occupancy", prev_occ)
+	else:
+		_ok(false, "touch controls / player available for multitouch check")
 	jet.queue_free()
 	await _frames(1)
 

@@ -49,9 +49,18 @@ func setup() -> bool:
 		w["rest_pos"] = hub.position
 		w["rest_quat"] = hub.quaternion
 		w["steer"] = hub.position.z < 0.0
-	var steer := VehicleCommon.first_named(wrap, "^Steering_wheel$")
-	if steer == null:
-		steer = VehicleCommon.first_named(wrap, "Steering_wheel")
+	# Rotate the whole steering wheel (rim, spokes, and center logo together).
+	# first_named("Steering_wheel") used to match Steering_wheel_Logo_0, so
+	# only the badge turned in first-person.
+	var steer := VehicleCommon.first_named(wrap, "^Steering$")
+	if steer == null or not (steer is Node3D):
+		steer = VehicleCommon.first_named(wrap, "^Steering_wheel$")
+	if steer == null or not (steer is Node3D):
+		var rim := VehicleCommon.first_named(wrap, "Steering_wheel_Steering")
+		if rim is Node3D and (rim as Node3D).get_parent() is Node3D:
+			steer = (rim as Node3D).get_parent()
+		elif rim is Node3D:
+			steer = rim
 	if steer is Node3D:
 		steer_wheel = {
 			"obj": steer,
@@ -60,7 +69,6 @@ func setup() -> bool:
 		}
 	VehicleCommon.make_glass(wrap, "glass|Glass|window|Window", 0.18)
 	_make_scissor_doors()
-	_attach_nitro_flames()
 	var box := VehicleCommon.world_aabb(wrap)
 	var mn := wrap.to_local(box.position)
 	var mx := wrap.to_local(box.position + box.size)
@@ -72,6 +80,7 @@ func setup() -> bool:
 		wheel_r = maxf(a.size.y, a.size.x) * 0.5
 		if wheel_r < 0.2:
 			wheel_r = 0.34
+	_attach_nitro_flames()
 	ready_ok = true
 	return true
 
@@ -110,10 +119,14 @@ func _mount_wheels(regex: String) -> Array:
 		spin.position = Vector3.ZERO
 		spin.quaternion = Quaternion.IDENTITY
 		VehicleCommon.reparent_keep_global(n, spin)
+		# Calipers stay on the knuckle / steer hinge: they follow steer and
+		# suspension, but must not roll with the tire / rotor / rim.
+		var calipers := _detach_calipers(n, steer)
 		var off := steer.position
 		out.append({
 			"root": steer, "spin": spin, "rest_pos": off, "rest_quat": steer.quaternion,
 			"steer": off.z < 0.0, "axle": "x", "spin_sign": 1.0, "offset": off,
+			"calipers": calipers,
 		})
 	out.sort_custom(func(a, b):
 		return a["offset"].z < b["offset"].z or (is_equal_approx(a["offset"].z, b["offset"].z) and a["offset"].x < b["offset"].x)
@@ -216,31 +229,157 @@ func wheel_layout() -> Array:
 	return out
 
 
-func _attach_nitro_flames() -> void:
-	_nitro_fx.clear()
-	var hubs: Array = VehicleCommon.find_named(wrap, "Exhaust")
-	if hubs.is_empty():
-		hubs = VehicleCommon.find_named(wrap, "exhaust")
-	for h in hubs:
-		if not (h is Node3D):
+func _detach_calipers(group: Node3D, hinge: Node3D) -> Array:
+	var moved: Array = []
+	if group == null or hinge == null:
+		return moved
+	var found: Array = []
+	for n in group.find_children("*", "MeshInstance3D", true, false):
+		var mi := n as MeshInstance3D
+		if mi == null:
 			continue
-		_nitro_fx.append(_make_flame(h as Node3D))
-	if _nitro_fx.is_empty() and wrap:
-		# Fallback: two tips at the rear corners of the body.
-		for x in [-0.45, 0.45]:
-			var hub := Node3D.new()
-			hub.name = "NitroHub"
-			wrap.add_child(hub)
-			hub.position = Vector3(x, 0.28, half_l * 0.92)
-			_nitro_fx.append(_make_flame(hub))
+		var nm := str(mi.name)
+		if nm.contains("Caliper") or nm.contains("caliper"):
+			found.append(mi)
+	for mi in found:
+		VehicleCommon.reparent_keep_global(mi, hinge)
+		moved.append(mi)
+	return moved
+
+
+func _attach_nitro_flames() -> void:
+	## Place blue nitro flames at the actual tailpipe exits, clearly behind
+	## the body — the Exhaust_* nodes sit at the mesh origin, so parenting
+	## a flame there buried the effect inside the chassis.
+	_nitro_fx.clear()
+	if wrap == null:
+		return
+	wrap.force_update_transform()
+	var tips := _exhaust_tip_positions()
+	if tips.is_empty():
+		tips = [Vector3(-0.20, 0.35, half_l + 0.12), Vector3(0.20, 0.35, half_l + 0.12)]
+	for i in tips.size():
+		var hub := Node3D.new()
+		hub.name = "NitroHub_%d" % i
+		wrap.add_child(hub)
+		# A little further aft of the pipe lip so the teardrop is outside the bumper.
+		var tip: Vector3 = tips[i]
+		hub.position = Vector3(tip.x, tip.y, tip.z + 0.16)
+		_nitro_fx.append(_make_flame(hub))
+
+
+func _exhaust_tip_positions() -> Array:
+	## Rear-most vertices of Exhaust meshes, clustered into left / right tips
+	## in wrap space. Visual nose is -Z, so the tail is +Z.
+	var pts: Array[Vector3] = []
+	var max_z := -1.0e9
+	for n in wrap.find_children("*", "MeshInstance3D", true, false):
+		var mi := n as MeshInstance3D
+		if mi == null or mi.mesh == null:
+			continue
+		if not str(mi.name).to_lower().contains("exhaust"):
+			continue
+		var xf: Transform3D = wrap.global_transform.affine_inverse() * mi.global_transform
+		for s in mi.mesh.get_surface_count():
+			var arr: Array = mi.mesh.surface_get_arrays(s)
+			if arr.is_empty() or arr[Mesh.ARRAY_VERTEX] == null:
+				continue
+			var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+			var step := maxi(1, verts.size() / 800)
+			var i := 0
+			while i < verts.size():
+				var p: Vector3 = xf * verts[i]
+				if p.z > max_z:
+					max_z = p.z
+				pts.append(p)
+				i += step
+	if pts.is_empty() or max_z < 0.5:
+		return []
+	var rear: Array[Vector3] = []
+	for p in pts:
+		if p.z >= max_z - 0.08:
+			rear.append(p)
+	if rear.is_empty():
+		return []
+	var left_acc := Vector3.ZERO
+	var right_acc := Vector3.ZERO
+	var ln := 0
+	var rn := 0
+	for p in rear:
+		if p.x < 0.0:
+			left_acc += p
+			ln += 1
+		else:
+			right_acc += p
+			rn += 1
+	var out: Array = []
+	if ln > 0:
+		out.append(left_acc / float(ln))
+	if rn > 0:
+		out.append(right_acc / float(rn))
+	return out
+
+
+func nitro_wrap_positions() -> Array:
+	## Test helper: flame origins in wrap space.
+	var out: Array = []
+	if wrap == null:
+		return out
+	for mi in _nitro_fx:
+		if mi is Node3D:
+			out.append(wrap.to_local((mi as Node3D).global_position))
+	return out
+
+
+func steer_wheel_has_rim() -> bool:
+	## True when the bound steering object includes the rim / spokes, not just the badge.
+	if steer_wheel.is_empty():
+		return false
+	var obj: Node3D = steer_wheel["obj"]
+	if obj == null:
+		return false
+	var nm := str(obj.name)
+	if nm == "Steering" or nm.contains("Steering_wheel_Steering"):
+		return true
+	for n in obj.find_children("*", "MeshInstance3D", true, false):
+		if str(n.name).contains("Steering_wheel_Steering"):
+			return true
+	return false
+
+
+func calipers_parented_to_steer() -> bool:
+	if wheels.is_empty():
+		return false
+	for w in wheels:
+		var hinge: Node3D = w["root"]
+		var spin: Node3D = w["spin"] if w.has("spin") else hinge
+		var seen := 0
+		for n in hinge.find_children("*", "MeshInstance3D", true, false):
+			# Only count calipers that are not under the spin hub.
+			if not str(n.name).contains("Caliper"):
+				continue
+			var p: Node = n
+			var under_spin := false
+			while p and p != hinge:
+				if p == spin:
+					under_spin = true
+					break
+				p = p.get_parent()
+			if under_spin:
+				return false
+			seen += 1
+		if seen <= 0:
+			return false
+	return true
 
 
 func _make_flame(hub: Node3D) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = "NitroFlame"
-	mi.mesh = VehicleCommon.make_teardrop_mesh(0.07)
+	mi.mesh = VehicleCommon.make_teardrop_mesh(0.10)
 	mi.rotation.x = PI * 0.5
-	mi.position = Vector3(0.0, 0.02, 0.18)
+	# Origin at the hub (already at the pipe exit); stretch aft along +Z.
+	mi.position = Vector3(0.0, 0.0, 0.22)
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	var sm := StandardMaterial3D.new()
 	sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED

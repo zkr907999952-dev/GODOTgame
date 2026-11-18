@@ -42,6 +42,14 @@ const GRIP_FALLOFF := 0.018
 const MAX_LATERAL_FORCE := 23000.0
 const ROLLING_FRICTION := 28.0
 const HULL_CLEARANCE := 0.12
+# GTA-like turn plant: extra downward (and inward) load while steering at speed.
+const TURN_DOWNFORCE := 9200.0
+const TURN_INWARD := 2600.0
+# Mid-air attitude (wheels unloaded): rotational control so a jumping car can be leveled.
+const AIR_ROLL := 9800.0
+const AIR_YAW := 7200.0
+const AIR_PITCH := 6400.0
+const AIR_DAMP := 4200.0
 
 signal occupied_changed(on: bool)
 
@@ -448,6 +456,57 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 			var long_s := float(_wheel_long_slip[i]) if i < _wheel_long_slip.size() else 0.0
 			_wheel_slip[i] = maxf(_wheel_slip[i], long_s)
 		state.apply_force(wheel_fwd * long_force, point - origin)
+	_apply_turn_and_air(state, xf, up, fwd)
+
+
+func grounded_wheel_count() -> int:
+	var n := 0
+	for c in _wheel_in_contact:
+		if c:
+			n += 1
+	return n
+
+
+func is_chassis_airborne() -> bool:
+	return grounded_wheel_count() == 0
+
+
+func _apply_turn_and_air(state: PhysicsDirectBodyState3D, xf: Transform3D, up: Vector3, fwd: Vector3) -> void:
+	if not occupied:
+		return
+	var contacts := grounded_wheel_count()
+	var spd := state.linear_velocity.length()
+	var right := xf.basis.x
+	if right.length_squared() < 1e-8:
+		right = fwd.cross(up)
+	else:
+		right = right.normalized()
+	var steer_mag := absf(steer_in)
+	if contacts >= 2:
+		# Planted, GTA-like cornering: extra downward load at speed, more when
+		# turning, plus an inward force toward the inside of the turn.
+		var spd_k := clampf(spd / 16.0, 0.0, 1.0)
+		var plant := TURN_DOWNFORCE * spd_k * spd_k + TURN_DOWNFORCE * 1.15 * steer_mag * spd_k
+		state.apply_central_force(-up * plant)
+		# Positive steer (about +Y) yaws the nose (-Z) toward -X (left).
+		var inward := -right * signf(steer_angle if absf(steer_angle) > 1e-5 else steer_in) * TURN_INWARD * steer_mag * spd_k
+		state.apply_central_force(inward)
+		return
+	if contacts > 0:
+		return
+	# Wheels unloaded: mid-air attitude control (roll / yaw from steering,
+	# pitch from throttle / brake) so a jumping car can be leveled or rotated.
+	var air_s := clampf(spd / 10.0, 0.40, 1.0)
+	var roll_t := -steer_in * AIR_ROLL * air_s
+	var yaw_t := steer_in * AIR_YAW * air_s
+	var pitch_t := -throttle_in * AIR_PITCH * 0.70 * air_s
+	if brake_in > 0.08:
+		pitch_t += brake_in * AIR_PITCH * air_s
+	elif throttle_in < -0.08:
+		pitch_t += -throttle_in * AIR_PITCH * air_s
+	var torque := fwd * roll_t + up * yaw_t + right * pitch_t
+	torque -= state.angular_velocity * AIR_DAMP
+	state.apply_torque(torque)
 
 
 func _update_gear(long_speed: float, wheel_r: float) -> void:
