@@ -1,7 +1,7 @@
 extends CanvasLayer
 ## 中文 HUD：设置 / 互动 / 摄像机 面板（对齐网页 overlay 结构，精简版）。
 
-enum PanelId { NONE, SETTINGS, INTERACT, CAMERA, MAP, WEAPON }
+enum PanelId { NONE, SETTINGS, INTERACT, CAMERA, MAP, WEAPON, VEHICLE }
 
 const INTERACT_MODES := [
 	{"id": "drag", "label": "拖拽"},
@@ -62,6 +62,12 @@ var _preset_buttons: Array = []
 var _root_ui: Control
 var _ui_hidden: bool = false
 var _btn_map: Button
+var _btn_vehicle: Button
+var _panel_vehicle: PanelContainer
+var _vehicle_system: Node
+var _btn_enter_exit: Button
+var _plane_throttle: VSlider
+var _plane_throttle_box: Control
 var _panel_map: PanelContainer
 var _map_list: VBoxContainer
 var _map_current: Label
@@ -168,6 +174,11 @@ func _build_ui() -> void:
 	_btn_map.pressed.connect(func(): toggle_map_panel())
 	root.add_child(_btn_map)
 
+	_btn_vehicle = _make_chrome_button("载具")
+	_btn_vehicle.position = Vector2(192, 16)
+	_btn_vehicle.pressed.connect(func(): _toggle_panel(PanelId.VEHICLE))
+	root.add_child(_btn_vehicle)
+
 	# Top-right chrome: 摄像机 + 互动
 	var right_bar := HBoxContainer.new()
 	right_bar.add_theme_constant_override("separation", 8)
@@ -223,6 +234,11 @@ func _build_ui() -> void:
 	_panel_map.position = Vector2(16, 88)
 	root.add_child(_panel_map)
 
+	_panel_vehicle = _build_vehicle_panel()
+	_panel_vehicle.position = Vector2(16, 88)
+	root.add_child(_panel_vehicle)
+	_build_vehicle_touch(root)
+
 	_overhead_ui = _build_overhead_ui()
 	root.add_child(_overhead_ui)
 
@@ -247,6 +263,7 @@ func _build_ui() -> void:
 	_wrap_scroll(_panel_settings)
 	_wrap_scroll(_panel_map)
 	_wrap_scroll(_panel_weapon)
+	_wrap_scroll(_panel_vehicle)
 	# 手机底部抽屉的「收起」把手
 	_btn_sheet_close = Button.new()
 	_btn_sheet_close.text = "收起 ▾"
@@ -878,7 +895,7 @@ func set_overhead(on: bool) -> void:
 	if _overhead_ui == null:
 		return
 	_overhead_ui.visible = on
-	for c in [_btn_settings, _btn_map, _btn_xray, _btn_camera, _btn_interact, _status]:
+	for c in [_btn_settings, _btn_map, _btn_vehicle, _btn_xray, _btn_camera, _btn_interact, _status]:
 		if c:
 			c.visible = not on
 	if _btn_weapon:
@@ -911,6 +928,160 @@ func _on_overhead_marker(m: Variant) -> void:
 		_overhead_clear.visible = m != null
 	if _overhead_go:
 		_overhead_go.disabled = m == null
+
+
+
+func setup_vehicles(vs: Node) -> void:
+	_vehicle_system = vs
+	if vs and vs.has_signal("proximity_changed") and not vs.is_connected("proximity_changed", _on_vehicle_proximity):
+		vs.connect("proximity_changed", _on_vehicle_proximity)
+	if vs and vs.has_signal("occupancy_changed") and not vs.is_connected("occupancy_changed", _on_vehicle_occupancy):
+		vs.connect("occupancy_changed", _on_vehicle_occupancy)
+	_refresh_vehicle_touch()
+
+
+func _build_vehicle_panel() -> PanelContainer:
+	var p := PanelContainer.new()
+	p.name = "VehiclePanel"
+	p.visible = false
+	p.custom_minimum_size = Vector2(260, 0)
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.07, 0.08, 0.1, 0.92)
+	style.set_corner_radius_all(8)
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 10
+	style.content_margin_bottom = 10
+	p.add_theme_stylebox_override("panel", style)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 8)
+	p.add_child(col)
+	var title := Label.new()
+	title.text = "载具"
+	title.add_theme_font_size_override("font_size", 16)
+	col.add_child(title)
+	var hint := Label.new()
+	hint.text = "在准星 / 指针指向的地面生成。PC 靠近按 F 上下车；手机用屏幕按钮。"
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.add_theme_font_size_override("font_size", 12)
+	hint.add_theme_color_override("font_color", Color(0.75, 0.78, 0.82, 0.9))
+	col.add_child(hint)
+	for item in [["跑车", "car"], ["战斗机", "plane"], ["检查床", "exam_bed"]]:
+		var b := Button.new()
+		b.text = "生成%s" % item[0]
+		b.custom_minimum_size = Vector2(0, 36)
+		b.focus_mode = Control.FOCUS_NONE
+		_style_button(b, false)
+		b.pressed.connect(_on_spawn_vehicle.bind(item[1]))
+		col.add_child(b)
+	var clr := Button.new()
+	clr.text = "清除生成的载具"
+	clr.custom_minimum_size = Vector2(0, 36)
+	clr.focus_mode = Control.FOCUS_NONE
+	_style_button(clr, false)
+	clr.pressed.connect(func():
+		if _vehicle_system:
+			_vehicle_system.call("clear_spawned")
+	)
+	col.add_child(clr)
+	var rst := Button.new()
+	rst.text = "重置默认载具"
+	rst.custom_minimum_size = Vector2(0, 36)
+	rst.focus_mode = Control.FOCUS_NONE
+	_style_button(rst, false)
+	rst.pressed.connect(func():
+		if _vehicle_system:
+			_vehicle_system.call("reset_defaults")
+	)
+	col.add_child(rst)
+	var note := Label.new()
+	note.text = "「清除生成的载具」只删菜单生成的，不拆跑道默认飞机和家里的检查床。"
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	note.add_theme_font_size_override("font_size", 11)
+	note.add_theme_color_override("font_color", Color(0.65, 0.68, 0.72, 0.85))
+	col.add_child(note)
+	return p
+
+
+func _build_vehicle_touch(root: Control) -> void:
+	_btn_enter_exit = Button.new()
+	_btn_enter_exit.text = "上载具"
+	_btn_enter_exit.custom_minimum_size = Vector2(108, 48)
+	_btn_enter_exit.add_theme_font_size_override("font_size", 16)
+	_style_button(_btn_enter_exit, true)
+	_btn_enter_exit.focus_mode = Control.FOCUS_NONE
+	_btn_enter_exit.visible = false
+	_btn_enter_exit.pressed.connect(func():
+		var g := _game()
+		if g and g.get("vehicle_system"):
+			g.get("vehicle_system").call("try_toggle")
+		_refresh_vehicle_touch()
+	)
+	root.add_child(_btn_enter_exit)
+	_plane_throttle_box = Control.new()
+	_plane_throttle_box.name = "PlaneThrottle"
+	_plane_throttle_box.visible = false
+	_plane_throttle_box.custom_minimum_size = Vector2(44, 160)
+	_plane_throttle = VSlider.new()
+	_plane_throttle.min_value = 0.0
+	_plane_throttle.max_value = 1.0
+	_plane_throttle.step = 0.01
+	_plane_throttle.value = 0.0
+	_plane_throttle.size = Vector2(32, 160)
+	_plane_throttle.focus_mode = Control.FOCUS_NONE
+	_plane_throttle.value_changed.connect(func(v: float):
+		if _vehicle_system:
+			_vehicle_system.set("touch_throttle", v)
+	)
+	_plane_throttle_box.add_child(_plane_throttle)
+	var lab := Label.new()
+	lab.text = "油门"
+	lab.position = Vector2(0, 162)
+	lab.add_theme_font_size_override("font_size", 11)
+	_plane_throttle_box.add_child(lab)
+	root.add_child(_plane_throttle_box)
+
+
+func _on_spawn_vehicle(kind: String) -> void:
+	if _vehicle_system and _vehicle_system.has_method("spawn_at_aim"):
+		_vehicle_system.call("spawn_at_aim", kind)
+	_close_all_panels()
+
+
+func _on_vehicle_proximity(_v: Node, _occ: bool) -> void:
+	_refresh_vehicle_touch()
+
+
+func _on_vehicle_occupancy(_v: Node) -> void:
+	_refresh_vehicle_touch()
+	sync()
+
+
+func _refresh_vehicle_touch() -> void:
+	var vs := _vehicle_system
+	var occ = vs.get("occupied") if vs else null
+	var near = vs.get("nearest") if vs else null
+	var show := touch_ui and (occ != null or near != null)
+	if _btn_enter_exit:
+		_btn_enter_exit.visible = show
+		if occ:
+			_btn_enter_exit.text = "离开载具"
+		elif near:
+			var k := str(vs.call("kind_of", near)) if vs and vs.has_method("kind_of") else "car"
+			_btn_enter_exit.text = "上检查床" if k == "exam_bed" else "上载具"
+		# Place above the right action cluster, inside the safe area.
+		var v := get_viewport().get_visible_rect().size
+		_btn_enter_exit.position = Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 72.0)
+	if _plane_throttle_box:
+		var in_plane := occ != null and vs and str(vs.call("kind_of", occ)) == "plane"
+		_plane_throttle_box.visible = touch_ui and in_plane
+		if _plane_throttle_box.visible:
+			var v2 := get_viewport().get_visible_rect().size
+			_plane_throttle_box.position = Vector2(_safe.x + 16.0, v2.y * 0.5 - 90.0)
+			if _plane_throttle and occ and ("thrust" in occ):
+				_plane_throttle.set_value_no_signal(float(occ.get("thrust")))
+		elif vs:
+			vs.set("touch_throttle", -1.0)
 
 
 func _make_chrome_button(text: String) -> Button:
@@ -1619,12 +1790,16 @@ func _toggle_panel(id: PanelId) -> void:
 	_panel_camera.visible = id == PanelId.CAMERA
 	_panel_map.visible = id == PanelId.MAP
 	_panel_weapon.visible = id == PanelId.WEAPON
+	if _panel_vehicle:
+		_panel_vehicle.visible = id == PanelId.VEHICLE
 	if id == PanelId.WEAPON:
 		_wui.call("rebuild")
 		_touchify(_panel_weapon, touch_ui)
 	if id == PanelId.MAP:
 		_rebuild_map_list()
 		_touchify(_panel_map, touch_ui)
+	if id == PanelId.VEHICLE:
+		_touchify(_panel_vehicle, touch_ui)
 	_set_mouse_for_ui(true)
 	_apply_layout()
 	_sync_from_systems()
@@ -1642,6 +1817,8 @@ func _close_all_panels() -> void:
 		_panel_map.visible = false
 	if _panel_weapon:
 		_panel_weapon.visible = false
+	if _panel_vehicle:
+		_panel_vehicle.visible = false
 	if _btn_sheet_close:
 		_btn_sheet_close.visible = false
 	_set_mouse_for_ui(false)
@@ -2280,7 +2457,7 @@ func _apply_layout() -> void:
 		_touch.set("safe", _safe)
 	var bw := (60.0 if compact else 72.0) if touch_ui else 80.0
 	var bh := 48.0 if touch_ui else 32.0
-	for b in [_btn_settings, _btn_map, _btn_weapon, _btn_xray, _btn_camera, _btn_interact]:
+	for b in [_btn_settings, _btn_map, _btn_vehicle, _btn_weapon, _btn_xray, _btn_camera, _btn_interact]:
 		if b == null:
 			continue
 		b.custom_minimum_size = Vector2(bw, bh)
@@ -2291,6 +2468,10 @@ func _apply_layout() -> void:
 	var sb := _safe.w + 16.0
 	_btn_settings.position = Vector2(sl, st)
 	_btn_map.position = Vector2(sl + bw + 8.0, st)
+	if _btn_vehicle:
+		_btn_vehicle.position = Vector2(sl + (bw + 8.0) * 2.0, st)
+	if has_method("_refresh_vehicle_touch"):
+		_refresh_vehicle_touch()
 	var right_bar := _btn_camera.get_parent() as Control
 	right_bar.offset_right = -sr
 	right_bar.offset_left = -sr - (bw * 3.0 + 16.0)
@@ -2301,7 +2482,7 @@ func _apply_layout() -> void:
 	_status.size = Vector2(v.x - sl - sr, 0) if compact else Vector2.ZERO
 	var top := st + bh + 40.0  # PC 默认 = 88
 	var open_p: PanelContainer = null
-	for p in [_panel_settings, _panel_map, _panel_interact, _panel_camera, _panel_weapon]:
+	for p in [_panel_settings, _panel_map, _panel_vehicle, _panel_interact, _panel_camera, _panel_weapon]:
 		var panel := p as PanelContainer
 		if panel.visible:
 			open_p = panel

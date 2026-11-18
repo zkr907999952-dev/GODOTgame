@@ -105,6 +105,9 @@ var _jump_buf: float = 0.0
 var _step_smooth: float = 0.0
 ## 俯视地图打开时锁定一切输入（game_root 设置）
 var input_locked: bool = false
+## Set by VehicleSystem while the player is in a car / plane / exam bed.
+var occupancy: String = ""
+var occupier: Node = null
 ## CameraPivot 是 top_level：每帧用「插值后的」角色位置 + 偏移摆放（物理插值下相机不抖）
 var _pivot_off: Vector3 = Vector3(0.0, 1.4, 0.0)
 var _pivot_rot: Vector3 = Vector3.ZERO
@@ -2208,10 +2211,25 @@ func _physics_process(delta: float) -> void:
 	_body_interp_reset()
 	if is_dead():
 		velocity = Vector3.ZERO
+		if occupancy != "" and get_parent() and get_parent().get("vehicle_system"):
+			var vs = get_parent().get("vehicle_system")
+			if vs and vs.has_method("try_exit"):
+				vs.call("try_exit")
 		if _corpse_drag and _corpse_drag.call("is_dragging"):
 			_corpse_drag.call("drop", "dead")
 		if _loco:
 			_loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, delta, 0.0)
+		return
+	if occupancy != "":
+		# Occupied: no walking. VehicleSystem places the body, applies the exam pose,
+		# and overrides the camera in first person. Observe mode still orbits.
+		velocity = Vector3.ZERO
+		_update_fp_eye_blend(delta)
+		if occupancy != "exam_bed" and _loco and not bool(_loco.get("frozen")):
+			_loco.set("frozen", true)
+		if play_mode == GameMode.DISPLAY and occupancy == "exam_bed":
+			_update_tp_camera(delta)
+			_apply_camera()
 		return
 	var display := play_mode == GameMode.DISPLAY
 	var can_act := (not display) and not input_locked

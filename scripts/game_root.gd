@@ -11,6 +11,7 @@ const LightingRigScript = preload("res://scripts/lighting_rig.gd")
 const CloneDollScript = preload("res://scripts/clone_doll.gd")
 const GameSettingsScript = preload("res://scripts/game_settings.gd")
 const BulletCamScript = preload("res://scripts/weapons/bullet_cam.gd")
+const VehicleSystemScript = preload("res://scripts/vehicles/vehicle_system.gd")
 ## 分身上限（每个分身 = 一套蒙皮网格 + 脏器 + 物理；共享网格 / 贴图资源）
 const CLONE_MAX := 8
 
@@ -66,6 +67,7 @@ var _busy: bool = false
 var _clones_root: Node3D
 var settings: Node
 var bullet_cam: Node
+var vehicle_system: Node
 
 
 func _ready() -> void:
@@ -89,6 +91,14 @@ func _ready() -> void:
 	add_child(bullet_cam)
 	if _hud and _hud.has_method("setup"):
 		_hud.call("setup", _player)
+	vehicle_system = VehicleSystemScript.new()
+	vehicle_system.name = "VehicleSystem"
+	# After the player so occupancy cameras run later in the tree.
+	add_child(vehicle_system)
+	vehicle_system.process_priority = 80
+	vehicle_system.call("setup", self, _player)
+	if _hud and _hud.has_method("setup_vehicles"):
+		_hud.call("setup_vehicles", vehicle_system)
 	call_deferred("_bind_ballistics")
 	print("game_root: ready — Tab 模式 · WASD/Shift/空格 · Ctrl/C 蹲 · Z 匍匐 · E 拖尸体 · M 地图 · H 界面 · X 透视")
 
@@ -137,9 +147,16 @@ func action_for_key(key: int, mode: String = "") -> String:
 	var m := mode if mode != "" else mode_name()
 	if m == "overhead":
 		return str(KEYMAP["overhead"].get(key, ""))
+	# F: enter/exit a nearby (or occupied) vehicle; otherwise keep display-mode focus.
+	if key == KEY_F and vehicle_system and vehicle_system.has_method("can_toggle") and bool(vehicle_system.call("can_toggle")):
+		return "vehicle_toggle"
+	var in_veh := vehicle_system != null and vehicle_system.get("occupied") != null
 	var a: String = str(KEYMAP[m].get(key, ""))
 	if a == "":
 		a = str(KEYMAP["common"].get(key, ""))
+	# While driving / on the exam bed, don't steal Q (yaw) or G (holster) from the vehicle.
+	if in_veh and a in ["weapon_wheel", "holster", "weapon_slot", "prone"]:
+		return ""
 	return a
 
 
@@ -217,6 +234,9 @@ func run_action(action: String, key: int = 0) -> void:
 			# E：切换拖拽尸体。T 仍是腹部互动模式循环，两者并存。
 			if _player and _player.has_method("toggle_corpse_drag"):
 				_player.call("toggle_corpse_drag")
+		"vehicle_toggle":
+			if vehicle_system and vehicle_system.has_method("try_toggle"):
+				vehicle_system.call("try_toggle")
 	_hud.call("sync")
 
 
@@ -245,6 +265,8 @@ func _apply_map_visibility(id: String) -> void:
 	_set_colliders_enabled(_room_col, in_room)
 	_player.set("camera_bounds", ROOM_CAMERA_BOUNDS if in_room else AABB())
 	_set_city_env(not in_room)
+	if vehicle_system and vehicle_system.has_method("notify_map"):
+		vehicle_system.call("notify_map", id)
 
 
 ## 光照 / 环境 / 雾按地图切换（scripts/lighting_rig.gd：房间 = 网页 StudioLights，城市 = CityLights + WorldClip 雾）。

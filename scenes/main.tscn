@@ -1,4 +1,4 @@
-[gd_scene load_steps=9 format=3 uid="uid://cmainscene001"]
+[gd_scene load_steps=23 format=3 uid="uid://cmainscene001"]
 
 [ext_resource type="Script" path="res://scripts/game_root.gd" id="1_root"]
 [ext_resource type="PackedScene" path="res://scenes/characters/tifa.tscn" id="2_player"]
@@ -8,6 +8,48 @@
 [ext_resource type="PackedScene" path="res://scenes/maps/room_mirror.tscn" id="6_mirror"]
 [ext_resource type="Script" path="res://scripts/room_collision.gd" id="7_roomcol"]
 [ext_resource type="Script" path="res://scripts/lighting_rig.gd" id="8_light"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_floor"]
+size = Vector3(6.2, 0.3, 4.85)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ceiling"]
+size = Vector3(6.2, 0.3, 4.85)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_wall_left"]
+size = Vector3(0.265, 2.4, 4.85)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_wall_right"]
+size = Vector3(0.265, 2.4, 4.85)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_wall_back"]
+size = Vector3(6.2, 2.4, 0.38)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_wall_mirror"]
+size = Vector3(6.2, 2.4, 0.285)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_pillar_back"]
+size = Vector3(0.05, 2.4, 0.6)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_pillar_front"]
+size = Vector3(0.05, 2.4, 0.475)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_beam"]
+size = Vector3(0.1, 0.2, 4.185)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_bed"]
+size = Vector3(1.62, 0.62, 2.4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_end_table_l"]
+size = Vector3(0.63, 0.35, 0.8)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_end_table_r"]
+size = Vector3(0.63, 0.35, 0.8)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_chair"]
+size = Vector3(0.69, 0.56, 0.71)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_cabinets"]
+size = Vector3(0.195, 0.67, 2.71)
 
 [node name="Main" type="Node3D"]
 script = ExtResource("1_root")
@@ -19,6 +61,62 @@ script = ExtResource("8_light")
 
 [node name="RoomCollision" type="StaticBody3D" parent="."]
 script = ExtResource("7_roomcol")
+
+[node name="floor" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.8, -0.15, -1.175)
+shape = SubResource("BoxShape3D_floor")
+
+[node name="ceiling" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.8, 2.55, -1.175)
+shape = SubResource("BoxShape3D_ceiling")
+
+[node name="wall_left" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.1675, 1.2, -1.175)
+shape = SubResource("BoxShape3D_wall_left")
+
+[node name="wall_right" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3.7675, 1.2, -1.175)
+shape = SubResource("BoxShape3D_wall_right")
+
+[node name="wall_back" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.8, 1.2, -3.41)
+shape = SubResource("BoxShape3D_wall_back")
+
+[node name="wall_mirror" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.8, 1.2, 1.1075)
+shape = SubResource("BoxShape3D_wall_mirror")
+
+[node name="pillar_back" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.995, 1.2, -2.92)
+shape = SubResource("BoxShape3D_pillar_back")
+
+[node name="pillar_front" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.995, 1.2, 0.7275)
+shape = SubResource("BoxShape3D_pillar_front")
+
+[node name="beam" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.99, 2.3, -1.1275)
+shape = SubResource("BoxShape3D_beam")
+
+[node name="bed" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.31, -2.02)
+shape = SubResource("BoxShape3D_bed")
+
+[node name="end_table_l" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.585, 0.175, -2.82)
+shape = SubResource("BoxShape3D_end_table_l")
+
+[node name="end_table_r" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.585, 0.175, -2.82)
+shape = SubResource("BoxShape3D_end_table_r")
+
+[node name="chair" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.775, 0.28, -2.235)
+shape = SubResource("BoxShape3D_chair")
+
+[node name="cabinets" type="CollisionShape3D" parent="RoomCollision"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3.5375, 0.335, -1.065)
+shape = SubResource("BoxShape3D_cabinets")
 
 [node name="RoomMirror" parent="." instance=ExtResource("6_mirror")]
 

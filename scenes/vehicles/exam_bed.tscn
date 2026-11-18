@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://cvehibed00001"]
+
+[ext_resource type="Script" path="res://scripts/vehicles/exam_bed.gd" id="1_bed"]
+
+[node name="ExamBed" type="StaticBody3D"]
+script = ExtResource("1_bed")

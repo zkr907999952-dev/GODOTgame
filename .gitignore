@@ -35,3 +35,15 @@ assets/maps/*_*.webp
 assets/maps/*_*.webp.import
 assets/props/*_[0-9].webp
 assets/props/*_[0-9].webp.import
+
+# Godot-extracted glTF sidecar textures for vehicle models (regenerated on import)
+assets/vehicles/*_*.png
+assets/vehicles/*_*.png.import
+assets/vehicles/*_*.webp
+assets/vehicles/*_*.webp.import
+assets/vehicles/exam_bed/*_*.png
+assets/vehicles/exam_bed/*_*.png.import
+assets/vehicles/exam_bed/*_*.webp
+assets/vehicles/exam_bed/*_*.webp.import
+assets/vehicles/exam_bed/*_*.jpg
+assets/vehicles/exam_bed/*_*.jpg.import

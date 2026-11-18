@@ -1,0 +1,7 @@
+[gd_scene load_steps=2 format=3 uid="uid://cvehiplane001"]
+
+[ext_resource type="Script" path="res://scripts/vehicles/plane_controller.gd" id="1_plane"]
+
+[node name="Plane" type="RigidBody3D"]
+mass = 14000.0
+script = ExtResource("1_plane")

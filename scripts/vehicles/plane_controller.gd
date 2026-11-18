@@ -1,0 +1,344 @@
+extends RigidBody3D
+## Ace Combat-style fighter aerodynamics on a Jolt RigidBody3D.
+## Forces are applied in _integrate_forces (standard Godot rigid-body pattern):
+## thrust, lift vs airspeed and angle of attack, induced/parasite drag, stall,
+## and control moments that grow with dynamic pressure then wash out past stall.
+## Visual surfaces / nozzles / exhaust are driven from this state by PlaneVisuals.
+class_name PlaneController
+
+const KIND := "plane"
+const ENTER_RADIUS := 8.4
+const MASS_KG := 14000.0
+const WING_AREA := 78.0  # m², F-22 class
+const WING_SPAN := 13.6
+const MAC := 5.7  # mean aerodynamic chord
+const THRUST_DRY := 210000.0  # N
+const THRUST_AB := 310000.0
+const CD0 := 0.028
+const K_INDUCED := 0.11
+const CL_ALPHA := 4.4  # per radian
+const CL_MAX := 1.15
+const ALPHA_STALL := 0.28  # rad ≈ 16°
+const RHO_SL := 1.225
+const GEAR_DRAG := 0.018
+const BRAKE_DRAG := 0.05
+const ROTATE_SPEED := 72.0  # m/s, ~260 km/h — game-ready, not airliner
+const TAXI_THRUST_SCALE := 0.18
+
+signal occupied_changed(on: bool)
+
+var vehicle_id: String = ""
+var is_default: bool = false
+var is_menu_spawned: bool = false
+var occupied: bool = false
+var spawn_map: String = "city"
+var door: float = 0.0
+var door_target: float = 0.0
+var thrust: float = 0.0  # 0..1 (0.8 = mil, 1.0 = AB)
+var ctrl_pitch: float = 0.0
+var ctrl_roll: float = 0.0
+var ctrl_yaw: float = 0.0
+var speed_brake: float = 0.0
+var gear: float = 1.0  # 1 down, 0 up
+var gear_want: float = 1.0
+var airborne: bool = false
+var steer_angle: float = 0.0
+var wheel_spin: float = 0.0
+var stall_amount: float = 0.0
+var aoa: float = 0.0
+var airspeed: float = 0.0
+var visuals: PlaneVisuals
+var _vis_spin: float = 0.0
+var _gear_rays: Array[Vector3] = [
+	Vector3(0.0, 0.0, -4.1),
+	Vector3(-1.85, 0.0, 1.4),
+	Vector3(1.85, 0.0, 1.4),
+]
+var _on_wheels: bool = true
+var _agl: float = 0.0
+
+
+func _ready() -> void:
+	mass = MASS_KG
+	# Slightly nose-forward inertia; custom inertia keeps pitch/roll from feeling floaty.
+	inertia = Vector3(28000.0, 52000.0, 22000.0)  # Ixx pitch, Iyy yaw, Izz roll (approx)
+	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
+	center_of_mass = Vector3(0.0, 0.05, 0.35)
+	gravity_scale = 1.0
+	continuous_cd = true
+	contact_monitor = true
+	max_contacts_reported = 12
+	collision_layer = 1
+	collision_mask = 1
+	linear_damp = 0.0
+	angular_damp = 0.15  # residual; most damping comes from aero
+	can_sleep = true
+	visuals = PlaneVisuals.new()
+	visuals.name = "Visuals"
+	add_child(visuals)
+	if not visuals.setup():
+		push_error("PlaneController: visual setup failed")
+		return
+	if visuals.wheels.size() >= 3:
+		_gear_rays.clear()
+		for w in visuals.wheels:
+			var off: Vector3 = w["offset"]
+			_gear_rays.append(off)
+	_build_collision()
+	# Re-apply after shapes exist so Jolt keeps the authored inertia (pitch/yaw/roll).
+	inertia = Vector3(28000.0, 52000.0, 22000.0)
+	_freeze_parked(true)
+
+
+func _build_collision() -> void:
+	var hl: float = visuals.half_l
+	var hw: float = visuals.half_w
+	var h: float = visuals.height
+	# Fuselage (long box) + nose taper box + wings + tail + vertical stab.
+	VehicleCommon.add_box_shape(self, "fuse", Vector3(0.0, 0.15, 0.4), Vector3(minf(hw * 1.4, 2.6), minf(h * 0.7, 2.2), hl * 1.55))
+	VehicleCommon.add_box_shape(self, "nose", Vector3(0.0, 0.05, -hl * 0.72), Vector3(1.1, 1.1, hl * 0.45))
+	VehicleCommon.add_box_shape(self, "wing", Vector3(0.0, 0.05, 0.6), Vector3(maxf(hw * 2.0, 10.5), 0.28, 4.6))
+	VehicleCommon.add_box_shape(self, "tail", Vector3(0.0, 0.2, hl * 0.72), Vector3(6.4, 0.22, 2.2))
+	VehicleCommon.add_box_shape(self, "vstab", Vector3(0.0, 1.1, hl * 0.7), Vector3(0.28, 2.0, 2.0))
+	# Intake / strake cheeks
+	VehicleCommon.add_box_shape(self, "inlet_l", Vector3(-1.1, -0.15, -1.2), Vector3(1.2, 0.7, 3.2))
+	VehicleCommon.add_box_shape(self, "inlet_r", Vector3(1.1, -0.15, -1.2), Vector3(1.2, 0.7, 3.2))
+
+
+func _freeze_parked(on: bool) -> void:
+	freeze = on and not occupied
+	if freeze:
+		linear_velocity = Vector3.ZERO
+		angular_velocity = Vector3.ZERO
+		sleeping = true
+
+
+func set_pilot_input(pitch: float, roll: float, yaw: float, throttle_delta: float, brake: float, steer: float) -> void:
+	ctrl_pitch = clampf(pitch, -1.0, 1.0)
+	ctrl_roll = clampf(roll, -1.0, 1.0)
+	ctrl_yaw = clampf(yaw, -1.0, 1.0)
+	if throttle_delta != 0.0:
+		thrust = clampf(thrust + throttle_delta, 0.0, 1.0)
+	speed_brake = clampf(brake, 0.0, 1.0)
+	steer_angle = clampf(steer, -1.0, 1.0) * 0.55
+
+
+func set_throttle(t: float) -> void:
+	thrust = clampf(t, 0.0, 1.0)
+
+
+func _physics_process(delta: float) -> void:
+	door += (door_target - door) * (1.0 - exp(-8.0 * delta))
+	# Auto gear: retract once flying and accelerating; drop when slow / close to ground.
+	if airborne and airspeed > 90.0 and _agl > 18.0 and linear_velocity.y > -4.0:
+		gear_want = 0.0
+	elif (not airborne) or airspeed < 80.0 or _agl < 28.0:
+		gear_want = 1.0
+	gear = move_toward(gear, gear_want, delta * 0.55)
+	_vis_spin += (airspeed / 0.42) * delta * (1.0 if _on_wheels else 0.15)
+	wheel_spin = _vis_spin
+	if visuals:
+		visuals.apply_pose({
+			"gear": gear,
+			"steer_angle": steer_angle,
+			"wheel_spin": wheel_spin,
+			"door": door,
+			"ctrl_pitch": ctrl_pitch,
+			"ctrl_roll": ctrl_roll,
+			"ctrl_yaw": ctrl_yaw,
+			"thrust": thrust,
+			"speed_brake": speed_brake,
+			"airborne": airborne,
+			"speed": airspeed,
+			"susp": [0.4, 0.4, 0.4],
+		}, delta, Time.get_ticks_msec() * 0.001, global_position.y)
+	if not occupied:
+		# Parked: bleed throttle, keep brakes.
+		thrust = move_toward(thrust, 0.0, delta * 0.4)
+		ctrl_pitch = 0.0
+		ctrl_roll = 0.0
+		ctrl_yaw = 0.0
+
+
+func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
+	var dt := state.step
+	if dt <= 0.0:
+		return
+	var xf := state.transform
+	var basis := xf.basis
+	var fwd := -basis.z  # nose
+	var up := basis.y
+	var right := basis.x
+	var vel := state.linear_velocity
+	airspeed = vel.length()
+	var alt := xf.origin.y
+	var rho := RHO_SL * exp(-maxf(alt, 0.0) / 8500.0)
+	# Wheel contact / AGL (ray along body -Y).
+	_probe_ground(state, xf)
+	# Air-relative axes (if nearly still, fall back to body axes).
+	var v_fwd := vel.dot(fwd)
+	var v_up := vel.dot(up)
+	var v_right := vel.dot(right)
+	if airspeed > 4.0:
+		aoa = atan2(-v_up, maxf(v_fwd, 4.0))
+	else:
+		aoa = 0.0
+	var beta := 0.0
+	if airspeed > 4.0:
+		beta = atan2(v_right, maxf(v_fwd, 4.0))
+	# Stall blending (smooth, not a cliff).
+	var stall := clampf((absf(aoa) - ALPHA_STALL) / 0.12, 0.0, 1.0)
+	stall_amount = stall
+	var cl := clampf(CL_ALPHA * aoa, -CL_MAX, CL_MAX) * (1.0 - 0.72 * stall)
+	# Flaps at low speed / gear down add a little CL and CD.
+	var flap := visuals.flap_t if visuals else 0.0
+	cl += flap * 0.35 * (1.0 - stall)
+	var cd := CD0 + K_INDUCED * cl * cl + gear * GEAR_DRAG + speed_brake * BRAKE_DRAG + flap * 0.04 + stall * 0.08
+	var q := 0.5 * rho * airspeed * airspeed
+	var lift := q * WING_AREA * cl
+	var drag := q * WING_AREA * cd
+	# Force directions: lift along body-up blended with world-up-from-velocity.
+	var lift_dir := up
+	if airspeed > 8.0:
+		var vhat := vel / airspeed
+		lift_dir = vhat.cross(right)
+		if lift_dir.length_squared() < 1e-6:
+			lift_dir = up
+		else:
+			lift_dir = lift_dir.normalized()
+			if lift_dir.dot(up) < 0.0:
+				lift_dir = -lift_dir
+	var drag_dir := -vel.normalized() if airspeed > 0.3 else -fwd
+	# Thrust along nozzle / body forward. Afterburner kicks in above 0.8.
+	var mil := clampf(thrust / 0.8, 0.0, 1.0)
+	var ab := clampf((thrust - 0.8) / 0.2, 0.0, 1.0)
+	var thrust_n := mil * THRUST_DRY + ab * (THRUST_AB - THRUST_DRY)
+	if _on_wheels and not airborne:
+		thrust_n *= lerpf(TAXI_THRUST_SCALE, 1.0, clampf(airspeed / ROTATE_SPEED, 0.0, 1.0))
+	var force := fwd * thrust_n + lift_dir * lift + drag_dir * drag
+	# Control moments: scale with q, lose authority in stall and at very low speed.
+	var q_norm := clampf(q / (0.5 * RHO_SL * 110.0 * 110.0), 0.0, 1.8)
+	var auth := q_norm * (1.0 - 0.7 * stall) * (0.25 + 0.75 * clampf(airspeed / 40.0, 0.0, 1.0))
+	# Ace Combat: generous but not instant. Units: torque in N·m.
+	var pitch_t := ctrl_pitch * auth * 98000.0
+	var roll_t := ctrl_roll * auth * 140000.0
+	var yaw_t := ctrl_yaw * auth * 52000.0
+	# Speed-brake / rudder + weathercock (beta) stability.
+	yaw_t += -beta * auth * 70000.0
+	pitch_t += -aoa * (0.35 + 1.4 * stall) * auth * 40000.0  # pitch stability + stall nose-drop
+	# Rate damping (stability derivatives).
+	var w := state.angular_velocity
+	var p := w.dot(fwd)  # roll rate about nose? actually roll is about fwd
+	# Body rates:
+	var rate_roll := w.dot(fwd)
+	var rate_pitch := w.dot(right)
+	var rate_yaw := w.dot(up)
+	var damp_roll := -rate_roll * (18000.0 + q_norm * 42000.0)
+	var damp_pitch := -rate_pitch * (22000.0 + q_norm * 50000.0)
+	var damp_yaw := -rate_yaw * (20000.0 + q_norm * 38000.0)
+	var torque := right * (pitch_t + damp_pitch) + fwd * (roll_t + damp_roll) + up * (yaw_t + damp_yaw)
+	# Ground handling.
+	if _on_wheels:
+		torque += _taxi_torque(state, fwd, up, right, vel)
+		force += _taxi_force(state, fwd, vel, thrust_n)
+		# Keep from pitching into the pavement at low speed.
+		if airspeed < ROTATE_SPEED * 0.85:
+			var sink := minf(0.0, vel.y)
+			force += Vector3(0, -sink * MASS_KG * 6.0, 0)
+			# Limit nose-down pitching on the runway.
+			if ctrl_pitch < 0.0:
+				torque -= right * pitch_t * 0.85
+	state.apply_central_force(force)
+	state.apply_torque(torque)
+	# Leave gravity to the engine (gravity_scale = 1).
+
+
+func _probe_ground(state: PhysicsDirectBodyState3D, xf: Transform3D) -> void:
+	var space := state.get_space_state()
+	var up := xf.basis.y
+	var hits := 0
+	var agl_min := 1e9
+	var exclude := [get_rid()]
+	for off in _gear_rays:
+		var start := xf * (off + Vector3(0, 0.6, 0))
+		var end := start - up * (2.4 + (0.0 if gear > 0.4 else 0.2))
+		var q := PhysicsRayQueryParameters3D.create(start, end, 1, exclude)
+		var hit := space.intersect_ray(q)
+		if hit.is_empty():
+			# Also try world-down in case the jet is banked on the ground.
+			var q2 := PhysicsRayQueryParameters3D.create(start, start + Vector3(0, -3.2, 0), 1, exclude)
+			hit = space.intersect_ray(q2)
+		if hit.is_empty():
+			continue
+		hits += 1
+		var d: float = start.distance_to(hit["position"])
+		agl_min = minf(agl_min, d)
+	_on_wheels = hits >= 1 and gear > 0.35 and agl_min < 2.1
+	_agl = 0.0 if agl_min > 1e8 else maxf(0.0, agl_min - 0.7)
+	# Airborne if not on wheels or clearly climbing with speed.
+	airborne = (not _on_wheels) or (_agl > 2.4 and airspeed > ROTATE_SPEED * 0.7)
+
+
+func _taxi_force(state: PhysicsDirectBodyState3D, fwd: Vector3, vel: Vector3, _thrust_n: float) -> Vector3:
+	# Wheel friction: kill sideways slip, rolling resistance, wheel brakes.
+	var right := state.transform.basis.x
+	var lat := vel.dot(right)
+	var long := vel.dot(fwd)
+	var f := Vector3.ZERO
+	f += -right * lat * MASS_KG * 6.5  # grip
+	f += -fwd * long * MASS_KG * 0.35  # rolling resistance
+	if speed_brake > 0.02 or not occupied:
+		f += -fwd * long * MASS_KG * (2.8 * maxf(speed_brake, 0.25 if not occupied else 0.0))
+	# Nose-wheel steering couples a bit of lateral force already via torque.
+	return f
+
+
+func _taxi_torque(state: PhysicsDirectBodyState3D, fwd: Vector3, up: Vector3, right: Vector3, vel: Vector3) -> Vector3:
+	var steer := steer_angle if occupied else 0.0
+	if occupied and absf(ctrl_yaw) > absf(steer):
+		steer = ctrl_yaw * 0.55
+	var long := vel.dot(fwd)
+	# Steering torque about up, speed-sensitive (less at high taxi speed).
+	var yaw := -steer * long * MASS_KG * 0.9
+	# Damp roll/pitch on the ground so the jet sits planted.
+	var w := state.angular_velocity
+	return up * yaw - right * w.dot(right) * 18000.0 - fwd * w.dot(fwd) * 14000.0 - up * w.dot(up) * 8000.0
+
+
+func cockpit_offset() -> Vector3:
+	if visuals:
+		return Vector3(float(visuals.cockpit["x"]), float(visuals.cockpit["y"]), float(visuals.cockpit["z"]))
+	return Vector3(0.0, 1.28, -5.15)
+
+
+func exit_offset() -> Vector3:
+	return global_transform.basis * Vector3(-(visuals.half_w if visuals else 2.1) - 1.4, 0.0, -1.0)
+
+
+func on_enter() -> void:
+	occupied = true
+	door_target = 1.0
+	_freeze_parked(false)
+	sleeping = false
+	# Canopy closes again after boarding.
+	get_tree().create_timer(0.8).timeout.connect(func():
+		if occupied:
+			door_target = 0.0
+	)
+	occupied_changed.emit(true)
+
+
+func on_exit() -> void:
+	occupied = false
+	door_target = 1.0
+	ctrl_pitch = 0.0
+	ctrl_roll = 0.0
+	ctrl_yaw = 0.0
+	speed_brake = 1.0
+	get_tree().create_timer(0.9).timeout.connect(func():
+		if not occupied:
+			door_target = 0.0
+			if not airborne and linear_velocity.length() < 1.2:
+				_freeze_parked(true)
+	)
+	occupied_changed.emit(false)

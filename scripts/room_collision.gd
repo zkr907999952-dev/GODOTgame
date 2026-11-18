@@ -27,6 +27,22 @@ const BOXES := [
 func _ready() -> void:
 	collision_layer = 1
 	collision_mask = 0
+	if _has_shapes():
+		return
+	rebuild_shapes()
+
+
+func _has_shapes() -> bool:
+	for c in get_children():
+		if c is CollisionShape3D and (c as CollisionShape3D).shape != null:
+			return true
+	return false
+
+
+func rebuild_shapes() -> void:
+	for c in get_children():
+		if c is CollisionShape3D:
+			c.queue_free()
 	for b in BOXES:
 		var mn: Vector3 = b[1]
 		var mx: Vector3 = b[2]
