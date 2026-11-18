@@ -230,7 +230,9 @@ func _physics_process(delta: float) -> void:
 		elif _agl < GEAR_AUTO_EXTEND_AGL or weight_on_gear():
 			gear_want = 1.0
 	gear = move_toward(gear, gear_want, delta * (1.55 if gear_manual else 0.55))
-	_vis_spin += (airspeed / 0.42) * delta * (1.0 if _on_wheels else 0.15)
+	# Signed: forward (along the visual nose) spins the contact patch backward.
+	var long_spin := linear_velocity.dot(-global_transform.basis.z)
+	_vis_spin += -(long_spin / 0.42) * delta * (1.0 if _on_wheels else 0.15)
 	wheel_spin = _vis_spin
 	if visuals:
 		visuals.apply_pose({
@@ -474,7 +476,8 @@ func _taxi_torque(state: PhysicsDirectBodyState3D, fwd: Vector3, up: Vector3, ri
 		steer = ctrl_yaw * 0.55
 	var long := vel.dot(fwd)
 	# Steering torque about up, speed-sensitive (less at high taxi speed).
-	var yaw := -steer * long * MASS_KG * 0.9
+	# Positive steer / ctrl_yaw is rudder-left. Forward (long > 0) must yaw left.
+	var yaw := steer * long * MASS_KG * 0.9
 	# Damp roll/pitch on the ground so the jet sits planted.
 	var w := state.angular_velocity
 	return up * yaw - right * w.dot(right) * 18000.0 - fwd * w.dot(fwd) * 14000.0 - up * w.dot(up) * 8000.0

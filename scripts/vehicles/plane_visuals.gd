@@ -78,10 +78,9 @@ func _mount_wheels(regex: String) -> Array:
 		if n.name.ends_with("_hub") or n.name.contains("Hub"):
 			continue
 		var world_pos := n.global_position
-		var a := VehicleCommon.world_aabb(n)
-		var axle := "x" if a.size.x <= a.size.z else "z"
-		var sx := n.global_transform.basis.get_scale().x
-		var spin_sign := signf(sx) if sx != 0.0 else 1.0
+		# Hub is identity in airframe space; roll axle is always local X.
+		# World AABB would pick a tilted axis when the fighter is spawned yawed.
+		var spin_sign := 1.0
 		var hub := Node3D.new()
 		hub.name = "WheelHub_%s" % n.name
 		wrap.add_child(hub)
@@ -93,7 +92,7 @@ func _mount_wheels(regex: String) -> Array:
 		var steer := off.z < 0.0
 		out.append({
 			"root": hub, "rest_pos": off, "rest_quat": hub.quaternion,
-			"steer": steer, "axle": axle, "spin_sign": spin_sign, "offset": off,
+			"steer": steer, "axle": "x", "spin_sign": spin_sign, "offset": off,
 		})
 	out.sort_custom(func(a, b):
 		var az: float = a["offset"].z
@@ -424,10 +423,7 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 		if w["steer"] and gear_down > 0.4:
 			hub.rotate_y(steer_angle * 0.9)
 		var spin: float = wheel_spin * float(w["spin_sign"])
-		if w["axle"] == "z":
-			hub.rotate_z(spin)
-		else:
-			hub.rotate_x(spin)
+		hub.rotate_x(spin)
 	var door_t := float(st.get("door", 0.0))
 	for d in doors:
 		(d as VehicleHinge).apply(door_t)

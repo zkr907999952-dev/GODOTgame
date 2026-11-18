@@ -25,6 +25,8 @@ var marker_back: Marker3D
 var marker_head: Marker3D
 var marker_stirrup_l: Marker3D
 var marker_stirrup_r: Marker3D
+var marker_armrest_l: Marker3D
+var marker_armrest_r: Marker3D
 var wrap: Node3D
 var ready_ok: bool = false
 var half_l: float = 1.0
@@ -106,17 +108,38 @@ func _identify_markers() -> void:
 	if not found_bar:
 		bar_l = Vector3(0.39, 1.185, 0.707)
 		bar_r = Vector3(-0.39, 1.185, 0.707)
+	# Wide, thin mid-height rail at the hips = left/right armrests (Object_21).
+	var arm_l := Vector3(0.42, 1.20, 0.20)
+	var arm_r := Vector3(-0.42, 1.20, 0.20)
+	var found_arm := false
+	for mi in VehicleCommon.mesh_instances(wrap):
+		var a := VehicleCommon.aabb_in(wrap, mi)
+		if a.get("empty", false):
+			continue
+		var s: Vector3 = a["max"] - a["min"]
+		var c := Vector3(a["cx"], a["cy"], a["cz"])
+		if s.x > 0.70 and s.y < 0.10 and s.z > 0.20 and s.z < 0.50 and c.y > 1.05 and c.y < 1.30 and c.z > 0.0 and c.z < 0.45:
+			arm_l = Vector3(a["maxX"] - 0.04, a["maxY"], c.z)
+			arm_r = Vector3(a["minX"] + 0.04, a["maxY"], c.z)
+			found_arm = true
+	if not found_arm:
+		arm_l = Vector3(0.42, 1.20, 0.20)
+		arm_r = Vector3(-0.42, 1.20, 0.20)
 	var back_c := (seat_c + head_c) * 0.5
 	_add_marker("Seat", seat_c)
 	_add_marker("Backrest", back_c)
 	_add_marker("Headrest", head_c)
 	_add_marker("StirrupL", bar_l)
 	_add_marker("StirrupR", bar_r)
+	_add_marker("ArmrestL", arm_l)
+	_add_marker("ArmrestR", arm_r)
 	marker_seat = wrap.get_node("Seat") as Marker3D
 	marker_back = wrap.get_node("Backrest") as Marker3D
 	marker_head = wrap.get_node("Headrest") as Marker3D
 	marker_stirrup_l = wrap.get_node("StirrupL") as Marker3D
 	marker_stirrup_r = wrap.get_node("StirrupR") as Marker3D
+	marker_armrest_l = wrap.get_node("ArmrestL") as Marker3D
+	marker_armrest_r = wrap.get_node("ArmrestR") as Marker3D
 	var d: Vector3 = head_c - seat_c
 	backrest_angle = atan2(d.y, maxf(absf(d.z), 0.05))
 
@@ -184,6 +207,23 @@ func stirrup_l_global() -> Vector3:
 func stirrup_r_global() -> Vector3:
 	## Patient's right stirrup (bed -X).
 	return marker_stirrup_r.global_position if marker_stirrup_r else global_position + Vector3(-0.39, 1.185, 0.71)
+
+
+func armrest_l_local() -> Vector3:
+	return marker_armrest_l.position if marker_armrest_l else Vector3(0.42, 1.20, 0.20)
+
+
+func armrest_r_local() -> Vector3:
+	return marker_armrest_r.position if marker_armrest_r else Vector3(-0.42, 1.20, 0.20)
+
+
+func armrest_l_global() -> Vector3:
+	return marker_armrest_l.global_position if marker_armrest_l else global_position + Vector3(0.42, 1.20, 0.20)
+
+
+func armrest_r_global() -> Vector3:
+	return marker_armrest_r.global_position if marker_armrest_r else global_position + Vector3(-0.42, 1.20, 0.20)
+
 
 
 func patient_basis() -> Basis:

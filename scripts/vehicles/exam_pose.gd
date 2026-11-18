@@ -1,7 +1,7 @@
 extends RefCounted
 ## Lithotomy / stirrup exam pose. The Body mesh is already rotated to lie
 ## on the table (hips on the seat, spine along the backrest). This then
-## spreads the legs onto the left/right stirrups and relaxes the arms.
+## spreads the legs onto the left/right stirrups and rests the arms on the armrests.
 ## Bone names match SoftLoco (C_Hip_a, C_Spine_*, L/R_UpperLeg_a, Foreleg, Foot).
 class_name ExamPose
 
@@ -60,7 +60,7 @@ static func clear(skel: Skeleton3D) -> void:
 	skel.force_update_transform()
 
 
-static func apply(skel: Skeleton3D, left_stirrup: Vector3, right_stirrup: Vector3, _backrest_angle: float = 0.0) -> void:
+static func apply(skel: Skeleton3D, left_stirrup: Vector3, right_stirrup: Vector3, _backrest_angle: float = 0.0, left_armrest: Vector3 = Vector3.ZERO, right_armrest: Vector3 = Vector3.ZERO) -> void:
 	if skel == null:
 		return
 	clear(skel)
@@ -74,6 +74,25 @@ static func apply(skel: Skeleton3D, left_stirrup: Vector3, right_stirrup: Vector
 	skel.force_update_transform()
 	_ik_leg(skel, true, left_stirrup)
 	_ik_leg(skel, false, right_stirrup)
+	if left_armrest.length_squared() > 1e-6:
+		_ik_arm(skel, true, left_armrest)
+	if right_armrest.length_squared() > 1e-6:
+		_ik_arm(skel, false, right_armrest)
+	skel.force_update_transform()
+
+
+static func offset_hair(skel: Skeleton3D, local_off: Vector3) -> void:
+	## Shift HairRoot in its parent (head) space so the hair sits back
+	## off the pillow / skull instead of clipping through them.
+	if skel == null:
+		return
+	var i := skel.find_bone("HairRoot")
+	if i < 0:
+		i = skel.find_bone("Hair_1")
+	if i < 0:
+		return
+	var rest := skel.get_bone_rest(i)
+	skel.set_bone_pose_position(i, rest.origin + local_off)
 	skel.force_update_transform()
 
 
@@ -123,6 +142,54 @@ static func _ik_leg(skel: Skeleton3D, left: bool, target: Vector3) -> void:
 	if shin_dir.length_squared() < 1e-8:
 		return
 	_aim_bone(skel, i_sh, shin_dir.normalized())
+
+
+static func _ik_arm(skel: Skeleton3D, left: bool, target: Vector3) -> void:
+	var ua_n := "L_UpperArm_a" if left else "R_UpperArm_a"
+	var fa_n := "L_Forearm_a" if left else "R_Forearm_a"
+	var ha_n := "L_Hand_a" if left else "R_Hand_a"
+	var i_ua := skel.find_bone(ua_n)
+	var i_fa := skel.find_bone(fa_n)
+	var i_ha := skel.find_bone(ha_n)
+	if i_ua < 0 or i_fa < 0 or i_ha < 0:
+		return
+	var skel_inv := skel.global_transform.affine_inverse()
+	var p_ua := skel_inv * _bone_world_pos(skel, i_ua)
+	var p_fa := skel_inv * _bone_world_pos(skel, i_fa)
+	var p_ha := skel_inv * _bone_world_pos(skel, i_ha)
+	var tgt := skel_inv * target
+	var len1 := p_ua.distance_to(p_fa)
+	var len2 := p_fa.distance_to(p_ha)
+	if len1 < 1e-4 or len2 < 1e-4:
+		return
+	var to_t := tgt - p_ua
+	var dist := clampf(to_t.length(), 0.06, len1 + len2 - 0.015)
+	if to_t.length_squared() < 1e-8:
+		return
+	var axis_dir := to_t.normalized()
+	# Pole: out to the side and slightly toward the face so elbows rest
+	# naturally on the armrests rather than through the torso.
+	var pole := Vector3(0.65 if left else -0.65, -0.10, 0.40)
+	var pole_n := pole - axis_dir * pole.dot(axis_dir)
+	if pole_n.length_squared() < 1e-6:
+		pole_n = Vector3(0, 0, 1)
+	else:
+		pole_n = pole_n.normalized()
+	var cos_el := clampf((len1 * len1 + len2 * len2 - dist * dist) / (2.0 * len1 * len2), -1.0, 1.0)
+	var cos_sh := clampf((len1 * len1 + dist * dist - len2 * len2) / (2.0 * len1 * dist), -1.0, 1.0)
+	var sh_bend := acos(cos_sh)
+	var rot_axis := axis_dir.cross(pole_n)
+	if rot_axis.length_squared() < 1e-8:
+		rot_axis = Vector3(1, 0, 0)
+	else:
+		rot_axis = rot_axis.normalized()
+	var ua_dir := axis_dir.rotated(rot_axis, sh_bend)
+	_aim_bone(skel, i_ua, ua_dir)
+	var elbow := p_ua + ua_dir * len1
+	var fa_dir := (tgt - elbow)
+	if fa_dir.length_squared() < 1e-8:
+		return
+	_aim_bone(skel, i_fa, fa_dir.normalized())
 
 
 static func _bone_world_pos(skel: Skeleton3D, idx: int) -> Vector3:

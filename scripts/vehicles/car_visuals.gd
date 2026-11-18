@@ -1,5 +1,5 @@
 extends Node3D
-## Sports-car visual rig. Wheels and steering wheel follow VehicleWheel3D /
+## Sports-car visual rig. Wheels and steering wheel follow the raycast-car
 ## controller state. Facing/scale match the web prototype (target length 4.82 m).
 class_name CarVisuals
 
@@ -90,8 +90,9 @@ func _mount_wheels(regex: String) -> Array:
 		if n.get_parent() and str(n.get_parent().name).begins_with("WheelHub"):
 			continue
 		var world_pos := n.global_position
-		var a := VehicleCommon.world_aabb(n)
-		var axle := "x" if a.size.x <= a.size.z else "z"
+		# Hub is identity in car space. The roll axle is always local X
+		# (left-right), measured in wrap space — never a world AABB, which
+		# tilts when the car is spawned already yawed.
 		var hub := Node3D.new()
 		hub.name = "WheelHub_%s" % n.name
 		wrap.add_child(hub)
@@ -101,7 +102,7 @@ func _mount_wheels(regex: String) -> Array:
 		var off := hub.position
 		out.append({
 			"root": hub, "rest_pos": off, "rest_quat": hub.quaternion,
-			"steer": off.z < 0.0, "axle": axle, "spin_sign": 1.0, "offset": off,
+			"steer": off.z < 0.0, "axle": "x", "spin_sign": 1.0, "offset": off,
 		})
 	out.sort_custom(func(a, b):
 		return a["offset"].z < b["offset"].z or (is_equal_approx(a["offset"].z, b["offset"].z) and a["offset"].x < b["offset"].x)
@@ -148,10 +149,9 @@ func apply_pose(st: Dictionary, _delta: float, _time: float) -> void:
 		hub.quaternion = w["rest_quat"]
 		if w["steer"]:
 			hub.rotate_y(steer_angle)
-		if w["axle"] == "z":
-			hub.rotate_z(wheel_spin * float(w["spin_sign"]))
-		else:
-			hub.rotate_x(wheel_spin * float(w["spin_sign"]))
+		# Roll about the hub's local X (car right). wheel_spin is already
+		# signed so forward motion turns the contact patch backward.
+		hub.rotate_x(wheel_spin * float(w.get("spin_sign", 1.0)))
 	if not steer_wheel.is_empty():
 		var sw: Node3D = steer_wheel["obj"]
 		var axis := str(steer_wheel.get("axis", "z"))

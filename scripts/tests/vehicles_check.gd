@@ -1,9 +1,9 @@
 extends SceneTree
-## 0.2.19 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.20 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.19"
-const VERSION_CODE := 21
+const VERSION_NAME := "0.2.20"
+const VERSION_CODE := 22
 
 var fails := 0
 var main: Node
@@ -64,6 +64,7 @@ func _run() -> void:
 	await _check_city_defaults()
 	await _check_0218_physics_and_visuals()
 	await _check_0219_chase_wheel_gear()
+	await _check_0220_spawn_yaw_car_turn_weapons()
 	_finish()
 
 
@@ -120,6 +121,12 @@ func _check_exam_bed_default() -> void:
 	_ok(concave == 0, "exam bed has no concave trimesh on the body")
 	_ok(bed.get("marker_seat") != null and bed.get("marker_stirrup_l") != null and bed.get("marker_stirrup_r") != null,
 		"exam bed has seat / stirrup markers")
+	_ok(bed.get("marker_armrest_l") != null and bed.get("marker_armrest_r") != null,
+		"exam bed has left / right armrest markers")
+	if bed.has_method("armrest_l_local") and bed.has_method("armrest_r_local"):
+		var al: Vector3 = bed.call("armrest_l_local")
+		var ar: Vector3 = bed.call("armrest_r_local")
+		_ok(al.x > 0.15 and ar.x < -0.15, "patient-left armrest is +X, right is -X (L=%s R=%s)" % [al, ar])
 	if bed.has_method("stirrup_l_local") and bed.has_method("stirrup_r_local"):
 		var sl: Vector3 = bed.call("stirrup_l_local")
 		var sr: Vector3 = bed.call("stirrup_r_local")
@@ -238,25 +245,26 @@ func _check_car_plane_scenes() -> void:
 	root.add_child(car)
 	# setup happens in _ready
 	# already in tree
-	_ok(car is VehicleBody3D, "car is VehicleBody3D")
+	_ok(car is RigidBody3D and not (car is VehicleBody3D), "car is RigidBody3D (raycast suspension)")
 	var car_shapes := _count_body_shapes(car)
 	_ok(car_shapes >= 4, "car has fine collision (%d boxes)" % car_shapes)
 	_ok(_concave_on_body(car) == 0, "car body has no concave trimesh")
 	_ok(_convex_or_box_only(car), "car hulls are convex or boxes")
 	var wheels := 0
 	for c in car.get_children():
-		if c is VehicleWheel3D:
+		if c is RayCast3D:
 			wheels += 1
-	_ok(wheels >= 4, "car has VehicleWheel3D wheels (%d)" % wheels)
+	_ok(wheels >= 4, "car has RayCast3D suspension wheels (%d)" % wheels)
 	_ok(not _body_shapes_look_like_wheels(car), "car body hulls do not include wheels")
 	if car.has_method("spawn_lift"):
 		_ok(float(car.call("spawn_lift")) > 0.0, "car spawn_lift is positive (%.3f)" % float(car.call("spawn_lift")))
 	var hull_min := VehicleCommon.body_collision_min_y(car)
 	var contact := 1.0e9
+	var rest_d: float = float(car.get("REST_DISTANCE")) if car.get("REST_DISTANCE") != null else 0.16
+	var wr: float = float(car.visuals.wheel_r) if car.get("visuals") else 0.34
 	for c in car.get_children():
-		if c is VehicleWheel3D:
-			var w := c as VehicleWheel3D
-			contact = minf(contact, w.position.y - w.wheel_rest_length - w.wheel_radius)
+		if c is RayCast3D:
+			contact = minf(contact, (c as RayCast3D).position.y - rest_d - wr)
 	if contact < 1.0e8:
 		_ok(hull_min >= contact + 0.02, "car body hull stays above wheel contact (hull=%.3f contact=%.3f)" % [hull_min, contact])
 	_ok(car.get("visuals") != null, "car visuals bound")
@@ -319,8 +327,12 @@ func _check_exam_pose_api() -> void:
 	var skel: Skeleton3D = player.call("get_skeleton") if player and player.has_method("get_skeleton") else null
 	_ok(skel != null, "player skeleton available for posing")
 	if skel:
-		ExamPose.apply(skel, Vector3(-0.4, 1.1, 0.7), Vector3(0.4, 1.1, 0.7), 0.45)
+		ExamPose.apply(skel, Vector3(-0.4, 1.1, 0.7), Vector3(0.4, 1.1, 0.7), 0.45, Vector3(0.42, 1.20, 0.20), Vector3(-0.42, 1.20, 0.20))
 		_ok(skel.find_bone("L_UpperLeg_a") >= 0 and skel.find_bone("R_UpperLeg_a") >= 0, "leg bones exist")
+		_ok(skel.find_bone("L_UpperArm_a") >= 0 and skel.find_bone("R_UpperArm_a") >= 0, "arm bones exist")
+		ExamPose.offset_hair(skel, Vector3(0.0, 0.015, -0.08))
+		var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
+		_ok(pose_src.find("func offset_hair") >= 0, "ExamPose can offset hair off the pillow")
 		ExamPose.clear(skel)
 
 
@@ -377,25 +389,35 @@ func _check_city_defaults() -> void:
 			var b: Vector3 = pl[1].global_position
 			var lateral := Vector2(a.x - b.x, a.z - b.z).length()
 			_ok(lateral > 4.0 and lateral < 30.0, "fighters are side by side (dist=%.1f m)" % lateral)
-			# Near the known runway area or a detected airport landmark.
+			# Threshold / building end — NOT the 0.2.19 MAPS「机场跑道（空旷）」helipad pad.
 			var mid := (a + b) * 0.5
-			var runway_err := Vector2(mid.x + 1000.0, mid.z - 300.0).length()
-			_ok(runway_err < 80.0, "fighters spawned at the labeled runway start (mid=%s, err=%.1f m)" % [mid, runway_err])
+			var info: Dictionary = vs.call("runway_threshold_info") if vs.has_method("runway_threshold_info") else {}
+			var want_mid: Vector3 = info.get("mid", Vector3(-814.49, 0.0, 504.38))
+			var want_yaw := float(info.get("yaw", 0.70456))
+			var want_heading: Vector3 = info.get("heading", Vector3(-0.64770, 0.0, -0.76189))
+			var threshold: Vector3 = info.get("threshold", want_mid)
+			var helipad: Vector3 = info.get("helipad", Vector3(-1100.95, 0.0, 167.41))
+			var mid_err := Vector2(mid.x - want_mid.x, mid.z - want_mid.z).length()
+			_ok(mid_err < 40.0, "fighters spawned at the threshold / building end (mid=%s, want=%s, err=%.1f m)" % [mid, want_mid, mid_err])
+			var old_err := Vector2(mid.x + 1000.0, mid.z - 300.0).length()
+			_ok(old_err > 120.0, "fighters are not at the 0.2.19 helipad-end MAPS label (dist_to_-1000,300=%.1f m)" % old_err)
+			var d_thr := Vector2(mid.x - threshold.x, mid.z - threshold.z).length()
+			var d_hel := Vector2(mid.x - helipad.x, mid.z - helipad.z).length()
+			_ok(d_thr < d_hel - 40.0, "parked nearer the threshold than the helipads (d_thr=%.1f d_hel=%.1f)" % [d_thr, d_hel])
+			_ok(d_thr > 8.0 and d_thr < 50.0, "standoff is just inside the threshold bars (d=%.1f m)" % d_thr)
 			_ok(absf(a.y - b.y) < 2.0, "fighters sit at a similar height (%.2f / %.2f)" % [a.y, b.y])
 			var yaw_err := absf(wrapf(pl[0].rotation.y - pl[1].rotation.y, -PI, PI))
 			_ok(yaw_err < 0.08, "both fighters share a heading (dyaw=%.3f)" % yaw_err)
-			var want_yaw := -PI * 0.5
-			if vs.has_method("_runway_heading_at"):
-				var hd: Dictionary = vs.call("_runway_heading_at", Vector3(-1000.0, 0.0, 300.0))
-				want_yaw = float(hd.get("yaw", want_yaw))
 			var align := absf(wrapf(pl[0].rotation.y - want_yaw, -PI, PI))
 			_ok(align < 0.20, "fighter noses align with the runway heading (yaw=%.3f want=%.3f err=%.3f)" % [pl[0].rotation.y, want_yaw, align])
 			var nose: Vector3 = -pl[0].global_transform.basis.z
 			var nose_h := Vector3(nose.x, 0.0, nose.z)
 			if nose_h.length_squared() > 1e-6:
 				nose_h = nose_h.normalized()
-			# West-end threshold: nose should have a strong +X component on this map.
-			_ok(absf(nose_h.x) > 0.85 or absf(nose_h.z) > 0.85, "nose lies along the runway axis (nose_h=%s)" % nose_h)
+			var head_h := Vector3(want_heading.x, 0.0, want_heading.z)
+			if head_h.length_squared() > 1e-6:
+				head_h = head_h.normalized()
+			_ok(nose_h.dot(head_h) > 0.85, "noses point down the runway toward the helipads (nose_h=%s heading=%s dot=%.3f)" % [nose_h, head_h, nose_h.dot(head_h)])
 
 
 func _convex_or_box_only(n: Node) -> bool:
@@ -434,10 +456,23 @@ func _check_bindings_and_hinge() -> void:
 	_ok(drive.find("func is_drive_third") >= 0 and drive.find("func orbit_look") >= 0, "third-person orbit + recenter API exists")
 	_ok(drive.find("func begin_orbit") >= 0 and drive.find("func end_orbit") >= 0, "orbit hold / release API exists")
 	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
-	_ok(car_src.find("engine_force = -force") >= 0, "car engine_force is negated so W drives the visual nose")
+	_ok(car_src.find("extends RigidBody3D") >= 0, "car is a RigidBody3D (raycast suspension, not VehicleBody3D)")
 	_ok(car_src.find("FREEZE_MODE_KINEMATIC") >= 0, "car uses kinematic freeze so Jolt keeps wheel positions")
-	_ok(car_src.find("WHEEL_FRICTION := 1.0") >= 0 or car_src.find("WHEEL_FRICTION_REAR := 1.0") >= 0, "car tyre grip follows Truck Town (friction_slip 1.0)")
-	_ok(car_src.find("ENGINE_FORCE") >= 0, "car uses a bounded Truck Town-style engine_force, not raw overpowering torque")
+	_ok(car_src.find("TIRE_GRIP") >= 0 and car_src.find("SPRING_STRENGTH") >= 0, "car uses raycast springs + lateral tire grip")
+	_ok(car_src.find("ENGINE_POWER") >= 0, "car uses a bounded ENGINE_POWER, not raw overpowering torque")
+	_ok(car_src.find("custom-3d-car") >= 0, "car physics is ported from custom-3d-car (Godot 4 + Jolt)")
+	_ok(drive.find("yaw += 1.0") >= 0 and drive.find("yaw -= 1.0") >= 0, "Q adds left yaw, E subtracts (yaw was reversed in 0.2.19)")
+	_ok(drive.find("holding_ab") >= 0 and drive.find("move_toward(pl.thrust, 0.8") >= 0, "afterburner last lever segment is hold-to")
+	_ok(drive.find("_holster_occupied_weapons") >= 0, "entering a vehicle holsters weapons")
+	_ok(drive.find("_chase_dir") >= 0, "chase cam follows motion, not a heading-locked fuselage")
+	_ok(drive.find("offset_hair") >= 0 and drive.find("set_gaze_target") >= 0, "exam pose offsets hair and looks at the camera in observation mode")
+	var car_vis := FileAccess.get_file_as_string("res://scripts/vehicles/car_visuals.gd")
+	var pl_vis := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
+	_ok(car_vis.find("hub.rotate_x") >= 0 and car_vis.find("axle") >= 0, "car wheels roll about hub-local X, not a world AABB axis")
+	_ok(pl_vis.find("hub.rotate_x") >= 0, "plane wheels roll about hub-local X, not a world AABB axis")
+	_ok(car_src.find("_vis_spin +=") >= 0 and car_src.find("-(long_speed") >= 0, "car wheel spin sign matches forward travel")
+	var pl_ctrl := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
+	_ok(pl_ctrl.find("_vis_spin +=") >= 0 and (pl_ctrl.find("-(long_spin") >= 0 or pl_ctrl.find("-(") >= 0), "plane wheel spin sign matches forward taxi")
 	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
 	_ok(pl_src.find("ROTATE_SPEED") >= 0 and pl_src.find("_apply_gear_suspension") >= 0, "plane has rotate-speed takeoff and gear suspension")
 	_ok(pl_src.find("GEAR_AUTO_RETRACT_AGL") >= 0 and pl_src.find("weight_on_gear") >= 0, "plane auto-retracts gear above an AGL threshold and refuses to retract on the wheels")
@@ -1082,6 +1117,99 @@ func _check_0219_chase_wheel_gear() -> void:
 		else:
 			_ok(false, "can enter fighter for G-key routing check")
 	plane.queue_free()
+	floor.queue_free()
+	await _frames(1)
+
+
+func _check_0220_spawn_yaw_car_turn_weapons() -> void:
+	## Runtime: car can turn, weapons holster on enter, exam cam is untilted.
+	if vs == null or player == null:
+		return
+	# Source-level yaw / exam-cam already covered in bindings; add physics turn.
+	var floor := StaticBody3D.new()
+	floor.name = "TestFloor0220"
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(260, 1, 260)
+	cs.shape = box
+	cs.position = Vector3(0, -0.5, 0)
+	floor.add_child(cs)
+	floor.position = Vector3(21000, 20, 21000)
+	root.add_child(floor)
+	await _phys(1)
+
+	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	root.add_child(car)
+	_ok(car is RigidBody3D and not (car is VehicleBody3D), "spawned car is RigidBody3D, not VehicleBody3D")
+	var lift: float = float(car.call("spawn_lift"))
+	car.global_position = floor.position + Vector3(0, lift + 0.02, 0)
+	car.rotation = Vector3.ZERO
+	if car.has_method("_restore_wheel_positions"):
+		car.call("_restore_wheel_positions")
+	car.reset_physics_interpolation()
+	car.freeze = false
+	car.occupied = true
+	car.sleeping = false
+	for i in 20:
+		await _phys(1)
+	car.linear_velocity = Vector3.ZERO
+	car.angular_velocity = Vector3.ZERO
+	car.global_position = floor.position + Vector3(4, lift + 0.02, 0)
+	car.rotation = Vector3.ZERO
+	car.reset_physics_interpolation()
+	for i in 12:
+		await _phys(1)
+	# Build a little speed, then hold left steer (positive, matches steer := -axis_lr).
+	car.set_driver_input(1.0, 0.0, 0.0, false, false)
+	for i in 40:
+		await _phys(1)
+	var yaw0: float = car.rotation.y
+	car.set_driver_input(1.0, 1.0, 0.0, false, false)
+	for i in 90:
+		await _phys(1)
+	var dyaw := wrapf(car.rotation.y - yaw0, -PI, PI)
+	_ok(absf(dyaw) > 0.25, "steering actually turns the sports car (dyaw=%.3f)" % dyaw)
+	_ok(dyaw > 0.15, "positive steer turns left / +Y (dyaw=%.3f)" % dyaw)
+	car.queue_free()
+
+	# Boarding with a weapon drawn must holster (empty hands while occupied).
+	var car2: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	main.add_child(car2)
+	car2.global_position = Vector3(1.8, 0.6, 0.3)
+	if car2.has_method("spawn_lift"):
+		car2.global_position.y = float(car2.call("spawn_lift"))
+	car2.rotation = Vector3.ZERO
+	if car2.has_method("reset_physics_interpolation"):
+		car2.reset_physics_interpolation()
+	await _phys(2)
+	var ws: Node = player.call("get_weapons") if player.has_method("get_weapons") else null
+	_ok(ws != null, "player weapon system is available")
+	if ws and ws.has_method("select"):
+		var ids: PackedStringArray = ws.call("weapon_ids") if ws.has_method("weapon_ids") else PackedStringArray()
+		var pick := "pistol" if "pistol" in ids or ids.is_empty() else ids[0]
+		ws.call("select", pick)
+		await _frames(2)
+	player.global_position = car2.global_position + Vector3(2.0, 0.1, 0.0)
+	vs.nearest = car2
+	_ok(bool(vs.call("try_enter")), "enter car with a weapon drawn")
+	if ws:
+		var armed := bool(ws.call("is_armed")) if ws.has_method("is_armed") else (str(ws.get("current")) != "")
+		var cur := str(ws.get("current"))
+		var st := str(ws.get("state"))
+		_ok(not armed or st == "holstering" or cur == "", "boarding holsters the current weapon (current='%s' state='%s')" % [cur, st])
+		# Stay empty-handed: a later select must also be stripped.
+		if ws.has_method("select"):
+			ws.call("select", "pistol")
+			await _phys(2)
+			armed = bool(ws.call("is_armed")) if ws.has_method("is_armed") else (str(ws.get("current")) != "")
+			cur = str(ws.get("current"))
+			st = str(ws.get("state"))
+			_ok(not armed or st == "holstering" or cur == "", "occupied occupant cannot keep a drawn weapon (current='%s' state='%s')" % [cur, st])
+	_ok(str(main.call("action_for_key", KEY_Q, "control")) == "", "occupied Q is still not the weapon wheel")
+	_ok(bool(vs.call("try_exit")), "exit car after weapon-holster check")
+	if ws and ws.has_method("holster"):
+		ws.call("holster")
+	car2.queue_free()
 	floor.queue_free()
 	await _frames(1)
 

@@ -13,11 +13,15 @@ const PLANE_SCENE := "res://scenes/vehicles/plane.tscn"
 const BED_SCENE := "res://scenes/vehicles/exam_bed.tscn"
 const ROOM_BED_POS := Vector3(-1.32, 0.0, 0.05)
 const ROOM_BED_YAW := 0.0  # length along Z, head toward -Z; clear of the furniture bed and wall
-const FALLBACK_RUNWAY := Vector3(-1000.0, 0.0, 300.0)
-# City AirPort_Track runs predominantly along world X; the labeled threshold
-# (MAPS「机场跑道（空旷）」, x=-1000, z=300) sits at the western end, so the
-# default nose points +X (Godot yaw -PI/2) down the longer remaining pavement.
-const FALLBACK_RUNWAY_YAW := -PI * 0.5
+# Last-resort fallback if AirPort_Track cannot be measured this frame.
+# These numbers were measured from the city AirPort_Track asphalt at the
+# white-threshold / building end (not the helipad pad). Prefer live mesh
+# measurement in _measure_runway() over this constant.
+const FALLBACK_RUNWAY := Vector3(-814.49, 0.0, 504.38)
+const FALLBACK_RUNWAY_YAW := 0.70456  # nose toward the helipad end
+const FALLBACK_RUNWAY_AXIS := Vector3(0.64770, 0.0, 0.76189)  # t+ toward threshold
+const RUNWAY_LANE := 7.2
+const RUNWAY_STANDOFF := 26.0  # metres inward from the asphalt threshold
 const ROAD_CAR_COUNT := 5
 const LANDMARK_GROUND := "^(Boulevard_Ground|Docks_Ground|Island_Ground|AirPort_Track)"
 const LANDMARK_AIRPORT := "^(AirPort_Track|Airport_Front|AirPort)$"
@@ -58,6 +62,7 @@ var _touch_orbit: bool = false
 var _orbit_yaw: float = 0.0
 var _orbit_pitch: float = -0.18
 var _cam_ready: bool = false
+var _chase_dir: Vector3 = Vector3.ZERO  # smoothed motion/heading for the chase cam
 const CAM_PITCH_DEFAULT := -0.18
 const CAM_PITCH_AIR := -0.12
 
@@ -173,9 +178,10 @@ func _spawn_default_planes() -> void:
 	if spots.is_empty():
 		var g: Variant = _ground(FALLBACK_RUNWAY.x, FALLBACK_RUNWAY.z)
 		var y: float = (g as Vector3).y if g != null else 0.0
+		var across := Vector3(-FALLBACK_RUNWAY_AXIS.z, 0.0, FALLBACK_RUNWAY_AXIS.x)
 		spots = [
-			{"x": FALLBACK_RUNWAY.x, "y": y, "z": FALLBACK_RUNWAY.z - 8.0, "yaw": FALLBACK_RUNWAY_YAW},
-			{"x": FALLBACK_RUNWAY.x, "y": y, "z": FALLBACK_RUNWAY.z + 8.0, "yaw": FALLBACK_RUNWAY_YAW},
+			{"x": FALLBACK_RUNWAY.x - across.x * RUNWAY_LANE, "y": y, "z": FALLBACK_RUNWAY.z - across.z * RUNWAY_LANE, "yaw": FALLBACK_RUNWAY_YAW},
+			{"x": FALLBACK_RUNWAY.x + across.x * RUNWAY_LANE, "y": y, "z": FALLBACK_RUNWAY.z + across.z * RUNWAY_LANE, "yaw": FALLBACK_RUNWAY_YAW},
 		]
 	for i in spots.size():
 		var s: Dictionary = spots[i]
@@ -183,62 +189,240 @@ func _spawn_default_planes() -> void:
 
 
 func _airport_plane_spawns() -> Array:
-	## Two fighters side by side at the labeled runway start (x=-1000, z=300),
-	## on the pavement, noses aligned with the runway heading (ready to taxi
-	## straight down the strip). The mid-track spawn (~-760, 348) was rejected
-	## in favor of this labeled threshold. No new marked screenshot was
-	## available this pass; position comes from MAPS「机场跑道（空旷）」, heading
-	## from AirPort_Track / the known west-to-east strip.
-	var start := FALLBACK_RUNWAY
-	if game and game.get("MAPS"):
-		for m in game.get("MAPS"):
-			if str(m.get("id")) != "city":
-				continue
-			var spawns: Array = m.get("spawns", [])
-			for s in spawns:
-				if "机场" in str(s.get("label", "")) or "跑道" in str(s.get("label", "")):
-					start = Vector3(float(s["x"]), 0.0, float(s["z"]))
-					break
-	var yaw_and_lane: Dictionary = _runway_heading_at(start)
-	var yaw: float = float(yaw_and_lane["yaw"])
-	var lane: float = float(yaw_and_lane["lane"])
-	var along_x: bool = bool(yaw_and_lane["along_x"])
+	## Two fighters side by side on the pavement just inside the white
+	## threshold bars (the building / blue-roof end), noses pointing down
+	## the long runway toward the helipad pad. The MAPS label
+	## 「机场跑道（空旷）」 at x=-1000, z=300 is the helipad end and is wrong.
+	## Position and heading come from a live AirPort_Track mesh measurement.
+	var info := _measure_runway()
+	var mid: Vector3 = info["mid"]
+	var yaw: float = float(info["yaw"])
+	var across: Vector3 = info["across"]
+	var lane: float = float(info["lane"])
 	var out: Array = []
-	var place: Callable = func(x: float, z: float, yv: float) -> void:
+	for side in [-1.0, 1.0]:
+		var x: float = mid.x + across.x * lane * side
+		var z: float = mid.z + across.z * lane * side
 		var g: Variant = _ground(x, z)
-		var y: float = (g as Vector3).y if g != null else 0.0
-		out.append({"x": x, "y": y, "z": z, "yaw": yv})
-	if along_x:
-		place.call(start.x, start.z - lane, yaw)
-		place.call(start.x, start.z + lane, yaw)
-	else:
-		place.call(start.x - lane, start.z, yaw)
-		place.call(start.x + lane, start.z, yaw)
+		var y: float = (g as Vector3).y if g != null else mid.y
+		out.append({"x": x, "y": y, "z": z, "yaw": yaw})
 	return out
 
 
-func _runway_heading_at(start: Vector3) -> Dictionary:
-	## Nose along the strip, pointing down the longer remaining pavement.
-	var tracks: Array = _landmark_re("AirPort_Track")
-	if tracks.is_empty():
-		tracks = _landmark_re("Airport_Front")
-	if tracks.is_empty():
-		tracks = _landmark_re("AirPort$")
-	if tracks.is_empty():
-		return {"yaw": FALLBACK_RUNWAY_YAW, "lane": 7.2, "along_x": true}
-	var box: AABB = tracks[0]
-	var along_x := box.size.x > box.size.z
-	var yaw := FALLBACK_RUNWAY_YAW
-	var lane := 7.2
-	if along_x:
-		var x_mid := box.position.x + box.size.x * 0.5
-		yaw = -PI * 0.5 if start.x <= x_mid else PI * 0.5
-		lane = minf(7.2, maxf(5.5, box.size.z * 0.16))
+func runway_threshold_info() -> Dictionary:
+	## Public for tests / HUD: measured threshold-end spawn and takeoff heading.
+	return _measure_runway()
+
+
+func _runway_heading_at(_start: Vector3) -> Dictionary:
+	## Kept for callers; heading is the takeoff direction (toward the helipads),
+	## measured from AirPort_Track — not from an AABB, which is square on this
+	## ~50° diagonal strip.
+	var info := _measure_runway()
+	return {"yaw": info["yaw"], "lane": info["lane"], "along_x": false, "heading": info["heading"], "mid": info["mid"]}
+
+
+func _measure_runway() -> Dictionary:
+	## PCA-fit the AirPort_Track asphalt, pick the end closer to the AirPort
+	## buildings as the threshold, stand off onto the pavement, nose toward
+	## the opposite (helipad) end.
+	var empty := {
+		"mid": FALLBACK_RUNWAY,
+		"yaw": FALLBACK_RUNWAY_YAW,
+		"heading": Vector3(-FALLBACK_RUNWAY_AXIS.x, 0.0, -FALLBACK_RUNWAY_AXIS.z),
+		"across": Vector3(-FALLBACK_RUNWAY_AXIS.z, 0.0, FALLBACK_RUNWAY_AXIS.x),
+		"lane": RUNWAY_LANE,
+		"threshold": FALLBACK_RUNWAY,
+		"helipad": Vector3(-1100.95, 0.0, 167.41),
+	}
+	if game == null or not game.has_node("City"):
+		return empty
+	var city: Node = game.get_node("City")
+	var track: MeshInstance3D = null
+	for mi in city.find_children("AirPort_Track_MAT_Airport_0", "MeshInstance3D", true, false):
+		track = mi as MeshInstance3D
+		break
+	if track == null or track.mesh == null:
+		for mi in city.find_children("*", "MeshInstance3D", true, false):
+			if "AirPort_Track" in str(mi.name) and mi.mesh:
+				track = mi as MeshInstance3D
+				break
+	if track == null or track.mesh == null:
+		return empty
+	var pts: Array[Vector3] = []
+	var grass_ok := false
+	var img: Image = null
+	var mat := track.get_active_material(0)
+	if mat == null:
+		mat = track.mesh.surface_get_material(0)
+	if mat is BaseMaterial3D:
+		var tex: Texture2D = (mat as BaseMaterial3D).albedo_texture
+		if tex:
+			img = tex.get_image()
+			if img and img.is_compressed():
+				img.decompress()
+			grass_ok = img != null
+	var xf := track.global_transform
+	var tw := 0
+	var th := 0
+	if img:
+		tw = img.get_width()
+		th = img.get_height()
+	for s in track.mesh.get_surface_count():
+		var arr := track.mesh.surface_get_arrays(s)
+		var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var uvs: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV] if arr[Mesh.ARRAY_TEX_UV] != null else PackedVector2Array()
+		for i in verts.size():
+			var w: Vector3 = xf * verts[i]
+			if w.y < -1.0:
+				continue
+			if grass_ok and i < uvs.size():
+				var uv: Vector2 = uvs[i]
+				var px := clampi(int(uv.x * tw), 0, tw - 1)
+				var py := clampi(int(uv.y * th), 0, th - 1)
+				var col := img.get_pixel(px, py)
+				# Olive / green shoulder (atlas tile), not yellow markings.
+				var is_yellow := col.r > 0.7 and col.g > 0.45 and col.b < 0.4 and col.r > col.g + 0.05
+				var is_grass := (not is_yellow) and col.g >= col.r - 0.03 and col.g > col.b + 0.08 and col.r < 0.71
+				if is_grass:
+					continue
+			pts.append(w)
+	if pts.size() < 32:
+		return empty
+	var mx := 0.0
+	var mz := 0.0
+	for p in pts:
+		mx += p.x
+		mz += p.z
+	mx /= float(pts.size())
+	mz /= float(pts.size())
+	var cxx := 0.0
+	var czz := 0.0
+	var cxz := 0.0
+	for p in pts:
+		var dx := p.x - mx
+		var dz := p.z - mz
+		cxx += dx * dx
+		czz += dz * dz
+		cxz += dx * dz
+	var tr := cxx + czz
+	var det := cxx * czz - cxz * cxz
+	var disc := sqrt(maxf(0.0, tr * tr * 0.25 - det))
+	var l1 := tr * 0.5 + disc
+	var ex := l1 - czz
+	var ez := cxz
+	if absf(ex) + absf(ez) < 1e-8:
+		ex = cxz
+		ez = l1 - cxx
+	var elen := sqrt(ex * ex + ez * ez)
+	if elen < 1e-6:
+		return empty
+	ex /= elen
+	ez /= elen
+	# Project.
+	var tmin := INF
+	var tmax := -INF
+	var samples: Array = []  # {t, s}
+	for p in pts:
+		var tt := (p.x - mx) * ex + (p.z - mz) * ez
+		var ss := -(p.x - mx) * ez + (p.z - mz) * ex
+		tmin = minf(tmin, tt)
+		tmax = maxf(tmax, tt)
+		samples.append(Vector2(tt, ss))
+	# Typical-width bins give the main strip centre (ignore helipad pad / apron).
+	var bins := 40
+	var span := tmax - tmin
+	if span < 20.0:
+		return empty
+	var typ_s: Array[float] = []
+	var typ_w: Array[float] = []
+	for bi in bins:
+		var a := tmin + span * float(bi) / float(bins)
+		var b := tmin + span * float(bi + 1) / float(bins)
+		var slist: Array[float] = []
+		for sm in samples:
+			if sm.x >= a and sm.x < b:
+				slist.append(sm.y)
+		if slist.size() < 4:
+			continue
+		slist.sort()
+		var w := slist[slist.size() - 1] - slist[0]
+		# Main strip is the narrower cluster (~80–110 m including shoulders).
+		# Helipad / terminal aprons are wider (~135–155 m).
+		if w > 30.0 and w < 120.0:
+			typ_s.append(slist[slist.size() / 2])
+			typ_w.append(w)
+	var center_s := 0.0
+	var width := 90.0
+	if typ_s.size():
+		var mid_i := typ_s.size() / 2
+		var scopy: Array[float] = typ_s.duplicate()
+		scopy.sort()
+		center_s = scopy[mid_i]
+		var wcopy: Array[float] = typ_w.duplicate()
+		wcopy.sort()
+		width = wcopy[wcopy.size() / 2]
+	# Asphalt along the centreline.
+	var half := maxf(width * 0.35, 12.0)
+	var tmin_c := INF
+	var tmax_c := -INF
+	for sm in samples:
+		if absf(sm.y - center_s) < half:
+			tmin_c = minf(tmin_c, sm.x)
+			tmax_c = maxf(tmax_c, sm.x)
+	if tmin_c > tmax_c:
+		tmin_c = tmin
+		tmax_c = tmax
+	var sx := -ez
+	var sz := ex
+	var end_pos := Vector3(mx + ex * tmax_c + sx * center_s, 0.0, mz + ez * tmax_c + sz * center_s)
+	var end_neg := Vector3(mx + ex * tmin_c + sx * center_s, 0.0, mz + ez * tmin_c + sz * center_s)
+	# Threshold = the end closer to the grey airport buildings.
+	var bld_c := Vector3(-831.86, 0.0, 362.89)
+	for mi in city.find_children("AirPort_MAT_Airport_0", "MeshInstance3D", true, false):
+		var bld := mi as MeshInstance3D
+		if bld and bld.mesh:
+			bld_c = bld.global_transform * bld.mesh.get_aabb().get_center()
+			bld_c.y = 0.0
+		break
+	var d_pos := Vector2(end_pos.x - bld_c.x, end_pos.z - bld_c.z).length()
+	var d_neg := Vector2(end_neg.x - bld_c.x, end_neg.z - bld_c.z).length()
+	var thr_t: float
+	var hel_t: float
+	var threshold: Vector3
+	var helipad: Vector3
+	if d_pos <= d_neg:
+		thr_t = tmax_c
+		hel_t = tmin_c
+		threshold = end_pos
+		helipad = end_neg
 	else:
-		var z_mid := box.position.z + box.size.z * 0.5
-		yaw = 0.0 if start.z <= z_mid else PI
-		lane = minf(7.2, maxf(5.5, box.size.x * 0.16))
-	return {"yaw": yaw, "lane": lane, "along_x": along_x}
+		thr_t = tmin_c
+		hel_t = tmax_c
+		threshold = end_neg
+		helipad = end_pos
+	# Park just inside the threshold bars, not past them off the pavement.
+	var sign_in := 1.0 if hel_t > thr_t else -1.0
+	var mid_t := thr_t + sign_in * RUNWAY_STANDOFF
+	var mid := Vector3(mx + ex * mid_t + sx * center_s, 0.0, mz + ez * mid_t + sz * center_s)
+	# Takeoff heading: toward the helipad end.
+	var heading := Vector3(helipad.x - threshold.x, 0.0, helipad.z - threshold.z)
+	if heading.length_squared() < 1e-6:
+		heading = Vector3(-ex, 0.0, -ez) if d_pos <= d_neg else Vector3(ex, 0.0, ez)
+	else:
+		heading = heading.normalized()
+	# yaw such that visual nose (-basis.z) = heading: (-sin y, 0, -cos y) = heading
+	var yaw := atan2(-heading.x, -heading.z)
+	var across := Vector3(-heading.z, 0.0, heading.x)
+	return {
+		"mid": mid,
+		"yaw": yaw,
+		"heading": heading,
+		"across": across,
+		"lane": RUNWAY_LANE,
+		"threshold": threshold,
+		"helipad": helipad,
+	}
 
 
 func _spawn_default_cars() -> void:
@@ -449,6 +633,16 @@ func _update_nearest() -> void:
 		proximity_changed.emit(nearest, false)
 
 
+func _holster_occupied_weapons() -> void:
+	## Boarding any vehicle (car / plane / exam bed) forces empty hands.
+	## Occupied Q is not the weapon wheel; occupied G is landing gear.
+	if player == null or not player.has_method("get_weapons"):
+		return
+	var ws: Node = player.call("get_weapons")
+	if ws and ws.has_method("holster"):
+		ws.call("holster")
+
+
 func try_toggle() -> bool:
 	if occupied:
 		return try_exit()
@@ -482,6 +676,7 @@ func try_enter() -> bool:
 	player.global_transform = Transform3D(Basis.IDENTITY, player.global_position)
 	player.set("occupancy", kind_of(v))
 	player.set("occupier", v)
+	_holster_occupied_weapons()
 	if v.has_method("on_enter"):
 		v.call("on_enter")
 	var k := kind_of(v)
@@ -671,6 +866,7 @@ func _reset_vehicle_cam() -> void:
 	_touch_orbit = false
 	_orbit_yaw = 0.0
 	_orbit_pitch = CAM_PITCH_DEFAULT
+	_chase_dir = Vector3.ZERO
 
 
 func toggle_occupied_gear() -> void:
@@ -726,8 +922,11 @@ func _process_occupied(delta: float) -> void:
 	if not is_instance_valid(occupied) or player == null:
 		return
 	var k := kind_of(occupied)
+	# Stay empty-handed for the whole occupancy (boarding with a weapon,
+	# or any later attempt to draw, holsters again).
+	_holster_occupied_weapons()
 	if k == "exam_bed":
-		_apply_exam_pose()
+		_apply_exam_pose(delta)
 		_exam_camera(delta)
 		return
 	_drive_input(delta)
@@ -735,7 +934,7 @@ func _process_occupied(delta: float) -> void:
 	_vehicle_camera(delta)
 
 
-func _apply_exam_pose() -> void:
+func _apply_exam_pose(delta: float = 0.016) -> void:
 	var bed := occupied as ExamBed
 	if bed == null or player == null or not player.has_node("Body"):
 		return
@@ -750,23 +949,39 @@ func _apply_exam_pose() -> void:
 	player.velocity = Vector3.ZERO
 	player.global_transform = Transform3D(Basis.IDENTITY, Vector3(seat.x, 0.0, seat.z))
 	body.visible = true
-	# Reset bones to rest before measuring the hip, then place Body.
 	if skel:
 		ExamPose.clear(skel)
 	var hip_local := ExamPose.hip_local(skel, body) if skel else Vector3(0.0, 0.917, 0.033)
 	var lie := bed.patient_basis()
-	# hip_world = body.origin + lie * hip_local.
-	# The hip bone sits inside the pelvis; the buttocks / sit-bones are behind
-	# the hip in Body space (−Z, a little −Y). Putting only the hip on the
-	# seat left the buttocks sunk through the cushion. Place that sit point
-	# on the pad (small skin gap along the face / backrest normal) so the
-	# body rests flush on the seat and against the raised backrest.
-	const BUTTOCK := Vector3(0.0, -0.03, -0.10)
-	const SEAT_SKIN := 0.02
+	# Sit-bones slightly behind the hip; lift the body a little so it sits
+	# on (not in) the cushion and the backrest.
+	const BUTTOCK := Vector3(0.0, -0.02, -0.10)
+	const SEAT_SKIN := 0.055
 	var sit := hip_local + BUTTOCK
 	body.global_transform = Transform3D(lie, seat - lie * sit + lie.z * SEAT_SKIN)
 	if skel:
-		ExamPose.apply(skel, bed.stirrup_l_global(), bed.stirrup_r_global(), bed.backrest_angle)
+		var al: Vector3 = bed.armrest_l_global() if bed.has_method("armrest_l_global") else bed.stirrup_l_global()
+		var ar: Vector3 = bed.armrest_r_global() if bed.has_method("armrest_r_global") else bed.stirrup_r_global()
+		ExamPose.apply(skel, bed.stirrup_l_global(), bed.stirrup_r_global(), bed.backrest_angle, al, ar)
+		ExamPose.offset_hair(skel, Vector3(0.0, 0.015, -0.08))
+		# Observation mode: head / eyes look at the orbit camera.
+		if player.has_method("is_display_mode") and bool(player.call("is_display_mode")) and player.has_method("get_secondary"):
+			var sec = player.call("get_secondary")
+			if sec and player.has_node("CameraPivot/Camera3D"):
+				var cam: Camera3D = player.get_node("CameraPivot/Camera3D")
+				if sec.has_method("set_gaze_target"):
+					sec.call("set_gaze_target", cam.global_position)
+				if sec.has_method("update"):
+					sec.call("update", delta, false)
+				ExamPose.offset_hair(skel, Vector3(0.0, 0.015, -0.08))
+				if sec.has_method("snap_hair_to_pose"):
+					sec.call("snap_hair_to_pose")
+		elif player.has_method("get_secondary"):
+			var sec2 = player.call("get_secondary")
+			if sec2 and sec2.has_method("clear_gaze"):
+				sec2.call("clear_gaze")
+			if sec2 and sec2.has_method("snap_hair_to_pose"):
+				sec2.call("snap_hair_to_pose")
 
 
 func _exam_camera(_delta: float) -> void:
@@ -787,17 +1002,27 @@ func _exam_camera(_delta: float) -> void:
 		return
 	var lie := bed.patient_basis()
 	# Default: from the head, look toward the feet / abdomen, slightly at the body.
-	var look_dir := -lie.y * 0.92 - lie.z * 0.25  # toward feet, a little toward the back/belly
+	var look_dir := -lie.y * 0.92 - lie.z * 0.25
 	if look_dir.length_squared() < 1e-6:
 		look_dir = bed.global_transform.basis.z
 	look_dir = look_dir.normalized()
 	var yaw := float(player.get("_yaw"))
 	var pitch := float(player.get("_pitch"))
-	# Relative look around the lying head, starting from look-at-body.
-	var base := Basis.looking_at(look_dir, lie.z)
+	# Untilted origin: world-up so the first-person camera has no roll
+	# from the lying basis. The CharacterBody stays identity.
+	var up_ref := Vector3.UP
+	if absf(look_dir.dot(up_ref)) > 0.94:
+		up_ref = lie.x if absf(lie.x.dot(Vector3.UP)) < 0.9 else Vector3.RIGHT
+	var base := Basis.looking_at(look_dir, up_ref)
 	var extra := Basis.from_euler(Vector3(pitch, yaw, 0.0))
-	var eye := head.origin + lie.z * 0.10
-	cam.global_transform = Transform3D((base * extra).orthonormalized(), eye)
+	var eye := head.origin + Vector3.UP * 0.04 + lie.z * 0.06
+	var look := (base * extra).orthonormalized()
+	# Strip residual roll: rebuild with world up.
+	var fwd2 := -look.z
+	var up2 := Vector3.UP
+	if absf(fwd2.dot(up2)) > 0.94:
+		up2 = look.y
+	cam.global_transform = Transform3D(Basis.looking_at(fwd2, up2), eye)
 	cam.fov = float(player.get("fp_fov"))
 	cam.near = 0.04
 	cam.current = true
@@ -846,15 +1071,18 @@ func _drive_input(delta: float) -> void:
 		var pitch := -axis_fb
 		# A = roll left (axis_lr < 0); D = roll right.
 		var roll := axis_lr
-		var yaw := touch_yaw
+		# Q / left yaw button = rudder left (positive ctrl_yaw, +Y torque).
+		# touch_yaw is stored as -1 left / +1 right; invert so left is +.
+		var yaw := -touch_yaw
 		if Input.is_key_pressed(KEY_Q):
-			yaw -= 1.0
-		if Input.is_key_pressed(KEY_E):
 			yaw += 1.0
+		if Input.is_key_pressed(KEY_E):
+			yaw -= 1.0
 		yaw = clampf(yaw, -1.0, 1.0)
 		var td := 0.0
 		var decelerating := false
-		if Input.is_key_pressed(KEY_SHIFT) or touch_thrust_up:
+		var holding_ab := Input.is_key_pressed(KEY_SHIFT) or touch_thrust_up
+		if holding_ab:
 			td += delta * 0.45
 		if Input.is_key_pressed(KEY_C) or touch_thrust_down:
 			td -= delta * 0.45
@@ -862,6 +1090,10 @@ func _drive_input(delta: float) -> void:
 		if touch_throttle >= 0.0 and not touch_thrust_up and not touch_thrust_down:
 			pl.set_throttle(touch_throttle)
 			td = 0.0
+		# Hold-to-afterburner: the last 0.2 of the lever is AB only while
+		# Shift / the accel key is held. Releasing drops thrust back to mil.
+		if (not holding_ab) and (not decelerating) and td == 0.0 and pl.thrust > 0.8:
+			pl.thrust = move_toward(pl.thrust, 0.8, delta * 0.55)
 		var br := 1.0 if decelerating or (Input.is_key_pressed(KEY_Q) and Input.is_key_pressed(KEY_E)) else 0.0
 		pl.set_pilot_input(pitch, roll, yaw, td, br, yaw)
 		pl.set_meta("decelerating", decelerating)
@@ -896,9 +1128,10 @@ func _vehicle_camera(delta: float) -> void:
 		cam.near = 0.08
 		cam.current = true
 		return
-	# Third person: vehicle-centered chase. Default / recenter sit behind the
-	# vehicle and look along its heading (Battlefield / Ace Combat). Hold LMB
-	# or swipe to orbit around the vehicle; release springs offsets back to 0.
+	# Third person: dynamic chase based on motion, not locked to the vehicle
+	# heading / roll (custom-3d-car auto-rotate + Ace Combat flight-path chase).
+	# Slow or stationary: fall back to the visual nose. Hold LMB / swipe to
+	# orbit; release recenters behind the current motion (or heading).
 	var dt := maxf(delta, 0.0001)
 	var held := _touch_orbit or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 	if bool(player.get("ui_blocks_capture")):
@@ -909,9 +1142,9 @@ func _vehicle_camera(delta: float) -> void:
 	if not _cam_ready:
 		_orbit_yaw = 0.0
 		_orbit_pitch = want_pitch
+		_chase_dir = Vector3.ZERO
 		_cam_ready = true
 	if not held:
-		# Offsets are vehicle-relative, so yaw 0 is always "behind the nose".
 		_orbit_yaw += wrapf(0.0 - _orbit_yaw, -PI, PI) * (1.0 - exp(-3.2 * dt))
 		_orbit_pitch += (want_pitch - _orbit_pitch) * (1.0 - exp(-2.8 * dt))
 	_orbit_pitch = clampf(_orbit_pitch, -1.25, 0.55)
@@ -921,36 +1154,48 @@ func _vehicle_camera(delta: float) -> void:
 	var look_ahead := 5.5 if k == "car" else 14.0
 	var fwd := _vehicle_forward(xf)
 	var origin := xf.origin
+	var vel := Vector3.ZERO
+	if occupied is RigidBody3D:
+		vel = (occupied as RigidBody3D).linear_velocity
+	# Motion direction; at low speed use the nose. Never lock to fuselage roll.
+	var motion := vel
+	if not airborne:
+		motion.y = 0.0
+	var motion_dir := fwd
+	if motion.length() > (3.5 if airborne else 1.4):
+		motion_dir = motion.normalized()
+		# Reverse: keep the camera behind the visual nose, not ahead of the boot.
+		if motion_dir.dot(fwd) < -0.15:
+			motion_dir = fwd
+	if _chase_dir.length_squared() < 1e-6:
+		_chase_dir = motion_dir
+	else:
+		_chase_dir = _chase_dir.slerp(motion_dir, 1.0 - exp(-2.6 * dt)).normalized()
+	var chase := _chase_dir
 	var pivot_pt := origin + Vector3(0.0, look_y_off, 0.0)
 	var cam_pos: Vector3
 	var look_pt: Vector3
 	var up_ref := Vector3.UP
-	if airborne and not held:
-		# 3D fuselage chase (old web project / Ace Combat).
-		cam_pos = origin - fwd * dist + xf.basis.y * height * 0.55
-		look_pt = origin + fwd * look_ahead + xf.basis.y * 0.4
-		if xf.basis.y.dot(Vector3.UP) > 0.25:
-			up_ref = xf.basis.y
+	var yaw := _heading_yaw(chase, _heading_yaw(fwd)) + _orbit_yaw
+	var cy := cos(_orbit_pitch)
+	var look_dir := Vector3(-sin(yaw) * cy, sin(_orbit_pitch), -cos(yaw) * cy)
+	if airborne:
+		# Follow the flight path, not the banked fuselage.
+		cam_pos = origin - chase * dist + up_ref * (height * 0.55 - look_dir.y * dist * 0.25)
+		look_pt = origin + chase * look_ahead + up_ref * 0.4 if not held else pivot_pt
 	else:
-		var yaw := _heading_yaw(fwd) + _orbit_yaw
-		var cy := cos(_orbit_pitch)
-		var look_dir := Vector3(-sin(yaw) * cy, sin(_orbit_pitch), -cos(yaw) * cy)
 		cam_pos = origin - look_dir * dist
 		cam_pos.y = pivot_pt.y - look_dir.y * dist + height * 0.12
-		var fwd_h := Vector3(fwd.x, 0.0, fwd.z)
+		var fwd_h := Vector3(chase.x, 0.0, chase.z)
 		if fwd_h.length_squared() < 1e-8:
-			fwd_h = Vector3(-sin(yaw - _orbit_yaw), 0.0, -cos(yaw - _orbit_yaw))
-		else:
+			fwd_h = Vector3(fwd.x, 0.0, fwd.z)
+		if fwd_h.length_squared() > 1e-8:
 			fwd_h = fwd_h.normalized()
-		# Orbit: look at the vehicle (the orbit center). Recentered: look along
-		# the heading so the nose stays in frame and the camera faces forward.
 		look_pt = pivot_pt if held else (pivot_pt + fwd_h * look_ahead)
 	var to_tgt := look_pt - cam_pos
 	if to_tgt.length_squared() < 1e-8:
-		to_tgt = fwd if fwd.length_squared() > 1e-8 else Vector3(0, 0, -1)
+		to_tgt = chase if chase.length_squared() > 1e-8 else Vector3(0, 0, -1)
 	var want_xf := Transform3D(Basis.looking_at(to_tgt, up_ref), cam_pos)
-	# Snap to the interpolated vehicle-relative pose. World-space lag here is
-	# what made the mesh smear under the camera during sudden motion.
 	_apply_vehicle_cam_xform(pivot, cam, want_xf, not _cam_ready)
 	cam.fov = 55.0 if k == "car" else 62.0
 	cam.near = 0.15
