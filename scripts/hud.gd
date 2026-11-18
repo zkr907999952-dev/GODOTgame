@@ -75,6 +75,7 @@ var _btn_thrust_up: Button
 var _btn_thrust_down: Button
 var _btn_yaw_l: Button
 var _btn_yaw_r: Button
+var _btn_gear: Button
 var _thrust_lever: Control
 var _thrust_fill: ColorRect
 var _thrust_ab: ColorRect
@@ -1051,7 +1052,13 @@ func _build_vehicle_touch(root: Control) -> void:
 	_btn_yaw_l.button_up.connect(func(): _set_vs("touch_yaw", 0.0))
 	_btn_yaw_r.button_down.connect(func(): _set_vs("touch_yaw", 1.0))
 	_btn_yaw_r.button_up.connect(func(): _set_vs("touch_yaw", 0.0))
-	for b in [_btn_thrust_up, _btn_thrust_down, _btn_yaw_l, _btn_yaw_r]:
+	_btn_gear = _veh_btn("起落架", Vector2(88, 40), 14)
+	_btn_gear.pressed.connect(func():
+		if _vehicle_system and _vehicle_system.has_method("toggle_occupied_gear"):
+			_vehicle_system.call("toggle_occupied_gear")
+		_refresh_vehicle_touch()
+	)
+	for b in [_btn_thrust_up, _btn_thrust_down, _btn_yaw_l, _btn_yaw_r, _btn_gear]:
 		root.add_child(b)
 
 	_thrust_lever = Control.new()
@@ -1222,6 +1229,14 @@ func _refresh_vehicle_touch() -> void:
 	if _btn_yaw_r:
 		_btn_yaw_r.visible = show_plane_btns
 		_btn_yaw_r.position = Vector2(right - 64.0, by - 250.0)
+	if _btn_gear:
+		_btn_gear.visible = show_plane_btns
+		_btn_gear.position = Vector2(right - 88.0, by - 300.0)
+		if show_plane_btns and occ:
+			var g = occ.get("gear")
+			var gw = occ.get("gear_want")
+			var down := float(gw if gw != null else (g if g != null else 1.0)) > 0.5
+			_btn_gear.text = "收起落架" if down else "放下起落架"
 	if _plane_throttle_box:
 		_plane_throttle_box.visible = false
 	if vs and not show_plane:

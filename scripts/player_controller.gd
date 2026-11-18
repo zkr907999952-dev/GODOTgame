@@ -1221,7 +1221,7 @@ func _process(delta: float) -> void:
 	if occupancy != "":
 		# Exam bed in observation mode: keep the orbit camera. Everything else
 		# (lying FP, car/plane chase or cockpit) is written by VehicleSystem
-		# after this node (process_priority lower than the player).
+		# after this node (process_priority 20, player is -10).
 		if occupancy == "exam_bed" and play_mode == GameMode.DISPLAY:
 			_update_tp_camera(delta)
 			_push_view_spin(delta)
@@ -1930,12 +1930,9 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 			var dir := 1.0 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0
 			var steps := dir * maxf(1.0, mb.factor if mb.factor > 0.0 else 1.0)
-			if first_person:
-				# Wheel up = zoom in = narrower FOV.
-				fp_fov = clampf(fp_fov - steps * 3.0, fp_fov_min, fp_fov_max)
-				_apply_camera()
-			else:
-				_tp_dolly(steps)
+			# Wheel always dollies distance to the look-at / follow center.
+			# It must not change FOV in observation or character view.
+			_tp_dolly(steps)
 			get_viewport().set_input_as_handled()
 			return
 		if not first_person:

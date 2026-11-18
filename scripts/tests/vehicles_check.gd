@@ -1,9 +1,9 @@
 extends SceneTree
-## 0.2.18 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.19 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.18"
-const VERSION_CODE := 20
+const VERSION_NAME := "0.2.19"
+const VERSION_CODE := 21
 
 var fails := 0
 var main: Node
@@ -63,6 +63,7 @@ func _run() -> void:
 	await _check_car_cam_and_exit()
 	await _check_city_defaults()
 	await _check_0218_physics_and_visuals()
+	await _check_0219_chase_wheel_gear()
 	_finish()
 
 
@@ -226,6 +227,9 @@ func _check_hud() -> void:
 	_ok(hud.get("_btn_car_accel") != null and hud.get("_btn_car_brake") != null, "mobile car accel + drift buttons exist")
 	_ok(hud.get("_btn_thrust_up") != null and hud.get("_btn_thrust_down") != null, "mobile fighter accel/decel buttons exist")
 	_ok(hud.get("_btn_yaw_l") != null and hud.get("_btn_yaw_r") != null, "mobile fighter yaw buttons exist")
+	_ok(hud.get("_btn_gear") != null, "mobile landing-gear button exists")
+	if hud.get("_btn_gear"):
+		_ok("起落架" in str(hud.get("_btn_gear").text), "mobile gear button is labeled 起落架")
 	_ok(hud.get("_thrust_lever") != null and hud.get("_thrust_ab") != null, "thrust lever with afterburner segment exists")
 
 
@@ -378,6 +382,20 @@ func _check_city_defaults() -> void:
 			var runway_err := Vector2(mid.x + 1000.0, mid.z - 300.0).length()
 			_ok(runway_err < 80.0, "fighters spawned at the labeled runway start (mid=%s, err=%.1f m)" % [mid, runway_err])
 			_ok(absf(a.y - b.y) < 2.0, "fighters sit at a similar height (%.2f / %.2f)" % [a.y, b.y])
+			var yaw_err := absf(wrapf(pl[0].rotation.y - pl[1].rotation.y, -PI, PI))
+			_ok(yaw_err < 0.08, "both fighters share a heading (dyaw=%.3f)" % yaw_err)
+			var want_yaw := -PI * 0.5
+			if vs.has_method("_runway_heading_at"):
+				var hd: Dictionary = vs.call("_runway_heading_at", Vector3(-1000.0, 0.0, 300.0))
+				want_yaw = float(hd.get("yaw", want_yaw))
+			var align := absf(wrapf(pl[0].rotation.y - want_yaw, -PI, PI))
+			_ok(align < 0.20, "fighter noses align with the runway heading (yaw=%.3f want=%.3f err=%.3f)" % [pl[0].rotation.y, want_yaw, align])
+			var nose: Vector3 = -pl[0].global_transform.basis.z
+			var nose_h := Vector3(nose.x, 0.0, nose.z)
+			if nose_h.length_squared() > 1e-6:
+				nose_h = nose_h.normalized()
+			# West-end threshold: nose should have a strong +X component on this map.
+			_ok(absf(nose_h.x) > 0.85 or absf(nose_h.z) > 0.85, "nose lies along the runway axis (nose_h=%s)" % nose_h)
 
 
 func _convex_or_box_only(n: Node) -> bool:
@@ -409,6 +427,8 @@ func _check_bindings_and_hinge() -> void:
 	_ok(drive.find("KEY_SHIFT") >= 0, "Shift is bound (car nitro / plane thrust)")
 	_ok(drive.find("KEY_C") >= 0, "plane C decelerate is bound")
 	_ok(drive.find("KEY_Q") >= 0 and drive.find("KEY_E") >= 0, "plane Q/E yaw is bound")
+	_ok(drive.find("KEY_G") >= 0 and drive.find("toggle_gear") >= 0, "plane G landing-gear toggle is bound")
+	_ok(drive.find("_orbit_yaw") >= 0 and drive.find("_heading_yaw") >= 0, "chase cam uses vehicle-relative heading offsets")
 	_ok(drive.find("pitch := -axis_fb") >= 0, "plane W dives / S pitches up (pitch = -axis_fb)")
 	_ok(drive.find("steer := -axis_lr") >= 0, "car A/D steering (steer = -axis_lr)")
 	_ok(drive.find("func is_drive_third") >= 0 and drive.find("func orbit_look") >= 0, "third-person orbit + recenter API exists")
@@ -416,8 +436,12 @@ func _check_bindings_and_hinge() -> void:
 	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
 	_ok(car_src.find("engine_force = -force") >= 0, "car engine_force is negated so W drives the visual nose")
 	_ok(car_src.find("FREEZE_MODE_KINEMATIC") >= 0, "car uses kinematic freeze so Jolt keeps wheel positions")
+	_ok(car_src.find("WHEEL_FRICTION := 1.0") >= 0 or car_src.find("WHEEL_FRICTION_REAR := 1.0") >= 0, "car tyre grip follows Truck Town (friction_slip 1.0)")
+	_ok(car_src.find("ENGINE_FORCE") >= 0, "car uses a bounded Truck Town-style engine_force, not raw overpowering torque")
 	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
 	_ok(pl_src.find("ROTATE_SPEED") >= 0 and pl_src.find("_apply_gear_suspension") >= 0, "plane has rotate-speed takeoff and gear suspension")
+	_ok(pl_src.find("GEAR_AUTO_RETRACT_AGL") >= 0 and pl_src.find("weight_on_gear") >= 0, "plane auto-retracts gear above an AGL threshold and refuses to retract on the wheels")
+	_ok(pl_src.find("gear * GEAR_DRAG") >= 0 or pl_src.find("GEAR_DRAG") >= 0, "gear-down adds parasite drag")
 	var vis := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
 	_ok(vis.find("st.get(\"decelerating\"") >= 0 or vis.find("decelerating") >= 0, "flaps read the decelerating flag")
 	_ok(vis.find("petal_gap") >= 0, "nozzle petal gap follows thrust")
@@ -862,6 +886,201 @@ func _check_0218_physics_and_visuals() -> void:
 	if vs:
 		_ok(vs.has_method("is_drive_third") and vs.has_method("orbit_look") and vs.has_method("end_orbit"),
 			"vehicle system exposes orbit / recenter helpers")
+	plane.queue_free()
+	floor.queue_free()
+	await _frames(1)
+
+
+func _check_0219_chase_wheel_gear() -> void:
+	if vs == null or player == null or main == null:
+		return
+	# process_priority must run *after* the player (higher number; player is -10).
+	_ok(int(vs.process_priority) > int(player.process_priority), "VehicleSystem process_priority (%d) runs after the player (%d)" % [vs.process_priority, player.process_priority])
+
+	# Wheel dollies distance and does not change FOV in display or character modes.
+	var pc_src := FileAccess.get_file_as_string("res://scripts/player_controller.gd")
+	_ok(pc_src.find("fp_fov = clampf(fp_fov - steps") < 0, "player wheel path no longer changes FOV")
+	var fov_fp0: float = float(player.get("fp_fov"))
+	var fov_tp0: float = float(player.get("tp_fov"))
+	var d0: float = float(player.call("get_tp_distance"))
+	# Display / observation.
+	if player.has_method("is_display_mode") and not bool(player.call("is_display_mode")):
+		player.call("set_play_mode", player.get("play_mode"))  # keep
+	player.call("_tp_dolly", 3.0)
+	var d1: float = float(player.call("get_tp_distance"))
+	_ok(d1 < d0 - 0.01, "display-mode wheel dollies camera distance (%.3f -> %.3f)" % [d0, d1])
+	_ok(is_equal_approx(float(player.get("fp_fov")), fov_fp0) and is_equal_approx(float(player.get("tp_fov")), fov_tp0), "display-mode wheel does not change FOV")
+	# Character / control mode: same dolly, still no FOV change.
+	if player.has_method("set_play_mode"):
+		# GameMode.CONTROL is the first-person play mode (enum value 1 if DISPLAY=0).
+		var modes = player.get("GameMode") if false else null
+		player.set("first_person", true)
+	var fov_fp1: float = float(player.get("fp_fov"))
+	player.call("_tp_dolly", -2.0)
+	var d2: float = float(player.call("get_tp_distance"))
+	_ok(d2 > d1 + 0.005, "character-mode wheel also changes camera distance (%.3f -> %.3f)" % [d1, d2])
+	_ok(is_equal_approx(float(player.get("fp_fov")), fov_fp1) and is_equal_approx(float(player.get("tp_fov")), fov_tp0), "character-mode wheel does not change FOV")
+
+	# Chase cam: heading-aligned default + recenter after an orbit.
+	# Park a temporary car in the room.
+	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	main.add_child(car)
+	car.global_position = Vector3(1.8, 0.6, 0.3)
+	if car.has_method("spawn_lift"):
+		car.global_position.y = float(car.call("spawn_lift"))
+	car.rotation = Vector3(0.0, 0.7, 0.0)
+	if car.has_method("reset_physics_interpolation"):
+		car.reset_physics_interpolation()
+	await _phys(2)
+	player.global_position = car.global_position + Vector3(2.0, 0.1, 0.0)
+	vs.nearest = car
+	_ok(bool(vs.call("try_enter")), "enter car for chase-cam check")
+	_ok(str(vs.get("vehicle_cam")) == "third", "chase cam defaults to third person")
+	if vs.has_method("_reset_vehicle_cam"):
+		vs.call("_reset_vehicle_cam")
+	if vs.has_method("_vehicle_camera"):
+		vs.call("_vehicle_camera", 0.016)
+	await _frames(2)
+	if vs.has_method("_vehicle_camera"):
+		vs.call("_vehicle_camera", 0.016)
+	var err0 := 99.0
+	if vs.has_method("chase_heading_error"):
+		err0 = float(vs.call("chase_heading_error"))
+	_ok(err0 < 0.25, "default chase cam aligns with the vehicle heading (err=%.3f rad)" % err0)
+	# Orbit off-heading, then release and recenter.
+	if vs.has_method("begin_orbit"):
+		vs.call("begin_orbit")
+	if vs.has_method("orbit_look"):
+		vs.call("orbit_look", Vector2(180.0, 0.0), 0.01)
+	if vs.has_method("_vehicle_camera"):
+		vs.call("_vehicle_camera", 0.016)
+	if vs.has_method("end_orbit"):
+		vs.call("end_orbit")
+	for i in 36:
+		if vs.has_method("_vehicle_camera"):
+			vs.call("_vehicle_camera", 0.05)
+	var err1 := 99.0
+	if vs.has_method("chase_heading_error"):
+		err1 = float(vs.call("chase_heading_error"))
+	_ok(err1 < 0.25, "recenter returns the chase cam to the vehicle heading (err=%.3f rad)" % err1)
+	# G is not holster while driving; V still toggles camera.
+	_ok(str(main.call("action_for_key", KEY_V, "control")) == "vehicle_cam", "V is vehicle_cam while in the car")
+	_ok(str(main.call("action_for_key", KEY_G, "control")) == "", "G is not holster while in the car")
+	_ok(str(main.call("action_for_key", KEY_Q, "control")) == "", "Q is not weapon_wheel while in the car")
+	_ok(bool(vs.call("try_exit")), "exit car after chase-cam check")
+	car.queue_free()
+	await _frames(1)
+
+	# Isolated floor: straight-line throttle (no uncommanded spin) + landing gear.
+	var floor := StaticBody3D.new()
+	floor.name = "TestFloor0219"
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(260, 1, 260)
+	cs.shape = box
+	cs.position = Vector3(0, -0.5, 0)
+	floor.add_child(cs)
+	floor.position = Vector3(18000, 20, 18000)
+	root.add_child(floor)
+	await _phys(1)
+
+	var car2: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	root.add_child(car2)
+	var lift: float = float(car2.call("spawn_lift"))
+	car2.global_position = floor.position + Vector3(0, lift + 0.02, 0)
+	car2.rotation = Vector3.ZERO
+	if car2.has_method("_restore_wheel_positions"):
+		car2.call("_restore_wheel_positions")
+	car2.reset_physics_interpolation()
+	car2.freeze = false
+	car2.occupied = true
+	car2.sleeping = false
+	for i in 20:
+		await _phys(1)
+	car2.linear_velocity = Vector3.ZERO
+	car2.angular_velocity = Vector3.ZERO
+	car2.global_position = floor.position + Vector3(4, lift + 0.02, 0)
+	car2.rotation = Vector3.ZERO
+	car2.reset_physics_interpolation()
+	for i in 12:
+		await _phys(1)
+	var yaw0: float = car2.rotation.y
+	car2.set_driver_input(1.0, 0.0, 0.0, false, false)
+	for i in 90:
+		await _phys(1)
+	var dyaw := absf(wrapf(car2.rotation.y - yaw0, -PI, PI))
+	var fwd: Vector3 = -car2.global_transform.basis.z
+	var long_w: float = car2.linear_velocity.dot(fwd)
+	_ok(long_w > 1.5, "flat-ground throttle moves the car forward (v=%.2f)" % long_w)
+	_ok(dyaw < 0.18, "flat-ground throttle does not spin the car out (dyaw=%.3f)" % dyaw)
+	car2.queue_free()
+
+	var plane: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(plane)
+	await _phys(2)
+	var plift: float = float(plane.call("spawn_lift"))
+	plane.global_position = floor.position + Vector3(-8, plift, 0)
+	plane.rotation = Vector3.ZERO
+	plane.freeze = false
+	plane.sleeping = false
+	plane.can_sleep = false
+	plane.reset_physics_interpolation()
+	for i in 40:
+		await _phys(1)
+	plane.occupied = true
+	# Gear-down drag is higher than gear-up.
+	plane.gear = 1.0
+	var d_down: float = float(plane.call("gear_drag_coeff"))
+	plane.gear = 0.0
+	var d_up: float = float(plane.call("gear_drag_coeff"))
+	_ok(d_down > d_up + 0.01, "gear-down increases drag (down=%.3f up=%.3f)" % [d_down, d_up])
+	plane.gear = 1.0
+	plane.gear_want = 1.0
+	plane.gear_manual = false
+	# Settled on the runway: G must not retract.
+	if plane.has_method("toggle_gear"):
+		plane.call("toggle_gear")
+	_ok(float(plane.gear_want) > 0.5, "gear will not retract while settled on the runway (gear_want=%.2f)" % float(plane.gear_want))
+	# Lift off: auto-retract above the AGL threshold.
+	plane.gear_manual = false
+	plane.gear = 1.0
+	plane.gear_want = 1.0
+	plane.global_position = floor.position + Vector3(-8, plift + 12.0, 0)
+	plane.linear_velocity = Vector3(0, 2.0, -50.0)
+	plane.angular_velocity = Vector3.ZERO
+	plane.reset_physics_interpolation()
+	for i in 50:
+		await _phys(1)
+	_ok(float(plane.gear_want) < 0.5 or float(plane.gear) < 0.6, "gear auto-retracts above the AGL threshold (gear=%.2f want=%.2f agl=%.2f)" % [float(plane.gear), float(plane.gear_want), float(plane.get("_agl"))])
+	# Airborne G toggles gear back down.
+	plane.gear_manual = false
+	if plane.has_method("weight_on_gear"):
+		# If still considered on wheels, push it higher.
+		if bool(plane.call("weight_on_gear")):
+			plane.global_position.y += 8.0
+			for i in 20:
+				await _phys(1)
+	if plane.has_method("toggle_gear"):
+		# Start from known up, toggle down, then up.
+		plane.gear = 0.2
+		plane.gear_want = 0.0
+		plane.call("toggle_gear")
+	_ok(float(plane.gear_want) > 0.5, "G toggles landing gear down when airborne (want=%.2f)" % float(plane.gear_want))
+	plane.call("toggle_gear")
+	_ok(float(plane.gear_want) < 0.5, "G toggles landing gear up when airborne (want=%.2f)" % float(plane.gear_want))
+
+	# Occupied fighter: G is vehicle_gear, Q is still not the weapon wheel.
+	# Place the plane in the room-ish so we can occupy via VehicleSystem.
+	# (Use a dummy enter on vs.)
+	if vs.get("occupied") == null:
+		player.global_position = plane.global_position + Vector3(3, 0, 0)
+		vs.nearest = plane
+		if bool(vs.call("try_enter")):
+			_ok(str(main.call("action_for_key", KEY_G, "control")) == "vehicle_gear", "G is vehicle_gear while in the fighter")
+			_ok(str(main.call("action_for_key", KEY_Q, "control")) == "", "Q is not weapon_wheel while in the fighter")
+			_ok(bool(vs.call("try_exit")), "exit fighter after gear-bind check")
+		else:
+			_ok(false, "can enter fighter for G-key routing check")
 	plane.queue_free()
 	floor.queue_free()
 	await _frames(1)

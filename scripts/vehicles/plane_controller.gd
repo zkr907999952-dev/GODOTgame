@@ -20,7 +20,14 @@ const CL_ALPHA := 4.4  # per radian
 const CL_MAX := 1.15
 const ALPHA_STALL := 0.28  # rad ≈ 16°
 const RHO_SL := 1.225
-const GEAR_DRAG := 0.018
+# Gear-down parasite drag. Raised a little so a hanging gear is noticeable
+# (Ace Combat / old web project: gear adds measurable drag).
+const GEAR_DRAG := 0.032
+# Auto-retract once clearly off the pavement. Same 3.4 m AGL threshold as
+# rouchangmoniqi3 src/lib/vehicle-sim.ts (agl > 3.4). Never retract while
+# the weight is still on the wheels.
+const GEAR_AUTO_RETRACT_AGL := 3.4
+const GEAR_AUTO_EXTEND_AGL := 2.6
 const BRAKE_DRAG := 0.05
 const ROTATE_SPEED := 42.0  # m/s, ~150 km/h — taxi then pull stick to rotate
 const TAXI_THRUST_SCALE := 0.70
@@ -188,18 +195,39 @@ func rotate_speed() -> float:
 	return ROTATE_SPEED
 
 
+func gear_drag_coeff() -> float:
+	## Extra parasite-drag term from the hanging gear (0 when retracted).
+	return gear * GEAR_DRAG
+
+
+func weight_on_gear() -> bool:
+	## True when the jet is settled on the pavement and the legs are carrying load.
+	return gear > 0.35 and _on_wheels and _agl < 1.5
+
+
 func toggle_gear() -> void:
+	## G / mobile button / Ctrl. Refuse to retract while settled on the runway
+	## so the jet is not left unsupported on the hull.
 	gear_manual = true
-	gear_want = 0.0 if gear > 0.5 else 1.0
+	# Toggle the *commanded* state so a second G before the legs finish
+	# moving still reverses the request (not the in-between visual pose).
+	if gear_want > 0.5:
+		if weight_on_gear():
+			return
+		gear_want = 0.0
+	else:
+		gear_want = 1.0
 
 
 func _physics_process(delta: float) -> void:
 	door += (door_target - door) * (1.0 - exp(-8.0 * delta))
-	# Auto gear, unless the pilot toggled it (Ctrl).
+	# Auto gear, unless the pilot toggled it (G / Ctrl / mobile).
+	# Retract only when the weight is off the wheels and AGL is past the
+	# Ace Combat / old-project threshold. Auto-extend again on approach.
 	if not gear_manual:
-		if airborne and airspeed > 90.0 and _agl > 18.0 and linear_velocity.y > -4.0:
+		if (not weight_on_gear()) and airborne and _agl > GEAR_AUTO_RETRACT_AGL:
 			gear_want = 0.0
-		elif (not airborne) or airspeed < 80.0 or _agl < 28.0:
+		elif _agl < GEAR_AUTO_EXTEND_AGL or weight_on_gear():
 			gear_want = 1.0
 	gear = move_toward(gear, gear_want, delta * (1.55 if gear_manual else 0.55))
 	_vis_spin += (airspeed / 0.42) * delta * (1.0 if _on_wheels else 0.15)
@@ -404,7 +432,19 @@ func _probe_ground(state: PhysicsDirectBodyState3D, xf: Transform3D) -> void:
 		var d: float = start.distance_to(hit["position"])
 		agl_min = minf(agl_min, d)
 	_on_wheels = hits >= 1 and gear > 0.35 and agl_min < 2.1
-	_agl = 0.0 if agl_min > 1e8 else maxf(0.0, agl_min - 0.7)
+	if agl_min > 1e8:
+		# Short contact rays missed — measure AGL with a long world-down ray
+		# so auto-retract (and "are we still on the runway?") work in flight.
+		# A miss here used to leave _agl at 0, which looked like "on the ground".
+		var origin := xf.origin + Vector3(0.0, 2.0, 0.0)
+		var q3 := PhysicsRayQueryParameters3D.create(origin, origin + Vector3(0.0, -400.0, 0.0), 1, exclude)
+		var hit3 := space.intersect_ray(q3)
+		if hit3.is_empty():
+			_agl = 400.0
+		else:
+			_agl = maxf(0.0, origin.distance_to(hit3["position"]) - 2.0)
+	else:
+		_agl = maxf(0.0, agl_min - 0.7)
 	# Airborne if not on wheels or clearly climbing with speed.
 	airborne = (not _on_wheels) or (_agl > 2.4 and airspeed > ROTATE_SPEED * 0.7)
 

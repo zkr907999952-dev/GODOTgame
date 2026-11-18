@@ -1,31 +1,40 @@
 extends VehicleBody3D
 ## Sports-car physics using Godot's VehicleBody3D + VehicleWheel3D (Jolt).
-## Pattern follows the official VehicleBody3D workflow (truck-town style):
-## per-wheel suspension/friction, engine force at the driven wheels, and a
-## simple automatic gearbox + torque curve so it feels heavier and more
-## planted than the old web arcade sim.
+## Wheel / grip / suspension values follow the official Truck Town demo
+## (godotengine/godot-demo-projects 3d/truck_town, Godot 4.6 + Jolt):
+##   wheel_friction_slip = 1.0, suspension_stiffness = 40, damping_compression
+##   = 0.88, chassis PhysicsMaterial friction 0.5. Engine force is scaled for
+##   this 1420 kg mass from the demo's "engine_force_value" pattern (including
+##   the low-speed launch boost), not a raw Newton torque that overpowers the
+##   tyres and spins the car out uncommanded.
 class_name CarController
 
 const KIND := "car"
 const ENTER_RADIUS := 4.2
 const MASS_KG := 1420.0
-const MAX_STEER := 0.55  # rad (~31°)
-const STEER_SPEED := 3.6
-const BRAKE_FORCE := 28.0
-const HANDBRAKE_FORCE := 46.0
+const MAX_STEER := 0.42  # rad, Truck Town uses 0.4
+const STEER_SPEED := 1.8
+const BRAKE_FORCE := 18.0
+const HANDBRAKE_FORCE := 28.0
 const IDLE_RPM := 900.0
 const REDLINE_RPM := 8200.0
 const PEAK_RPM := 5200.0
-const PEAK_TORQUE := 780.0  # N·m
 const FINAL_DRIVE := 3.54
 const GEAR_RATIOS := [0.0, 3.21, 2.11, 1.47, 1.14, 0.92, 0.74]  # index 0 unused (neutral)
-const DRIVETRAIN_EFF := 0.88
-const WHEEL_FRICTION := 13.5
-const SUSP_STIFFNESS := 48.0
-const SUSP_MAX_FORCE := 12000.0
+# Official demo uses ~40 force at a light body. Scale for 1420 kg so 0–100 km/h
+# is sports-car quick but the tyres (friction_slip 1.0) can actually hold it.
+const ENGINE_FORCE := 4200.0
+const ENGINE_FORCE_NITRO := 5600.0
+const ENGINE_FORCE_REV := 2800.0
+const WHEEL_FRICTION := 1.0  # Truck Town / docs: 1.0 is normal grip
+const WHEEL_FRICTION_FRONT := 1.15
+const WHEEL_FRICTION_REAR := 1.0
+const WHEEL_FRICTION_HB := 0.35  # rear slip under handbrake / drift
+const SUSP_STIFFNESS := 40.0
+const SUSP_MAX_FORCE := 9000.0
 const SUSP_TRAVEL := 0.13
-const DAMP_COMP := 0.95
-const DAMP_REL := 1.05
+const DAMP_COMP := 0.88
+const DAMP_REL := 0.92
 
 signal occupied_changed(on: bool)
 
@@ -54,7 +63,7 @@ var spawn_map: String = "city"
 func _ready() -> void:
 	mass = MASS_KG
 	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
-	center_of_mass = Vector3(0.0, -0.18, 0.16)  # slightly rear / low, mid-engine feel
+	center_of_mass = Vector3(0.0, -0.22, 0.08)  # low and slightly rearward, planted
 	gravity_scale = 1.0
 	continuous_cd = true
 	contact_monitor = true
@@ -62,6 +71,14 @@ func _ready() -> void:
 	collision_layer = 1
 	collision_mask = 1  # world only; player uses a proximity test to enter
 	can_sleep = true
+	linear_damp = 0.04
+	angular_damp = 0.35  # helps the chassis track straight when no steer input
+	if physics_material_override == null:
+		var mat := PhysicsMaterial.new()
+		# Truck Town uses 0.5; keep the hull from yawing the car if it kisses the ground.
+		mat.friction = 0.15
+		mat.bounce = 0.0
+		physics_material_override = mat
 	# Jolt + FREEZE_MODE_STATIC zeros VehicleWheel3D local positions, so the
 	# car ends up spinning on a single point under the chassis.
 	freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
@@ -134,10 +151,10 @@ func _build_wheels() -> void:
 		wh.suspension_max_force = SUSP_MAX_FORCE
 		wh.damping_compression = DAMP_COMP
 		wh.damping_relaxation = DAMP_REL
-		wh.wheel_friction_slip = WHEEL_FRICTION
-		wh.wheel_roll_influence = 0.08
+		wh.wheel_friction_slip = WHEEL_FRICTION_FRONT if bool(w["steer"]) else WHEEL_FRICTION_REAR
+		wh.wheel_roll_influence = 0.1  # VehicleWheel3D default; Truck Town uses 0.4 (truck)
 		wh.use_as_steering = bool(w["steer"])
-		# RWD with a little front drive for launch stability (mostly rear).
+		# Driven wheels: rear always, front lightly (AWD launch, RWD feel).
 		wh.use_as_traction = true
 		_wheels.append(wh)
 		_wheel_rest.append(wh.position)
@@ -229,50 +246,49 @@ func _drive(delta: float) -> void:
 	var fwd := -global_transform.basis.z
 	var long_speed := linear_velocity.dot(fwd)  # + = forward
 	# Steering: slower at speed (Ackermann-ish reduction).
-	var steer_limit := MAX_STEER / (1.0 + speed * 0.055)
+	var steer_limit := MAX_STEER / (1.0 + speed * 0.05)
 	var steer_target := steer_in * steer_limit
 	steer_angle = move_toward(steer_angle, steer_target, STEER_SPEED * delta)
 	steering = steer_angle
-	# Automatic gearbox from wheel speed.
+	# Automatic gearbox is visual / RPM only; force follows Truck Town.
 	var wheel_r := visuals.wheel_r if visuals else 0.34
 	_update_gear(long_speed, wheel_r)
 	var ratio: float = GEAR_RATIOS[gear] * FINAL_DRIVE
-	# Engine rpm from driven-wheel speed, with throttle flare.
 	var wheel_rad_s := (long_speed / maxf(wheel_r, 0.2))
 	var shaft_rpm := absf(wheel_rad_s) * ratio * 60.0 / TAU
 	var want_rpm := maxf(IDLE_RPM, shaft_rpm)
 	if absf(throttle_in) > 0.05 and absf(long_speed) < 1.0:
 		want_rpm = lerpf(want_rpm, lerpf(IDLE_RPM, REDLINE_RPM, absf(throttle_in)), 0.55)
 	rpm = move_toward(rpm, clampf(want_rpm, IDLE_RPM, REDLINE_RPM), 6000.0 * delta)
-	var tq := _torque_at(rpm) * throttle_in
-	if nitro and throttle_in > 0.1:
-		tq *= 1.28
-	# Wheel longitudinal force = torque * ratio * eff / r. Split across driven wheels.
-	var force := (tq * ratio * DRIVETRAIN_EFF) / maxf(wheel_r, 0.2)
-	var driven := 0
-	for w in _wheels:
-		if w.use_as_traction:
-			driven += 1
-	driven = maxi(driven, 1)
-	# Reverse uses a lower force cap.
-	if throttle_in < 0.0 and long_speed < 0.6:
-		force = clampf(force, -MASS_KG * 6.5, MASS_KG * 6.5)
-	# Visual nose is -Z (Godot camera convention). VehicleBody3D applies
-	# positive engine_force along +Z, so the sign must be flipped or W
-	# would drive the car backward.
+	# Truck Town: engine_force_value, with a low-speed launch boost, capped.
+	# Visual nose is -Z; VehicleBody3D applies +engine_force along +Z, so flip.
+	var cap := ENGINE_FORCE_NITRO if (nitro and throttle_in > 0.1) else ENGINE_FORCE
+	if throttle_in < -0.02:
+		cap = ENGINE_FORCE_REV
+	var force := cap * throttle_in
+	var spd := absf(long_speed)
+	if spd < 5.0 and absf(throttle_in) > 0.02 and not is_zero_approx(spd):
+		force = signf(throttle_in) * clampf(cap * 5.0 / maxf(spd, 0.35), 0.0, cap * 1.6)
+	elif spd < 5.0 and absf(throttle_in) > 0.02:
+		force = signf(throttle_in) * cap * 1.35
 	engine_force = -force
-	# Per-wheel brake / handbrake (rear bias on HB).
+	# Per-wheel brake / handbrake (rear bias on HB) and grip for drift.
 	var br := brake_in * BRAKE_FORCE
 	if handbrake:
 		br = HANDBRAKE_FORCE
 	brake = br
 	for i in _wheels.size():
 		var w := _wheels[i]
-		if handbrake and not w.use_as_steering:
+		if w.use_as_steering:
+			w.wheel_friction_slip = WHEEL_FRICTION_FRONT
+			w.brake = br * 0.7
+		elif handbrake:
+			w.wheel_friction_slip = WHEEL_FRICTION_HB
 			w.brake = HANDBRAKE_FORCE
 			w.engine_force = 0.0
 		else:
-			w.brake = br * (0.7 if w.use_as_steering else 1.0)
+			w.wheel_friction_slip = WHEEL_FRICTION_REAR
+			w.brake = br
 	# Keep the body awake while driving.
 	if absf(throttle_in) > 0.02 or absf(steer_in) > 0.02 or speed > 0.4:
 		sleeping = false
@@ -300,18 +316,6 @@ func _update_gear(long_speed: float, wheel_r: float) -> void:
 	elif best < gear:
 		gear = maxi(gear - 1, best)
 	gear = clampi(gear, 1, GEAR_RATIOS.size() - 1)
-
-
-func _torque_at(r: float) -> float:
-	# Smooth hump peaking at PEAK_RPM, falling to ~55% at redline, ~45% at idle.
-	var u := clampf((r - IDLE_RPM) / (REDLINE_RPM - IDLE_RPM), 0.0, 1.0)
-	var peak_u := (PEAK_RPM - IDLE_RPM) / (REDLINE_RPM - IDLE_RPM)
-	var t: float
-	if u < peak_u:
-		t = 0.45 + 0.55 * (u / maxf(peak_u, 0.05))
-	else:
-		t = 1.0 - 0.45 * ((u - peak_u) / maxf(1.0 - peak_u, 0.05))
-	return PEAK_TORQUE * clampf(t, 0.35, 1.0)
 
 
 func _apply_visuals(delta: float) -> void:

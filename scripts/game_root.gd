@@ -100,8 +100,10 @@ func _ready() -> void:
 	vehicle_system.name = "VehicleSystem"
 	# After the player so occupancy cameras run later in the tree.
 	add_child(vehicle_system)
-	# Lower than the player (0) so occupancy cameras run AFTER the player camera.
-	vehicle_system.process_priority = -20
+	# Godot runs _process from low to high process_priority. The player is -10;
+	# a *higher* value lets occupancy cameras write after the player camera.
+	vehicle_system.process_priority = 20
+	vehicle_system.process_physics_priority = 20
 	vehicle_system.call("setup", self, _player)
 	if _hud and _hud.has_method("setup_vehicles"):
 		_hud.call("setup_vehicles", vehicle_system)
@@ -159,6 +161,9 @@ func action_for_key(key: int, mode: String = "") -> String:
 	var in_veh := vehicle_system != null and vehicle_system.get("occupied") != null
 	if in_veh and key == KEY_V:
 		return "vehicle_cam"
+	# Occupied G toggles landing gear in the fighter; it must not holster.
+	if in_veh and key == KEY_G and vehicle_system and str(vehicle_system.call("kind_of", vehicle_system.get("occupied"))) == "plane":
+		return "vehicle_gear"
 	var a: String = str(KEYMAP[m].get(key, ""))
 	if a == "":
 		a = str(KEYMAP["common"].get(key, ""))
@@ -248,6 +253,9 @@ func run_action(action: String, key: int = 0) -> void:
 		"vehicle_cam":
 			if vehicle_system and vehicle_system.has_method("toggle_vehicle_cam"):
 				vehicle_system.call("toggle_vehicle_cam")
+		"vehicle_gear":
+			if vehicle_system and vehicle_system.has_method("toggle_occupied_gear"):
+				vehicle_system.call("toggle_occupied_gear")
 	_hud.call("sync")
 
 
