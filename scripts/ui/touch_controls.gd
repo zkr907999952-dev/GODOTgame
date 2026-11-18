@@ -388,6 +388,9 @@ func _on_up(idx: int, p: Vector2) -> void:
 	_end_finger(idx, p)
 	fingers.erase(idx)
 	var role := str(f["role"])
+	if role == "look" or role == "orbit":
+		if player and player.has_method("touch_look_end"):
+			player.call("touch_look_end")
 	if role == "ui" or role.begins_with("btn:"):
 		return
 	# 短按且没怎么动 = 一次点按（用于双击环绕）。

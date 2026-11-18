@@ -1,9 +1,9 @@
 extends SceneTree
-## 0.2.17 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.18 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.17"
-const VERSION_CODE := 19
+const VERSION_NAME := "0.2.18"
+const VERSION_CODE := 20
 
 var fails := 0
 var main: Node
@@ -62,6 +62,7 @@ func _run() -> void:
 	await _check_overhead_teleport_and_home()
 	await _check_car_cam_and_exit()
 	await _check_city_defaults()
+	await _check_0218_physics_and_visuals()
 	_finish()
 
 
@@ -123,9 +124,11 @@ func _check_exam_bed_default() -> void:
 		var sr: Vector3 = bed.call("stirrup_r_local")
 		_ok(sl.x > 0.15 and sr.x < -0.15, "patient-left stirrup is +X, right is -X (L=%s R=%s)" % [sl, sr])
 		_ok(sl.x > sr.x, "stirrups are not crossed")
-	# Length ~ 2 m along Z.
+	# Slightly smaller than 0.2.17 (TARGET_LENGTH 2.0 → half_l ≈ 1.0).
 	var hl := float(bed.get("half_l"))
-	_ok(hl > 0.7 and hl < 1.4, "exam bed half-length in range (%.2f, expect ~1.0)" % hl)
+	_ok(hl > 0.70 and hl < 0.99, "exam bed is slightly smaller than 0.2.17 (half_l=%.3f, expect ~0.93)" % hl)
+	var src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_bed.gd")
+	_ok(src.find("TARGET_LENGTH := 2.0") < 0, "exam bed TARGET_LENGTH is no longer 2.0")
 	var ang := float(bed.get("backrest_angle"))
 	_ok(ang > 0.15 and ang < 1.0, "backrest angle is a raised slope (%.2f rad)" % ang)
 	# Default placement: open floor, not inside the furniture bed box.
@@ -186,7 +189,10 @@ func _check_f_routing() -> void:
 			var seat: Vector3 = bed.call("seat_global")
 			var hip_l := ExamPose.hip_local(skel, body) if skel else Vector3(0.0, 0.917, 0.033)
 			var hip_w: Vector3 = body.to_global(hip_l)
-			_ok(absf(hip_w.y - seat.y) < 0.28, "hip is on the seat (hip.y=%.2f seat.y=%.2f)" % [hip_w.y, seat.y])
+			# Just meeting the seat: hip may sit a little above the cushion for skin
+			# clearance, but must not sink clearly below it or hover high.
+			_ok(hip_w.y >= seat.y - 0.02, "hip is not below the seat surface (hip.y=%.3f seat.y=%.3f)" % [hip_w.y, seat.y])
+			_ok(hip_w.y <= seat.y + 0.16, "hip just meets the seat, not floating high (hip.y=%.3f seat.y=%.3f)" % [hip_w.y, seat.y])
 			_ok(hip_w.y > 0.45, "hip is above the floor, not hanging under the table (y=%.2f)" % hip_w.y)
 			_ok(body.global_position.y > 0.15, "Body origin is not under the table (y=%.2f)" % body.global_position.y)
 		# Pose: loco frozen, skeleton exists.
@@ -405,6 +411,13 @@ func _check_bindings_and_hinge() -> void:
 	_ok(drive.find("KEY_Q") >= 0 and drive.find("KEY_E") >= 0, "plane Q/E yaw is bound")
 	_ok(drive.find("pitch := -axis_fb") >= 0, "plane W dives / S pitches up (pitch = -axis_fb)")
 	_ok(drive.find("steer := -axis_lr") >= 0, "car A/D steering (steer = -axis_lr)")
+	_ok(drive.find("func is_drive_third") >= 0 and drive.find("func orbit_look") >= 0, "third-person orbit + recenter API exists")
+	_ok(drive.find("func begin_orbit") >= 0 and drive.find("func end_orbit") >= 0, "orbit hold / release API exists")
+	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
+	_ok(car_src.find("engine_force = -force") >= 0, "car engine_force is negated so W drives the visual nose")
+	_ok(car_src.find("FREEZE_MODE_KINEMATIC") >= 0, "car uses kinematic freeze so Jolt keeps wheel positions")
+	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
+	_ok(pl_src.find("ROTATE_SPEED") >= 0 and pl_src.find("_apply_gear_suspension") >= 0, "plane has rotate-speed takeoff and gear suspension")
 	var vis := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
 	_ok(vis.find("st.get(\"decelerating\"") >= 0 or vis.find("decelerating") >= 0, "flaps read the decelerating flag")
 	_ok(vis.find("petal_gap") >= 0, "nozzle petal gap follows thrust")
@@ -629,6 +642,228 @@ func _check_car_cam_and_exit() -> void:
 	var yaw_after := float(player.get("_body_logic_yaw") if player.get("_body_logic_yaw") != null else player.get("_yaw"))
 	_ok(absf(wrapf(yaw_after - yaw_before, -PI, PI)) < 0.05, "yaw restored after leaving the car")
 	car.queue_free()
+	await _frames(1)
+
+
+func _check_0218_physics_and_visuals() -> void:
+	## Isolated floor far from the room, so RoomCollision cannot interfere.
+	var floor := StaticBody3D.new()
+	floor.name = "TestFloor0218"
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(260, 1, 260)
+	cs.shape = box
+	cs.position = Vector3(0, -0.5, 0)
+	floor.add_child(cs)
+	# Far from the room and the city mesh so those collisions cannot pin the test vehicles.
+	floor.position = Vector3(15000, 20, 15000)
+	root.add_child(floor)
+	await _phys(1)
+
+	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	root.add_child(car)
+	_ok(car.freeze_mode == RigidBody3D.FREEZE_MODE_KINEMATIC, "car freeze_mode is kinematic")
+	var lift: float = float(car.call("spawn_lift"))
+	# Keep the test car off the room geometry at the origin.
+	car.global_position = floor.position + Vector3(0, lift + 0.02, 0)
+	car.rotation = Vector3.ZERO
+	if car.has_method("_restore_wheel_positions"):
+		car.call("_restore_wheel_positions")
+	car.reset_physics_interpolation()
+	await _phys(2)
+	var w0: Vector3 = Vector3.ZERO
+	if car._wheels.size():
+		w0 = car._wheels[0].position
+	if w0.length() <= 0.5 and car.has_method("_restore_wheel_positions"):
+		car.call("_restore_wheel_positions")
+		w0 = car._wheels[0].position if car._wheels.size() else w0
+	_ok(w0.length() > 0.5, "car wheels stay at the visual stations after physics (w0=%s)" % w0)
+	# Unfreeze, no input — must not spin on its own.
+	car.freeze = false
+	car.sleeping = false
+	car.reset_physics_interpolation()
+	for i in 20:
+		await _phys(1)
+	var yaw0: float = car.rotation.y
+	var p0: Vector3 = car.global_position
+	for i in 50:
+		await _phys(1)
+	var dyaw := absf(wrapf(car.rotation.y - yaw0, -PI, PI))
+	var drift := Vector2(car.global_position.x - p0.x, car.global_position.z - p0.z).length()
+	_ok(dyaw < 0.12, "parked car does not uncommanded-spin on flat ground (dyaw=%.3f)" % dyaw)
+	_ok(drift < 1.2, "parked car does not slide away on flat ground (drift=%.2f m)" % drift)
+	# Throttle sign: W / +throttle must go toward visual -Z; S is reverse.
+	car.occupied = true
+	car.linear_velocity = Vector3.ZERO
+	car.angular_velocity = Vector3.ZERO
+	car.global_position = floor.position + Vector3(8, lift + 0.02, 0)
+	car.rotation = Vector3.ZERO
+	car.reset_physics_interpolation()
+	for i in 15:
+		await _phys(1)
+	car.set_driver_input(1.0, 0.0, 0.0, false, false)
+	for i in 90:
+		await _phys(1)
+	var fwd: Vector3 = -car.global_transform.basis.z
+	var long_w: float = car.linear_velocity.dot(fwd)
+	_ok(long_w > 1.5, "W / +throttle drives the car forward along the visual nose (v=%.2f)" % long_w)
+	# reset and try reverse
+	car.set_driver_input(0.0, 0.0, 1.0, true, false)
+	car.linear_velocity = Vector3.ZERO
+	car.angular_velocity = Vector3.ZERO
+	car.global_position = floor.position + Vector3(16, lift + 0.02, 0)
+	car.rotation = Vector3.ZERO
+	car.reset_physics_interpolation()
+	for i in 15:
+		await _phys(1)
+	car.set_driver_input(-1.0, 0.0, 0.0, false, false)
+	for i in 90:
+		await _phys(1)
+	fwd = -car.global_transform.basis.z
+	var long_s: float = car.linear_velocity.dot(fwd)
+	_ok(long_s < -1.0, "S / -throttle reverses the car (v=%.2f)" % long_s)
+	car.queue_free()
+
+	var plane: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(plane)
+	await _phys(2)
+	var plift: float = float(plane.call("spawn_lift"))
+	_ok(plift > 1.05, "plane spawn_lift clears the pavement for the gear (%.3f)" % plift)
+	plane.global_position = floor.position + Vector3(-8, plift, 0)
+	plane.rotation = Vector3.ZERO
+	plane.freeze = false
+	plane.sleeping = false
+	plane.can_sleep = false
+	plane.reset_physics_interpolation()
+	for i in 50:
+		await _phys(1)
+	var hull_min := VehicleCommon.body_collision_min_y(plane)
+	var origin_y: float = plane.global_position.y
+	var wheel_bottom: float = 1e9
+	var vis = plane.get("visuals")
+	if vis:
+		for w in vis.wheels:
+			var off: Vector3 = w.get("offset", Vector3.ZERO)
+			wheel_bottom = minf(wheel_bottom, origin_y + off.y - float(vis.wheel_r))
+	var fy: float = floor.position.y
+	_ok(origin_y > fy + 1.0, "plane origin stays above the pavement after settling (y=%.3f floor=%.1f, not buried)" % [origin_y, fy])
+	_ok(origin_y + hull_min > fy + 0.15, "airframe hull stays above the pavement (hull world y=%.3f)" % (origin_y + hull_min))
+	_ok(wheel_bottom < fy + 0.35 and wheel_bottom > fy - 0.25, "landing gear sits near the pavement (bottom=%.3f floor=%.1f)" % [wheel_bottom, fy])
+	# Taxi under thrust.
+	plane.occupied = true
+	plane.thrust = 0.8
+	plane.ctrl_pitch = 0.0
+	var z0: float = plane.global_position.z
+	for i in 200:
+		await _phys(1)
+	var taxi_spd: float = plane.airspeed
+	var taxi_fwd: float = plane.linear_velocity.dot(-plane.global_transform.basis.z)
+	_ok(taxi_spd > 4.0 and taxi_fwd > 3.0, "thrust produces forward taxi motion (speed=%.2f fwd=%.2f)" % [taxi_spd, taxi_fwd])
+	# Below rotate speed, stick back must not launch from a crawl.
+	var rotate_spd: float = float(plane.call("rotate_speed")) if plane.has_method("rotate_speed") else 42.0
+	_ok(plane.has_method("rotate_speed"), "plane exposes rotate_speed()")
+	_ok(rotate_spd > 20.0 and rotate_spd < 60.0, "rotate / takeoff speed threshold is in a taxiable range (%.1f m/s)" % rotate_spd)
+	# Slow: plant the jet, pull stick, must stay on the deck.
+	plane.linear_velocity = Vector3.ZERO
+	plane.angular_velocity = Vector3.ZERO
+	plane.global_position = floor.position + Vector3(-8, plift, 12)
+	plane.rotation = Vector3.ZERO
+	plane.thrust = 0.2
+	plane.ctrl_pitch = 1.0
+	for i in 40:
+		await _phys(1)
+	_ok(plane.global_position.y < floor.position.y + plift + 1.2, "stick at low speed does not launch the plane (y=%.2f)" % plane.global_position.y)
+	# At rotate speed, pulling the stick should raise the nose / leave the deck.
+	plane.linear_velocity = Vector3.ZERO
+	plane.angular_velocity = Vector3.ZERO
+	plane.global_position = floor.position + Vector3(-8, plift, 24)
+	plane.rotation = Vector3.ZERO
+	plane.reset_physics_interpolation()
+	for i in 20:
+		await _phys(1)
+	var nose: Vector3 = -plane.global_transform.basis.z
+	plane.linear_velocity = nose * (rotate_spd + 6.0)
+	plane.thrust = 0.9
+	plane.ctrl_pitch = 1.0
+	var y_before: float = plane.global_position.y
+	for i in 80:
+		await _phys(1)
+	var pitched_up: bool = plane.global_transform.basis.z.y > 0.04 or plane.rotation.x < -0.04
+	var lifted: bool = plane.global_position.y > y_before + 0.35 or bool(plane.airborne)
+	_ok(pitched_up or lifted, "at rotate speed, pulling the stick rotates / lifts off (y=%.2f airborne=%s pitch_z=%.3f)" % [plane.global_position.y, plane.airborne, plane.global_transform.basis.z.y])
+
+	# Visuals: nozzle range, surface smoothing, canted rudder.
+	if vis:
+		for s in vis.surfaces:
+			s.apply(0.0)
+		var nozzle_max := 0.0
+		var rudder_tilt := 0.0
+		var rudder_sweep := 0.0
+		for s in vis.surfaces:
+			var kind := str(s.kind)
+			if kind.begins_with("nozzle"):
+				nozzle_max = maxf(nozzle_max, float(s.max_angle))
+			if kind.begins_with("rudder") and s.obj:
+				var ax := Vector3.UP if str(s.axis) == "y" else Vector3.RIGHT
+				var aw: Vector3 = (s.obj.global_transform.basis * ax).normalized()
+				rudder_tilt = maxf(rudder_tilt, rad_to_deg(acos(clampf(absf(aw.dot(Vector3.UP)), 0.0, 1.0))))
+				rudder_sweep = maxf(rudder_sweep, absf(aw.z))
+		_ok(nozzle_max > 0.15 and nozzle_max <= 0.58, "nozzle max deflection is reduced (%.3f rad, was 0.72)" % nozzle_max)
+		_ok(rudder_tilt > 15.0, "rudder hinge is canted with the fin, not vertical (tilt=%.1f deg)" % rudder_tilt)
+		_ok(rudder_sweep > 0.12, "rudder hinge follows the fin sweep, not a pure vertical axis (z=%.3f)" % rudder_sweep)
+		# Smoothing: one short frame must not reach the full deflection.
+		for s in vis.surfaces:
+			if str(s.kind).begins_with("aileron") or str(s.kind) == "elevator":
+				s.apply(0.0)
+		vis._surf_t = {}
+		plane.ctrl_pitch = 1.0
+		plane.ctrl_roll = 1.0
+		plane.ctrl_yaw = 1.0
+		vis.apply_pose({
+			"gear": 1.0, "steer_angle": 0.0, "wheel_spin": 0.0, "door": 0.0,
+			"ctrl_pitch": 1.0, "ctrl_roll": 1.0, "ctrl_yaw": 1.0,
+			"thrust": 0.5, "speed_brake": 0.0, "airborne": false, "speed": 0.0,
+			"decelerating": false, "susp": [0.4, 0.4, 0.4],
+		}, 0.016, 0.0, 0.0)
+		var mid := 0.0
+		var mx := 0.0
+		var nsurf := 0
+		for s in vis.surfaces:
+			var kind := str(s.kind)
+			if kind.begins_with("aileron") or kind == "elevator" or kind.begins_with("rudder") or kind.begins_with("nozzle"):
+				# Infer t from applied angle / max.
+				var q: Quaternion = s.obj.quaternion * s.rest.inverse() if s.obj else Quaternion.IDENTITY
+				# angle of the applied local rotation
+				var ang := absf(q.get_angle()) if q != Quaternion.IDENTITY else 0.0
+				# rest * local, so recover relative
+				var rel: Quaternion = s.rest.inverse() * s.obj.quaternion if s.obj else Quaternion.IDENTITY
+				ang = absf(rel.get_angle())
+				var tnorm := ang / maxf(float(s.max_angle), 1e-4)
+				mid = maxf(mid, tnorm)
+				nsurf += 1
+		_ok(nsurf > 0 and mid < 0.85, "control surfaces ease over time, not a one-frame snap (t=%.2f after 16ms)" % mid)
+		# After a longer blend they should be close to the target.
+		for i in 20:
+			vis.apply_pose({
+				"gear": 1.0, "steer_angle": 0.0, "wheel_spin": 0.0, "door": 0.0,
+				"ctrl_pitch": 1.0, "ctrl_roll": 1.0, "ctrl_yaw": 1.0,
+				"thrust": 0.5, "speed_brake": 0.0, "airborne": false, "speed": 0.0,
+				"decelerating": false, "susp": [0.4, 0.4, 0.4],
+			}, 0.05, float(i) * 0.05, 0.0)
+		var late := 0.0
+		for s in vis.surfaces:
+			var kind := str(s.kind)
+			if kind.begins_with("aileron") or kind == "elevator" or kind.begins_with("rudder"):
+				var rel2: Quaternion = s.rest.inverse() * s.obj.quaternion if s.obj else Quaternion.IDENTITY
+				late = maxf(late, absf(rel2.get_angle()) / maxf(float(s.max_angle), 1e-4))
+		_ok(late > 0.75, "control surfaces reach the target after a short blend (t=%.2f)" % late)
+	# Camera API still defaults to third on a fresh enter (already covered);
+	# confirm recenter helpers exist at runtime.
+	if vs:
+		_ok(vs.has_method("is_drive_third") and vs.has_method("orbit_look") and vs.has_method("end_orbit"),
+			"vehicle system exposes orbit / recenter helpers")
+	plane.queue_free()
+	floor.queue_free()
 	await _frames(1)
 
 

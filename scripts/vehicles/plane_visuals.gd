@@ -17,6 +17,7 @@ var nozzle_engines: Array = []  # {top, bot, aim, exit_z, throat_z}
 var exhausts: Array = []
 var steer_wheel: Dictionary = {}  # {obj, rest}
 var flap_t: float = 0.0
+var _surf_t: Dictionary = {}  # hinge id -> current (smoothed) deflection
 var wrap: Node3D
 var cockpit: Dictionary = {"x": 0.0, "y": 1.28, "z": -5.15}
 var half_l: float = 8.6
@@ -274,7 +275,7 @@ func _bind_surfaces_and_nozzles() -> void:
 					tb = tb.merge(a2)
 			var extras: Array = tops.slice(1)
 			top_bind = VehicleHinge.mount(
-				wrap, tops[0], Vector3(cx, tb.position.y + 0.02, hinge_z), "x", 1.0, 0.72,
+				wrap, tops[0], Vector3(cx, tb.position.y + 0.02, hinge_z), "x", 1.0, 0.50,
 				"nozzleLT" if tag == "L" else "nozzleRT", extras)
 		if bots.size():
 			var tb := AABB()
@@ -291,7 +292,7 @@ func _bind_surfaces_and_nozzles() -> void:
 					tb = tb.merge(a2)
 			var extras: Array = bots.slice(1)
 			bot_bind = VehicleHinge.mount(
-				wrap, bots[0], Vector3(cx, tb.position.y + tb.size.y - 0.02, hinge_z), "x", 1.0, 0.72,
+				wrap, bots[0], Vector3(cx, tb.position.y + tb.size.y - 0.02, hinge_z), "x", 1.0, 0.50,
 				"nozzleLB" if tag == "L" else "nozzleRB", extras)
 		var top: VehicleHinge = top_bind if top_bind else bot_bind
 		var bot: VehicleHinge = bot_bind if bot_bind else top_bind
@@ -308,18 +309,14 @@ func _bind_surfaces_and_nozzles() -> void:
 		var src = er if er else el
 		if src is Node3D:
 			var a := VehicleCommon.aabb_in(wrap, src as Node3D)
-			surfaces.append(VehicleHinge.mount(wrap, src as Node3D, Vector3(a["cx"], a["cy"], a["minZ"] + 0.04), "x", 1.0, 0.48, "nozzle"))
+			surfaces.append(VehicleHinge.mount(wrap, src as Node3D, Vector3(a["cx"], a["cy"], a["minZ"] + 0.04), "x", 1.0, 0.40, "nozzle"))
 	for obj in VehicleCommon.find_named(wrap, "^rudder"):
 		if not (obj is Node3D):
 			continue
 		var a := VehicleCommon.aabb_in(wrap, obj as Node3D)
 		var left: bool = a["cx"] < 0.0
-		var in_x: float = a["maxX"] - 0.04 if left else a["minX"] + 0.04
-		var out_x: float = a["minX"] + 0.04 if left else a["maxX"] - 0.04
-		var hinge_z: float = a["minZ"] + (a["maxZ"] - a["minZ"]) * 0.14
-		var hinge := Vector3(in_x, a["minY"] + 0.14, hinge_z)
-		var tip := Vector3(out_x, a["maxY"] - 0.05, hinge_z + 0.1)
-		surfaces.append(VehicleHinge.mount_canted(wrap, obj as Node3D, hinge, tip, 1.0, 0.48, "rudderL" if left else "rudderR"))
+		var line := _fin_hinge_line(wrap, obj as Node3D, a)
+		surfaces.append(VehicleHinge.mount_canted(wrap, obj as Node3D, line[0], line[1], 1.0, 0.48, "rudderL" if left else "rudderR"))
 	for obj in VehicleCommon.find_named(wrap, "^wingflap_"):
 		if obj is Node3D:
 			var a := VehicleCommon.aabb_in(wrap, obj as Node3D)
@@ -492,7 +489,14 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 				tv = flap_t
 			_:
 				tv = 0.0
-		h.apply(tv)
+		# Animate to the target instead of snapping in one frame.
+		# Flaps already ease via flap_t; still run the same follow so a
+		# one-frame apply cannot jump.
+		var sid := "%s_%s" % [h.kind, h.obj.name if h.obj else str(h)]
+		var cur := float(_surf_t.get(sid, 0.0))
+		cur += (tv - cur) * (1.0 - exp(-9.0 * maxf(delta, 1e-5)))
+		_surf_t[sid] = cur
+		h.apply(cur)
 	for eng in nozzle_engines:
 		var top: VehicleHinge = eng["top"]
 		var bot: VehicleHinge = eng["bot"]
@@ -509,6 +513,71 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 		sw.quaternion = steer_wheel["rest"] * Quaternion.from_euler(e)
 	for fx in exhausts:
 		(fx as JetExhaust).apply(thrust, time, altitude)
+
+
+func _fin_hinge_line(wrap_n: Node3D, obj: Node3D, a: Dictionary) -> Array:
+	## Hinge line follows the fin leading edge (cant + sweep), not world +Y.
+	var pts: Array[Vector3] = _mesh_points_in(wrap_n, obj)
+	if pts.size() >= 8:
+		pts.sort_custom(func(p, q): return p.y < q.y)
+		var lo_y: float = pts[0].y
+		var hi_y: float = pts[pts.size() - 1].y
+		var span := maxf(hi_y - lo_y, 0.05)
+		var lo := _leading_in_band(pts, lo_y, lo_y + span * 0.18)
+		var hi := _leading_in_band(pts, hi_y - span * 0.18, hi_y)
+		# Inset a little from the sharp leading edge into the panel.
+		var chord: float = float(a.get("maxZ", lo.z + 1.0)) - float(a.get("minZ", lo.z))
+		var inset := Vector3(0.0, 0.0, maxf(chord * 0.08, 0.04))
+		return [lo + inset, hi + inset]
+	# AABB fallback: use inboard-root and outboard-tip at each end's front.
+	var left: bool = float(a["cx"]) < 0.0
+	var in_x: float = float(a["maxX"]) - 0.04 if left else float(a["minX"]) + 0.04
+	var out_x: float = float(a["minX"]) + 0.04 if left else float(a["maxX"]) - 0.04
+	var root_z: float = float(a["minZ"]) + (float(a["maxZ"]) - float(a["minZ"])) * 0.55
+	var tip_z: float = float(a["minZ"]) + (float(a["maxZ"]) - float(a["minZ"])) * 0.08
+	return [Vector3(in_x, float(a["minY"]) + 0.14, root_z), Vector3(out_x, float(a["maxY"]) - 0.05, tip_z)]
+
+
+func _leading_in_band(pts: Array[Vector3], y0: float, y1: float) -> Vector3:
+	var band: Array[Vector3] = []
+	for p in pts:
+		if p.y >= y0 and p.y <= y1:
+			band.append(p)
+	if band.is_empty():
+		return pts[0]
+	band.sort_custom(func(p, q): return p.z < q.z)
+	var n := mini(10, band.size())
+	var acc := Vector3.ZERO
+	for i in n:
+		acc += band[i]
+	return acc / float(n)
+
+
+func _mesh_points_in(wrap_n: Node3D, n: Node3D) -> Array[Vector3]:
+	var out: Array[Vector3] = []
+	var nodes: Array = n.find_children("*", "MeshInstance3D", true, false)
+	if n is MeshInstance3D:
+		nodes.append(n)
+	var seen := {}
+	for x in nodes:
+		if not (x is MeshInstance3D):
+			continue
+		var mi := x as MeshInstance3D
+		if mi.mesh == null or seen.has(mi.get_instance_id()):
+			continue
+		seen[mi.get_instance_id()] = true
+		for s in mi.mesh.get_surface_count():
+			var arr := mi.mesh.surface_get_arrays(s)
+			if arr.is_empty() or arr[Mesh.ARRAY_VERTEX] == null:
+				continue
+			var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+			var xf := wrap_n.global_transform.affine_inverse() * mi.global_transform
+			var step := maxi(1, verts.size() / 400)
+			var i := 0
+			while i < verts.size():
+				out.append(xf * verts[i])
+				i += step
+	return out
 
 
 func _smoothstep(e0: float, e1: float, x: float) -> float:

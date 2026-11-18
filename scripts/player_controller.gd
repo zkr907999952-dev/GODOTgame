@@ -1681,14 +1681,39 @@ const FP_TOUCH_SENS_LEGACY := 0.00305 * 0.9
 
 
 func touch_look(rel: Vector2) -> void:
+	var vs := _vehicle_system_node()
+	if vs and vs.has_method("is_drive_third") and bool(vs.call("is_drive_third")):
+		vs.call("orbit_look", rel, touch_look_sensitivity)
+		if vs.has_method("begin_orbit"):
+			vs.call("begin_orbit")
+		return
 	var k := touch_look_sensitivity
 	_yaw -= rel.x * k
 	_pitch = clampf(_pitch - rel.y * k, min_pitch, max_pitch)
-	_apply_camera()
+	if occupancy != "car" and occupancy != "plane":
+		_apply_camera()
 
 
 func touch_orbit(rel: Vector2) -> void:
+	var vs := _vehicle_system_node()
+	if vs and vs.has_method("is_drive_third") and bool(vs.call("is_drive_third")):
+		vs.call("orbit_look", rel, touch_look_sensitivity)
+		if vs.has_method("begin_orbit"):
+			vs.call("begin_orbit")
+		return
 	_tp_orbit_pixels(rel)
+
+
+func touch_look_end() -> void:
+	var vs := _vehicle_system_node()
+	if vs and vs.has_method("end_orbit"):
+		vs.call("end_orbit")
+
+
+func _vehicle_system_node() -> Node:
+	if get_parent() and get_parent().get("vehicle_system"):
+		return get_parent().get("vehicle_system")
+	return null
 
 
 func touch_pan(rel: Vector2) -> void:
@@ -1773,10 +1798,44 @@ func touch_crouch_tap() -> void:
 	_set_stance("stand" if (_stance == "crouch" or _stance == "prone") else "crouch")
 
 
+func _handle_vehicle_look(event: InputEvent) -> bool:
+	var vs := _vehicle_system_node()
+	if vs == null:
+		return false
+	var third := vs.has_method("is_drive_third") and bool(vs.call("is_drive_third"))
+	if event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+		var mb := event as InputEventMouseButton
+		if third:
+			if mb.pressed:
+				vs.call("begin_orbit")
+			else:
+				vs.call("end_orbit")
+			get_viewport().set_input_as_handled()
+			return true
+	if event is InputEventMouseMotion:
+		var mm := event as InputEventMouseMotion
+		if third and (mm.button_mask & MOUSE_BUTTON_MASK_LEFT):
+			vs.call("orbit_look", mm.relative, mouse_sensitivity)
+			get_viewport().set_input_as_handled()
+			return true
+		if not third and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			# First-person cockpit look; VehicleSystem writes the camera.
+			_yaw -= mm.relative.x * mouse_sensitivity
+			_pitch = clampf(_pitch - mm.relative.y * mouse_sensitivity, min_pitch, max_pitch)
+			get_viewport().set_input_as_handled()
+			return true
+		# Don't let the walking camera overwrite the vehicle chase/cockpit cam.
+		return occupancy == "car" or occupancy == "plane"
+	return false
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	# 只处理鼠标；离散按键统一由 game_root.run_action 路由（每个键只在一处处理）。
 	if input_locked:
 		return
+	if occupancy == "car" or occupancy == "plane":
+		if _handle_vehicle_look(event):
+			return
 	if touch_active and event is InputEventMouse and event.device == InputEvent.DEVICE_ID_EMULATION:
 		return
 	# 脏器互动：左键（捕获鼠标时取屏幕中心，否则取光标）。HUD 面板打开时也可以互动——

@@ -22,8 +22,11 @@ const ALPHA_STALL := 0.28  # rad ≈ 16°
 const RHO_SL := 1.225
 const GEAR_DRAG := 0.018
 const BRAKE_DRAG := 0.05
-const ROTATE_SPEED := 72.0  # m/s, ~260 km/h — game-ready, not airliner
-const TAXI_THRUST_SCALE := 0.18
+const ROTATE_SPEED := 42.0  # m/s, ~150 km/h — taxi then pull stick to rotate
+const TAXI_THRUST_SCALE := 0.70
+const GEAR_TRAVEL := 0.32
+const GEAR_STIFF := 420000.0
+const GEAR_DAMP := 56000.0
 
 signal occupied_changed(on: bool)
 
@@ -56,6 +59,7 @@ var _gear_rays: Array[Vector3] = [
 ]
 var _on_wheels: bool = true
 var _agl: float = 0.0
+var _gear_setup: Array = []  # {start, rest, radius} in body space
 
 
 func _ready() -> void:
@@ -87,6 +91,7 @@ func _ready() -> void:
 	_build_collision()
 	# Re-apply after shapes exist so Jolt keeps the authored inertia (pitch/yaw/roll).
 	inertia = Vector3(28000.0, 52000.0, 22000.0)
+	_build_gear_setup()
 	_freeze_parked(true)
 
 
@@ -121,6 +126,28 @@ func _build_collision() -> void:
 				var lift := min_keep - y
 				c.position.y += lift * 0.5
 				box.size.y = maxf(0.08, box.size.y - lift)
+	# Airframe hulls must not pin the jet to the pavement; wheels carry the weight.
+	if physics_material_override == null:
+		var mat := PhysicsMaterial.new()
+		mat.friction = 0.04
+		mat.bounce = 0.0
+		physics_material_override = mat
+
+
+func _build_gear_setup() -> void:
+	## One spring per visual wheel. Rest lengths are chosen so every leg
+	## carries load at spawn_lift (main-gear visuals sit a little higher
+	## than the nose, so they are virtually extended to the pavement).
+	_gear_setup.clear()
+	var wr: float = visuals.wheel_r if visuals else 0.42
+	var lift := spawn_lift()
+	var sag := 0.10
+	for off in _gear_rays:
+		var start := off + Vector3(0.0, 1.15, 0.0)
+		# World dist from start to the runway when the body is at spawn height.
+		var dist_at_spawn := lift + start.y
+		var rest := dist_at_spawn + sag
+		_gear_setup.append({"start": start, "rest": rest, "radius": wr})
 
 
 func _freeze_parked(on: bool) -> void:
@@ -147,12 +174,18 @@ func set_throttle(t: float) -> void:
 
 func spawn_lift() -> float:
 	## Body-origin height above the ground so the visual gear sits on the runway.
+	var contact := 1.0e9
 	if visuals:
-		var box := VehicleCommon.world_aabb(visuals)
-		var mn := to_local(box.position) if is_inside_tree() else Vector3(0, box.position.y, 0)
-		# Visual was lifted by ORIGIN_Y; lowest visual (wheels) is around -ORIGIN_Y.
-		return maxf(1.28, -mn.y + 0.04)
-	return 1.32
+		for w in visuals.wheels:
+			var off: Vector3 = w.get("offset", Vector3.ZERO)
+			contact = minf(contact, off.y - visuals.wheel_r)
+	if contact > 1.0e8:
+		return 1.40
+	return -contact + 0.03
+
+
+func rotate_speed() -> float:
+	return ROTATE_SPEED
 
 
 func toggle_gear() -> void:
@@ -250,6 +283,11 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var thrust_n := mil * THRUST_DRY + ab * (THRUST_AB - THRUST_DRY)
 	if _on_wheels and not airborne:
 		thrust_n *= lerpf(TAXI_THRUST_SCALE, 1.0, clampf(airspeed / ROTATE_SPEED, 0.0, 1.0))
+	# Extra lift only when rotating at speed — never from a standstill.
+	var rotate_t := 0.0
+	if _on_wheels and ctrl_pitch > 0.2 and airspeed > ROTATE_SPEED * 0.70:
+		rotate_t = clampf((airspeed / ROTATE_SPEED - 0.70) / 0.30, 0.0, 1.0) * clampf(ctrl_pitch, 0.0, 1.0)
+		lift += MASS_KG * 9.81 * rotate_t * 0.85
 	var force := fwd * thrust_n + lift_dir * lift + drag_dir * drag
 	# Control moments: scale with q, lose authority in stall and at very low speed.
 	var q_norm := clampf(q / (0.5 * RHO_SL * 110.0 * 110.0), 0.0, 1.8)
@@ -272,20 +310,77 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var damp_pitch := -rate_pitch * (22000.0 + q_norm * 50000.0)
 	var damp_yaw := -rate_yaw * (20000.0 + q_norm * 38000.0)
 	var torque := right * (pitch_t + damp_pitch) + fwd * (roll_t + damp_roll) + up * (yaw_t + damp_yaw)
-	# Ground handling.
+	# Ground handling: ray-spring gear supports the jet so airframe hulls
+	# stay above the pavement (otherwise the fuselage falls in and sticks).
+	var gear_force := Vector3.ZERO
+	if gear > 0.35:
+		gear_force = _apply_gear_suspension(state, xf, fwd, up, right, vel)
+		force += gear_force
 	if _on_wheels:
 		torque += _taxi_torque(state, fwd, up, right, vel)
 		force += _taxi_force(state, fwd, vel, thrust_n)
-		# Keep from pitching into the pavement at low speed.
-		if airspeed < ROTATE_SPEED * 0.85:
+		# Keep from pitching into the pavement at low speed, but allow
+		# rotation once taxi speed is high enough and the stick is pulled.
+		if airspeed < ROTATE_SPEED * 0.70:
 			var sink := minf(0.0, vel.y)
 			force += Vector3(0, -sink * MASS_KG * 6.0, 0)
-			# Limit nose-down pitching on the runway.
 			if ctrl_pitch < 0.0:
 				torque -= right * pitch_t * 0.85
+		elif ctrl_pitch > 0.2:
+			# Rotation / takeoff: help the nose come up after the threshold.
+			torque += right * ctrl_pitch * rotate_t * 160000.0
+		else:
+			if ctrl_pitch < 0.0:
+				torque -= right * pitch_t * 0.5
 	state.apply_central_force(force)
 	state.apply_torque(torque)
 	# Leave gravity to the engine (gravity_scale = 1).
+
+
+
+func _apply_gear_suspension(state: PhysicsDirectBodyState3D, xf: Transform3D, _fwd: Vector3, up: Vector3, _right: Vector3, vel: Vector3) -> Vector3:
+	var space := state.get_space_state()
+	var exclude := [get_rid()]
+	var hits := 0
+	var agl_min := 1e9
+	var wr: float = visuals.wheel_r if visuals else 0.42
+	var legs: Array = _gear_setup if _gear_setup else []
+	if legs.is_empty():
+		for off in _gear_rays:
+			legs.append({"start": off + Vector3(0.0, 1.15, 0.0), "rest": 1.25, "radius": wr})
+	for g in legs:
+		var start_local: Vector3 = g["start"]
+		var rest: float = float(g["rest"])
+		var start := xf * start_local
+		var max_len := rest + 1.2
+		var q := PhysicsRayQueryParameters3D.create(start, start + Vector3(0.0, -max_len, 0.0), 1, exclude)
+		var hit := space.intersect_ray(q)
+		if hit.is_empty():
+			q = PhysicsRayQueryParameters3D.create(start, start - up * max_len, 1, exclude)
+			hit = space.intersect_ray(q)
+		if hit.is_empty():
+			continue
+		hits += 1
+		var hit_p: Vector3 = hit["position"]
+		var dist := start.distance_to(hit_p)
+		agl_min = minf(agl_min, dist - (rest - wr))
+		var compression := rest - dist
+		if compression < -0.04:
+			continue
+		var nrm: Vector3 = hit.get("normal", Vector3.UP)
+		if nrm.length_squared() < 1e-6:
+			nrm = Vector3.UP
+		else:
+			nrm = nrm.normalized()
+		var r_arm: Vector3 = hit_p - xf.origin
+		var rel_v := (vel + state.angular_velocity.cross(r_arm)).dot(nrm)
+		var spring := GEAR_STIFF * maxf(compression, 0.0) - GEAR_DAMP * rel_v
+		spring = clampf(spring, -MASS_KG * 12.0, MASS_KG * 18.0)
+		state.apply_force(nrm * spring, r_arm)
+	if hits >= 1 and gear > 0.35 and agl_min < 2.4:
+		_on_wheels = true
+		_agl = maxf(0.0, agl_min)
+	return Vector3.ZERO
 
 
 func _probe_ground(state: PhysicsDirectBodyState3D, xf: Transform3D) -> void:
@@ -321,7 +416,12 @@ func _taxi_force(state: PhysicsDirectBodyState3D, fwd: Vector3, vel: Vector3, _t
 	var long := vel.dot(fwd)
 	var f := Vector3.ZERO
 	f += -right * lat * MASS_KG * 6.5  # grip
-	f += -fwd * long * MASS_KG * 0.35  # rolling resistance
+	# Rolling resistance: modest Coulomb + light viscous, so taxi can
+	# reach rotate speed under thrust (the old 0.35*m*v cap stalled the jet).
+	var roll := MASS_KG * 9.81 * 0.025
+	if absf(long) > 0.05:
+		f += -fwd * signf(long) * roll
+	f += -fwd * long * MASS_KG * 0.04
 	if speed_brake > 0.02 or not occupied:
 		f += -fwd * long * MASS_KG * (2.8 * maxf(speed_brake, 0.25 if not occupied else 0.0))
 	# Nose-wheel steering couples a bit of lateral force already via torque.
@@ -355,6 +455,7 @@ func on_enter() -> void:
 	door_target = 1.0
 	_freeze_parked(false)
 	sleeping = false
+	can_sleep = false
 	# Canopy closes again after boarding.
 	get_tree().create_timer(0.8).timeout.connect(func():
 		if occupied:
@@ -365,6 +466,7 @@ func on_enter() -> void:
 
 func on_exit() -> void:
 	occupied = false
+	can_sleep = true
 	door_target = 1.0
 	ctrl_pitch = 0.0
 	ctrl_roll = 0.0

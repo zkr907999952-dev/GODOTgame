@@ -32,8 +32,6 @@ var _city_ready: bool = false
 var _room_ready: bool = false
 var _landmarks: Dictionary = {}  # name -> AABB (world)
 var _saved_player: Dictionary = {}
-var _cam_yaw: float = 0.0
-var _cam_pitch: float = 0.15
 var _chase_dist: float = 9.0
 var _player_col_layer: int = 2
 var _player_col_mask: int = 3
@@ -46,6 +44,13 @@ var touch_yaw: float = 0.0  # -1 left, +1 right (mobile yaw buttons)
 var touch_thrust_up: bool = false
 var touch_thrust_down: bool = false
 var _ctrl_was_down: bool = false
+# Third-person chase cam: default heading follows the vehicle and springs
+# back after the player releases LMB / a touch swipe orbit.
+var _orbit_held: bool = false
+var _touch_orbit: bool = false
+var _cam_yaw: float = 0.0
+var _cam_pitch: float = -0.18
+var _cam_ready: bool = false
 
 
 func setup(g: Node, p: CharacterBody3D) -> void:
@@ -323,6 +328,8 @@ func _spawn_car(pos: Vector3, yaw: float, defaulted: bool, map_id: String, menu:
 	if v is VehicleBody3D:
 		(v as VehicleBody3D).linear_velocity = Vector3.ZERO
 		(v as VehicleBody3D).angular_velocity = Vector3.ZERO
+	if v.has_method("reset_physics_interpolation"):
+		v.reset_physics_interpolation()
 	return v
 
 
@@ -335,6 +342,8 @@ func _spawn_plane(pos: Vector3, yaw: float, defaulted: bool, map_id: String, men
 	if v is RigidBody3D:
 		(v as RigidBody3D).linear_velocity = Vector3.ZERO
 		(v as RigidBody3D).angular_velocity = Vector3.ZERO
+	if v.has_method("reset_physics_interpolation"):
+		v.reset_physics_interpolation()
 	return v
 
 
@@ -459,6 +468,7 @@ func try_enter() -> bool:
 	else:
 		# Cars / planes default to third person; the player can toggle 1st/3rd.
 		vehicle_cam = "third"
+		_reset_vehicle_cam()
 		_hide_player_body(true)
 	occupancy_changed.emit(v)
 	proximity_changed.emit(v, true)
@@ -604,7 +614,48 @@ func _restore_standing(dest: Vector3) -> void:
 
 func toggle_vehicle_cam() -> String:
 	vehicle_cam = "first" if vehicle_cam != "first" else "third"
+	if vehicle_cam == "third":
+		_reset_vehicle_cam()
 	return vehicle_cam
+
+
+func is_drive_third() -> bool:
+	var k := kind_of(occupied)
+	return occupied != null and (k == "car" or k == "plane") and vehicle_cam == "third"
+
+
+func begin_orbit() -> void:
+	_orbit_held = true
+	_touch_orbit = true
+
+
+func end_orbit() -> void:
+	_orbit_held = false
+	_touch_orbit = false
+
+
+func orbit_look(rel: Vector2, sens: float = 0.004) -> void:
+	if not is_drive_third():
+		return
+	_orbit_held = true
+	_cam_yaw -= rel.x * sens
+	_cam_pitch = clampf(_cam_pitch - rel.y * sens, -1.25, 0.55)
+
+
+func _reset_vehicle_cam() -> void:
+	_cam_ready = false
+	_orbit_held = false
+	_touch_orbit = false
+	if occupied:
+		_cam_yaw = _vehicle_yaw(occupied)
+	_cam_pitch = -0.18
+
+
+func _vehicle_yaw(v: Node) -> float:
+	if v == null or not (v is Node3D):
+		return 0.0
+	var z: Vector3 = (v as Node3D).global_transform.basis.z
+	return atan2(z.x, z.z)
 
 
 func _process_occupied(delta: float) -> void:
@@ -641,7 +692,11 @@ func _apply_exam_pose() -> void:
 	var hip_local := ExamPose.hip_local(skel, body) if skel else Vector3(0.0, 0.917, 0.033)
 	var lie := bed.patient_basis()
 	# hip_world = body.origin + lie * hip_local  →  body.origin = seat - lie * hip_local
-	body.global_transform = Transform3D(lie, seat - lie * hip_local)
+	# Hip bone sits slightly *out* of the cushions so the skin just touches
+	# the seat / backrest, instead of the mesh clipping through them.
+	# face = lie.z (patient face / out of the backrest).
+	const SKIN := 0.075
+	body.global_transform = Transform3D(lie, seat - lie * hip_local + lie.z * SKIN)
 	if skel:
 		ExamPose.apply(skel, bed.stirrup_l_global(), bed.stirrup_r_global(), bed.backrest_angle)
 
@@ -748,7 +803,7 @@ func _drive_input(delta: float) -> void:
 		_ctrl_was_down = ctrl_now
 
 
-func _vehicle_camera(_delta: float) -> void:
+func _vehicle_camera(delta: float) -> void:
 	if player == null or not player.has_node("CameraPivot/Camera3D"):
 		return
 	var cam: Camera3D = player.get_node("CameraPivot/Camera3D")
@@ -765,16 +820,55 @@ func _vehicle_camera(_delta: float) -> void:
 		cam.fov = float(player.get("fp_fov"))
 		cam.near = 0.08
 		cam.current = true
+		return
+	# Third person: chase default + auto-recenter. Hold LMB / swipe to orbit
+	# about the vehicle; on release the view springs back behind it.
+	var dt := maxf(delta, 0.0001)
+	var held := _touch_orbit or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+	if bool(player.get("ui_blocks_capture")):
+		held = _touch_orbit
+	_orbit_held = held
+	var veh_yaw := _vehicle_yaw(occupied)
+	if not _cam_ready:
+		_cam_yaw = veh_yaw
+		_cam_pitch = -0.18
+		_cam_ready = true
+	var want_pitch := -0.12 if (k == "plane" and occupied.get("airborne")) else -0.18
+	if not held:
+		var dyaw := wrapf(veh_yaw - _cam_yaw, -PI, PI)
+		_cam_yaw += dyaw * (1.0 - exp(-3.2 * dt))
+		_cam_pitch += (want_pitch - _cam_pitch) * (1.0 - exp(-2.8 * dt))
+	_cam_pitch = clampf(_cam_pitch, -1.25, 0.55)
+	var dist := 8.5 if k == "car" else 16.0
+	var height := 2.4 if k == "car" else 4.6
+	var look_y: float = (occupied as Node3D).global_position.y + (1.2 if k == "car" else 1.8)
+	var cy := cos(_cam_pitch)
+	var lx := -sin(_cam_yaw) * cy
+	var ly := sin(_cam_pitch)
+	var lz := -cos(_cam_yaw) * cy
+	var look_dir := Vector3(lx, ly, lz)
+	var cam_pos: Vector3 = (occupied as Node3D).global_position - look_dir * dist + Vector3(0.0, height * 0.12, 0.0)
+	cam_pos.y = look_y - ly * dist + height * 0.12
+	# Airborne jet: blend toward a 3D chase behind the fuselage when not orbiting.
+	if k == "plane" and bool(occupied.get("airborne")) and not held:
+		var xf: Transform3D = (occupied as Node3D).global_transform
+		var chase: Vector3 = (occupied as Node3D).global_position + xf.basis.z * dist + xf.basis.y * height * 0.55
+		var rec := 1.0
+		cam_pos = cam_pos.lerp(chase, rec)
+	var look_ahead := 5.5 if k == "car" else 14.0
+	var nose: Vector3 = -(occupied as Node3D).global_transform.basis.z
+	var look_pt: Vector3 = (occupied as Node3D).global_position + nose * look_ahead + Vector3(0.0, look_y - (occupied as Node3D).global_position.y, 0.0)
+	var kfollow := 1.0 - exp(-8.5 * dt)
+	# Write the camera directly (VehicleSystem already runs after the player).
+	var want_xf := Transform3D(Basis.looking_at(look_pt - cam_pos, Vector3.UP), cam_pos)
+	if cam.global_transform.origin.distance_squared_to(cam_pos) > 400.0 or not _cam_ready:
+		cam.global_transform = want_xf
 	else:
-		var dist := 8.5 if k == "car" else 16.0
-		var height := 2.4 if k == "car" else 4.6
-		# Chase behind the vehicle (vehicle -Z is nose, so +Z is tail).
-		var cam_pos: Vector3 = occupied.global_position + occupied.global_transform.basis.z * dist + Vector3(0, height, 0)
-		var look_pt: Vector3 = occupied.global_position + Vector3(0, 1.2 if k == "car" else 1.8, 0)
-		cam.global_transform = Transform3D(Basis.looking_at(look_pt - cam_pos, Vector3.UP), cam_pos)
-		cam.fov = 55.0 if k == "car" else 62.0
-		cam.near = 0.15
-		cam.current = true
+		cam.global_position = cam.global_position.lerp(cam_pos, kfollow)
+		cam.global_transform = Transform3D(want_xf.basis, cam.global_position)
+	cam.fov = 55.0 if k == "car" else 62.0
+	cam.near = 0.15
+	cam.current = true
 
 
 # ------------------------------------------------------------------ menu

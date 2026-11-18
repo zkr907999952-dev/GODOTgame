@@ -46,6 +46,7 @@ var steer_angle: float = 0.0
 var wheel_spin: float = 0.0
 var visuals: CarVisuals
 var _wheels: Array[VehicleWheel3D] = []
+var _wheel_rest: Array[Vector3] = []
 var _vis_spin: float = 0.0
 var spawn_map: String = "city"
 
@@ -61,6 +62,9 @@ func _ready() -> void:
 	collision_layer = 1
 	collision_mask = 1  # world only; player uses a proximity test to enter
 	can_sleep = true
+	# Jolt + FREEZE_MODE_STATIC zeros VehicleWheel3D local positions, so the
+	# car ends up spinning on a single point under the chassis.
+	freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
 	visuals = CarVisuals.new()
 	visuals.name = "Visuals"
 	add_child(visuals)
@@ -70,6 +74,7 @@ func _ready() -> void:
 	_build_wheels()
 	_build_collision()
 	_freeze_parked(true)
+	call_deferred("_restore_wheel_positions")
 
 
 func _build_collision() -> void:
@@ -135,14 +140,26 @@ func _build_wheels() -> void:
 		# RWD with a little front drive for launch stability (mostly rear).
 		wh.use_as_traction = true
 		_wheels.append(wh)
+		_wheel_rest.append(wh.position)
 
 
 func _freeze_parked(on: bool) -> void:
+	freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
 	freeze = on and not occupied
 	if freeze:
 		linear_velocity = Vector3.ZERO
 		angular_velocity = Vector3.ZERO
 		sleeping = true
+	_restore_wheel_positions()
+
+
+func _restore_wheel_positions() -> void:
+	## Jolt has been seen to clear wheel local origins; put them back.
+	for i in _wheels.size():
+		if i < _wheel_rest.size() and _wheel_rest[i].length_squared() > 0.01:
+			if _wheels[i].position.distance_squared_to(_wheel_rest[i]) > 0.0001:
+				_wheels[i].position = _wheel_rest[i]
+				_wheels[i].reset_physics_interpolation()
 
 
 func _trim_hulls_above_wheels() -> void:
@@ -195,6 +212,7 @@ func set_driver_input(throttle: float, steer: float, brake: float, hb: bool, nt:
 
 
 func _physics_process(delta: float) -> void:
+	_restore_wheel_positions()
 	door += (door_target - door) * (1.0 - exp(-8.0 * delta))
 	if not occupied:
 		engine_force = 0.0
@@ -239,7 +257,10 @@ func _drive(delta: float) -> void:
 	# Reverse uses a lower force cap.
 	if throttle_in < 0.0 and long_speed < 0.6:
 		force = clampf(force, -MASS_KG * 6.5, MASS_KG * 6.5)
-	engine_force = force
+	# Visual nose is -Z (Godot camera convention). VehicleBody3D applies
+	# positive engine_force along +Z, so the sign must be flipped or W
+	# would drive the car backward.
+	engine_force = -force
 	# Per-wheel brake / handbrake (rear bias on HB).
 	var br := brake_in * BRAKE_FORCE
 	if handbrake:
