@@ -633,11 +633,15 @@ var _body_interp_ready := false
 
 
 func _body_interp_reset() -> void:
+	if occupancy != "":
+		return
 	if _body and _body_interp_ready:
 		_body.position = _body_rest_pos
 
 
 func _body_interp_apply() -> void:
+	if occupancy != "":
+		return
 	if _body == null:
 		return
 	if not _body_interp_ready:
@@ -1214,6 +1218,14 @@ func debug_tp_state() -> Dictionary:
 
 func _process(delta: float) -> void:
 	_body_interp_apply()
+	if occupancy != "":
+		# Exam bed in observation mode: keep the orbit camera. Everything else
+		# (lying FP, car/plane chase or cockpit) is written by VehicleSystem
+		# after this node (process_priority lower than the player).
+		if occupancy == "exam_bed" and play_mode == GameMode.DISPLAY:
+			_update_tp_camera(delta)
+			_push_view_spin(delta)
+		return
 	# 在面板上松开按键时收不到 release → 以实际按键状态为准。
 	if _rmb_down and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
 		_rmb_down = false

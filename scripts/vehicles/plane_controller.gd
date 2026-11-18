@@ -90,19 +90,34 @@ func _ready() -> void:
 	_freeze_parked(true)
 
 
+var gear_manual: bool = false
+
+
 func _build_collision() -> void:
-	var hl: float = visuals.half_l
-	var hw: float = visuals.half_w
-	var h: float = visuals.height
-	# Fuselage (long box) + nose taper box + wings + tail + vertical stab.
-	VehicleCommon.add_box_shape(self, "fuse", Vector3(0.0, 0.15, 0.4), Vector3(minf(hw * 1.4, 2.6), minf(h * 0.7, 2.2), hl * 1.55))
-	VehicleCommon.add_box_shape(self, "nose", Vector3(0.0, 0.05, -hl * 0.72), Vector3(1.1, 1.1, hl * 0.45))
-	VehicleCommon.add_box_shape(self, "wing", Vector3(0.0, 0.05, 0.6), Vector3(maxf(hw * 2.0, 10.5), 0.28, 4.6))
-	VehicleCommon.add_box_shape(self, "tail", Vector3(0.0, 0.2, hl * 0.72), Vector3(6.4, 0.22, 2.2))
-	VehicleCommon.add_box_shape(self, "vstab", Vector3(0.0, 1.1, hl * 0.7), Vector3(0.28, 2.0, 2.0))
-	# Intake / strake cheeks
-	VehicleCommon.add_box_shape(self, "inlet_l", Vector3(-1.1, -0.15, -1.2), Vector3(1.2, 0.7, 3.2))
-	VehicleCommon.add_box_shape(self, "inlet_r", Vector3(1.1, -0.15, -1.2), Vector3(1.2, 0.7, 3.2))
+	# Per-mesh convex hulls matching the airframe, excluding landing-gear wheels.
+	# No concave trimesh on a moving RigidBody.
+	var n := 0
+	if visuals and visuals.wrap:
+		n = VehicleCommon.add_convexes_from_visual(self, visuals.wrap, VehicleCommon.PLANE_GEAR_RE, 0.08)
+	if n < 3:
+		var hl: float = visuals.half_l if visuals else 8.6
+		VehicleCommon.add_box_shape(self, "fuse", Vector3(0.0, 0.25, 0.4), Vector3(2.2, 1.6, hl * 1.35))
+		VehicleCommon.add_box_shape(self, "wing", Vector3(0.0, 0.15, 0.6), Vector3(13.0, 0.22, 4.4))
+		VehicleCommon.add_box_shape(self, "vstab", Vector3(0.0, 1.2, hl * 0.7), Vector3(0.22, 1.8, 1.8))
+	# Keep hulls above typical wheel contact (~ origin_y below body origin).
+	var min_keep := -0.95
+	if visuals:
+		for w in visuals.wheels:
+			var off: Vector3 = w.get("offset", Vector3.ZERO)
+			min_keep = minf(min_keep, off.y + 0.15)
+	for c in get_children():
+		if c is CollisionShape3D:
+			var y := VehicleCommon.shape_lowest_y(c as CollisionShape3D)
+			if y < min_keep and (c as CollisionShape3D).shape is BoxShape3D:
+				var box := (c as CollisionShape3D).shape as BoxShape3D
+				var lift := min_keep - y
+				c.position.y += lift * 0.5
+				box.size.y = maxf(0.08, box.size.y - lift)
 
 
 func _freeze_parked(on: bool) -> void:
@@ -127,14 +142,30 @@ func set_throttle(t: float) -> void:
 	thrust = clampf(t, 0.0, 1.0)
 
 
+func spawn_lift() -> float:
+	## Body-origin height above the ground so the visual gear sits on the runway.
+	if visuals:
+		var box := VehicleCommon.world_aabb(visuals)
+		var mn := to_local(box.position) if is_inside_tree() else Vector3(0, box.position.y, 0)
+		# Visual was lifted by ORIGIN_Y; lowest visual (wheels) is around -ORIGIN_Y.
+		return maxf(1.28, -mn.y + 0.04)
+	return 1.32
+
+
+func toggle_gear() -> void:
+	gear_manual = true
+	gear_want = 0.0 if gear > 0.5 else 1.0
+
+
 func _physics_process(delta: float) -> void:
 	door += (door_target - door) * (1.0 - exp(-8.0 * delta))
-	# Auto gear: retract once flying and accelerating; drop when slow / close to ground.
-	if airborne and airspeed > 90.0 and _agl > 18.0 and linear_velocity.y > -4.0:
-		gear_want = 0.0
-	elif (not airborne) or airspeed < 80.0 or _agl < 28.0:
-		gear_want = 1.0
-	gear = move_toward(gear, gear_want, delta * 0.55)
+	# Auto gear, unless the pilot toggled it (Ctrl).
+	if not gear_manual:
+		if airborne and airspeed > 90.0 and _agl > 18.0 and linear_velocity.y > -4.0:
+			gear_want = 0.0
+		elif (not airborne) or airspeed < 80.0 or _agl < 28.0:
+			gear_want = 1.0
+	gear = move_toward(gear, gear_want, delta * (1.55 if gear_manual else 0.55))
 	_vis_spin += (airspeed / 0.42) * delta * (1.0 if _on_wheels else 0.15)
 	wheel_spin = _vis_spin
 	if visuals:
@@ -150,6 +181,7 @@ func _physics_process(delta: float) -> void:
 			"speed_brake": speed_brake,
 			"airborne": airborne,
 			"speed": airspeed,
+			"decelerating": bool(get_meta("decelerating", false)) or speed_brake > 0.15 or thrust < 0.32,
 			"susp": [0.4, 0.4, 0.4],
 		}, delta, Time.get_ticks_msec() * 0.001, global_position.y)
 	if not occupied:

@@ -82,13 +82,13 @@ static func mount_canted(
 func apply(t: float) -> void:
 	if obj == null:
 		return
+	# Axis-angle in the hub's local frame. Uses +X/+Y/+Z (same as Three.js XYZ
+	# single-axis pivots). Godot from_euler is YXZ and is easy to get wrong
+	# on canted hubs when more than one component is involved.
 	var a := sign * max_angle * clampf(t, -1.0, 1.0)
-	var e := Vector3.ZERO
-	match axis:
-		"x":
-			e.x = a
-		"y":
-			e.y = a
-		_:
-			e.z = a
-	obj.quaternion = rest * Quaternion.from_euler(e)
+	var ax := Vector3(1.0, 0.0, 0.0)
+	if axis == "y":
+		ax = Vector3(0.0, 1.0, 0.0)
+	elif axis == "z":
+		ax = Vector3(0.0, 0.0, 1.0)
+	obj.quaternion = rest * Quaternion(ax, a)

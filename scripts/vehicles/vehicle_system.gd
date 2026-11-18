@@ -11,8 +11,8 @@ class_name VehicleSystem
 const CAR_SCENE := "res://scenes/vehicles/car.tscn"
 const PLANE_SCENE := "res://scenes/vehicles/plane.tscn"
 const BED_SCENE := "res://scenes/vehicles/exam_bed.tscn"
-const ROOM_BED_POS := Vector3(-1.48, 0.0, -0.25)
-const ROOM_BED_YAW := 0.0  # length along Z, head toward -Z / the furniture bed
+const ROOM_BED_POS := Vector3(-1.32, 0.0, 0.05)
+const ROOM_BED_YAW := 0.0  # length along Z, head toward -Z; clear of the furniture bed and wall
 const FALLBACK_RUNWAY := Vector3(-1000.0, 0.0, 300.0)
 const ROAD_CAR_COUNT := 5
 const LANDMARK_GROUND := "^(Boulevard_Ground|Docks_Ground|Island_Ground|AirPort_Track)"
@@ -37,8 +37,15 @@ var _cam_pitch: float = 0.15
 var _chase_dist: float = 9.0
 var _player_col_layer: int = 2
 var _player_col_mask: int = 3
+var vehicle_cam: String = "third"  # "first" | "third" — default third on car/plane
 var touch_throttle: float = -1.0  # >=0 overrides plane throttle (0..1)
-var touch_steer: Vector2 = Vector2.ZERO  # reused from move stick when occupying
+var touch_steer: Vector2 = Vector2.ZERO
+var touch_car_accel: bool = false
+var touch_car_brake: bool = false
+var touch_yaw: float = 0.0  # -1 left, +1 right (mobile yaw buttons)
+var touch_thrust_up: bool = false
+var touch_thrust_down: bool = false
+var _ctrl_was_down: bool = false
 
 
 func setup(g: Node, p: CharacterBody3D) -> void:
@@ -162,55 +169,47 @@ func _spawn_default_planes() -> void:
 
 
 func _airport_plane_spawns() -> Array:
-	## Port of world-map.ts getAirportPlaneSpawns, but only the side-by-side
-	## pair at the runway start (the web sim also placed a second pair).
+	## Two fighters side by side at the labeled runway start (x=-1000, z=300),
+	## on the runway surface, facing along the strip.
+	var start := FALLBACK_RUNWAY
+	if game and game.get("MAPS"):
+		for m in game.get("MAPS"):
+			if str(m.get("id")) != "city":
+				continue
+			var spawns: Array = m.get("spawns", [])
+			for s in spawns:
+				if "机场" in str(s.get("label", "")) or "跑道" in str(s.get("label", "")):
+					start = Vector3(float(s["x"]), 0.0, float(s["z"]))
+					break
 	var tracks: Array = _landmark_re("AirPort_Track")
 	if tracks.is_empty():
 		tracks = _landmark_re("Airport_Front")
-	if tracks.is_empty():
-		tracks = _landmark_re("^AirPort$")
-	if tracks.is_empty():
-		return []
-	var track: AABB = tracks[0]
-	var terminals: Array = _landmark_re("Airport_Front")
-	var term: Variant = terminals[0] if terminals.size() else null
-	var box := track
-	var along_x := box.size.x > box.size.z
-	var tcx: float
-	var tcz: float
-	if term is AABB:
-		var tb: AABB = term
-		tcx = tb.position.x + tb.size.x * 0.5
-		tcz = tb.position.z + tb.size.z * 0.5
-	else:
-		tcx = box.position.x + box.size.x * 0.5
-		tcz = box.position.z + box.size.z * 0.5
+	var along_x := false
+	var yaw := 0.0
+	var lane := 7.2
+	if tracks:
+		var box: AABB = tracks[0]
+		along_x = box.size.x > box.size.z
+		# Face down the longer remaining runway from this start point.
+		if along_x:
+			var x_mid := box.position.x + box.size.x * 0.5
+			yaw = -PI * 0.5 if start.x <= x_mid else PI * 0.5
+			lane = minf(7.2, maxf(5.5, box.size.z * 0.16))
+		else:
+			var z_mid := box.position.z + box.size.z * 0.5
+			yaw = 0.0 if start.z <= z_mid else PI
+			lane = minf(7.2, maxf(5.5, box.size.x * 0.16))
 	var out: Array = []
-	var place: Callable = func(x: float, z: float, yaw: float) -> void:
+	var place: Callable = func(x: float, z: float, yv: float) -> void:
 		var g: Variant = _ground(x, z)
-		if g == null:
-			return
-		out.append({"x": x, "y": (g as Vector3).y, "z": z, "yaw": yaw})
+		var y: float = (g as Vector3).y if g != null else 0.0
+		out.append({"x": x, "y": y, "z": z, "yaw": yv})
 	if along_x:
-		var z_mid := box.position.z + box.size.z * 0.5
-		var x_min := box.position.x + 28.0
-		var x_max := box.position.x + box.size.x - 28.0
-		var use_max := absf(x_max - tcx) <= absf(x_min - tcx)
-		var x0 := x_max if use_max else x_min
-		var yaw_run := PI * 0.5 if use_max else -PI * 0.5
-		var lane := minf(6.4, box.size.z * 0.18)
-		place.call(x0, z_mid - lane, yaw_run)
-		place.call(x0, z_mid + lane, yaw_run)
+		place.call(start.x, start.z - lane, yaw)
+		place.call(start.x, start.z + lane, yaw)
 	else:
-		var x_mid := box.position.x + box.size.x * 0.5
-		var z_min := box.position.z + 28.0
-		var z_max := box.position.z + box.size.z - 28.0
-		var use_max := absf(z_max - tcz) <= absf(z_min - tcz)
-		var z0 := z_max if use_max else z_min
-		var yaw_run := 0.0 if use_max else PI
-		var lane := minf(6.4, box.size.x * 0.18)
-		place.call(x_mid - lane, z0, yaw_run)
-		place.call(x_mid + lane, z0, yaw_run)
+		place.call(start.x - lane, start.z, yaw)
+		place.call(start.x + lane, start.z, yaw)
 	return out
 
 
@@ -318,17 +317,24 @@ func _register(v: Node, id: String, defaulted: bool, menu: bool, map_id: String)
 func _spawn_car(pos: Vector3, yaw: float, defaulted: bool, map_id: String, menu: bool = false) -> Node:
 	var v: Node = load(CAR_SCENE).instantiate()
 	_register(v, _next_id("car", defaulted), defaulted, menu, map_id)
-	# Place after entering the tree so physics sees the transform.
-	v.global_position = pos + Vector3(0, 0.6, 0)
-	v.rotation.y = yaw
+	var lift := float(v.call("spawn_lift")) if v.has_method("spawn_lift") else 0.5
+	v.global_position = pos + Vector3(0, lift, 0)
+	v.rotation = Vector3(0.0, yaw, 0.0)
+	if v is VehicleBody3D:
+		(v as VehicleBody3D).linear_velocity = Vector3.ZERO
+		(v as VehicleBody3D).angular_velocity = Vector3.ZERO
 	return v
 
 
 func _spawn_plane(pos: Vector3, yaw: float, defaulted: bool, map_id: String, menu: bool = false) -> Node:
 	var v: Node = load(PLANE_SCENE).instantiate()
 	_register(v, _next_id("plane", defaulted), defaulted, menu, map_id)
-	v.global_position = pos + Vector3(0, 1.4, 0)
-	v.rotation.y = yaw
+	var lift := float(v.call("spawn_lift")) if v.has_method("spawn_lift") else 1.32
+	v.global_position = pos + Vector3(0, lift, 0)
+	v.rotation = Vector3(0.0, yaw, 0.0)
+	if v is RigidBody3D:
+		(v as RigidBody3D).linear_velocity = Vector3.ZERO
+		(v as RigidBody3D).angular_velocity = Vector3.ZERO
 	return v
 
 
@@ -422,35 +428,38 @@ func try_enter() -> bool:
 		return false
 	var v := nearest
 	occupied = v
+	var body: Node3D = player.get_node_or_null("Body")
 	_saved_player = {
 		"col_layer": player.collision_layer,
 		"col_mask": player.collision_mask,
 		"pos": player.global_position,
+		"xform": player.global_transform,
 		"mode": player.get("play_mode"),
+		"yaw": float(player.get("_yaw")),
+		"pitch": float(player.get("_pitch")),
+		"body_logic_yaw": float(player.get("_body_logic_yaw")),
+		"body_pos": body.position if body else Vector3.ZERO,
+		"body_rot": body.rotation if body else Vector3.ZERO,
 	}
 	_player_col_layer = player.collision_layer
 	_player_col_mask = player.collision_mask
 	player.collision_layer = 0
 	player.collision_mask = 0
 	player.velocity = Vector3.ZERO
+	# Never tilt the CharacterBody3D — yaw lives on Body / the camera.
+	player.global_transform = Transform3D(Basis.IDENTITY, player.global_position)
 	player.set("occupancy", kind_of(v))
 	player.set("occupier", v)
 	if v.has_method("on_enter"):
 		v.call("on_enter")
 	var k := kind_of(v)
 	if k == "exam_bed":
-		# Default first-person lying on the bed.
-		if player.has_method("set_play_mode") and player.get("play_mode") != 1:
-			# GameMode.CONTROL = 1
-			player.call("set_play_mode", 1)
+		# Keep the current play mode. Observation must keep the pose.
 		_apply_exam_pose()
 	else:
-		# Driving: switch to control (FP cockpit) if already in control, otherwise
-		# stay in the current mode — Tab still toggles cockpit / chase.
-		if player.has_method("set_play_mode") and bool(player.call("is_display_mode")):
-			# Keep display as chase cam; user can Tab into the cockpit.
-			pass
-		_hide_player_body(k != "exam_bed")
+		# Cars / planes default to third person; the player can toggle 1st/3rd.
+		vehicle_cam = "third"
+		_hide_player_body(true)
 	occupancy_changed.emit(v)
 	proximity_changed.emit(v, true)
 	return true
@@ -460,11 +469,9 @@ func try_exit() -> bool:
 	if occupied == null or player == null:
 		return false
 	var v := occupied
-	var k := kind_of(v)
 	if v.has_method("on_exit"):
 		v.call("on_exit")
 	_hide_player_body(false)
-	_restore_player_loco()
 	var off: Vector3 = v.call("exit_offset") if v.has_method("exit_offset") else v.global_transform.basis.x * 2.0
 	var dest: Vector3 = v.global_position + off
 	var g: Variant = _ground(dest.x, dest.z)
@@ -472,10 +479,9 @@ func try_exit() -> bool:
 		dest.y = (g as Vector3).y + 0.04
 	else:
 		dest.y = v.global_position.y
-	player.global_position = dest
-	player.velocity = Vector3.ZERO
-	player.collision_layer = _player_col_layer
-	player.collision_mask = _player_col_mask
+	_restore_standing(dest)
+	player.collision_layer = int(_saved_player.get("col_layer", _player_col_layer))
+	player.collision_mask = int(_saved_player.get("col_mask", _player_col_mask))
 	player.set("occupancy", "")
 	player.set("occupier", null)
 	player.reset_physics_interpolation()
@@ -490,27 +496,50 @@ func _hide_player_body(hide: bool) -> void:
 	if player == null or not player.has_node("Body"):
 		return
 	var body: Node3D = player.get_node("Body")
-	# Keep the node processed so the skeleton can still be posed for the exam bed.
 	if kind_of(occupied) == "exam_bed":
 		body.visible = true
 		return
 	body.visible = not hide
 
 
-func _restore_player_loco() -> void:
+func _restore_standing(dest: Vector3) -> void:
+	## Detach pose overrides and put the CharacterBody back upright, original yaw.
 	if player == null:
 		return
+	var skel: Skeleton3D = player.call("get_skeleton") if player.has_method("get_skeleton") else null
+	if skel:
+		ExamPose.clear(skel)
 	var loco = player.call("get_loco") if player.has_method("get_loco") else null
 	if loco:
 		loco.set("frozen", false)
-	# Un-rotate the body mesh; standing up beside the table.
+		if loco.has_method("apply_pose"):
+			loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, 0.016, 0.0)
+	# CharacterBody is always world-upright; facing lives on Body + look yaw.
+	player.global_transform = Transform3D(Basis.IDENTITY, dest)
+	player.velocity = Vector3.ZERO
+	var yaw := float(_saved_player.get("body_logic_yaw", _saved_player.get("yaw", 0.0)))
+	if player.has_method("set_facing"):
+		player.call("set_facing", yaw)
+	else:
+		player.set("_yaw", yaw)
+		player.set("_body_logic_yaw", yaw)
+		if player.has_node("Body"):
+			var body: Node3D = player.get_node("Body")
+			body.position = Vector3.ZERO
+			body.rotation = Vector3(0.0, yaw + PI, 0.0)
 	if player.has_node("Body"):
-		var body: Node3D = player.get_node("Body")
-		body.rotation = Vector3(0, body.rotation.y, 0)
-		body.position = Vector3.ZERO
-	if player.has_method("set_facing") and occupied:
-		# Face away from the vehicle.
-		pass
+		var body2: Node3D = player.get_node("Body")
+		body2.position = Vector3.ZERO
+		body2.visible = true
+		# set_facing already wrote rotation.y; clear any residual pitch/roll.
+		body2.rotation = Vector3(0.0, body2.rotation.y, 0.0)
+	if "pitch" in _saved_player:
+		player.set("_pitch", float(_saved_player["pitch"]))
+
+
+func toggle_vehicle_cam() -> String:
+	vehicle_cam = "first" if vehicle_cam != "first" else "third"
+	return vehicle_cam
 
 
 func _process_occupied(delta: float) -> void:
@@ -528,129 +557,130 @@ func _process_occupied(delta: float) -> void:
 
 func _apply_exam_pose() -> void:
 	var bed := occupied as ExamBed
-	if bed == null or player == null:
+	if bed == null or player == null or not player.has_node("Body"):
 		return
 	var loco = player.call("get_loco") if player.has_method("get_loco") else null
 	if loco:
 		loco.set("frozen", true)
-	# Place the character hip at the seat, body lying supine along the table.
-	var seat := bed.seat_global()
-	var basis := bed.lie_basis()
-	# CharacterBody origin is at the feet when standing; shift so the hip (~0.95 m) lands on the seat.
-	# After lie_basis, standing +Y (head) is table -Z, so "up the body" is -table.z.
-	# We want the hip (about 0.95 m along +Y in standing space) at the seat.
-	# In lie space, standing +Y maps to -table Z. Standing origin (feet) is 0.95 m toward +Z (feet end) from the hip.
-	var hip_along := 0.95
-	# feet origin in table space: seat + (mapped standing -Y) * 0? Easier: put player origin at seat, then offset Body.
-	player.global_position = seat
-	player.velocity = Vector3.ZERO
-	player.global_transform = Transform3D(basis, seat)
-	if player.has_node("Body"):
-		# Body's local origin is at the feet of the mesh; move it so hip ~ seat.
-		# After root rotation, we shift the mesh along local +Y (original head axis, now table -Z)
-		# by -hip_along so the hip (0.95 along +Y) sits at the player origin (seat).
-		var body: Node3D = player.get_node("Body")
-		body.position = Vector3(0.0, -hip_along, 0.0)
-		body.rotation = Vector3.ZERO
-		body.visible = true
+	var body: Node3D = player.get_node("Body")
 	var skel: Skeleton3D = player.call("get_skeleton") if player.has_method("get_skeleton") else null
+	# Keep CharacterBody upright at the seat xz so exit can restore a standing pose
+	# without residual pitch/roll. Only the Body mesh is laid on the table.
+	var seat := bed.seat_global()
+	player.velocity = Vector3.ZERO
+	player.global_transform = Transform3D(Basis.IDENTITY, Vector3(seat.x, 0.0, seat.z))
+	body.visible = true
+	# Reset bones to rest before measuring the hip, then place Body.
+	if skel:
+		ExamPose.clear(skel)
+	var hip_local := ExamPose.hip_local(skel, body) if skel else Vector3(0.0, 0.917, 0.033)
+	var lie := bed.patient_basis()
+	# hip_world = body.origin + lie * hip_local  →  body.origin = seat - lie * hip_local
+	body.global_transform = Transform3D(lie, seat - lie * hip_local)
 	if skel:
 		ExamPose.apply(skel, bed.stirrup_l_global(), bed.stirrup_r_global(), bed.backrest_angle)
 
 
 func _exam_camera(_delta: float) -> void:
-	if player == null or not bool(player.get("first_person")):
-		# Observe / orbit uses the normal third-person camera, pose stays applied.
+	if player == null:
+		return
+	# Observation / display mode keeps the pose and uses the normal orbit camera.
+	if player.has_method("is_display_mode") and bool(player.call("is_display_mode")):
+		return
+	if not bool(player.get("first_person")):
 		return
 	var skel: Skeleton3D = player.call("get_skeleton") if player.has_method("get_skeleton") else null
 	if skel == null or not player.has_node("CameraPivot/Camera3D"):
 		return
 	var cam: Camera3D = player.get_node("CameraPivot/Camera3D")
-	var pivot: Node3D = player.get_node("CameraPivot")
 	var head := ExamPose.head_world(skel)
-	# Default look: from the head toward the feet / abdomen (table +Z, slightly down).
+	var bed := occupied as ExamBed
+	if bed == null:
+		return
+	var lie := bed.patient_basis()
+	# Default: from the head, look toward the feet / abdomen, slightly at the body.
+	var look_dir := -lie.y * 0.92 - lie.z * 0.25  # toward feet, a little toward the back/belly
+	if look_dir.length_squared() < 1e-6:
+		look_dir = bed.global_transform.basis.z
+	look_dir = look_dir.normalized()
 	var yaw := float(player.get("_yaw"))
 	var pitch := float(player.get("_pitch"))
-	# Remap: standing FP yaw/pitch onto a lying reference looking along +Z of the table,
-	# with pitch 0 looking along the body, negative pitch looking toward the belly / legs.
-	var bed := occupied as ExamBed
-	var look := bed.global_transform.basis
-	# Start from a view aimed at the torso (down the body, a little toward the belly).
-	var base := look * Basis.from_euler(Vector3(-0.55, 0.0, 0.0))
+	# Relative look around the lying head, starting from look-at-body.
+	var base := Basis.looking_at(look_dir, lie.z)
 	var extra := Basis.from_euler(Vector3(pitch, yaw, 0.0))
-	var xf := Transform3D(base * extra, head.origin + head.basis.y * 0.08)
-	# Place pivot + camera so the existing pipeline doesn't fight us next frame:
-	# write camera global directly (occupancy hook also runs after player camera).
-	cam.global_transform = xf
+	var eye := head.origin + lie.z * 0.10
+	cam.global_transform = Transform3D((base * extra).orthonormalized(), eye)
 	cam.fov = float(player.get("fp_fov"))
 	cam.near = 0.04
 	cam.current = true
 
 
 func _attach_player_to_vehicle() -> void:
-	if occupied == null:
+	if occupied == null or player == null:
 		return
-	player.global_position = occupied.global_position
+	# Follow the vehicle origin but NEVER copy its pitch/roll onto the CharacterBody.
+	player.global_transform = Transform3D(Basis.IDENTITY, occupied.global_position)
 	player.velocity = Vector3.ZERO
-	player.global_transform = occupied.global_transform
 
 
 func _drive_input(delta: float) -> void:
 	if player == null:
 		return
-	# Don't drive while a HUD panel is up.
 	if bool(player.get("ui_blocks_capture")) or bool(player.get("input_locked")):
 		return
 	var k := kind_of(occupied)
-	var throttle := Input.get_axis("move_back", "move_forward")
-	var steer := Input.get_axis("move_left", "move_right")
-	# Mobile stick (player.touch_move is Vector2, +y back? get_vector uses down=+y in Godot
-	# but player maps touch_move like input_dir). Reuse touch_move if present.
+	# PC stick: W/S = get_axis(back, forward) → W = +1. A/D = get_axis(left, right) → A = -1, D = +1.
+	var axis_fb := Input.get_axis("move_back", "move_forward")
+	var axis_lr := Input.get_axis("move_left", "move_right")
 	if player.get("touch_move") != null:
 		var tm: Vector2 = player.touch_move
 		if tm.length_squared() > 1e-4:
-			steer = tm.x
-			throttle = -tm.y if absf(tm.y) > absf(throttle) else throttle
-			# Player touch_move uses the same convention as Input.get_vector (y + = back).
-			# move_forward is -y in get_vector, so throttle = -touch_move.y? 
-			# Input.get_vector("left","right","forward","back"): forward is -y.
-			# touch_move is assigned as input_dir equivalent, so y>0 is back, y<0 is forward.
-			# throttle forward should be + when moving forward, so throttle = -tm.y.
-			throttle = -tm.y
+			# touch_move: +x right, +y back (same as Input.get_vector).
+			axis_lr = tm.x
+			axis_fb = -tm.y
 	if k == "car" and occupied is CarController:
-		var brake := 1.0 if Input.is_key_pressed(KEY_SPACE) or throttle < -0.05 and (occupied as CarController).linear_velocity.length() > 1.0 and throttle < 0.0 else 0.0
-		if throttle < 0.0 and (occupied as CarController).linear_velocity.dot(-(occupied as CarController).global_transform.basis.z) > 1.0:
-			# Forward motion + back input = brake, not reverse, until almost stopped.
-			brake = maxf(brake, -throttle)
-			# Keep a little reverse only when nearly still (handled in controller via throttle).
-		var hb := Input.is_key_pressed(KEY_SPACE)
+		var throttle := axis_fb
+		if touch_car_accel:
+			throttle = maxf(throttle, 1.0)
+		# A = steer left (positive Godot steering), D = right.
+		var steer := -axis_lr
+		var hb := Input.is_key_pressed(KEY_SPACE) or touch_car_brake
 		var nt := Input.is_key_pressed(KEY_SHIFT)
-		(occupied as CarController).set_driver_input(throttle, steer, brake, hb, nt)
+		var brake := 1.0 if hb else 0.0
+		var car := occupied as CarController
+		var fwd_speed := car.linear_velocity.dot(-car.global_transform.basis.z)
+		if throttle < -0.05 and fwd_speed > 1.0:
+			brake = maxf(brake, -throttle)
+		car.set_driver_input(throttle, steer, brake, hb, nt)
 	elif k == "plane" and occupied is PlaneController:
 		var pl := occupied as PlaneController
-		var pitch := -throttle  # W / stick forward = nose down (stick convention)
-		var roll := steer
-		var yaw := 0.0
+		# S = pull up (axis_fb < 0 → pitch +); W = dive (axis_fb > 0 → pitch -).
+		var pitch := -axis_fb
+		# A = roll left (axis_lr < 0); D = roll right.
+		var roll := axis_lr
+		var yaw := touch_yaw
 		if Input.is_key_pressed(KEY_Q):
 			yaw -= 1.0
 		if Input.is_key_pressed(KEY_E):
 			yaw += 1.0
-		# Mouse look, when captured, also contributes (Ace Combat-ish).
-		# Throttle: Shift up, Ctrl down; or explicit slider from touch.
+		yaw = clampf(yaw, -1.0, 1.0)
 		var td := 0.0
-		if Input.is_key_pressed(KEY_SHIFT):
+		var decelerating := false
+		if Input.is_key_pressed(KEY_SHIFT) or touch_thrust_up:
 			td += delta * 0.45
-		if Input.is_key_pressed(KEY_CTRL):
+		if Input.is_key_pressed(KEY_C) or touch_thrust_down:
 			td -= delta * 0.45
-		if touch_throttle >= 0.0:
+			decelerating = true
+		if touch_throttle >= 0.0 and not touch_thrust_up and not touch_thrust_down:
 			pl.set_throttle(touch_throttle)
 			td = 0.0
-		var br := 1.0 if Input.is_key_pressed(KEY_SPACE) else 0.0
-		# On the ground, W/S is throttle and A/D is nose-wheel steer.
-		if not pl.airborne:
-			pl.set_pilot_input(0.0, 0.0, yaw, throttle * delta * 0.5 + td, br, steer)
-		else:
-			pl.set_pilot_input(pitch, roll, yaw, td, br, steer)
+		var br := 1.0 if decelerating or (Input.is_key_pressed(KEY_Q) and Input.is_key_pressed(KEY_E)) else 0.0
+		pl.set_pilot_input(pitch, roll, yaw, td, br, yaw)
+		pl.set_meta("decelerating", decelerating)
+		var ctrl_now := Input.is_physical_key_pressed(KEY_CTRL)
+		if ctrl_now and not _ctrl_was_down and pl.has_method("toggle_gear"):
+			pl.call("toggle_gear")
+		_ctrl_was_down = ctrl_now
 
 
 func _vehicle_camera(_delta: float) -> void:
@@ -658,7 +688,7 @@ func _vehicle_camera(_delta: float) -> void:
 		return
 	var cam: Camera3D = player.get_node("CameraPivot/Camera3D")
 	var k := kind_of(occupied)
-	var fp := bool(player.get("first_person"))
+	var fp := vehicle_cam == "first"
 	if fp:
 		var eye_off: Vector3 = occupied.call("cockpit_offset") if occupied.has_method("cockpit_offset") else Vector3(0, 1.2, 0)
 		var eye: Vector3 = occupied.global_transform * eye_off
@@ -671,9 +701,9 @@ func _vehicle_camera(_delta: float) -> void:
 		cam.near = 0.08
 		cam.current = true
 	else:
-		# Chase camera behind the vehicle.
 		var dist := 8.5 if k == "car" else 16.0
 		var height := 2.4 if k == "car" else 4.6
+		# Chase behind the vehicle (vehicle -Z is nose, so +Z is tail).
 		var cam_pos: Vector3 = occupied.global_position + occupied.global_transform.basis.z * dist + Vector3(0, height, 0)
 		var look_pt: Vector3 = occupied.global_position + Vector3(0, 1.2 if k == "car" else 1.8, 0)
 		cam.global_transform = Transform3D(Basis.looking_at(look_pt - cam_pos, Vector3.UP), cam_pos)
@@ -709,13 +739,10 @@ func aim_point(kind: String) -> Vector3:
 		var cam: Camera3D = player.call("get_camera")
 		if cam:
 			from = cam.global_position
+			# Always aim from the crosshair (viewport centre). The mouse is on
+			# the 载具 menu button when this is called, so it must not be used.
 			var vp := cam.get_viewport().get_visible_rect().size
-			var screen := vp * 0.5
-			# PC: use mouse if it is on the viewport.
-			var mouse := cam.get_viewport().get_mouse_position()
-			if mouse.x >= 0.0 and mouse.y >= 0.0 and mouse.x <= vp.x and mouse.y <= vp.y:
-				screen = mouse
-			dir = cam.project_ray_normal(screen)
+			dir = cam.project_ray_normal(vp * 0.5)
 	var to := from + dir * 220.0
 	var q := PhysicsRayQueryParameters3D.create(from, to, 1)
 	var excl: Array[RID] = []
@@ -733,8 +760,20 @@ func aim_point(kind: String) -> Vector3:
 			p = g as Vector3
 	else:
 		p = hit["position"]
-	# Keep menu-spawned vehicles from stacking on top of each other.
-	var min_d := 22.0 if kind == "plane" else 9.0
+		# Wall or ceiling hits should still place the vehicle on the floor.
+		var nrm: Vector3 = hit.get("normal", Vector3.UP)
+		if nrm.dot(Vector3.UP) < 0.35:
+			var gf: Variant = _ground(p.x, p.z)
+			if gf != null:
+				p = gf as Vector3
+	# Keep menu-spawned vehicles from stacking. Distances are tight in the room
+	# (exam bed ~2 m) and looser on the city map.
+	var min_d := 22.0 if kind == "plane" else (2.3 if kind == "exam_bed" else 7.0)
+	var step := 8.0 if kind == "plane" else (1.6 if kind == "exam_bed" else 4.0)
+	var slide := dir.slide(Vector3.UP)
+	if slide.length_squared() < 1e-6:
+		slide = Vector3(0, 0, -1)
+	slide = slide.normalized()
 	for _i in 8:
 		var clash := false
 		for v in vehicles:
@@ -745,7 +784,7 @@ func aim_point(kind: String) -> Vector3:
 				break
 		if not clash:
 			break
-		p += dir.slide(Vector3.UP).normalized() * (8.0 if kind == "plane" else 4.0)
+		p += slide * step
 	var g2: Variant = _ground(p.x, p.z)
 	if g2 != null:
 		p = g2 as Vector3

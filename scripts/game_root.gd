@@ -95,7 +95,8 @@ func _ready() -> void:
 	vehicle_system.name = "VehicleSystem"
 	# After the player so occupancy cameras run later in the tree.
 	add_child(vehicle_system)
-	vehicle_system.process_priority = 80
+	# Lower than the player (0) so occupancy cameras run AFTER the player camera.
+	vehicle_system.process_priority = -20
 	vehicle_system.call("setup", self, _player)
 	if _hud and _hud.has_method("setup_vehicles"):
 		_hud.call("setup_vehicles", vehicle_system)
@@ -151,6 +152,8 @@ func action_for_key(key: int, mode: String = "") -> String:
 	if key == KEY_F and vehicle_system and vehicle_system.has_method("can_toggle") and bool(vehicle_system.call("can_toggle")):
 		return "vehicle_toggle"
 	var in_veh := vehicle_system != null and vehicle_system.get("occupied") != null
+	if in_veh and key == KEY_V:
+		return "vehicle_cam"
 	var a: String = str(KEYMAP[m].get(key, ""))
 	if a == "":
 		a = str(KEYMAP["common"].get(key, ""))
@@ -237,6 +240,9 @@ func run_action(action: String, key: int = 0) -> void:
 		"vehicle_toggle":
 			if vehicle_system and vehicle_system.has_method("try_toggle"):
 				vehicle_system.call("try_toggle")
+		"vehicle_cam":
+			if vehicle_system and vehicle_system.has_method("toggle_vehicle_cam"):
+				vehicle_system.call("toggle_vehicle_cam")
 	_hud.call("sync")
 
 
@@ -253,7 +259,7 @@ func _map_def(id: String) -> Dictionary:
 	return MAPS[0]
 
 
-func _apply_map_visibility(id: String) -> void:
+func _apply_map_visibility(id: String, notify_vehicles: bool = true) -> void:
 	var in_room := id == "room"
 	_room.visible = in_room
 	if _room_mirror:
@@ -265,7 +271,9 @@ func _apply_map_visibility(id: String) -> void:
 	_set_colliders_enabled(_room_col, in_room)
 	_player.set("camera_bounds", ROOM_CAMERA_BOUNDS if in_room else AABB())
 	_set_city_env(not in_room)
-	if vehicle_system and vehicle_system.has_method("notify_map"):
+	# Overhead preview from the room must NOT notify the vehicle system —
+	# that was hiding the home exam bed and spawning city vehicles mid-map-open.
+	if notify_vehicles and vehicle_system and vehicle_system.has_method("notify_map"):
 		vehicle_system.call("notify_map", id)
 
 
@@ -329,7 +337,7 @@ func open_overhead() -> void:
 	if current_map == "room":
 		# 网页：在家打开地图时显示城市、以城市出生点为中心
 		_overhead_preview = true
-		_apply_map_visibility("city")
+		_apply_map_visibility("city", false)
 	var s: Dictionary = _map_def("city")["spawns"][0]
 	var center := _player.global_position if current_map == "city" else Vector3(float(s["x"]), 0.0, float(s["z"]))
 	_player.set("input_locked", true)
@@ -344,7 +352,7 @@ func close_overhead(restore: bool = true) -> void:
 	map_view.close()
 	map_view.set_marker(null)
 	if _overhead_preview and restore:
-		_apply_map_visibility("room")
+		_apply_map_visibility("room", false)
 	_overhead_preview = false
 	_player.set("input_locked", false)
 	_player.set_physics_process(true)

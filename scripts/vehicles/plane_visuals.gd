@@ -394,11 +394,15 @@ func _measure_cockpit() -> Dictionary:
 
 
 static func petal_gap(thrust: float) -> float:
-	if thrust > 0.4:
-		return ((thrust - 0.4) / 0.6) * 0.58
-	if thrust >= 0.2:
-		return -0.18
-	return 0.0
+	## >0 opens the petal (accelerate / afterburner); <0 contracts (decelerate).
+	var u := clampf(thrust, 0.0, 1.0)
+	if u >= 0.8:
+		# Last segment of the thrust lever = afterburner, extra open.
+		return 0.38 + (u - 0.8) / 0.2 * 0.28
+	if u >= 0.4:
+		return (u - 0.4) / 0.4 * 0.38
+	# Idle / decelerate: petals close.
+	return lerpf(-0.28, 0.0, u / 0.4)
 
 
 func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0) -> void:
@@ -441,49 +445,54 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 	var roll_c := clampf(float(st.get("ctrl_roll", 0.0)), -1.0, 1.0)
 	var yaw_c := clampf(float(st.get("ctrl_yaw", steer_angle * 1.6)), -1.0, 1.0)
 	var thrust := float(st.get("thrust", 0.0))
+	# Petal gap opens with thrust (afterburner is the last segment); contracts when decelerating.
 	var gap := petal_gap(thrust) * 0.35
-	var vec_l := -pitch_c * 0.95 - roll_c * 0.92
-	var vec_r := -pitch_c * 0.95 + roll_c * 0.92
+	# W/S pitch vectors both nozzles together; A/D adds differential vectoring.
+	# pitch_c > 0 = nose up (S / stick back). Trailing edge up is negative X rotation.
+	var vec_l := -pitch_c * 0.95 + roll_c * 0.92
+	var vec_r := -pitch_c * 0.95 - roll_c * 0.92
 	var brake := clampf(float(st.get("speed_brake", 0.0)), 0.0, 1.0)
-	var airborne := bool(st.get("airborne", false))
-	var speed := float(st.get("speed", 0.0))
+	var decelerating := bool(st.get("decelerating", false)) or brake > 0.15 or thrust < 0.32
 	for s in surfaces:
 		var h := s as VehicleHinge
-		var t := 0.0
+		var tv := 0.0
 		match h.kind:
 			"aileronL":
-				t = -roll_c
+				# Roll left (A, roll_c < 0): left aileron trailing-edge up (tv < 0).
+				tv = roll_c
 			"aileronR":
-				t = roll_c
+				tv = -roll_c
 			"elevator":
-				t = -pitch_c
+				# Nose up (S, pitch_c > 0): elevator trailing-edge up.
+				tv = -pitch_c
 			"nozzle":
-				t = -pitch_c * 0.95
+				tv = -pitch_c * 0.95
 			"nozzleL":
-				t = vec_l
+				tv = vec_l
 			"nozzleR":
-				t = vec_r
+				tv = vec_r
 			"nozzleLT":
-				t = vec_l - gap
+				tv = vec_l - gap
 			"nozzleLB":
-				t = vec_l + gap
+				tv = vec_l + gap
 			"nozzleRT":
-				t = vec_r - gap
+				tv = vec_r - gap
 			"nozzleRB":
-				t = vec_r + gap
+				tv = vec_r + gap
 			"rudder":
-				t = yaw_c
+				tv = yaw_c
 			"rudderL":
-				t = yaw_c + brake * 0.72
+				tv = yaw_c + brake * 0.72
 			"rudderR":
-				t = yaw_c - brake * 0.72
+				tv = yaw_c - brake * 0.72
 			"flap":
-				var want := 0.88 if (not airborne and (absf(speed) > 6.5 or thrust > 0.2)) else 0.0
+				# Decelerate: flaps deploy. Accelerate / high thrust: retract.
+				var want := 0.88 if decelerating else 0.0
 				flap_t += (want - flap_t) * (1.0 - exp(-3.4 * delta))
-				t = flap_t
+				tv = flap_t
 			_:
-				t = 0.0
-		h.apply(t)
+				tv = 0.0
+		h.apply(tv)
 	for eng in nozzle_engines:
 		var top: VehicleHinge = eng["top"]
 		var bot: VehicleHinge = eng["bot"]

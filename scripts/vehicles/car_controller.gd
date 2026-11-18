@@ -67,28 +67,28 @@ func _ready() -> void:
 	if not visuals.setup():
 		push_error("CarController: visual setup failed")
 		return
-	_build_collision()
 	_build_wheels()
+	_build_collision()
 	_freeze_parked(true)
 
 
 func _build_collision() -> void:
-	# Several boxes, not a single crude hull and not a concave trimesh
-	# (moving concave bodies are unstable in Jolt).
-	var hl: float = visuals.half_l
-	var hw: float = visuals.half_w
-	var h: float = visuals.height
-	var wr: float = visuals.wheel_r
-	# Main tub sits above the wheels.
-	VehicleCommon.add_box_shape(self, "body", Vector3(0.0, wr + (h - wr) * 0.38, 0.05), Vector3(hw * 1.85, (h - wr) * 0.72, hl * 1.72))
-	# Cabin
-	VehicleCommon.add_box_shape(self, "cabin", Vector3(0.0, wr + (h - wr) * 0.72, 0.05), Vector3(hw * 1.35, (h - wr) * 0.55, hl * 0.85))
-	# Nose / tail bumpers
-	VehicleCommon.add_box_shape(self, "nose", Vector3(0.0, wr + 0.18, -hl * 0.82), Vector3(hw * 1.6, 0.36, hl * 0.28))
-	VehicleCommon.add_box_shape(self, "tail", Vector3(0.0, wr + 0.22, hl * 0.82), Vector3(hw * 1.55, 0.4, hl * 0.26))
-	# Side skirts
-	VehicleCommon.add_box_shape(self, "skirt_l", Vector3(-hw * 0.92, wr + 0.08, 0.0), Vector3(0.16, 0.16, hl * 1.15))
-	VehicleCommon.add_box_shape(self, "skirt_r", Vector3(hw * 0.92, wr + 0.08, 0.0), Vector3(0.16, 0.16, hl * 1.15))
+	# Per-mesh convex hulls that follow the body shell, excluding wheels.
+	# No concave trimesh on a moving VehicleBody (Jolt misbehaves).
+	var n := 0
+	if visuals and visuals.wrap:
+		n = VehicleCommon.add_convexes_from_visual(self, visuals.wrap, VehicleCommon.WHEELISH_RE, 0.05)
+	# Keep the hulls clear of the ground / wheel volume so suspension can work.
+	_trim_hulls_above_wheels()
+	if n < 2:
+		# Fallback boxes that stay above the wheel tops.
+		var wr: float = visuals.wheel_r if visuals else 0.34
+		var hl: float = visuals.half_l if visuals else 2.4
+		var hw: float = minf(visuals.half_w if visuals else 1.0, 0.85)
+		var h: float = visuals.height if visuals else 1.2
+		var bottom := wr + 0.06
+		VehicleCommon.add_box_shape(self, "body", Vector3(0.0, bottom + (h - bottom) * 0.38, 0.05), Vector3(hw * 1.7, (h - bottom) * 0.7, hl * 1.55))
+		VehicleCommon.add_box_shape(self, "cabin", Vector3(0.0, bottom + (h - bottom) * 0.7, 0.05), Vector3(hw * 1.25, (h - bottom) * 0.5, hl * 0.8))
 
 
 func _build_wheels() -> void:
@@ -110,7 +110,11 @@ func _build_wheels() -> void:
 		# VehicleWheel3D position is the wheel center in body space.
 		# Visuals were lifted by ORIGIN_Y, so wheel y in body space is offset.y
 		# (already relative to the lifted wrap, i.e. body origin).
-		wh.position = Vector3(float(w["x"]), float(w["y"]), float(w["z"]))
+		# Node origin is the suspension attachment (Godot 4). Place it
+		# rest_length above the visual wheel centre so the physics wheel
+		# sits on the visual at rest, not buried in the pavement.
+		var wy := float(w["y"])
+		wh.position = Vector3(float(w["x"]), wy + SUSP_TRAVEL, float(w["z"]))
 		wh.wheel_radius = r
 		wh.wheel_rest_length = SUSP_TRAVEL
 		wh.suspension_stiffness = SUSP_STIFFNESS
@@ -131,6 +135,47 @@ func _freeze_parked(on: bool) -> void:
 		linear_velocity = Vector3.ZERO
 		angular_velocity = Vector3.ZERO
 		sleeping = true
+
+
+func _trim_hulls_above_wheels() -> void:
+	var floor_y := -1.0e9
+	for w in _wheels if _wheels else []:
+		# Wheel contact in body space: attachment.y - rest - radius.
+		floor_y = maxf(floor_y, w.position.y - w.wheel_rest_length - w.wheel_radius)
+	if floor_y < -1.0e8:
+		# Wheels not built yet — use visual wheel bottoms.
+		if visuals:
+			for w in visuals.wheel_layout():
+				floor_y = maxf(floor_y, float(w["y"]) - visuals.wheel_r)
+	var min_keep := floor_y + 0.04
+	for c in get_children():
+		if not (c is CollisionShape3D):
+			continue
+		var cs := c as CollisionShape3D
+		var y := VehicleCommon.shape_lowest_y(cs)
+		if y < min_keep:
+			if cs.shape is BoxShape3D:
+				var box := cs.shape as BoxShape3D
+				var lift := min_keep - y
+				cs.position.y += lift * 0.5
+				box.size.y = maxf(0.08, box.size.y - lift)
+			else:
+				# Convex under-wheel leftovers would jolt the chassis; drop them.
+				cs.queue_free()
+
+
+func spawn_lift() -> float:
+	## Body-origin height above the ground so the wheels rest on the pavement.
+	var contact := 1.0e9
+	if _wheels:
+		for w in _wheels:
+			contact = minf(contact, w.position.y - w.wheel_rest_length - w.wheel_radius)
+	elif visuals:
+		for w in visuals.wheel_layout():
+			contact = minf(contact, float(w["y"]) - visuals.wheel_r)
+	if contact > 1.0e8:
+		contact = -0.48
+	return -contact + 0.02
 
 
 func set_driver_input(throttle: float, steer: float, brake: float, hb: bool, nt: bool) -> void:

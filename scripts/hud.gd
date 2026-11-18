@@ -68,6 +68,17 @@ var _vehicle_system: Node
 var _btn_enter_exit: Button
 var _plane_throttle: VSlider
 var _plane_throttle_box: Control
+var _btn_vehicle_cam: Button
+var _btn_car_accel: Button
+var _btn_car_brake: Button
+var _btn_thrust_up: Button
+var _btn_thrust_down: Button
+var _btn_yaw_l: Button
+var _btn_yaw_r: Button
+var _thrust_lever: Control
+var _thrust_fill: ColorRect
+var _thrust_ab: ColorRect
+var _thrust_label: Label
 var _panel_map: PanelContainer
 var _map_list: VBoxContainer
 var _map_current: Label
@@ -1004,12 +1015,7 @@ func _build_vehicle_panel() -> PanelContainer:
 
 
 func _build_vehicle_touch(root: Control) -> void:
-	_btn_enter_exit = Button.new()
-	_btn_enter_exit.text = "上载具"
-	_btn_enter_exit.custom_minimum_size = Vector2(108, 48)
-	_btn_enter_exit.add_theme_font_size_override("font_size", 16)
-	_style_button(_btn_enter_exit, true)
-	_btn_enter_exit.focus_mode = Control.FOCUS_NONE
+	_btn_enter_exit = _veh_btn("上载具", Vector2(108, 48), 16)
 	_btn_enter_exit.visible = false
 	_btn_enter_exit.pressed.connect(func():
 		var g := _game()
@@ -1018,28 +1024,134 @@ func _build_vehicle_touch(root: Control) -> void:
 		_refresh_vehicle_touch()
 	)
 	root.add_child(_btn_enter_exit)
+
+	_btn_vehicle_cam = _veh_btn("第三人称", Vector2(108, 40), 14)
+	_btn_vehicle_cam.visible = false
+	_btn_vehicle_cam.pressed.connect(func():
+		if _vehicle_system and _vehicle_system.has_method("toggle_vehicle_cam"):
+			_vehicle_system.call("toggle_vehicle_cam")
+		_refresh_vehicle_touch()
+	)
+	root.add_child(_btn_vehicle_cam)
+
+	_btn_car_accel = _veh_btn("加速", Vector2(88, 52), 16)
+	_btn_car_brake = _veh_btn("手刹", Vector2(88, 52), 16)
+	_hold_btn(_btn_car_accel, "touch_car_accel")
+	_hold_btn(_btn_car_brake, "touch_car_brake")
+	root.add_child(_btn_car_accel)
+	root.add_child(_btn_car_brake)
+
+	_btn_thrust_up = _veh_btn("加速", Vector2(88, 48), 15)
+	_btn_thrust_down = _veh_btn("减速", Vector2(88, 48), 15)
+	_btn_yaw_l = _veh_btn("Q 偏航", Vector2(64, 40), 13)
+	_btn_yaw_r = _veh_btn("E 偏航", Vector2(64, 40), 13)
+	_hold_btn(_btn_thrust_up, "touch_thrust_up")
+	_hold_btn(_btn_thrust_down, "touch_thrust_down")
+	_btn_yaw_l.button_down.connect(func(): _set_vs("touch_yaw", -1.0))
+	_btn_yaw_l.button_up.connect(func(): _set_vs("touch_yaw", 0.0))
+	_btn_yaw_r.button_down.connect(func(): _set_vs("touch_yaw", 1.0))
+	_btn_yaw_r.button_up.connect(func(): _set_vs("touch_yaw", 0.0))
+	for b in [_btn_thrust_up, _btn_thrust_down, _btn_yaw_l, _btn_yaw_r]:
+		root.add_child(b)
+
+	_thrust_lever = Control.new()
+	_thrust_lever.name = "ThrustLever"
+	_thrust_lever.custom_minimum_size = Vector2(40, 180)
+	_thrust_lever.visible = false
+	_thrust_lever.gui_input.connect(_on_thrust_lever_gui)
+	var track := ColorRect.new()
+	track.color = Color(0.12, 0.13, 0.16, 0.85)
+	track.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_thrust_lever.add_child(track)
+	_thrust_fill = ColorRect.new()
+	_thrust_fill.color = Color(0.35, 0.75, 0.95, 0.9)
+	_thrust_fill.position = Vector2(6, 6)
+	_thrust_fill.size = Vector2(28, 0)
+	_thrust_lever.add_child(_thrust_fill)
+	_thrust_ab = ColorRect.new()
+	_thrust_ab.color = Color(1.0, 0.45, 0.15, 0.35)
+	_thrust_ab.position = Vector2(4, 6)
+	_thrust_ab.size = Vector2(32, 34)
+	_thrust_lever.add_child(_thrust_ab)
+	_thrust_lever.move_child(_thrust_ab, 1)
+	_thrust_label = Label.new()
+	_thrust_label.text = "油门"
+	_thrust_label.position = Vector2(-2, 182)
+	_thrust_label.add_theme_font_size_override("font_size", 11)
+	_thrust_lever.add_child(_thrust_label)
+	root.add_child(_thrust_lever)
+
 	_plane_throttle_box = Control.new()
 	_plane_throttle_box.name = "PlaneThrottle"
 	_plane_throttle_box.visible = false
-	_plane_throttle_box.custom_minimum_size = Vector2(44, 160)
 	_plane_throttle = VSlider.new()
 	_plane_throttle.min_value = 0.0
 	_plane_throttle.max_value = 1.0
 	_plane_throttle.step = 0.01
-	_plane_throttle.value = 0.0
-	_plane_throttle.size = Vector2(32, 160)
-	_plane_throttle.focus_mode = Control.FOCUS_NONE
-	_plane_throttle.value_changed.connect(func(v: float):
-		if _vehicle_system:
-			_vehicle_system.set("touch_throttle", v)
-	)
+	_plane_throttle.visible = false
 	_plane_throttle_box.add_child(_plane_throttle)
-	var lab := Label.new()
-	lab.text = "油门"
-	lab.position = Vector2(0, 162)
-	lab.add_theme_font_size_override("font_size", 11)
-	_plane_throttle_box.add_child(lab)
 	root.add_child(_plane_throttle_box)
+
+
+func _veh_btn(text: String, min_size: Vector2, font: int) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = min_size
+	b.add_theme_font_size_override("font_size", font)
+	_style_button(b, true)
+	b.focus_mode = Control.FOCUS_NONE
+	b.visible = false
+	b.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS
+	return b
+
+
+func _hold_btn(b: Button, prop: String) -> void:
+	b.button_down.connect(func(): _set_vs(prop, true))
+	b.button_up.connect(func(): _set_vs(prop, false))
+
+
+func _set_vs(prop: String, value: Variant) -> void:
+	if _vehicle_system:
+		_vehicle_system.set(prop, value)
+
+
+func _on_thrust_lever_gui(event: InputEvent) -> void:
+	if event is InputEventMouseButton or event is InputEventScreenTouch or event is InputEventMouseMotion or event is InputEventScreenDrag:
+		var pressed := false
+		var pos := Vector2.ZERO
+		if event is InputEventMouseButton:
+			pressed = (event as InputEventMouseButton).pressed or (event as InputEventMouseButton).button_mask != 0
+			pos = (event as InputEventMouseButton).position
+		elif event is InputEventMouseMotion:
+			pressed = (event as InputEventMouseMotion).button_mask != 0
+			pos = (event as InputEventMouseMotion).position
+		elif event is InputEventScreenTouch:
+			pressed = (event as InputEventScreenTouch).pressed
+			pos = (event as InputEventScreenTouch).position
+		elif event is InputEventScreenDrag:
+			pressed = true
+			pos = (event as InputEventScreenDrag).position
+		if not pressed:
+			return
+		var h := maxf(_thrust_lever.size.y - 12.0, 1.0)
+		var u := clampf(1.0 - (pos.y - 6.0) / h, 0.0, 1.0)
+		_set_vs("touch_throttle", u)
+		_update_thrust_lever(u)
+
+
+func _update_thrust_lever(thrust: float) -> void:
+	if _thrust_fill == null or _thrust_lever == null:
+		return
+	var h := maxf(_thrust_lever.size.y - 12.0, 1.0)
+	if _thrust_ab:
+		_thrust_ab.position = Vector2(4, 6)
+		_thrust_ab.size = Vector2(32, h * 0.2)
+	var fill := clampf(thrust, 0.0, 1.0) * h
+	_thrust_fill.size = Vector2(28, fill)
+	_thrust_fill.position = Vector2(6, 6 + h - fill)
+	_thrust_fill.color = Color(1.0, 0.45, 0.15, 0.95) if thrust >= 0.8 else Color(0.35, 0.75, 0.95, 0.9)
+	if _thrust_label:
+		_thrust_label.text = "加力" if thrust >= 0.8 else "油门"
 
 
 func _on_spawn_vehicle(kind: String) -> void:
@@ -1061,27 +1173,65 @@ func _refresh_vehicle_touch() -> void:
 	var vs := _vehicle_system
 	var occ = vs.get("occupied") if vs else null
 	var near = vs.get("nearest") if vs else null
-	var show := touch_ui and (occ != null or near != null)
+	var kind := str(vs.call("kind_of", occ if occ else near)) if vs and (occ or near) and vs.has_method("kind_of") else ""
+	var v := get_viewport().get_visible_rect().size
+	var show_enter := occ != null or near != null
 	if _btn_enter_exit:
-		_btn_enter_exit.visible = show
+		_btn_enter_exit.visible = show_enter
 		if occ:
-			_btn_enter_exit.text = "离开载具"
+			_btn_enter_exit.text = "离开检查床" if kind == "exam_bed" else "离开载具"
 		elif near:
-			var k := str(vs.call("kind_of", near)) if vs and vs.has_method("kind_of") else "car"
-			_btn_enter_exit.text = "上检查床" if k == "exam_bed" else "上载具"
-		# Place above the right action cluster, inside the safe area.
-		var v := get_viewport().get_visible_rect().size
+			_btn_enter_exit.text = "上检查床" if kind == "exam_bed" else "上载具"
 		_btn_enter_exit.position = Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 72.0)
+	var in_drive := occ != null and kind in ["car", "plane"]
+	if _btn_vehicle_cam:
+		_btn_vehicle_cam.visible = in_drive
+		if in_drive and vs:
+			var cam := str(vs.get("vehicle_cam"))
+			_btn_vehicle_cam.text = "第一人称" if cam == "first" else "第三人称"
+		_btn_vehicle_cam.position = Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 126.0)
+	var show_car := touch_ui and occ != null and kind == "car"
+	if _btn_car_accel:
+		_btn_car_accel.visible = show_car
+		_btn_car_accel.position = Vector2(v.x - _safe.z - 16.0 - 88.0, v.y - _safe.w - 180.0)
+	if _btn_car_brake:
+		_btn_car_brake.visible = show_car
+		_btn_car_brake.position = Vector2(v.x - _safe.z - 16.0 - 88.0, v.y - _safe.w - 122.0)
+	var show_plane := occ != null and kind == "plane"
+	var show_plane_btns := touch_ui and show_plane
+	if _thrust_lever:
+		_thrust_lever.visible = show_plane
+		_thrust_lever.position = Vector2(_safe.x + 16.0, v.y * 0.42)
+		_thrust_lever.size = Vector2(40, 180)
+		if show_plane and occ:
+			var th = occ.get("thrust")
+			if th != null:
+				_update_thrust_lever(float(th))
+	var right := v.x - _safe.z - 16.0
+	var by := v.y - _safe.w
+	if _btn_thrust_up:
+		_btn_thrust_up.visible = show_plane_btns
+		_btn_thrust_up.position = Vector2(right - 88.0, by - 200.0)
+	if _btn_thrust_down:
+		_btn_thrust_down.visible = show_plane_btns
+		_btn_thrust_down.position = Vector2(right - 88.0, by - 146.0)
+	# Left/right yaw sit side-by-side just above the accelerate button.
+	if _btn_yaw_l:
+		_btn_yaw_l.visible = show_plane_btns
+		_btn_yaw_l.position = Vector2(right - 132.0, by - 250.0)
+	if _btn_yaw_r:
+		_btn_yaw_r.visible = show_plane_btns
+		_btn_yaw_r.position = Vector2(right - 64.0, by - 250.0)
 	if _plane_throttle_box:
-		var in_plane := occ != null and vs and str(vs.call("kind_of", occ)) == "plane"
-		_plane_throttle_box.visible = touch_ui and in_plane
-		if _plane_throttle_box.visible:
-			var v2 := get_viewport().get_visible_rect().size
-			_plane_throttle_box.position = Vector2(_safe.x + 16.0, v2.y * 0.5 - 90.0)
-			if _plane_throttle and occ and ("thrust" in occ):
-				_plane_throttle.set_value_no_signal(float(occ.get("thrust")))
-		elif vs:
-			vs.set("touch_throttle", -1.0)
+		_plane_throttle_box.visible = false
+	if vs and not show_plane:
+		vs.set("touch_throttle", -1.0)
+		vs.set("touch_thrust_up", false)
+		vs.set("touch_thrust_down", false)
+		vs.set("touch_yaw", 0.0)
+	if vs and not show_car:
+		vs.set("touch_car_accel", false)
+		vs.set("touch_car_brake", false)
 
 
 func _make_chrome_button(text: String) -> Button:
@@ -2170,6 +2320,12 @@ func _process(_delta: float) -> void:
 	if _player and "play_mode" in _player and int(_player.play_mode) != _last_mode:
 		_last_mode = int(_player.play_mode)
 		_sync_from_systems()
+	if _thrust_lever and _thrust_lever.visible and _vehicle_system:
+		var occ = _vehicle_system.get("occupied")
+		if occ:
+			var th = occ.get("thrust")
+			if th != null:
+				_update_thrust_lever(float(th))
 	# 缩放滑条跟随滚轮
 	if _open == PanelId.CAMERA and _player and _zoom_slider and _player.has_method("get_tp_distance"):
 		var d := float(_player.call("get_tp_distance"))

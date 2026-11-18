@@ -383,3 +383,108 @@ static func mesh_instances(root: Node) -> Array[MeshInstance3D]:
 	for n in root.find_children("*", "MeshInstance3D", true, false):
 		out.append(n as MeshInstance3D)
 	return out
+
+
+const WHEELISH_RE := "(?i)(wheel|tire|tyre|rim|caliper|brake_disc|brake_disk|hubcap)"
+const PLANE_GEAR_RE := "(?i)(wheel|gear_f|gear_l|gear_r|gear_door|gear_lm|gear_rm)"
+
+
+static func clear_shapes(body: CollisionObject3D) -> void:
+	for c in body.get_children():
+		if c is CollisionShape3D:
+			c.queue_free()
+
+
+static func is_wheelish(n: Node, extra_re: String = "") -> bool:
+	var path := str(n.name)
+	var cur: Node = n
+	var guard := 0
+	while cur and guard < 8:
+		path = str(cur.name) + "/" + path
+		cur = cur.get_parent()
+		guard += 1
+	var re := RegEx.new()
+	re.compile(WHEELISH_RE)
+	if re.search(path) != null:
+		return true
+	if extra_re != "":
+		var r2 := RegEx.new()
+		r2.compile(extra_re)
+		if r2.search(path) != null:
+			return true
+	return false
+
+
+static func add_mesh_convex(body: CollisionObject3D, mi: MeshInstance3D, name: String, simplify: bool = true) -> CollisionShape3D:
+	if mi == null or mi.mesh == null:
+		return null
+	var sh: Shape3D = mi.mesh.create_convex_shape(true, simplify)
+	if sh == null:
+		return null
+	if sh is ConcavePolygonShape3D:
+		return null
+	var cs := CollisionShape3D.new()
+	cs.name = name
+	cs.shape = sh
+	body.add_child(cs)
+	cs.global_transform = mi.global_transform
+	return cs
+
+
+static func add_convexes_from_visual(body: CollisionObject3D, root: Node, exclude_re: String = "", min_size: float = 0.04, max_extent: float = 0.0) -> int:
+	## Per-mesh convex hulls. Never a concave trimesh. Skips wheel-like meshes.
+	var n := 0
+	var i := 0
+	for mi in mesh_instances(root):
+		if is_wheelish(mi, exclude_re):
+			continue
+		if mi.mesh == null:
+			continue
+		# Extent is measured in world space — imported meshes may be in cm
+		# and then scaled down on the MeshInstance (the exam bed is ~2 m after scale).
+		var a := mi.mesh.get_aabb()
+		var xf := mi.global_transform
+		var wa := AABB(xf * a.get_endpoint(0), Vector3.ZERO)
+		for ei in range(1, 8):
+			wa = wa.expand(xf * a.get_endpoint(ei))
+		var ext := wa.size
+		if ext.length() < min_size:
+			continue
+		if max_extent > 0.0 and maxf(ext.x, maxf(ext.y, ext.z)) > max_extent:
+			continue
+		var cs := add_mesh_convex(body, mi, "hull_%d_%s" % [i, mi.name])
+		i += 1
+		if cs:
+			n += 1
+	return n
+
+
+static func shape_lowest_y(cs: CollisionShape3D) -> float:
+	if cs == null or cs.shape == null:
+		return 0.0
+	var y := 1e9
+	if cs.shape is BoxShape3D:
+		var b := cs.shape as BoxShape3D
+		var half := b.size * 0.5
+		for sx in [-1, 1]:
+			for sy in [-1, 1]:
+				for sz in [-1, 1]:
+					var p: Vector3 = cs.position + cs.transform.basis * Vector3(half.x * float(sx), half.y * float(sy), half.z * float(sz))
+					y = minf(y, p.y)
+		return y
+	if cs.shape is ConvexPolygonShape3D:
+		var pts: PackedVector3Array = (cs.shape as ConvexPolygonShape3D).points
+		for p in pts:
+			var wp: Vector3 = cs.transform * p
+			y = minf(y, wp.y)
+		return y if y < 1e8 else 0.0
+	var xa := world_aabb(cs)
+	return xa.position.y
+
+
+static func body_collision_min_y(body: CollisionObject3D) -> float:
+	var y := 1e9
+	for c in body.get_children():
+		if c is CollisionShape3D and (c as CollisionShape3D).shape != null:
+			y = minf(y, shape_lowest_y(c as CollisionShape3D))
+	return 0.0 if y > 1e8 else y
