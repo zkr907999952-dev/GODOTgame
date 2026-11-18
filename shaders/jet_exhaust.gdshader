@@ -19,8 +19,8 @@ void fragment() {
 	float core = 1.0 - smoothstep(0.0, 0.62, radial);
 	float head = smoothstep(0.0, 0.045, t);
 	float tail = pow(1.0 - smoothstep(0.28, 1.0, t), 1.55);
-	float a = head * tail * (0.22 + core * 0.88) * u_alpha;
-	vec3 col = mix(u_color * 1.75, u_color * 0.05, pow(t, 0.62));
+	float a = head * tail * (0.38 + core * 0.90) * u_alpha;
+	vec3 col = mix(u_color * 1.85, u_color * 0.10, pow(t, 0.62));
 	ALBEDO = col;
 	ALPHA = a;
 }

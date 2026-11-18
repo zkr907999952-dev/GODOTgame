@@ -1,9 +1,9 @@
 extends SceneTree
-## 0.2.21 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.22 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.21"
-const VERSION_CODE := 23
+const VERSION_NAME := "0.2.22"
+const VERSION_CODE := 24
 
 var fails := 0
 var main: Node
@@ -58,7 +58,7 @@ func _run() -> void:
 	_check_bindings_and_hinge()
 	_check_exam_pose_api()
 	_check_menu_spawn_and_clear()
-	_check_map_open()
+	await _check_map_open()
 	await _check_overhead_teleport_and_home()
 	await _check_car_cam_and_exit()
 	await _check_city_defaults()
@@ -66,6 +66,7 @@ func _run() -> void:
 	await _check_0219_chase_wheel_gear()
 	await _check_0220_spawn_yaw_car_turn_weapons()
 	await _check_0221_playtest_fixes()
+	await _check_0222_playtest_fixes()
 	_finish()
 
 
@@ -380,6 +381,17 @@ func _check_city_defaults() -> void:
 	_ok(planes == 2, "exactly two default fighters (got %d)" % planes)
 	var cars := int(vs.call("default_car_count"))
 	_ok(cars >= 3, "several default cars on roads (got %d)" % cars)
+	var paved := 0
+	for v in vs.vehicles:
+		if str(vs.call("kind_of", v)) == "car" and bool(v.get("is_default")):
+			var ok_p := true
+			if vs.has_method("is_default_car_on_pavement"):
+				ok_p = bool(vs.call("is_default_car_on_pavement", v))
+			if ok_p:
+				paved += 1
+			else:
+				print("vehicles: car off pavement at ", v.global_position)
+	_ok(paved == cars and cars > 0, "all default cars sit on pavement (paved=%d / %d)" % [paved, cars])
 	if planes >= 2:
 		var pl: Array = []
 		for v in vs.vehicles:
@@ -405,7 +417,10 @@ func _check_city_defaults() -> void:
 			var d_thr := Vector2(mid.x - threshold.x, mid.z - threshold.z).length()
 			var d_hel := Vector2(mid.x - helipad.x, mid.z - helipad.z).length()
 			_ok(d_thr < d_hel - 40.0, "parked nearer the threshold than the helipads (d_thr=%.1f d_hel=%.1f)" % [d_thr, d_hel])
-			_ok(d_thr > 8.0 and d_thr < 50.0, "standoff is just inside the threshold bars (d=%.1f m)" % d_thr)
+			_ok(d_thr > 36.0 and d_thr < 80.0, "standoff is past the piano-key bars on the asphalt (d=%.1f m)" % d_thr)
+			var bars_inner := float(info.get("bars_inner", -1.0))
+			if bars_inner > 4.0:
+				_ok(d_thr > bars_inner + 12.0, "pair mid is past the inner edge of the threshold bars (d=%.1f bars_inner=%.1f)" % [d_thr, bars_inner])
 			_ok(absf(a.y - b.y) < 2.0, "fighters sit at a similar height (%.2f / %.2f)" % [a.y, b.y])
 			var yaw_err := absf(wrapf(pl[0].rotation.y - pl[1].rotation.y, -PI, PI))
 			_ok(yaw_err < 0.08, "both fighters share a heading (dyaw=%.3f)" % yaw_err)
@@ -419,6 +434,7 @@ func _check_city_defaults() -> void:
 			if head_h.length_squared() > 1e-6:
 				head_h = head_h.normalized()
 			_ok(nose_h.dot(head_h) > 0.85, "noses point down the runway toward the helipads (nose_h=%s heading=%s dot=%.3f)" % [nose_h, head_h, nose_h.dot(head_h)])
+			print("vehicles: fighter mid=", mid, " yaw=", pl[0].rotation.y, " d_thr=", d_thr, " bars_inner=", info.get("bars_inner", -1), " standoff=", info.get("standoff", -1), " a=", a, " b=", b)
 
 
 func _convex_or_box_only(n: Node) -> bool:
@@ -501,10 +517,19 @@ func _check_map_open() -> void:
 	_ok(mv != null and bool(mv.get("is_open")), "overhead / map view opens")
 	_ok(str(main.get("current_map")) == "room", "opening the map from the room does not change current_map")
 	_ok(int(vs.call("default_bed_count")) == beds_before, "opening the map does not despawn the home exam bed")
-	_ok(not bool(vs.get("_city_ready")), "opening the map does not spawn city vehicles")
+	# Preview must preload city vehicles so later travel does not hitch,
+	# but must not swap current_map or hide the home bed.
+	var gpre := 0
+	while vs and not bool(vs.get("_city_ready")) and gpre < 50:
+		await _phys(1)
+		gpre += 1
+	_ok(bool(vs.get("_city_ready")), "opening the map preloads city default vehicles (waited %d frames)" % gpre)
+	_ok(str(main.get("current_map")) == "room", "preload during preview does not change current_map")
+	_ok(int(vs.call("default_bed_count")) == beds_before, "preloading city vehicles does not hide the home exam bed")
 	if main.has_method("close_overhead"):
 		main.call("close_overhead")
 	_ok(mv == null or not bool(mv.get("is_open")), "overhead / map view closes")
+	_ok(str(main.get("current_map")) == "room", "closing the preview keeps the player in the room")
 	var hud: Node = main.get_node_or_null("HUD")
 	if hud and hud.has_method("toggle_map_panel"):
 		# Re-open via the HUD button path and close again.
@@ -587,12 +612,16 @@ func _check_overhead_teleport_and_home() -> void:
 	player.velocity = Vector3.ZERO
 	await _phys(2)
 	_ok(str(main.get("current_map")) == "room", "teleport test starts in the room")
-	_ok(not bool(vs.get("_city_ready")), "city defaults are not spawned before the first real map switch")
 	main.call("open_overhead")
 	var mv = main.get("map_view")
 	_ok(mv != null and bool(mv.get("is_open")), "overhead opens for teleport")
 	_ok(str(main.get("current_map")) == "room", "preview does not change current_map")
-	_ok(not bool(vs.get("_city_ready")), "preview still does not spawn city vehicles")
+	var gpre2 := 0
+	while vs and not bool(vs.get("_city_ready")) and gpre2 < 50:
+		await _phys(1)
+		gpre2 += 1
+	_ok(bool(vs.get("_city_ready")), "city vehicles are already ready before teleport (waited %d frames)" % gpre2)
+	_ok(int(vs.call("default_plane_count")) == 2, "default fighters exist before teleport")
 	var spawn: Dictionary = main.call("get_maps")[1]["spawns"][0]
 	mv.call("set_marker", Vector3(float(spawn["x"]), 2.0, float(spawn["z"])))
 	_ok(mv.get("marker") != null, "teleport marker is set")
@@ -960,27 +989,46 @@ func _check_0219_chase_wheel_gear() -> void:
 	_ok(is_equal_approx(float(player.get("fp_fov")), fov_fp1) and is_equal_approx(float(player.get("tp_fov")), fov_tp0), "character-mode wheel does not change FOV")
 
 	# Chase cam: heading-aligned default + recenter after an orbit.
-	# Park a temporary car in the room.
+	# Isolated pad — this test may run after the city map is already shown,
+	# so do not park at the world origin (city geometry would shove the car).
+	var cam_floor := StaticBody3D.new()
+	var cam_cs := CollisionShape3D.new()
+	var cam_box := BoxShape3D.new()
+	cam_box.size = Vector3(40, 1, 40)
+	cam_cs.shape = cam_box
+	cam_cs.position = Vector3(0, -0.5, 0)
+	cam_floor.add_child(cam_cs)
+	cam_floor.position = Vector3(19000, 40, 19000)
+	root.add_child(cam_floor)
 	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
-	main.add_child(car)
-	car.global_position = Vector3(1.8, 0.6, 0.3)
-	if car.has_method("spawn_lift"):
-		car.global_position.y = float(car.call("spawn_lift"))
+	root.add_child(car)
+	var cam_lift: float = float(car.call("spawn_lift")) if car.has_method("spawn_lift") else 0.5
+	car.global_position = cam_floor.position + Vector3(0, cam_lift, 0)
 	car.rotation = Vector3(0.0, 0.7, 0.0)
+	if car is RigidBody3D:
+		(car as RigidBody3D).linear_velocity = Vector3.ZERO
+		(car as RigidBody3D).angular_velocity = Vector3.ZERO
+		(car as RigidBody3D).freeze = true
 	if car.has_method("reset_physics_interpolation"):
 		car.reset_physics_interpolation()
-	await _phys(2)
+	await _phys(4)
 	player.global_position = car.global_position + Vector3(2.0, 0.1, 0.0)
+	if player.has_method("reset_physics_interpolation"):
+		player.reset_physics_interpolation()
 	vs.nearest = car
 	_ok(bool(vs.call("try_enter")), "enter car for chase-cam check")
 	_ok(str(vs.get("vehicle_cam")) == "third", "chase cam defaults to third person")
+	if car.has_method("reset_physics_interpolation"):
+		car.reset_physics_interpolation()
+	if player.has_method("reset_physics_interpolation"):
+		player.reset_physics_interpolation()
+	await _phys(4)
 	if vs.has_method("_reset_vehicle_cam"):
 		vs.call("_reset_vehicle_cam")
-	if vs.has_method("_vehicle_camera"):
-		vs.call("_vehicle_camera", 0.016)
-	await _frames(2)
-	if vs.has_method("_vehicle_camera"):
-		vs.call("_vehicle_camera", 0.016)
+	for i in 8:
+		if vs.has_method("_vehicle_camera"):
+			vs.call("_vehicle_camera", 0.016)
+		await _phys(1)
 	var err0 := 99.0
 	if vs.has_method("chase_heading_error"):
 		err0 = float(vs.call("chase_heading_error"))
@@ -1007,6 +1055,7 @@ func _check_0219_chase_wheel_gear() -> void:
 	_ok(str(main.call("action_for_key", KEY_Q, "control")) == "", "Q is not weapon_wheel while in the car")
 	_ok(bool(vs.call("try_exit")), "exit car after chase-cam check")
 	car.queue_free()
+	cam_floor.queue_free()
 	await _frames(1)
 
 	# Isolated floor: straight-line throttle (no uncommanded spin) + landing gear.
@@ -1234,8 +1283,8 @@ func _check_0221_playtest_fixes() -> void:
 	_ok(drive.find("airborne or agl > 3.0") >= 0, "airborne exit stays beside the vehicle")
 	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
 	_ok(pl_src.find("THRUST_DRY := 520000.0") >= 0 and pl_src.find("THRUST_AB := 880000.0") >= 0, "fighter dry/AB thrust is 520 kN / 880 kN (was 210 / 310)")
-	_ok(pl_src.find("auth * 210000.0") >= 0 and pl_src.find("auth * 320000.0") >= 0, "pitch/roll moments are 210 / 320 kN·m scale (were 98 / 140)")
-	_ok(pl_src.find("auth * 28000.0") >= 0, "yaw moment scale is 28 kN·m (was 52)")
+	_ok(pl_src.find("ctrl_pitch * 1.45") >= 0 and pl_src.find("ctrl_roll * 2.15") >= 0, "pitch/roll track old-project Ace Combat rates (1.45 / 2.15)")
+	_ok(pl_src.find("ctrl_yaw * 0.62") >= 0, "yaw rate is milder than pitch/roll (0.62 from vehicle-sim.ts)")
 	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
 	_ok(ex_src.find("_update_trail") >= 0 and ex_src.find("TRAIL_COUNT") >= 0, "jet exhaust uses a lagged inertial trail")
 	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
@@ -1577,6 +1626,110 @@ func _check_0221_playtest_fixes() -> void:
 
 	# Cleanup
 	for n in [car, plane_vis_node, car_cam, jet, car_g, fighter, floor]:
+		if n and is_instance_valid(n):
+			n.queue_free()
+	await _frames(1)
+
+
+
+func _check_0222_playtest_fixes() -> void:
+	## Spawn past the piano keys, pavement cars, preload, rewritten aero,
+	## visible exhaust plume, exam-bed pose guides.
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	_ok(vs_src.find("RUNWAY_PAST_BARS") >= 0 and vs_src.find("warmup_city") >= 0, "runway standoff uses piano-key inner edge and city warmup exists")
+	_ok(vs_src.find("LANDMARK_ROAD") >= 0 and vs_src.find("_pavement_y") >= 0, "default cars sample real roads and reject grass/water")
+	_ok(vs_src.find("preload_vehicle_resources") >= 0, "vehicle PackedScenes are prefetched")
+	_ok(vs_src.find("BACK_SHIFT") >= 0 and vs_src.find("left * 0.22") >= 0, "exam body shifts back and shins extend past the stirrups")
+	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
+	_ok(pl_src.find("TRACK_K0") >= 0 and pl_src.find("vehicle-sim.ts") >= 0, "flight model includes old-project velocity alignment")
+	_ok(pl_src.find("godot-simplified-flightsim") >= 0 and pl_src.find("ArcadeJetFlightExample") >= 0, "flight model cites mature open-source aero references")
+	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
+	_ok(ex_src.find("core.scale") >= 0 and ex_src.find("mid.scale") >= 0, "exhaust restores the visible teardrop plume body")
+	_ok(ex_src.find("plume_body_visible") >= 0, "exhaust exposes a visibility helper for tests")
+	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
+	_ok(pose_src.find("Vector3(-0.58, 0.08, 0.40)") >= 0, "thigh abduction is reduced vs 0.2.21 (0.62 → 0.40)")
+	_ok(pose_src.find("Vector3(0.16, 0.22, 0.32)") >= 0, "arm FK is a smoother arc than 0.2.21")
+
+	# Visible exhaust body at military and afterburner thrust.
+	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(jet)
+	await _frames(2)
+	var pvis = jet.get("visuals")
+	_ok(pvis != null and pvis.get("exhausts") != null and pvis.exhausts.size() > 0, "0222 fighter has exhaust instances")
+	if pvis and pvis.exhausts.size():
+		var fx = pvis.exhausts[0]
+		if fx.has_method("apply"):
+			fx.call("apply", 0.8, 1.0, 0.0, 0.016)
+		_ok(bool(fx.call("plume_body_visible")) if fx.has_method("plume_body_visible") else fx.visible, "exhaust plume body is visible at military thrust")
+		var L := float(fx.call("plume_body_length")) if fx.has_method("plume_body_length") else 0.0
+		_ok(L > 3.0, "military plume body has clear length (L=%.2f m)" % L)
+		fx.call("apply", 1.0, 1.0, 0.0, 0.016)
+		var L2 := float(fx.call("plume_body_length")) if fx.has_method("plume_body_length") else 0.0
+		_ok(L2 > L, "afterburner plume is longer than military (mil=%.2f ab=%.2f)" % [L, L2])
+		fx.call("apply", 0.0, 1.0, 0.0, 0.016)
+		_ok(fx.visible == false, "exhaust hidden at zero thrust")
+	jet.queue_free()
+
+	# Thrust changes speed along the nose; a pull-up at speed climbs
+	# (flight path follows attitude with lag), not attitude-only spin.
+	var floor := StaticBody3D.new()
+	var fshape := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(400, 1, 400)
+	fshape.shape = box
+	floor.add_child(fshape)
+	floor.position = Vector3(80, -0.5, 80)
+	root.add_child(floor)
+	var fighter: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(fighter)
+	var plift: float = float(fighter.call("spawn_lift")) if fighter.has_method("spawn_lift") else 2.0
+	fighter.global_position = floor.position + Vector3(0, plift + 80.0, 0)
+	fighter.rotation = Vector3.ZERO
+	fighter.freeze = false
+	fighter.occupied = true
+	fighter.sleeping = false
+	fighter.set("airborne", true)
+	fighter.set("gear", 0.0)
+	fighter.set("gear_want", 0.0)
+	fighter.linear_velocity = -fighter.global_transform.basis.z * 90.0
+	fighter.angular_velocity = Vector3.ZERO
+	fighter.reset_physics_interpolation()
+	fighter.thrust = 0.8
+	fighter.ctrl_pitch = 0.0
+	fighter.ctrl_roll = 0.0
+	fighter.ctrl_yaw = 0.0
+	for i in 10:
+		await _phys(1)
+	var nose0: Vector3 = -fighter.global_transform.basis.z
+	var v0: float = fighter.linear_velocity.dot(nose0)
+	fighter.thrust = 1.0
+	for i in 30:
+		await _phys(1)
+	var nose1: Vector3 = -fighter.global_transform.basis.z
+	var v1: float = fighter.linear_velocity.dot(nose1)
+	_ok(v1 - v0 > 6.0, "thrust changes speed along the nose (dv=%.2f v0=%.1f v1=%.1f)" % [v1 - v0, v0, v1])
+	# Pull up at speed: flight path should climb, not just the mesh spin.
+	fighter.thrust = 0.8
+	fighter.linear_velocity = -fighter.global_transform.basis.z * 90.0
+	fighter.angular_velocity = Vector3.ZERO
+	fighter.global_position = floor.position + Vector3(20, plift + 80.0, 0)
+	fighter.reset_physics_interpolation()
+	var y0: float = fighter.global_position.y
+	var path0 := atan2(fighter.linear_velocity.y, Vector2(fighter.linear_velocity.x, fighter.linear_velocity.z).length())
+	fighter.ctrl_pitch = 1.0
+	for i in 45:
+		await _phys(1)
+	var y1: float = fighter.global_position.y
+	var path1 := atan2(fighter.linear_velocity.y, Vector2(fighter.linear_velocity.x, fighter.linear_velocity.z).length())
+	var nose: Vector3 = -fighter.global_transform.basis.z
+	var align := 0.0
+	if fighter.linear_velocity.length() > 1.0:
+		align = fighter.linear_velocity.normalized().dot(nose)
+	_ok(y1 - y0 > 4.0, "pull-up at speed climbs (dy=%.2f m, y0=%.1f y1=%.1f)" % [y1 - y0, y0, y1])
+	_ok(path1 > path0 + 0.08, "flight path follows attitude with lag (path0=%.3f path1=%.3f)" % [path0, path1])
+	_ok(align > 0.55, "velocity stays coupled to the nose (align=%.3f)" % align)
+	print("vehicles: aero climb dy=%.2f path=%.3f->%.3f align=%.3f thrust_dv=%.2f" % [y1 - y0, path0, path1, align, v1 - v0])
+	for n in [fighter, floor]:
 		if n and is_instance_valid(n):
 			n.queue_free()
 	await _frames(1)

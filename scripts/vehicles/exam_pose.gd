@@ -17,19 +17,21 @@ const FK := {
 	"C_Spine_d": Vector3(0.02, 0.0, 0.0),
 	"C_Neck_a": Vector3(-0.10, 0.0, 0.0),
 	"C_Head_a": Vector3(-0.06, 0.0, 0.0),
-	# Legs: x = flex, y = twist, z = abduct. Left / right mirrored.
-	"L_UpperLeg_a": Vector3(-0.70, 0.10, 0.62),
-	"R_UpperLeg_a": Vector3(-0.70, -0.10, -0.62),
-	"L_Foreleg_a": Vector3(1.05, 0.0, 0.0),
-	"R_Foreleg_a": Vector3(1.05, 0.0, 0.0),
-	"L_Foot_a": Vector3(0.28, 0.12, 0.08),
-	"R_Foot_a": Vector3(0.28, -0.12, -0.08),
-	"L_Shoulder_a": Vector3(0.04, 0.12, 0.18),
-	"R_Shoulder_a": Vector3(0.04, -0.12, -0.18),
-	"L_UpperArm_a": Vector3(0.22, 0.35, 0.50),
-	"R_UpperArm_a": Vector3(0.22, -0.35, -0.50),
-	"L_Forearm_a": Vector3(0.40, 0.0, 0.12),
-	"R_Forearm_a": Vector3(0.40, 0.0, -0.12),
+	# Legs: x = flex, y = twist, z = abduct. Reduced hip abduction vs 0.2.21;
+	# IK then extends the shins outward past the stirrups.
+	"L_UpperLeg_a": Vector3(-0.58, 0.08, 0.40),
+	"R_UpperLeg_a": Vector3(-0.58, -0.08, -0.40),
+	"L_Foreleg_a": Vector3(0.95, 0.0, 0.10),
+	"R_Foreleg_a": Vector3(0.95, 0.0, -0.10),
+	"L_Foot_a": Vector3(0.22, 0.10, 0.06),
+	"R_Foot_a": Vector3(0.22, -0.10, -0.06),
+	# Arms: smoother arc to the armrests, less shrugged / kinked shoulders.
+	"L_Shoulder_a": Vector3(0.02, 0.06, 0.10),
+	"R_Shoulder_a": Vector3(0.02, -0.06, -0.10),
+	"L_UpperArm_a": Vector3(0.16, 0.22, 0.32),
+	"R_UpperArm_a": Vector3(0.16, -0.22, -0.32),
+	"L_Forearm_a": Vector3(0.28, 0.0, 0.08),
+	"R_Forearm_a": Vector3(0.28, 0.0, -0.08),
 	"L_Hand_a": Vector3(0.08, 0.0, 0.0),
 	"R_Hand_a": Vector3(0.08, 0.0, 0.0),
 }
@@ -121,7 +123,8 @@ static func _ik_leg(skel: Skeleton3D, left: bool, target: Vector3) -> void:
 	var axis_dir := to_t.normalized()
 	# Pole: out to the patient's side (mesh +X is left) and slightly "up" (face).
 	# In skeleton/Body space after lying: +X = left, +Y = toward head, +Z = face/up.
-	var pole := Vector3(0.75 if left else -0.75, 0.10, 0.55)
+	# Less side pull (narrower hips) and more face-up so the shin can kick out.
+	var pole := Vector3(0.42 if left else -0.42, 0.04, 0.78)
 	var pole_n := pole - axis_dir * pole.dot(axis_dir)
 	if pole_n.length_squared() < 1e-6:
 		pole_n = Vector3(0, 0, 1)
@@ -167,9 +170,9 @@ static func _ik_arm(skel: Skeleton3D, left: bool, target: Vector3) -> void:
 	if to_t.length_squared() < 1e-8:
 		return
 	var axis_dir := to_t.normalized()
-	# Pole: out to the side and slightly toward the face so elbows rest
-	# naturally on the armrests rather than through the torso.
-	var pole := Vector3(0.65 if left else -0.65, -0.10, 0.40)
+	# Pole: slightly out and toward the feet so the arm flows to the
+	# armrest in a smooth arc instead of a hiked, kinked elbow.
+	var pole := Vector3(0.48 if left else -0.48, -0.22, 0.18)
 	var pole_n := pole - axis_dir * pole.dot(axis_dir)
 	if pole_n.length_squared() < 1e-6:
 		pole_n = Vector3(0, 0, 1)

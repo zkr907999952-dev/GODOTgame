@@ -288,6 +288,21 @@ func _apply_map_visibility(id: String, notify_vehicles: bool = true) -> void:
 	# that was hiding the home exam bed and spawning city vehicles mid-map-open.
 	if notify_vehicles and vehicle_system and vehicle_system.has_method("notify_map"):
 		vehicle_system.call("notify_map", id)
+	elif vehicle_system and vehicle_system.has_method("sync_world_visibility"):
+		# Preview / restore must still show or hide already-preloaded city
+		# vehicles with the city world, without swapping occupancy / current_map.
+		vehicle_system.call("sync_world_visibility")
+	if (not in_room) and vehicle_system and vehicle_system.has_method("warmup_city"):
+		vehicle_system.call("warmup_city")
+
+
+func _warmup_city_defaults() -> void:
+	if vehicle_system and vehicle_system.has_method("warmup_city"):
+		vehicle_system.call("warmup_city")
+
+
+func set_city_colliders_enabled(enabled: bool) -> void:
+	_set_colliders_enabled(_city, enabled)
 
 
 ## 光照 / 环境 / 雾按地图切换（scripts/lighting_rig.gd：房间 = 网页 StudioLights，城市 = CityLights + WorldClip 雾）。

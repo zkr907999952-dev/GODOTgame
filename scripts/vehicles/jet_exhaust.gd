@@ -42,9 +42,10 @@ func _build() -> void:
 	core.name = "Core"
 	mid = _plume(0.34, Color(0.227, 0.627, 1.0), 0.7)
 	mid.name = "Mid"
-	# Straight teardrops stay hidden; the lagged segments are the visible plume.
-	core.visible = false
-	mid.visible = false
+	# Visible teardrop body (0.2.20 makeJetExhaust / setExhaust) so the plume
+	# has clear boundaries. The lagged trail is a soft curved halo around it.
+	core.visible = true
+	mid.visible = true
 	glow = MeshInstance3D.new()
 	glow.name = "Glow"
 	var sph := SphereMesh.new()
@@ -141,6 +142,15 @@ func apply(thrust: float, time: float, altitude: float = 0.0, delta: float = 0.0
 	var core_col := Color(0.91, 0.965, 1.0) if ab > 0.01 else Color(1.0, 0.878, 0.541)
 	var mid_col := Color(0.227, 0.627, 1.0) if ab > 0.01 else Color(1.0, 0.165, 0.0)
 	var glow_col := Color(0.494, 0.784, 1.0) if ab > 0.01 else Color(1.0, 0.353, 0.063)
+	# Restore the original plume body (clear core / mid boundaries).
+	core.visible = thrust > 0.02
+	mid.visible = thrust > 0.02
+	core.scale = Vector3(rad * 0.78, length, rad * 0.78)
+	core.position = Vector3(0.0, 0.0, length * 0.42)
+	mid.scale = Vector3(rad * 1.12, length * 1.22, rad * 1.12)
+	mid.position = Vector3(0.0, 0.0, length * 0.5)
+	_set_flame(core, core_col, (0.42 + cr * 0.40 + ab * 0.30) * flicker)
+	_set_flame(mid, mid_col, (0.24 + cr * 0.26 + ab * 0.28) * flicker)
 	_set_flame(glow, glow_col, 0.22 + cr * 0.2 + ab * 0.26)
 	light.light_color = Color(0.4, 0.784, 1.0) if ab > 0.15 else Color(1.0, 0.29, 0.07)
 	light.light_energy = cr * 3.4 + ab * 16.0
@@ -237,8 +247,8 @@ func _pose_segments(
 		sm.position = Vector3.ZERO
 		sc.scale = Vector3(rad_c, seg_len * 1.35, rad_c)
 		sm.scale = Vector3(rad_m, seg_len * 1.55, rad_m)
-		var fade := (0.34 + cr * 0.32 + ab * 0.24) * flicker * (0.45 + taper * 0.55)
-		var fade_m := (0.18 + cr * 0.18 + ab * 0.22) * flicker * (0.4 + taper * 0.6)
+		var fade := (0.22 + cr * 0.20 + ab * 0.16) * flicker * (0.35 + taper * 0.45)
+		var fade_m := (0.12 + cr * 0.12 + ab * 0.14) * flicker * (0.30 + taper * 0.40)
 		_set_flame(sc, core_col, fade)
 		_set_flame(sm, mid_col, fade_m)
 
@@ -306,3 +316,14 @@ func _point_along_trail(dist: float) -> Vector3:
 			return a.lerp(b, t)
 		acc += seg
 	return _trail[_trail.size() - 1]
+
+
+func plume_body_length() -> float:
+	## World-ish length of the visible teardrop body (core scale.y is the lathe length).
+	if core == null or not visible:
+		return 0.0
+	return absf(core.scale.y)
+
+
+func plume_body_visible() -> bool:
+	return visible and core != null and core.visible and mid != null and mid.visible

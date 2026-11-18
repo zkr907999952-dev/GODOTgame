@@ -1,9 +1,15 @@
 extends RigidBody3D
-## Ace Combat-style fighter aerodynamics on a Jolt RigidBody3D.
-## Forces are applied in _integrate_forces (standard Godot rigid-body pattern):
-## thrust, lift vs airspeed and angle of attack, induced/parasite drag, stall,
-## and control moments that grow with dynamic pressure then wash out past stall.
-## Visual surfaces / nozzles / exhaust are driven from this state by PlaneVisuals.
+## Rewritten 0.2.22 aerodynamic flight model on a Jolt RigidBody3D.
+## Primary reference: rouchangmoniqi3 src/lib/vehicle-sim.ts stepPlane
+## (thrust along the nose, lift vs AoA, drag, and a velocity-alignment
+## term so the flight path follows attitude with lag).
+## Also: NASA lift/drag (L,D = 0.5 ρ V² S C), fbcosentino/godot-simplified-flightsim
+## (aft-applied drag for weathercock / tail stability), and
+## brihernandez/ArcadeJetFlightExample (directional drag keeps velocity
+## aligned with the jet — otherwise the fuselage can rotate without flying).
+## Control rates follow the old project's Ace Combat-like agility
+## (responsive pitch/roll, milder yaw). Hold-to-afterburner lives in the
+## input layer. Visuals are driven by PlaneVisuals.
 class_name PlaneController
 
 const KIND := "plane"
@@ -29,6 +35,11 @@ const GEAR_DRAG := 0.032
 const GEAR_AUTO_RETRACT_AGL := 3.4
 const GEAR_AUTO_EXTEND_AGL := 2.6
 const BRAKE_DRAG := 0.05
+# Flight-path alignment (vehicle-sim.ts `track`, ArcadeJetFlightExample drag).
+# Without this, pitching only spins the mesh; translation lags or never turns.
+const TRACK_K0 := 0.28
+const TRACK_K_SPD := 0.014
+const TRACK_BLEND := 0.62
 const ROTATE_SPEED := 42.0  # m/s, ~150 km/h — taxi then pull stick to rotate
 const TAXI_THRUST_SCALE := 0.42  # keep ground roll usable with the stronger dry thrust
 const GEAR_TRAVEL := 0.32
@@ -295,7 +306,8 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	var q := 0.5 * rho * airspeed * airspeed
 	var lift := q * WING_AREA * cl
 	var drag := q * WING_AREA * cd
-	# Force directions: lift along body-up blended with world-up-from-velocity.
+	# Force directions: lift perpendicular to velocity in the symmetry plane
+	# (standard aero), falling back to body-up at low speed.
 	var lift_dir := up
 	if airspeed > 8.0:
 		var vhat := vel / airspeed
@@ -319,36 +331,43 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 		rotate_t = clampf((airspeed / ROTATE_SPEED - 0.70) / 0.30, 0.0, 1.0) * clampf(ctrl_pitch, 0.0, 1.0)
 		lift += MASS_KG * 9.81 * rotate_t * 0.85
 	var force := fwd * thrust_n + lift_dir * lift + drag_dir * drag
-	# Control moments: scale with q, lose authority in stall and at very low speed.
-	var q_norm := clampf(q / (0.5 * RHO_SL * 110.0 * 110.0), 0.0, 1.8)
-	# Arcade / Ace Combat authority: stays lively at moderate speed, snaps
-	# in pitch and roll, with a milder rudder so yaw is not twitchy.
-	var auth := q_norm * (1.0 - 0.55 * stall) * (0.42 + 0.58 * clampf(airspeed / 28.0, 0.0, 1.0))
-	# Units: torque in N·m.
-	var pitch_t := ctrl_pitch * auth * 210000.0
-	var roll_t := ctrl_roll * auth * 320000.0
-	var yaw_t := ctrl_yaw * auth * 28000.0
-	# Speed-brake / rudder + weathercock (beta) stability.
-	yaw_t += -beta * auth * 52000.0
-	pitch_t += -aoa * (0.28 + 1.2 * stall) * auth * 36000.0  # pitch stability + stall nose-drop
-	# Rate damping (stability derivatives): lighter in roll/pitch, a bit
-	# heavier in yaw so the stronger elevator/aileron don't make the rudder snappy.
+	# Velocity-alignment / flight-path tracking (vehicle-sim.ts):
+	#   track = 1 - exp(-dt * (0.28 + speed * 0.014))
+	#   vel += (fwd * spd - vel) * track * 0.62
+	# As a force: m * (fwd*spd - vel) * k * 0.62. Couples attitude to
+	# displacement so a pull-up at speed actually climbs.
+	if airborne and airspeed > 8.0:
+		var track_k := (TRACK_K0 + airspeed * TRACK_K_SPD) * TRACK_BLEND
+		force += (fwd * airspeed - vel) * track_k * MASS_KG
+	# Control: track the old project's desired body rates (Ace Combat agility)
+	# with a torque servo, plus stability-derivative damping and weathercock.
+	# Rates: pitch 1.45*ctrl, roll 2.15*ctrl, yaw 0.62, with ctrl = clamp(V/42, 0.22, 1.55).
+	var ctrl_s := clampf(airspeed / 42.0, 0.22, 1.55) * (1.0 - 0.55 * stall)
+	if not airborne and airspeed < ROTATE_SPEED * 0.70:
+		ctrl_s *= 0.15
+	var want_pitch := ctrl_pitch * 1.45 * ctrl_s
+	var want_roll := ctrl_roll * 2.15 * ctrl_s
+	var want_yaw := ctrl_yaw * 0.62 * ctrl_s
+	# Weathercock / AoA stability (godot-simplified-flightsim tail: drag aft).
+	want_yaw += -beta * 1.15 * clampf(airspeed / 50.0, 0.0, 1.0)
+	want_pitch += -aoa * (0.35 + 1.4 * stall)
 	var w := state.angular_velocity
-	var p := w.dot(fwd)  # roll rate about nose? actually roll is about fwd
-	# Body rates:
 	var rate_roll := w.dot(fwd)
 	var rate_pitch := w.dot(right)
 	var rate_yaw := w.dot(up)
-	var damp_roll := -rate_roll * (11000.0 + q_norm * 26000.0)
-	var damp_pitch := -rate_pitch * (13000.0 + q_norm * 30000.0)
-	var damp_yaw := -rate_yaw * (26000.0 + q_norm * 50000.0)
-	var torque := right * (pitch_t + damp_pitch) + fwd * (roll_t + damp_roll) + up * (yaw_t + damp_yaw)
+	# Inertia ~ (28000, 52000, 22000) for (pitch, yaw, roll). Gain tracks rates quickly.
+	var pitch_t := (want_pitch - rate_pitch) * 42000.0 - rate_pitch * (8000.0 + airspeed * 120.0)
+	var roll_t := (want_roll - rate_roll) * 30000.0 - rate_roll * (6000.0 + airspeed * 90.0)
+	var yaw_t := (want_yaw - rate_yaw) * 48000.0 - rate_yaw * (14000.0 + airspeed * 180.0)
+	var torque := right * pitch_t + fwd * roll_t + up * yaw_t
+	# Aft drag lever (simplified-flightsim Drag Point) for residual weathercock.
+	if airspeed > 8.0:
+		var tail := -fwd * 6.5
+		state.apply_force(drag_dir * drag * 0.18, tail)
 	# Ground handling: ray-spring gear supports the jet so airframe hulls
 	# stay above the pavement (otherwise the fuselage falls in and sticks).
-	var gear_force := Vector3.ZERO
 	if gear > 0.35:
-		gear_force = _apply_gear_suspension(state, xf, fwd, up, right, vel)
-		force += gear_force
+		_apply_gear_suspension(state, xf, fwd, up, right, vel)
 	if _on_wheels:
 		torque += _taxi_torque(state, fwd, up, right, vel)
 		force += _taxi_force(state, fwd, vel, thrust_n)

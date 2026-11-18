@@ -14,16 +14,19 @@ const BED_SCENE := "res://scenes/vehicles/exam_bed.tscn"
 const ROOM_BED_POS := Vector3(-1.32, 0.0, 0.05)
 const ROOM_BED_YAW := 0.0  # length along Z, head toward -Z; clear of the furniture bed and wall
 # Last-resort fallback if AirPort_Track cannot be measured this frame.
-# These numbers were measured from the city AirPort_Track asphalt at the
-# white-threshold / building end (not the helipad pad). Prefer live mesh
-# measurement in _measure_runway() over this constant.
-const FALLBACK_RUNWAY := Vector3(-814.49, 0.0, 504.38)
+# Mid is past the white piano-key bars at the building-end threshold, on the
+# asphalt, noses toward the helipad end. Prefer live mesh measurement.
+const FALLBACK_RUNWAY := Vector3(-824.61, 0.0, 494.28)
 const FALLBACK_RUNWAY_YAW := 0.70456  # nose toward the helipad end
 const FALLBACK_RUNWAY_AXIS := Vector3(0.64770, 0.0, 0.76189)  # t+ toward threshold
 const RUNWAY_LANE := 7.2
-const RUNWAY_STANDOFF := 26.0  # metres inward from the asphalt threshold
+const RUNWAY_STANDOFF := 46.0  # metres inward from the mesh end if bars cannot be measured
+# Playtest photo: red/blue dots sit on the pavement past the piano keys,
+# about 26 m from the inner edge of the bars (not on the bars themselves).
+const RUNWAY_PAST_BARS := 26.0
 const ROAD_CAR_COUNT := 5
 const LANDMARK_GROUND := "^(Boulevard_Ground|Docks_Ground|Island_Ground|AirPort_Track)"
+const LANDMARK_ROAD := "^(Boulevard_Ground|Docks_Ground|Island_Ground)$"
 const LANDMARK_AIRPORT := "^(AirPort_Track|Airport_Front|AirPort)$"
 
 signal proximity_changed(vehicle: Node, occupying: bool)
@@ -53,6 +56,11 @@ var touch_thrust_up: bool = false
 var touch_thrust_down: bool = false
 var _ctrl_was_down: bool = false
 var _g_was_down: bool = false
+var _city_warming: bool = false
+var _packed_car: PackedScene
+var _packed_plane: PackedScene
+var _packed_bed: PackedScene
+var _runway_cache: Dictionary = {}
 # Third-person chase cam (Battlefield / Ace Combat / old web project):
 # the vehicle is the orbit pivot. Offsets are *relative to the vehicle heading*
 # so the default and the recenter pose are always behind the nose, never a
@@ -72,6 +80,7 @@ func setup(g: Node, p: CharacterBody3D) -> void:
 	game = g
 	player = p
 	name = "VehicleSystem"
+	preload_vehicle_resources()
 	# Room exam bed is available immediately (room is the default map).
 	call_deferred("_ensure_room_defaults")
 
@@ -100,7 +109,27 @@ func _vehicle_visible(v: Node) -> bool:
 	if v == null:
 		return false
 	var sm := str(v.get("spawn_map"))
-	return sm == current_map or sm == ""
+	if sm == current_map or sm == "":
+		return true
+	# City defaults show with the city world, including overhead preview,
+	# without changing current_map or hiding the home exam bed.
+	if sm == "city" and game and game.has_node("City") and bool(game.get_node("City").visible):
+		return true
+	return false
+
+
+func sync_world_visibility() -> void:
+	_sync_visibility()
+
+
+func preload_vehicle_resources() -> void:
+	## Load car / plane / bed packed scenes once so first spawn is not a hitch.
+	if _packed_car == null and ResourceLoader.exists(CAR_SCENE):
+		_packed_car = load(CAR_SCENE) as PackedScene
+	if _packed_plane == null and ResourceLoader.exists(PLANE_SCENE):
+		_packed_plane = load(PLANE_SCENE) as PackedScene
+	if _packed_bed == null and ResourceLoader.exists(BED_SCENE):
+		_packed_bed = load(BED_SCENE) as PackedScene
 
 
 func _sync_visibility() -> void:
@@ -115,17 +144,40 @@ func _sync_visibility() -> void:
 
 
 func _ensure_city_defaults() -> void:
-	if _city_ready:
+	await warmup_city()
+
+
+func warmup_city() -> void:
+	## Instantiate default city vehicles up front (map preload / first preview)
+	## without changing current_map. Safe to call while the player is still in
+	## the room: city colliders are only enabled briefly for ground rays.
+	if _city_ready or _city_warming:
 		return
-	# City trimesh is built in map_collision.ensure_collisions, which game_root
-	# calls when showing the city. Wait a couple of physics frames so rays work.
-	if game and game.has_method("ground_at"):
+	_city_warming = true
+	preload_vehicle_resources()
+	var city: Node = game.get_node_or_null("City") if game else null
+	if city == null:
+		_city_warming = false
+		return
+	if city.has_method("ensure_collisions"):
+		city.call("ensure_collisions")
+	# City is being shown (overhead preview or a real switch). Enable
+	# colliders so ground rays can place vehicles on the pavement.
+	if game and game.has_method("set_city_colliders_enabled"):
+		game.call("set_city_colliders_enabled", true)
+	if get_tree():
 		await get_tree().physics_frame
 		await get_tree().physics_frame
 	_collect_landmarks()
 	_spawn_default_planes()
 	_spawn_default_cars()
 	_city_ready = true
+	_city_warming = false
+	# If this was only a preview and the city was hidden again, drop colliders.
+	if game and game.has_method("set_city_colliders_enabled"):
+		var keep: bool = (city != null and bool(city.visible)) or current_map == "city"
+		if not keep:
+			game.call("set_city_colliders_enabled", false)
 	_sync_visibility()
 	print("vehicle_system: city defaults ready  vehicles=", vehicles.size())
 
@@ -190,11 +242,11 @@ func _spawn_default_planes() -> void:
 
 
 func _airport_plane_spawns() -> Array:
-	## Two fighters side by side on the pavement just inside the white
-	## threshold bars (the building / blue-roof end), noses pointing down
-	## the long runway toward the helipad pad. The MAPS label
-	## 「机场跑道（空旷）」 at x=-1000, z=300 is the helipad end and is wrong.
-	## Position and heading come from a live AirPort_Track mesh measurement.
+	## Two fighters side by side on the asphalt past the white piano-key
+	## bars at the building-end threshold, noses pointing down the long
+	## runway toward the helipad pad. Playtest dots sit inward from the
+	## bars, not jammed against them. The MAPS label 「机场跑道（空旷）」
+	## at x=-1000, z=300 is the helipad end and is wrong.
 	var info := _measure_runway()
 	var mid: Vector3 = info["mid"]
 	var yaw: float = float(info["yaw"])
@@ -212,6 +264,8 @@ func _airport_plane_spawns() -> Array:
 
 func runway_threshold_info() -> Dictionary:
 	## Public for tests / HUD: measured threshold-end spawn and takeoff heading.
+	if _runway_cache.size() >= 4:
+		return _runway_cache
 	return _measure_runway()
 
 
@@ -251,6 +305,7 @@ func _measure_runway() -> Dictionary:
 	if track == null or track.mesh == null:
 		return empty
 	var pts: Array[Vector3] = []
+	var white_pts: Array[Vector3] = []
 	var grass_ok := false
 	var img: Image = null
 	var mat := track.get_active_material(0)
@@ -284,7 +339,10 @@ func _measure_runway() -> Dictionary:
 				var col := img.get_pixel(px, py)
 				# Olive / green shoulder (atlas tile), not yellow markings.
 				var is_yellow := col.r > 0.7 and col.g > 0.45 and col.b < 0.4 and col.r > col.g + 0.05
-				var is_grass := (not is_yellow) and col.g >= col.r - 0.03 and col.g > col.b + 0.08 and col.r < 0.71
+				var is_white := col.r > 0.78 and col.g > 0.78 and col.b > 0.78 and absf(col.r - col.g) < 0.08 and absf(col.r - col.b) < 0.08
+				var is_grass := (not is_yellow) and (not is_white) and col.g >= col.r - 0.03 and col.g > col.b + 0.08 and col.r < 0.71
+				if is_white:
+					white_pts.append(w)
 				if is_grass:
 					continue
 			pts.append(w)
@@ -402,20 +460,64 @@ func _measure_runway() -> Dictionary:
 		hel_t = tmax_c
 		threshold = end_neg
 		helipad = end_pos
-	# Park just inside the threshold bars, not past them off the pavement.
-	var sign_in := 1.0 if hel_t > thr_t else -1.0
-	var mid_t := thr_t + sign_in * RUNWAY_STANDOFF
-	var mid := Vector3(mx + ex * mid_t + sx * center_s, 0.0, mz + ez * mid_t + sz * center_s)
-	# Takeoff heading: toward the helipad end.
+	# Takeoff heading: toward the helipad end. Needed before placing mid.
 	var heading := Vector3(helipad.x - threshold.x, 0.0, helipad.z - threshold.z)
 	if heading.length_squared() < 1e-6:
 		heading = Vector3(-ex, 0.0, -ez) if d_pos <= d_neg else Vector3(ex, 0.0, ez)
 	else:
 		heading = heading.normalized()
+	# Inner edge of the white piano-key bars (wide markings at the threshold),
+	# then stand off onto the pavement to the playtest-marked dots.
+	var sign_in := 1.0 if hel_t > thr_t else -1.0
+	var bars_inner_dist := -1.0
+	if white_pts.size() >= 8:
+		# Only search the first 40 m — further white is centerline / other marks.
+		var key_bins := 16
+		var max_t := 40.0
+		var bin_w := max_t / float(key_bins)
+		var bmin: Array[float] = []
+		var bmax: Array[float] = []
+		var bcnt: Array[int] = []
+		bmin.resize(key_bins)
+		bmax.resize(key_bins)
+		bcnt.resize(key_bins)
+		for i in key_bins:
+			bmin[i] = INF
+			bmax[i] = -INF
+			bcnt[i] = 0
+		for wp in white_pts:
+			var tt := (wp.x - threshold.x) * heading.x + (wp.z - threshold.z) * heading.z
+			var ss := (wp.x - threshold.x) * (-heading.z) + (wp.z - threshold.z) * heading.x
+			if tt < 0.0 or tt >= max_t:
+				continue
+			var bi := clampi(int(tt / bin_w), 0, key_bins - 1)
+			bcnt[bi] += 1
+			bmin[bi] = minf(bmin[bi], ss)
+			bmax[bi] = maxf(bmax[bi], ss)
+		# Piano keys: a contiguous wide white band that starts near the
+		# threshold. Inner edge = end of that first run.
+		var run_start := -1
+		var run_end := -1
+		for i in key_bins:
+			var is_key := bcnt[i] >= 4 and (bmax[i] - bmin[i]) > 28.0
+			if is_key:
+				if run_start < 0:
+					run_start = i
+				run_end = i
+			elif run_start >= 0:
+				break
+		if run_start >= 0 and run_start <= 8 and run_end >= run_start:
+			bars_inner_dist = (float(run_end) + 1.0) * bin_w
+	var stand := RUNWAY_STANDOFF
+	if bars_inner_dist >= 8.0 and bars_inner_dist <= 36.0:
+		stand = bars_inner_dist + RUNWAY_PAST_BARS
+	stand = clampf(stand, 40.0, 60.0)
+	var mid_t := thr_t + sign_in * stand
+	var mid := Vector3(mx + ex * mid_t + sx * center_s, 0.0, mz + ez * mid_t + sz * center_s)
 	# yaw such that visual nose (-basis.z) = heading: (-sin y, 0, -cos y) = heading
 	var yaw := atan2(-heading.x, -heading.z)
 	var across := Vector3(-heading.z, 0.0, heading.x)
-	return {
+	_runway_cache = {
 		"mid": mid,
 		"yaw": yaw,
 		"heading": heading,
@@ -423,7 +525,10 @@ func _measure_runway() -> Dictionary:
 		"lane": RUNWAY_LANE,
 		"threshold": threshold,
 		"helipad": helipad,
+		"bars_inner": bars_inner_dist,
+		"standoff": stand,
 	}
+	return _runway_cache
 
 
 func _spawn_default_cars() -> void:
@@ -449,22 +554,21 @@ func _spawn_default_cars() -> void:
 				break
 			var x: float = spawn_xz.x + d.x
 			var z: float = spawn_xz.y + d.y
-			var g: Variant = _ground(x, z)
-			if g == null:
+			var gy: Variant = _pavement_y(x, z)
+			if gy == null:
 				continue
-			var gy: Vector3 = g
-			if gy.y < 0.04 or gy.y > 2.2:
-				continue
-			pts.append({"x": x, "y": gy.y, "z": z, "yaw": PI})
+			pts.append({"x": x, "y": float(gy), "z": z, "yaw": PI})
 	for p in pts:
 		_spawn_car(Vector3(p["x"], p["y"], p["z"]), float(p["yaw"]), true, "city")
 
 
 func _sample_road_points(count: int, avoid: Array) -> Array:
-	## Port of world-map.ts sampleRoadPoints (deterministic sine sampling).
+	## Port of world-map.ts sampleRoadPoints, but only on real road meshes
+	## (Boulevard / Docks / Island). AirPort_Track is excluded — its AABB
+	## includes grass shoulders and was parking a car in the grass.
 	var grounds: Array = []  # [AABB]
 	var re := RegEx.new()
-	re.compile(LANDMARK_GROUND)
+	re.compile(LANDMARK_ROAD)
 	for k in _landmarks.keys():
 		if re.search(str(k)) != null:
 			grounds.append(_landmarks[k])
@@ -472,7 +576,7 @@ func _sample_road_points(count: int, avoid: Array) -> Array:
 	if grounds.is_empty():
 		return out
 	var guard := 0
-	while out.size() < count and guard < count * 36:
+	while out.size() < count and guard < count * 48:
 		guard += 1
 		var b: AABB = grounds[guard % grounds.size()]
 		var pad := 8.0
@@ -491,15 +595,90 @@ func _sample_road_points(count: int, avoid: Array) -> Array:
 				break
 		if blocked:
 			continue
-		var g: Variant = _ground(x, z)
-		if g == null:
-			continue
-		var gy: Vector3 = g
-		if gy.y <= 0.04 or gy.y >= 2.2:
+		var gy: Variant = _pavement_y(x, z)
+		if gy == null:
 			continue
 		var along_x := b.size.x > b.size.z
-		out.append({"x": x, "y": gy.y, "z": z, "yaw": (-PI * 0.5) if along_x else 0.0})
+		out.append({"x": x, "y": float(gy), "z": z, "yaw": (-PI * 0.5) if along_x else 0.0})
 	return out
+
+
+func _road_ground(x: float, z: float) -> Variant:
+	## Like _ground, but ignores vehicles so a parked car is not its own ground.
+	var exclude: Array = []
+	if player:
+		exclude.append(player.get_rid())
+	for v in vehicles:
+		if v is CollisionObject3D and is_instance_valid(v):
+			exclude.append((v as CollisionObject3D).get_rid())
+	var q := PhysicsRayQueryParameters3D.create(Vector3(x, 4.0, z), Vector3(x, -2.0, z), 1)
+	q.exclude = exclude
+	if not is_inside_tree():
+		return null
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	return null if hit.is_empty() else hit["position"]
+
+
+func _pavement_y(x: float, z: float) -> Variant:
+	## Ground Y only if the point and a small ring sit on road-height pavement,
+	## not grass, water, or a cliff edge.
+	var g: Variant = _road_ground(x, z)
+	if g == null:
+		return null
+	var gy: Vector3 = g
+	if gy.y <= 0.04 or gy.y >= 2.2:
+		return null
+	if _hit_is_non_pavement(x, z):
+		return null
+	for d in [Vector2(1.6, 0.0), Vector2(-1.6, 0.0), Vector2(0.0, 1.6), Vector2(0.0, -1.6)]:
+		var n: Variant = _road_ground(x + d.x, z + d.y)
+		if n == null:
+			return null
+		var ny: Vector3 = n
+		if ny.y <= 0.04 or absf(ny.y - gy.y) > 0.55:
+			return null
+		if _hit_is_non_pavement(x + d.x, z + d.y):
+			return null
+	return gy.y
+
+
+func _hit_is_non_pavement(x: float, z: float) -> bool:
+	## Reject sea / grass / sidewalk names under a downward ray.
+	var exclude: Array = []
+	if player:
+		exclude.append(player.get_rid())
+	for v in vehicles:
+		if v is CollisionObject3D and is_instance_valid(v):
+			exclude.append((v as CollisionObject3D).get_rid())
+	var q := PhysicsRayQueryParameters3D.create(Vector3(x, 4.0, z), Vector3(x, -2.0, z), 1)
+	q.exclude = exclude
+	var space := get_world_3d().direct_space_state if is_inside_tree() else null
+	if space == null:
+		return false
+	var hit := space.intersect_ray(q)
+	if hit.is_empty():
+		return true
+	var n := hit.get("collider") as Node
+	var parts := ""
+	while n:
+		parts += " " + str(n.name)
+		n = n.get_parent()
+	var low := parts.to_lower()
+	if "sea" in low or "ocean" in low or "water" in low:
+		return true
+	if "grass" in low or "lawn" in low:
+		return true
+	# AirPort_Track shoulders are grass even when the mesh name is the track.
+	if "airport_track" in low:
+		return true
+	return false
+
+
+func is_default_car_on_pavement(v: Node) -> bool:
+	if v == null:
+		return false
+	var y = _pavement_y(v.global_position.x, v.global_position.z)
+	return y != null
 
 
 func _ground(x: float, z: float, top: float = 320.0, ignore: Node = null) -> Variant:
@@ -532,7 +711,8 @@ func _register(v: Node, id: String, defaulted: bool, menu: bool, map_id: String)
 
 
 func _spawn_car(pos: Vector3, yaw: float, defaulted: bool, map_id: String, menu: bool = false) -> Node:
-	var v: Node = load(CAR_SCENE).instantiate()
+	preload_vehicle_resources()
+	var v: Node = (_packed_car if _packed_car else load(CAR_SCENE)).instantiate()
 	_register(v, _next_id("car", defaulted), defaulted, menu, map_id)
 	var lift := float(v.call("spawn_lift")) if v.has_method("spawn_lift") else 0.5
 	v.global_position = pos + Vector3(0, lift, 0)
@@ -546,7 +726,8 @@ func _spawn_car(pos: Vector3, yaw: float, defaulted: bool, map_id: String, menu:
 
 
 func _spawn_plane(pos: Vector3, yaw: float, defaulted: bool, map_id: String, menu: bool = false) -> Node:
-	var v: Node = load(PLANE_SCENE).instantiate()
+	preload_vehicle_resources()
+	var v: Node = (_packed_plane if _packed_plane else load(PLANE_SCENE)).instantiate()
 	_register(v, _next_id("plane", defaulted), defaulted, menu, map_id)
 	var lift := float(v.call("spawn_lift")) if v.has_method("spawn_lift") else 1.32
 	v.global_position = pos + Vector3(0, lift, 0)
@@ -560,7 +741,8 @@ func _spawn_plane(pos: Vector3, yaw: float, defaulted: bool, map_id: String, men
 
 
 func _spawn_exam_bed(pos: Vector3, yaw: float, defaulted: bool, map_id: String, menu: bool = false) -> Node:
-	var v: Node = load(BED_SCENE).instantiate()
+	preload_vehicle_resources()
+	var v: Node = (_packed_bed if _packed_bed else load(BED_SCENE)).instantiate()
 	_register(v, _next_id("exam_bed", defaulted), defaulted, menu, map_id)
 	v.global_position = pos
 	v.rotation.y = yaw
@@ -1000,16 +1182,29 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 	var hip_local := ExamPose.hip_local(skel, body) if skel else Vector3(0.0, 0.917, 0.033)
 	var lie := bed.patient_basis()
 	# Sit-bones slightly behind the hip; lift the body a little so it sits
-	# on (not in) the cushion and the backrest.
+	# on (not in) the cushion and the backrest. Shift toward the headrest
+	# (patient +Y / spine) so the torso sits farther back, per playtest guides.
 	const BUTTOCK := Vector3(0.0, -0.02, -0.10)
 	const SEAT_SKIN := 0.055
+	# A little along the spine plus a horizontal slide toward the headrest
+	# (bed -Z) so the torso sits farther back without lifting the hips off
+	# the cushion (playtest "身体向后一些").
+	const BACK_SHIFT := 0.035
+	const HEADWARD := 0.08
 	var sit := hip_local + BUTTOCK
-	body.global_transform = Transform3D(lie, seat - lie * sit + lie.z * SEAT_SKIN)
+	var headward := -bed.global_transform.basis.z * HEADWARD
+	headward.y = 0.0
+	body.global_transform = Transform3D(lie, seat - lie * sit + lie.z * SEAT_SKIN + lie.y * BACK_SHIFT + headward)
 	if skel:
 		var al: Vector3 = bed.armrest_l_global() if bed.has_method("armrest_l_global") else bed.stirrup_l_global()
 		var ar: Vector3 = bed.armrest_r_global() if bed.has_method("armrest_r_global") else bed.stirrup_r_global()
-		ExamPose.apply(skel, bed.stirrup_l_global(), bed.stirrup_r_global(), bed.backrest_angle, al, ar)
-		ExamPose.offset_hair(skel, Vector3(0.0, 0.015, -0.08))
+		# Lower legs extend outward past the stirrup cups (playtest red curves).
+		var left := lie.x
+		var feet := -lie.y
+		var sl: Vector3 = bed.stirrup_l_global() + left * 0.22 + feet * 0.16
+		var sr: Vector3 = bed.stirrup_r_global() - left * 0.22 + feet * 0.16
+		ExamPose.apply(skel, sl, sr, bed.backrest_angle, al, ar)
+		ExamPose.offset_hair(skel, Vector3(0.0, 0.02, -0.10))
 		# Observation mode: head / eyes look at the orbit camera.
 		if player.has_method("is_display_mode") and bool(player.call("is_display_mode")) and player.has_method("get_secondary"):
 			var sec = player.call("get_secondary")
@@ -1019,7 +1214,7 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 					sec.call("set_gaze_target", cam.global_position)
 				if sec.has_method("update"):
 					sec.call("update", delta, false)
-				ExamPose.offset_hair(skel, Vector3(0.0, 0.015, -0.08))
+				ExamPose.offset_hair(skel, Vector3(0.0, 0.02, -0.10))
 				if sec.has_method("snap_hair_to_pose"):
 					sec.call("snap_hair_to_pose")
 		elif player.has_method("get_secondary"):
@@ -1355,7 +1550,9 @@ func reset_defaults() -> void:
 		return bool(v.get("is_default")) and v != occupied
 	)
 	_city_ready = false
+	_city_warming = false
 	_room_ready = false
+	_runway_cache.clear()
 	if current_map == "room" or true:
 		_ensure_room_defaults()
 	if current_map == "city":
