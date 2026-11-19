@@ -13,7 +13,7 @@ const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
 ##   · 左侧 FOV 竖条只在打开「摄像机」面板时显示
 ##   · 其余区域拖动 = 转视角（独立的触屏灵敏度）；第一人称下点画面不会触发工具
 ##   · 两种模式都有「切换」按钮（= Tab），贴在屏幕上边缘（安全区下方）
-## 飞机（仅手机 / 触屏）：默认「摇杆模式」把右侧加速/减速/左右偏航合成一个 `flight_stick`（左右偏航，上推加速，下拉减速，推满加力）。「按键模式」仍是四个独立按键。摇杆不得环绕视角。
+## 飞机（仅手机 / 触屏）：默认「滑块模式」右侧为加速键 + 长条偏航滑块 + 减速键（左右拖动偏航，松手回中；加速键仍可按住加力）。「摇杆模式」把加减速和偏航合成一个 `flight_stick`。「按键模式」仍是四个独立按键。滑块和摇杆都不得环绕视角。
 ## 每根手指按 index 单独跟踪角色（摇杆 / 视角 / 按钮 / 工具 / 环绕 / 双指），互不干扰。
 ## 落在 HUD 面板 / 按钮上的手指交给 GUI（触摸模拟鼠标），这里不处理。
 
@@ -41,6 +41,7 @@ var safe: Vector4 = Vector4.ZERO
 var fingers: Dictionary = {}  # index -> {role, start, pos, t0}
 var stick_vec: Vector2 = Vector2.ZERO
 var flight_stick_vec: Vector2 = Vector2.ZERO  # +x right, +y down (screen); pushed as +y up
+var flight_yaw_slider: float = 0.0  # -1 left .. +1 right, spring-returns on release
 var _last_tap_t: int = -100000
 var _last_tap_pos: Vector2 = Vector2.ZERO
 var _two_mid: Vector2 = Vector2.ZERO
@@ -89,6 +90,10 @@ func _release_all() -> void:
 	fingers.clear()
 	stick_vec = Vector2.ZERO
 	_push_stick()
+	flight_stick_vec = Vector2.ZERO
+	_push_flight_stick()
+	flight_yaw_slider = 0.0
+	_push_flight_yaw_slider()
 
 
 func _fp() -> bool:
@@ -171,14 +176,22 @@ func _show_stick() -> bool:
 	return _fp() or _in_drive()
 
 
-func _flight_stick_mode() -> bool:
+func _flight_control_mode() -> String:
 	if hud:
 		var s = hud.call("_settings") if hud.has_method("_settings") else null
-		if s and s.has_method("is_flight_stick_mode"):
-			return bool(s.call("is_flight_stick_mode"))
 		if s and "flight_control_mode" in s:
-			return str(s.get("flight_control_mode")) != "buttons"
-	return true  # default is 摇杆模式
+			var m := str(s.get("flight_control_mode"))
+			if m in ["slider", "stick", "buttons"]:
+				return m
+	return "slider"  # default is 滑块模式
+
+
+func _flight_stick_mode() -> bool:
+	return _flight_control_mode() == "stick"
+
+
+func _flight_slider_mode() -> bool:
+	return _flight_control_mode() == "slider"
 
 
 func _in_plane() -> bool:
@@ -198,6 +211,14 @@ func _show_flight_stick() -> bool:
 	return _in_drive() and _in_plane()
 
 
+func _show_flight_yaw_slider() -> bool:
+	if layout_edit:
+		return true
+	if _map_open() or not _flight_slider_mode():
+		return false
+	return _in_drive() and _in_plane()
+
+
 func flight_stick_center() -> Vector2:
 	var it := _default_item("flight_stick")
 	return _layout_center("flight_stick", it["center"])
@@ -205,6 +226,38 @@ func flight_stick_center() -> Vector2:
 
 func flight_stick_radius() -> float:
 	return STICK_SIZE * 0.5 * _layout_scale("flight_stick")
+
+
+func flight_yaw_slider_item() -> Dictionary:
+	return _default_item("flight_yaw_slider")
+
+
+func flight_yaw_slider_rect() -> Rect2:
+	var it := flight_yaw_slider_item()
+	var sz: Vector2 = it["size"] * _layout_scale("flight_yaw_slider")
+	var c := _layout_center("flight_yaw_slider", it["center"])
+	return Rect2(c - sz * 0.5, sz)
+
+func _thrust_bar_default_center(right: float, by: float, bs: Vector2) -> Vector2:
+	## Sit immediately left of the active right-side flight cluster, with a
+	## 10 px gap. On PC (no on-screen buttons) use a comparable lower-right slot.
+	var gap := 10.0
+	var mode := _flight_control_mode()
+	if mode == "slider":
+		var sl := Vector2(200, 52)
+		var sl_left := right - sl.x
+		return Vector2(sl_left - gap - bs.x * 0.5, by - 110.0)
+	if mode == "stick":
+		var fs := Vector2(STICK_SIZE, STICK_SIZE)
+		var fsc := Vector2(right - fs.x * 0.5 - 8.0, by - 200.0 + fs.y * 0.5)
+		var fs_left := fsc.x - fs.x * 0.5
+		return Vector2(fs_left - gap - bs.x * 0.5, fsc.y)
+	if mode == "buttons":
+		# Left of the interactive thrust lever, which itself sits left of the buttons.
+		var lever_x := right - 88.0 - 12.0 - 40.0
+		return Vector2(lever_x - gap - bs.x * 0.5, by - 200.0 + bs.y * 0.5)
+	# PC / no touch cluster: lower-right HUD slot.
+	return Vector2(right - 16.0 - bs.x * 0.5, by - 200.0 + bs.y * 0.5)
 
 
 func _usable() -> Rect2:
@@ -387,13 +440,31 @@ func _default_item(id: String) -> Dictionary:
 			var fs := Vector2(STICK_SIZE, STICK_SIZE)
 			var fsc := Vector2(right - fs.x * 0.5 - 8.0, by - 200.0 + fs.y * 0.5)
 			return {"center": fsc, "size": fs, "label": "飞控摇杆"}
+		"flight_yaw_slider":
+			# Long horizontal yaw bar; accel sits above, decel below.
+			var sl := Vector2(200, 52)
+			var slc := Vector2(right - sl.x * 0.5, by - 110.0)
+			return {"center": slc, "size": sl, "label": "偏航"}
+		"thrust_bar":
+			# Current thrust percentage, immediately left of the right-side cluster.
+			var bs := Vector2(48, 150)
+			var bc := _thrust_bar_default_center(right, by, bs)
+			return {"center": bc, "size": bs, "label": "推力"}
 		"accel":
 			return {"center": Vector2(right - 44.0, by - 180.0 + 26.0), "size": Vector2(88, 52), "label": "加速"}
 		"brake":
 			return {"center": Vector2(right - 44.0, by - 122.0 + 26.0), "size": Vector2(88, 52), "label": "手刹"}
 		"thrust_up":
+			if _flight_slider_mode():
+				var sl_up := Vector2(200, 52)
+				var slc_up := Vector2(right - sl_up.x * 0.5, by - 110.0)
+				return {"center": Vector2(slc_up.x, slc_up.y - sl_up.y * 0.5 - 8.0 - 24.0), "size": Vector2(88, 48), "label": "加速"}
 			return {"center": Vector2(right - 44.0, by - 200.0 + 24.0), "size": Vector2(88, 48), "label": "加速"}
 		"thrust_down":
+			if _flight_slider_mode():
+				var sl_dn := Vector2(200, 52)
+				var slc_dn := Vector2(right - sl_dn.x * 0.5, by - 110.0)
+				return {"center": Vector2(slc_dn.x, slc_dn.y + sl_dn.y * 0.5 + 8.0 + 24.0), "size": Vector2(88, 48), "label": "减速"}
 			return {"center": Vector2(right - 44.0, by - 146.0 + 24.0), "size": Vector2(88, 48), "label": "减速"}
 		"yaw_l":
 			return {"center": Vector2(right - 132.0 + 32.0, by - 250.0 + 20.0), "size": Vector2(64, 40), "label": "Q 偏航"}
@@ -439,7 +510,7 @@ func buttons() -> Dictionary:
 			out["drag"] = [_rect_from("drag", it["center"] - it["size"] * 0.5, it["size"]), "放下" if _drag_holding() else "拖拽"]
 	if layout_edit:
 		# 载具按键也画出来，方便一次编好行走和载具两套位置。
-		for id in ["enter", "vcam", "observe", "accel", "brake", "thrust_up", "thrust_down", "yaw_l", "yaw_r", "gear", "thrust", "flight_stick"]:
+		for id in ["enter", "vcam", "observe", "accel", "brake", "thrust_up", "thrust_down", "yaw_l", "yaw_r", "gear", "thrust", "flight_stick", "flight_yaw_slider", "thrust_bar"]:
 			var it := _default_item(id)
 			out[id] = [_rect_from(id, it["center"] - it["size"] * 0.5, it["size"]), it["label"]]
 	return out
@@ -556,6 +627,8 @@ func _on_down(idx: int, p: Vector2) -> void:
 			bid = "stick"
 		if bid == "" and p.distance_to(flight_stick_center()) <= flight_stick_radius() + 10.0:
 			bid = "flight_stick"
+		if bid == "" and flight_yaw_slider_rect().grow(10.0).has_point(p):
+			bid = "flight_yaw_slider"
 		if bid != "":
 			layout_selected = bid
 			f["role"] = "layout:" + bid
@@ -587,6 +660,12 @@ func _on_down(idx: int, p: Vector2) -> void:
 	if _show_flight_stick() and p.distance_to(flight_stick_center()) <= flight_stick_radius() + 8.0 and not _has_role("flight_stick"):
 		f["role"] = "flight_stick"
 		_flight_stick_to(p)
+		get_viewport().set_input_as_handled()
+		queue_redraw()
+		return
+	if _show_flight_yaw_slider() and flight_yaw_slider_rect().grow(8.0).has_point(p) and not _has_role("flight_yaw_slider"):
+		f["role"] = "flight_yaw_slider"
+		_flight_yaw_slider_to(p)
 		get_viewport().set_input_as_handled()
 		queue_redraw()
 		return
@@ -677,6 +756,8 @@ func _on_drag(idx: int, p: Vector2, rel: Vector2) -> void:
 			_stick_to(p)
 		"flight_stick":
 			_flight_stick_to(p)
+		"flight_yaw_slider":
+			_flight_yaw_slider_to(p)
 		"look":
 			player.call("touch_look", rel)
 		"zoom":
@@ -757,6 +838,9 @@ func _end_finger(idx: int, _p: Vector2) -> void:
 	elif role == "flight_stick":
 		flight_stick_vec = Vector2.ZERO
 		_push_flight_stick()
+	elif role == "flight_yaw_slider":
+		flight_yaw_slider = 0.0
+		_push_flight_yaw_slider()
 	elif role == "tool":
 		if player:
 			player.call("touch_tool_end")
@@ -842,6 +926,27 @@ func _push_flight_stick() -> void:
 		hud.call("_set_vs", "touch_flight_stick", v)
 	elif player and player.get_parent() and player.get_parent().get("vehicle_system"):
 		player.get_parent().get("vehicle_system").set("touch_flight_stick", v)
+
+
+func _flight_yaw_slider_to(p: Vector2) -> void:
+	var r := flight_yaw_slider_rect()
+	var half := maxf(r.size.x * 0.5, 1.0)
+	# Horizontal travel along the bar; vertical motion is ignored.
+	var x := (p.x - r.get_center().x) / (half * 0.90)
+	flight_yaw_slider = clampf(x, -1.0, 1.0)
+	if absf(flight_yaw_slider) < 0.06:
+		flight_yaw_slider = 0.0
+	_push_flight_yaw_slider()
+	queue_redraw()
+
+
+func _push_flight_yaw_slider() -> void:
+	# touch_yaw is -1 left / +1 right, same as the Q/E buttons.
+	var y := clampf(flight_yaw_slider, -1.0, 1.0)
+	if hud and hud.has_method("_set_vs"):
+		hud.call("_set_vs", "touch_yaw", y)
+	elif player and player.get_parent() and player.get_parent().get("vehicle_system"):
+		player.get_parent().get("vehicle_system").set("touch_yaw", y)
 
 
 func _push_stick() -> void:
@@ -945,7 +1050,7 @@ func _process(_dt: float) -> void:
 	if _crouch_t0 >= 0 and not _crouch_long and Time.get_ticks_msec() - _crouch_t0 >= CROUCH_LONG_MS:
 		_crouch_long = true
 		player.call("toggle_prone")
-	if (not _show_stick() and _has_role("stick")) or (not _show_flight_stick() and _has_role("flight_stick")):
+	if (not _show_stick() and _has_role("stick")) or (not _show_flight_stick() and _has_role("flight_stick")) or (not _show_flight_yaw_slider() and _has_role("flight_yaw_slider")):
 		_release_all_except_buttons()
 	queue_redraw()
 
@@ -982,6 +1087,9 @@ func _draw() -> void:
 			var wads := _weapons()
 			on = on or (wads != null and bool(wads.get("ads")))
 		var selected: bool = layout_edit and layout_selected == id
+		# The yaw slider is drawn as a long bar below, not a rounded button.
+		if id == "flight_yaw_slider":
+			continue
 		var bg := Color(0.28, 0.48, 0.78, 0.95) if (on or selected) else surf
 		var rad := 10.0 if id != "thrust" else 8.0
 		draw_style_box(_box(bg, Color(0.95, 0.85, 0.35, 0.95) if selected else line, rad), r)
@@ -1007,17 +1115,28 @@ func _draw() -> void:
 		draw_circle(fc + flight_stick_vec * (STICK_MAX * _layout_scale("flight_stick")), KNOB * 0.5 * _layout_scale("flight_stick"), accent)
 		if not layout_edit:
 			_text_center("偏航 / 加减速", fc + Vector2(0, fr + 12.0), 11, Color(0.8, 0.82, 0.86, 0.8))
-		# 缩放竖条：只在摄像机面板打开时显示
-		var zr := zoom_rect()
-		if zr.size.y > 1.0:
-			draw_style_box(_box(surf, line, 18.0), zr)
-			var lo: float = player.get("fp_fov_min")
-			var hi: float = player.get("fp_fov_max")
-			var t := clampf((hi - float(player.get("fp_fov"))) / maxf(1.0, hi - lo), 0.0, 1.0)
-			var ty := zr.position.y + zr.size.y * (1.0 - t)
-			draw_circle(Vector2(zr.get_center().x, clampf(ty, zr.position.y + 10.0, zr.end.y - 10.0)), 10.0, fg)
-			_text_center("%d°" % int(round(float(player.get("fp_fov")))), Vector2(zr.get_center().x, zr.end.y + 12.0), 11, Color(0.8, 0.82, 0.86, 0.8))
-		# 准星改由 HUD Reticle 统一绘制（空手白点 / 髋射十字 / 开镜隐藏）。
+	if _show_flight_yaw_slider():
+		var sr := flight_yaw_slider_rect()
+		var ssel: bool = layout_edit and layout_selected == "flight_yaw_slider"
+		draw_style_box(_box(Color(0.28, 0.48, 0.78, 0.28) if ssel else Color(0.14, 0.16, 0.2, 0.55), Color(0.95, 0.85, 0.35, 0.95) if ssel else line, 16.0), sr)
+		# Center tick and end marks so it reads as a left/right bar, not a stick.
+		var mid := sr.get_center()
+		draw_line(Vector2(mid.x, sr.position.y + 6.0), Vector2(mid.x, sr.end.y - 6.0), Color(1, 1, 1, 0.35), 2.0, true)
+		var travel := maxf(sr.size.x * 0.5 - 18.0, 8.0)
+		var knob := mid + Vector2(flight_yaw_slider * travel, 0.0)
+		draw_circle(knob, 16.0 * _layout_scale("flight_yaw_slider"), accent)
+		_text_center("偏航", mid, 12, Color(0.8, 0.82, 0.86, 0.85))
+	# 缩放竖条：只在摄像机面板打开时显示
+	var zr := zoom_rect()
+	if zr.size.y > 1.0:
+		draw_style_box(_box(surf, line, 18.0), zr)
+		var lo: float = player.get("fp_fov_min")
+		var hi: float = player.get("fp_fov_max")
+		var zt := clampf((hi - float(player.get("fp_fov"))) / maxf(1.0, hi - lo), 0.0, 1.0)
+		var ty := zr.position.y + zr.size.y * (1.0 - zt)
+		draw_circle(Vector2(zr.get_center().x, clampf(ty, zr.position.y + 10.0, zr.end.y - 10.0)), 10.0, fg)
+		_text_center("%d°" % int(round(float(player.get("fp_fov")))), Vector2(zr.get_center().x, zr.end.y + 12.0), 11, Color(0.8, 0.82, 0.86, 0.8))
+	# 准星改由 HUD Reticle 统一绘制（空手白点 / 髋射十字 / 开镜隐藏）。
 
 
 func _box(bg: Color, border: Color, radius: float) -> StyleBoxFlat:

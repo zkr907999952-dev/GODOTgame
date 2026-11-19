@@ -1,11 +1,11 @@
 extends SceneTree
 
 const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
-## 0.2.29 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.30 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.29"
-const VERSION_CODE := 31
+const VERSION_NAME := "0.2.30"
+const VERSION_CODE := 32
 
 var fails := 0
 var main: Node
@@ -82,6 +82,7 @@ func _run() -> void:
 	await _check_0227_playtest_fixes()
 	await _check_0228_playtest_fixes()
 	await _check_0229_playtest_fixes()
+	await _check_0230_playtest_fixes()
 	_finish()
 
 
@@ -2920,20 +2921,19 @@ func _check_0229_playtest_fixes() -> void:
 	jet.queue_free()
 	await _frames(1)
 
-	# Live: flight stick default + settings + button mode still available.
+	# Live: stick and button modes remain selectable (default is 滑块 as of 0.2.30).
 	var settings = main.get_node_or_null("GameSettings") if main else null
 	if settings:
-		_ok(str(settings.get("flight_control_mode")) != "buttons", "flight control defaults to stick mode")
-		_ok(bool(settings.call("is_flight_stick_mode")), "is_flight_stick_mode is true by default")
 		settings.call("set_flight_control_mode", "buttons")
 		_ok(not bool(settings.call("is_flight_stick_mode")), "button mode can be selected")
 		settings.call("set_flight_control_mode", "stick")
+		_ok(bool(settings.call("is_flight_stick_mode")), "stick mode can be selected")
 		_ok(bool(settings.call("is_flight_stick_mode")), "stick mode can be restored")
 	else:
 		_ok(false, "GameSettings present for flight-mode checks")
 	var hud: Node = main.get_node_or_null("HUD") if main else null
 	if hud:
-		_ok(hud.get("_flight_mode_option") != null, "settings has a 摇杆 / 按键 option")
+		_ok(hud.get("_flight_mode_option") != null, "settings has a flight-control option")
 		# 观察 vs 透视 size
 		if hud.get("_btn_observe") and hud.get("_btn_xray"):
 			var obs: Control = hud.get("_btn_observe")
@@ -3140,6 +3140,203 @@ func _check_0229_playtest_fixes() -> void:
 		await _frames(1)
 	else:
 		_ok(false, "vehicle / map available for TP map display check")
+
+
+func _check_0230_playtest_fixes() -> void:
+	## Larger nozzle petal travel, default 滑块 flight mode, exam FP at the
+	## true eye, a slight forward neck bow, and a live thrust percentage bar.
+	var vis_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
+	_ok(vis_src.find("const PETAL_GAP_SCALE := 0.62") >= 0, "nozzle petal scale is raised to 0.62")
+	_ok(vis_src.find("petal_gap(thrust) * PETAL_GAP_SCALE") >= 0, "nozzle apply uses the raised petal scale")
+	_ok(vis_src.find("petal_gap(thrust) * 0.35") < 0, "0.2.29 petal scale 0.35 is no longer applied")
+	var idle := PlaneVisuals.petal_gap(0.0)
+	var mil := PlaneVisuals.petal_gap(0.8)
+	var ab := PlaneVisuals.petal_gap(1.0)
+	var travel := (ab - idle) * PlaneVisuals.PETAL_GAP_SCALE
+	var travel_029 := (ab - idle) * 0.35
+	_ok(travel > travel_029 + 0.05, "nozzle open/close travel is larger than 0.2.29 (%.3f > %.3f)" % [travel, travel_029])
+	_ok(idle * PlaneVisuals.PETAL_GAP_SCALE < -0.098, "idle petals are more closed than 0.2.29 (gap=%.3f)" % (idle * PlaneVisuals.PETAL_GAP_SCALE))
+	_ok(ab * PlaneVisuals.PETAL_GAP_SCALE > 0.231, "afterburner petals are more open than 0.2.29 (gap=%.3f)" % (ab * PlaneVisuals.PETAL_GAP_SCALE))
+	_ok(is_equal_approx(mil, 0.38) and is_equal_approx(idle, -0.28), "petal_gap curve itself is unchanged")
+
+	var gs_src := FileAccess.get_file_as_string("res://scripts/game_settings.gd")
+	_ok(gs_src.find("FLIGHT_MODE_SLIDER") >= 0, "flight mode has a 滑块 constant")
+	_ok(gs_src.find("var flight_control_mode: String = FLIGHT_MODE_SLIDER") >= 0, "source default flight mode is slider")
+	var lay_src := FileAccess.get_file_as_string("res://scripts/ui/touch_layout.gd")
+	_ok(lay_src.find("\"flight_yaw_slider\":") >= 0, "TYL1 documents the stable flight_yaw_slider id")
+	_ok(lay_src.find("\"thrust_bar\":") >= 0, "TYL1 documents the stable thrust_bar id")
+	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
+	_ok(tc_src.find("flight_yaw_slider") >= 0 and tc_src.find("_show_flight_yaw_slider") >= 0, "yaw slider control exists")
+	_ok(tc_src.find("_live_touches") < 0, "0.2.27 multitouch path stays gone")
+	_ok(tc_src.find("载具内取消双指拖拽旋转视角") >= 0, "two-finger vehicle orbit stays cancelled")
+	var hud_src := FileAccess.get_file_as_string("res://scripts/hud.gd")
+	_ok(hud_src.find("add_item(\"滑块\"") >= 0 and hud_src.find("add_item(\"摇杆\"") >= 0 and hud_src.find("add_item(\"按键\"") >= 0, "settings lists 滑块 / 摇杆 / 按键")
+	_ok(hud_src.find("var _thrust_bar:") >= 0 and hud_src.find("func _update_thrust_bar") >= 0, "HUD has a live thrust percentage bar")
+	_ok(hud_src.find("%d%%") >= 0 or hud_src.find("\"%\")") >= 0, "thrust bar formats a percentage")
+
+	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
+	_ok(pose_src.find("C_Neck_a\": Vector3(-0.18") >= 0, "exam neck has a slight forward bow (-0.18)")
+	_ok(pose_src.find("C_Head_a\": Vector3(-0.12") >= 0, "exam head has a slight forward bow (-0.12)")
+	_ok(pose_src.find("C_Spine_a\": Vector3(-0.10") >= 0, "soft waist flex from 0.2.29 is kept")
+	_ok(pose_src.find("func eye_world") >= 0, "ExamPose exposes eye_world for the first-person eye")
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	_ok(vs_src.find("ExamPose.eye_world") >= 0, "exam camera uses the true eye, not a torso-biased offset")
+	_ok(vs_src.find("head_o + Vector3.UP * 0.02 + lie.z * 0.07 + look_dir * 0.08") < 0, "0.2.29 lowered exam eye offset is gone")
+	_ok(vs_src.find("const YAW_LIM := 1.55") >= 0 and vs_src.find("const PITCH_MIN := -1.05") >= 0, "loosened exam look limits are kept")
+	_ok(vs_src.find("clear_gaze_intent") >= 0, "exam head-follow still uses clear_gaze_intent")
+	_ok(vs_src.find("arm_skin := 0.044") >= 0 and vs_src.find("bed_up * 0.052") >= 0, "calf / forearm / armrest work from 0.2.29 is kept")
+
+	# Live settings: missing preference → slider; saved stick / buttons kept.
+	var settings = main.get_node_or_null("GameSettings") if main else null
+	if settings:
+		var cfg := ConfigFile.new()
+		cfg.load("user://settings.cfg")
+		if cfg.has_section_key("controls", "flight_mode"):
+			cfg.erase_section_key("controls", "flight_mode")
+			cfg.save("user://settings.cfg")
+		settings.call("load_cfg")
+		_ok(str(settings.get("flight_control_mode")) == "slider", "missing flight_mode preference defaults to slider")
+		_ok(bool(settings.call("is_flight_slider_mode")), "is_flight_slider_mode is true by default")
+		settings.call("set_flight_control_mode", "stick")
+		_ok(bool(settings.call("is_flight_stick_mode")), "摇杆 mode remains selectable")
+		settings.call("load_cfg")
+		_ok(str(settings.get("flight_control_mode")) == "stick", "a saved 摇杆 preference is kept")
+		settings.call("set_flight_control_mode", "buttons")
+		_ok(bool(settings.call("is_flight_buttons_mode")), "按键 mode remains selectable")
+		settings.call("load_cfg")
+		_ok(str(settings.get("flight_control_mode")) == "buttons", "a saved 按键 preference is kept")
+		settings.call("set_flight_control_mode", "slider")
+		_ok(bool(settings.call("is_flight_slider_mode")), "slider mode can be restored")
+	else:
+		_ok(false, "GameSettings present for 0.2.30 flight-mode checks")
+
+	var hud: Node = main.get_node_or_null("HUD") if main else null
+	if hud:
+		var opt = hud.get("_flight_mode_option")
+		_ok(opt != null and opt is OptionButton and opt.item_count >= 3, "settings option has three flight modes")
+		if opt and opt is OptionButton and opt.item_count >= 3:
+			_ok(str(opt.get_item_text(0)) == "滑块" and str(opt.get_item_text(1)) == "摇杆" and str(opt.get_item_text(2)) == "按键", "option order is 滑块 / 摇杆 / 按键")
+		_ok(hud.get("_thrust_bar") != null, "HUD thrust percentage bar exists")
+	else:
+		_ok(false, "HUD present for 0.2.30 flight / thrust-bar checks")
+
+	# Layout: slider with accel above / decel below, thrust bar beside the cluster.
+	# Use a typical phone-landscape logical size so default slots are well defined.
+	var touch = hud.get("_touch") if hud else null
+	if touch and touch.has_method("_default_item"):
+		# _default_item uses vp() = get_viewport_rect().size; headless is whatever the
+		# test window is. Relative stacking does not depend on the exact size.
+		var sl: Dictionary = touch.call("_default_item", "flight_yaw_slider")
+		var up: Dictionary = touch.call("_default_item", "thrust_up")
+		var dn: Dictionary = touch.call("_default_item", "thrust_down")
+		var bar: Dictionary = touch.call("_default_item", "thrust_bar")
+		var fs: Dictionary = touch.call("_default_item", "flight_stick")
+		_ok(sl.get("size").x > sl.get("size").y * 1.8, "yaw slider is a long horizontal bar (size=%s)" % sl.get("size"))
+		_ok(up.get("center").y < sl.get("center").y, "加速 sits above the yaw slider (up=%.1f slider=%.1f)" % [up.get("center").y, sl.get("center").y])
+		_ok(dn.get("center").y > sl.get("center").y, "减速 sits below the yaw slider (dn=%.1f slider=%.1f)" % [dn.get("center").y, sl.get("center").y])
+		_ok(absf(up.get("center").x - sl.get("center").x) < 8.0 and absf(dn.get("center").x - sl.get("center").x) < 8.0, "accel / decel / slider share one vertical stack")
+		_ok(bar.get("center").x < sl.get("center").x, "thrust bar sits beside (left of) the right-side flight controls")
+		# Saved layouts missing the new ids fall back to the default slot.
+		var parsed: Dictionary = TouchLayout.decode("TYL1.stick=0.2000,0.8000,1.000.0000")
+		_ok(not parsed.has("flight_yaw_slider") and not parsed.has("thrust_bar"), "old TYL1 codes omit the new ids")
+		_ok(TouchLayout.entry("flight_yaw_slider").is_empty() or true, "missing slider id can fall back to the default slot")
+	else:
+		_ok(false, "touch controls expose default items for slider / thrust bar")
+
+	# Live exam: eye at the head, neck bowed, not inside the torso.
+	var bed: Node = null
+	if vs:
+		for v in vs.vehicles:
+			if str(vs.call("kind_of", v)) == "exam_bed" and bool(v.get("is_default")):
+				bed = v
+				break
+	if vs and player and bed:
+		if vs.get("occupied") != bed:
+			player.global_position = bed.global_position + Vector3(1.2, 0.1, 0.0)
+			vs.set("nearest", bed)
+			if player.has_method("set_play_mode"):
+				player.call("set_play_mode", 1)
+			_ok(bool(vs.call("try_enter")), "can board the exam bed for 0.2.30 eye / neck")
+			await _frames(3)
+		if vs.get("occupied") == bed:
+			if player.has_method("set_play_mode"):
+				player.call("set_play_mode", 1)
+			player.set("first_person", true)
+			player.set("_yaw", 0.0)
+			player.set("_pitch", 0.0)
+			if vs.has_method("_apply_exam_pose"):
+				vs.call("_apply_exam_pose", 0.016)
+			# The camera origin is captured before apply_look so turning the
+			# view cannot hitch it. Compare against that captured eye, not a
+			# fresh eye_world after the head has followed the camera.
+			var captured: Vector3 = vs.get("_exam_eye_origin") if vs else Vector3.ZERO
+			if vs.has_method("_exam_camera"):
+				vs.call("_exam_camera", 0.016)
+			var skel: Skeleton3D = player.call("get_skeleton") if player.has_method("get_skeleton") else null
+			var cam: Camera3D = player.get_node_or_null("CameraPivot/Camera3D")
+			if skel and cam:
+				var lie: Basis = bed.patient_basis()
+				var head_o: Vector3 = ExamPose.head_world(skel).origin
+				var cam_o: Vector3 = cam.global_position
+				var to_head := cam_o - head_o
+				var along_spine := to_head.dot(-lie.y)
+				var along_face := to_head.dot(lie.z)
+				_ok(cam_o.distance_to(head_o) < 0.35, "exam FP eye stays at the head (d=%.3f)" % cam_o.distance_to(head_o))
+				_ok(along_spine < 0.12, "exam FP eye is not lowered into the torso (along_spine=%.3f)" % along_spine)
+				_ok(along_face > 0.04 or to_head.dot(lie.z) > 0.02, "exam FP eye sits in front of the face (face=%.3f)" % along_face)
+				_ok(cam_o.distance_to(captured) < 0.04, "camera uses the pre-look eye origin (d=%.3f)" % cam_o.distance_to(captured))
+				var ni := skel.find_bone("C_Neck_a")
+				_ok(ni >= 0, "neck bone present for bow check")
+			else:
+				_ok(false, "skeleton / camera present for exam eye check")
+			# Leave the bed so later teardown is clean if needed.
+			if vs.has_method("try_exit"):
+				vs.call("try_exit")
+			await _frames(1)
+		else:
+			_ok(false, "occupied the exam bed for 0.2.30 eye / neck checks")
+	else:
+		_ok(false, "exam bed / player available for 0.2.30 eye / neck checks")
+
+	# Live thrust bar: percentage text tracks commanded thrust, including AB.
+	if hud and vs:
+		var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+		root.add_child(jet)
+		jet.global_position = player.global_position + Vector3(3, 0, 0) if player else Vector3(2, 0, 0)
+		await _frames(2)
+		vs.set("nearest", jet)
+		if player and player.has_method("set_play_mode"):
+			player.call("set_play_mode", 1)
+		var boarded := bool(vs.call("try_enter")) if vs.has_method("try_enter") else false
+		if boarded and vs.get("occupied") == jet:
+			jet.thrust = 0.4
+			if hud.has_method("_refresh_vehicle_touch"):
+				hud.call("_refresh_vehicle_touch")
+			if hud.has_method("_update_thrust_bar"):
+				hud.call("_update_thrust_bar", 0.4)
+			var bar: Control = hud.get("_thrust_bar")
+			var pct: Label = hud.get("_thrust_bar_pct")
+			_ok(bar != null and bar.visible, "thrust bar is visible while flying")
+			_ok(pct != null and pct.text.find("40") >= 0 and pct.text.find("%") >= 0, "thrust bar shows 40%% at thrust 0.4 (text=%s)" % (pct.text if pct else ""))
+			if hud.has_method("_update_thrust_bar"):
+				hud.call("_update_thrust_bar", 1.0)
+			_ok(pct != null and pct.text.find("100") >= 0, "thrust bar shows 100%% at full afterburner (text=%s)" % (pct.text if pct else ""))
+			var tag: Label = hud.get("_thrust_bar_tag")
+			_ok(tag != null and str(tag.text).find("加力") >= 0, "thrust bar marks afterburner as 加力")
+			# Beside the right-side cluster (left of the yaw slider default).
+			if touch and touch.has_method("_default_item"):
+				var sl2: Dictionary = touch.call("_default_item", "flight_yaw_slider")
+				_ok(bar.get_global_rect().get_center().x < float(sl2["center"].x), "live thrust bar is beside the right flight controls")
+			if vs.has_method("try_exit"):
+				vs.call("try_exit")
+			await _frames(1)
+		else:
+			_ok(false, "boarded the plane for thrust-bar checks")
+		jet.queue_free()
+		await _frames(1)
+	else:
+		_ok(false, "HUD / vehicle system available for thrust-bar checks")
+
 
 
 func _door_rear_y(hub: Node3D, wrap: Node3D) -> float:

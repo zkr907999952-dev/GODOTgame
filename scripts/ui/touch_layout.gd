@@ -14,7 +14,8 @@ extends RefCounted
 ## 缺省的键表示用内置默认位置。空载荷（TYL1..XXXX 或未保存）= 全部默认。
 ## 把调好的码填到 DEFAULT_CODE 即可成为内置默认（仍可被 user:// 覆盖）。
 ## 0.2.29 新增 id `flight_stick`（飞机摇杆模式：左右偏航、上推加速、下拉减速）。
-## 缺省该键时用内置默认位置；旧 TYL1 布局没有这一段也不会坏，只是用默认。
+## 0.2.30 新增 id `flight_yaw_slider`（滑块模式：长条左右偏航）和 `thrust_bar`（推力百分比条）。
+## 缺省这些键时用内置默认位置；旧 TYL1 布局没有这一段也不会坏，只是用默认。
 class_name TouchLayout
 
 const VERSION := 1
@@ -50,6 +51,8 @@ const IDS := {
 	"gear": "起落架",
 	"thrust": "推力条",
 	"flight_stick": "飞机摇杆",
+	"flight_yaw_slider": "偏航滑块",
+	"thrust_bar": "推力条",
 }
 
 static var _cache: Dictionary = {}

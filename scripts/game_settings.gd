@@ -26,10 +26,11 @@ var hit_force: float = HIT_FORCE_DEFAULT
 ## 尸体拖拽拉扯力度（0.35..2.5）。1.0 = 加强后的默认拉力，可在设置里再调。
 const PULL_FORCE_DEFAULT := 1.0
 var pull_force: float = PULL_FORCE_DEFAULT
-## 手机飞机控制： "stick"（摇杆，默认）或 "buttons"（按键）。仅影响触屏布局。
+## 手机飞机控制： "slider"（滑块，默认）、"stick"（摇杆）或 "buttons"（按键）。仅影响触屏布局。
+const FLIGHT_MODE_SLIDER := "slider"
 const FLIGHT_MODE_STICK := "stick"
 const FLIGHT_MODE_BUTTONS := "buttons"
-var flight_control_mode: String = FLIGHT_MODE_STICK
+var flight_control_mode: String = FLIGHT_MODE_SLIDER
 
 
 func _ready() -> void:
@@ -56,8 +57,12 @@ func load_cfg() -> void:
 		render_scale = clampf(float(c.get_value("graphics", "render_scale", 0.0)), 0.0, 1.0)
 	hit_force = clampf(float(c.get_value("combat", "hit_force", HIT_FORCE_DEFAULT)), 0.35, 2.0)
 	pull_force = clampf(float(c.get_value("combat", "pull_force", PULL_FORCE_DEFAULT)), 0.35, 2.5)
-	var fm := str(c.get_value("controls", "flight_mode", FLIGHT_MODE_STICK))
-	flight_control_mode = FLIGHT_MODE_BUTTONS if fm == FLIGHT_MODE_BUTTONS else FLIGHT_MODE_STICK
+	var fm := str(c.get_value("controls", "flight_mode", FLIGHT_MODE_SLIDER))
+	# Keep a previously saved 摇杆 / 按键 / 滑块 choice. Missing or unknown → 滑块.
+	if fm == FLIGHT_MODE_BUTTONS or fm == FLIGHT_MODE_STICK or fm == FLIGHT_MODE_SLIDER:
+		flight_control_mode = fm
+	else:
+		flight_control_mode = FLIGHT_MODE_SLIDER
 
 
 func save_cfg() -> void:
@@ -146,12 +151,26 @@ func set_pull_force(v: float) -> void:
 	save_cfg()
 
 
+func is_flight_slider_mode() -> bool:
+	return flight_control_mode == FLIGHT_MODE_SLIDER
+
+
 func is_flight_stick_mode() -> bool:
-	return flight_control_mode != FLIGHT_MODE_BUTTONS
+	return flight_control_mode == FLIGHT_MODE_STICK
+
+
+func is_flight_buttons_mode() -> bool:
+	return flight_control_mode == FLIGHT_MODE_BUTTONS
 
 
 func set_flight_control_mode(mode: String) -> void:
-	var m := FLIGHT_MODE_BUTTONS if mode == FLIGHT_MODE_BUTTONS else FLIGHT_MODE_STICK
+	var m := FLIGHT_MODE_SLIDER
+	if mode == FLIGHT_MODE_BUTTONS:
+		m = FLIGHT_MODE_BUTTONS
+	elif mode == FLIGHT_MODE_STICK:
+		m = FLIGHT_MODE_STICK
+	elif mode == FLIGHT_MODE_SLIDER:
+		m = FLIGHT_MODE_SLIDER
 	if flight_control_mode == m:
 		return
 	flight_control_mode = m

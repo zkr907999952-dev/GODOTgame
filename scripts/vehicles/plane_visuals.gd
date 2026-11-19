@@ -448,8 +448,15 @@ func _measure_cockpit() -> Dictionary:
 	return {"x": 0.0, "y": y - ORIGIN_Y, "z": z}
 
 
+## Scales nozzle petal travel. 0.2.29 used 0.35; 0.2.30 raises this so idle
+## is more closed and afterburner is more open, without changing the curve,
+## pivots, or thrust-vectoring linkage.
+const PETAL_GAP_SCALE := 0.62
+
+
 static func petal_gap(thrust: float) -> float:
 	## >0 opens the petal (accelerate / afterburner); <0 contracts (decelerate).
+	## Applied angle is petal_gap(thrust) * PETAL_GAP_SCALE (see apply_pose).
 	var u := clampf(thrust, 0.0, 1.0)
 	if u >= 0.8:
 		# Last segment of the thrust lever = afterburner, extra open.
@@ -507,7 +514,7 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 	var yaw_c := clampf(float(st.get("ctrl_yaw", steer_angle * 1.6)), -1.0, 1.0)
 	var thrust := float(st.get("thrust", 0.0))
 	# Petal gap opens with thrust (afterburner is the last segment); contracts when decelerating.
-	var gap := petal_gap(thrust) * 0.35
+	var gap := petal_gap(thrust) * PETAL_GAP_SCALE
 	# W/S pitch vectors both nozzles together; A/D adds differential vectoring.
 	# pitch_c > 0 = nose up (S / stick back). Trailing edge up is negative X rotation.
 	var vec_l := -pitch_c * 0.95 + roll_c * 0.92

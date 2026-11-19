@@ -17,8 +17,10 @@ const FK := {
 	"C_Spine_b": Vector3(-0.07, 0.0, 0.0),
 	"C_Spine_c": Vector3(-0.04, 0.0, 0.0),
 	"C_Spine_d": Vector3(-0.02, 0.0, 0.0),
-	"C_Neck_a": Vector3(-0.10, 0.0, 0.0),
-	"C_Head_a": Vector3(-0.06, 0.0, 0.0),
+	# Slight forward neck / head bow so first-person at the true eye can
+	# look down the body more naturally. CharacterBody stays upright.
+	"C_Neck_a": Vector3(-0.18, 0.0, 0.0),
+	"C_Head_a": Vector3(-0.12, 0.0, 0.0),
 	# Legs: x = flex, y = twist, z = abduct. 0.2.26: slightly less hip flex
 	# and a flatter shin so the calves rest along the stirrup pads instead
 	# of plunging through them.
@@ -417,3 +419,29 @@ static func head_world(skel: Skeleton3D) -> Transform3D:
 	if i < 0:
 		return skel.global_transform
 	return skel.global_transform * skel.get_bone_global_pose(i)
+
+
+## Metres in front of the eyes along head +Z, so the near plane is not inside the face.
+const EYE_FORWARD := 0.10
+## Fallback from C_Head_a (skull base) toward the crown / face when eye bones are missing.
+const EYE_CROWN := 0.08
+const EYE_FACE := 0.04
+
+
+static func eye_world(skel: Skeleton3D) -> Transform3D:
+	## First-person eye: midpoint of L_Eye / R_Eye (or an estimate from the
+	## head bone), then pushed forward along the face (+Z). Call this after
+	## the static pose / breath and before apply_look, so looking around
+	## cannot hitch the camera origin.
+	var hw := head_world(skel)
+	var b := hw.basis.orthonormalized()
+	var origin := hw.origin + b.y * EYE_CROWN + b.z * EYE_FACE
+	if skel:
+		var il := skel.find_bone("L_Eye")
+		var ir := skel.find_bone("R_Eye")
+		if il >= 0 and ir >= 0:
+			var le: Vector3 = skel.global_transform * skel.get_bone_global_pose(il).origin
+			var re: Vector3 = skel.global_transform * skel.get_bone_global_pose(ir).origin
+			origin = (le + re) * 0.5
+	origin += b.z * EYE_FORWARD
+	return Transform3D(b, origin)

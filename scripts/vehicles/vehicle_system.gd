@@ -1439,8 +1439,10 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 				if life.has_method("update"):
 					life.call("update", delta, false)
 		# Capture the eye from the posed head *before* look rotation, so
-		# turning the view cannot hitch the camera origin.
-		_exam_eye_origin = ExamPose.head_world(skel).origin
+		# turning the view cannot hitch the camera origin. Use the true
+		# eye height (in front of the face), not a torso-biased offset.
+		var eye_xf := ExamPose.eye_world(skel)
+		_exam_eye_origin = eye_xf.origin
 		_exam_eye_ready = true
 		# First-person: the visible head follows the camera look (after IK
 		# and breath). Aim at the same world-forward the camera uses.
@@ -1508,10 +1510,10 @@ func _exam_camera(_delta: float) -> void:
 	var pitch := yp.y
 	# Eye comes from the IK head, captured before apply_look, so rotating
 	# the neck cannot hitch the camera origin mid-swing.
-	var head_o := _exam_eye_origin if _exam_eye_ready else ExamPose.head_world(skel).origin
-	# A little closer to the torso after the soft waist flex, so the belly
-	# is naturally in the lower FOV without burying the camera in the mesh.
-	var eye := head_o + Vector3.UP * 0.02 + lie.z * 0.07 + look_dir * 0.08
+	# Eye sits at the head / eyes, in front of the face — not lowered toward
+	# the torso to "see the belly". Default look still biases slightly toward
+	# the abdomen so the belly is in the lower FOV.
+	var eye := _exam_eye_origin if _exam_eye_ready else ExamPose.eye_world(skel).origin
 	var look := _exam_look_basis(look_dir, yaw, pitch)
 	cam.global_transform = Transform3D(look, eye)
 	cam.fov = float(player.get("fp_fov"))

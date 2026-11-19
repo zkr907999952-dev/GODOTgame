@@ -83,6 +83,14 @@ var _thrust_lever: Control
 var _thrust_fill: ColorRect
 var _thrust_ab: ColorRect
 var _thrust_label: Label
+## Live thrust percentage display (read-only). Distinct from the interactive
+## `thrust` lever used in 按键 mode. Scale: plane.thrust 0..1 shown as 0–100%
+## (idle 0%, military/dry 80%, full afterburner 100%). Fill turns orange and
+## the label reads 「加力」 once thrust >= 0.8.
+var _thrust_bar: Control
+var _thrust_bar_fill: ColorRect
+var _thrust_bar_pct: Label
+var _thrust_bar_tag: Label
 var _panel_map: PanelContainer
 var _map_list: VBoxContainer
 var _map_current: Label
@@ -1112,6 +1120,46 @@ func _build_vehicle_touch(root: Control) -> void:
 	_thrust_lever.add_child(_thrust_label)
 	root.add_child(_thrust_lever)
 
+	_thrust_bar = Control.new()
+	_thrust_bar.name = "ThrustBar"
+	_thrust_bar.custom_minimum_size = Vector2(48, 150)
+	_thrust_bar.visible = false
+	_thrust_bar.mouse_filter = Control.MOUSE_FILTER_STOP
+	var bar_bg := ColorRect.new()
+	bar_bg.name = "Track"
+	bar_bg.color = Color(0.12, 0.13, 0.16, 0.88)
+	bar_bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_thrust_bar.add_child(bar_bg)
+	var bar_mil := ColorRect.new()
+	bar_mil.name = "MilitaryMark"
+	bar_mil.color = Color(1, 1, 1, 0.28)
+	bar_mil.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_thrust_bar.add_child(bar_mil)
+	_thrust_bar_fill = ColorRect.new()
+	_thrust_bar_fill.name = "Fill"
+	_thrust_bar_fill.color = Color(0.35, 0.75, 0.95, 0.95)
+	_thrust_bar_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_thrust_bar.add_child(_thrust_bar_fill)
+	_thrust_bar_pct = Label.new()
+	_thrust_bar_pct.name = "Percent"
+	_thrust_bar_pct.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_thrust_bar_pct.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_thrust_bar_pct.add_theme_font_size_override("font_size", 14)
+	_thrust_bar_pct.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98, 0.95))
+	_thrust_bar_pct.text = "0%"
+	_thrust_bar_pct.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_thrust_bar.add_child(_thrust_bar_pct)
+	_thrust_bar_tag = Label.new()
+	_thrust_bar_tag.name = "Tag"
+	_thrust_bar_tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_thrust_bar_tag.add_theme_font_size_override("font_size", 11)
+	_thrust_bar_tag.add_theme_color_override("font_color", Color(0.8, 0.82, 0.86, 0.9))
+	_thrust_bar_tag.text = "推力"
+	_thrust_bar_tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_thrust_bar.add_child(_thrust_bar_tag)
+	root.add_child(_thrust_bar)
+
 	_plane_throttle_box = Control.new()
 	_plane_throttle_box.name = "PlaneThrottle"
 	_plane_throttle_box.visible = false
@@ -1188,6 +1236,39 @@ func _update_thrust_lever(thrust: float) -> void:
 	if _thrust_label:
 		_thrust_label.text = "加力" if thrust >= 0.8 else "油门"
 
+
+
+func _update_thrust_bar(thrust: float) -> void:
+	## Display plane.thrust 0..1 as 0–100%. Military/dry is 80%; the last
+	## 20% is afterburner and is drawn in orange with a 「加力」 tag.
+	if _thrust_bar == null or _thrust_bar_fill == null:
+		return
+	var u := clampf(thrust, 0.0, 1.0)
+	var pct := int(round(u * 100.0))
+	var ab := u >= 0.8
+	var pad := 6.0
+	var inner := Vector2(maxf(_thrust_bar.size.x - pad * 2.0, 8.0), maxf(_thrust_bar.size.y - pad * 2.0 - 28.0, 8.0))
+	var track_pos := Vector2(pad, pad + 16.0)
+	var fill_h := inner.y * u
+	_thrust_bar_fill.size = Vector2(inner.x, fill_h)
+	_thrust_bar_fill.position = Vector2(track_pos.x, track_pos.y + inner.y - fill_h)
+	_thrust_bar_fill.color = Color(1.0, 0.45, 0.15, 0.95) if ab else Color(0.35, 0.75, 0.95, 0.95)
+	var mil := _thrust_bar.get_node_or_null("MilitaryMark") as ColorRect
+	if mil:
+		# Tick at 80% (military) so afterburner is visually past that line.
+		var mil_y := track_pos.y + inner.y * (1.0 - 0.8)
+		mil.position = Vector2(pad - 1.0, mil_y)
+		mil.size = Vector2(inner.x + 2.0, 2.0)
+	if _thrust_bar_pct:
+		_thrust_bar_pct.text = "%d%%" % pct
+		_thrust_bar_pct.position = Vector2(0.0, track_pos.y + inner.y * 0.5 - 12.0)
+		_thrust_bar_pct.size = Vector2(_thrust_bar.size.x, 24.0)
+		_thrust_bar_pct.add_theme_color_override("font_color", Color(1.0, 0.85, 0.55, 0.98) if ab else Color(0.95, 0.96, 0.98, 0.95))
+	if _thrust_bar_tag:
+		_thrust_bar_tag.text = "加力" if ab else "推力"
+		_thrust_bar_tag.position = Vector2(0.0, 2.0)
+		_thrust_bar_tag.size = Vector2(_thrust_bar.size.x, 16.0)
+		_thrust_bar_tag.add_theme_color_override("font_color", Color(1.0, 0.55, 0.25, 0.95) if ab else Color(0.8, 0.82, 0.86, 0.9))
 
 func _on_spawn_vehicle(kind: String) -> void:
 	if _vehicle_system and _vehicle_system.has_method("spawn_at_aim"):
@@ -1267,22 +1348,49 @@ func _refresh_vehicle_touch() -> void:
 		_place_layout_btn(_btn_car_brake, "brake", Vector2(v.x - _safe.z - 16.0 - 88.0, v.y - _safe.w - 122.0), Vector2(88, 52))
 	var show_plane := occ != null and kind == "plane"
 	var stick_mode := _is_flight_stick_mode()
-	var show_plane_btns := touch_ui and show_plane and not editing and not is_map_open() and not stick_mode
+	var slider_mode := _is_flight_slider_mode()
+	var show_plane_btns := touch_ui and show_plane and not editing and not is_map_open() and not stick_mode and not slider_mode
+	var show_slider_accels := touch_ui and show_plane and not editing and not is_map_open() and slider_mode
+	var show_gear := touch_ui and show_plane and not editing and not is_map_open()
 	var by := v.y - _safe.w
-	# Thrust bar sits on the right in 按键模式; 摇杆模式 hides it (the stick covers accel/decel/yaw).
+	# Interactive thrust lever is only for 按键模式. The read-only percentage
+	# bar (thrust_bar) is shown in every flight mode and on PC.
 	if _thrust_lever:
-		_thrust_lever.visible = show_plane and not editing and not is_map_open() and not stick_mode
+		_thrust_lever.visible = show_plane and not editing and not is_map_open() and show_plane_btns
 		_place_layout_btn(_thrust_lever, "thrust", Vector2(right - 88.0 - 12.0 - 40.0, by - 200.0), Vector2(40, 180))
-		if show_plane and occ:
-			var th = occ.get("thrust")
-			if th != null:
-				_update_thrust_lever(float(th))
+		if _thrust_lever.visible and occ:
+			var thl = occ.get("thrust")
+			if thl != null:
+				_update_thrust_lever(float(thl))
+	if _thrust_bar:
+		var show_bar := show_plane and not editing and not is_map_open()
+		_thrust_bar.visible = show_bar
+		var bar_sz := Vector2(48, 150)
+		var bar_pos := Vector2(right - 16.0 - bar_sz.x, by - 200.0)
+		if _touch and _touch.has_method("_default_item"):
+			var it: Dictionary = _touch.call("_default_item", "thrust_bar")
+			bar_sz = it["size"]
+			bar_pos = it["center"] - bar_sz * 0.5
+		_place_layout_btn(_thrust_bar, "thrust_bar", bar_pos, bar_sz)
+		if show_bar and occ:
+			var thb = occ.get("thrust")
+			if thb != null:
+				_update_thrust_bar(float(thb))
+	# Accel / decel: 按键模式 keeps the four-button cluster; 滑块 mode places
+	# them immediately above / below the yaw slider via _default_item.
+	var up_pos := Vector2(right - 88.0, by - 200.0)
+	var dn_pos := Vector2(right - 88.0, by - 146.0)
+	if _touch and _touch.has_method("_default_item"):
+		var itu: Dictionary = _touch.call("_default_item", "thrust_up")
+		var itd: Dictionary = _touch.call("_default_item", "thrust_down")
+		up_pos = itu["center"] - itu["size"] * 0.5
+		dn_pos = itd["center"] - itd["size"] * 0.5
 	if _btn_thrust_up:
-		_btn_thrust_up.visible = show_plane_btns
-		_place_layout_btn(_btn_thrust_up, "thrust_up", Vector2(right - 88.0, by - 200.0), Vector2(88, 48))
+		_btn_thrust_up.visible = show_plane_btns or show_slider_accels
+		_place_layout_btn(_btn_thrust_up, "thrust_up", up_pos, Vector2(88, 48))
 	if _btn_thrust_down:
-		_btn_thrust_down.visible = show_plane_btns
-		_place_layout_btn(_btn_thrust_down, "thrust_down", Vector2(right - 88.0, by - 146.0), Vector2(88, 48))
+		_btn_thrust_down.visible = show_plane_btns or show_slider_accels
+		_place_layout_btn(_btn_thrust_down, "thrust_down", dn_pos, Vector2(88, 48))
 	if _btn_yaw_l:
 		_btn_yaw_l.visible = show_plane_btns
 		_place_layout_btn(_btn_yaw_l, "yaw_l", Vector2(right - 132.0, by - 250.0), Vector2(64, 40))
@@ -1291,9 +1399,10 @@ func _refresh_vehicle_touch() -> void:
 		_place_layout_btn(_btn_yaw_r, "yaw_r", Vector2(right - 64.0, by - 250.0), Vector2(64, 40))
 	if _btn_gear:
 		# Gear is to the RIGHT of the exit button (same row), not overlapping.
-		_btn_gear.visible = show_plane_btns
+		# Visible in all mobile flight modes (滑块 / 摇杆 / 按键).
+		_btn_gear.visible = show_gear
 		_place_layout_btn(_btn_gear, "gear", Vector2(gear_x, pair_y), gear_sz)
-		if show_plane_btns and occ:
+		if show_gear and occ:
 			var g = occ.get("gear")
 			var gw = occ.get("gear_want")
 			var down := float(gw if gw != null else (g if g != null else 1.0)) > 0.5
@@ -1307,6 +1416,7 @@ func _refresh_vehicle_touch() -> void:
 		vs.set("touch_yaw", 0.0)
 		vs.set("touch_flight_stick", Vector2.ZERO)
 	elif vs and stick_mode:
+		# Stick covers accel / decel; do not leave leftover button flags on.
 		vs.set("touch_thrust_up", false)
 		vs.set("touch_thrust_down", false)
 	if vs and not show_car:
@@ -1383,7 +1493,7 @@ func _build_settings_panel() -> PanelContainer:
 	_chk_touch.toggled.connect(func(on: bool): set_touch_ui(on))
 	v.add_child(_chk_touch)
 
-	# 仅手机 / 触屏：飞机控制摇杆或按键。默认摇杆。
+	# 仅手机 / 触屏：飞机控制滑块 / 摇杆 / 按键。默认滑块。
 	_flight_mode_row = VBoxContainer.new()
 	_flight_mode_row.add_theme_constant_override("separation", 4)
 	var fm_l := Label.new()
@@ -1391,8 +1501,9 @@ func _build_settings_panel() -> PanelContainer:
 	fm_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
 	_flight_mode_row.add_child(fm_l)
 	_flight_mode_option = OptionButton.new()
-	_flight_mode_option.add_item("摇杆", 0)
-	_flight_mode_option.add_item("按键", 1)
+	_flight_mode_option.add_item("滑块", 0)
+	_flight_mode_option.add_item("摇杆", 1)
+	_flight_mode_option.add_item("按键", 2)
 	_flight_mode_option.item_selected.connect(_on_flight_mode_selected)
 	_flight_mode_row.add_child(_flight_mode_option)
 	v.add_child(_flight_mode_row)
@@ -1584,7 +1695,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。受击力度调节子弹对布娃娃的撞击强弱。拉扯力度调节拖拽尸体时的拉力。「武器无需换弹」开启后开火不必换弹，与「无限备弹」独立。电脑瞄准为按住，手机为切换。手机可在设置里把飞机控制切成摇杆（默认，右侧一个摇杆管偏航和加减速）或按键。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。受击力度调节子弹对布娃娃的撞击强弱。拉扯力度调节拖拽尸体时的拉力。「武器无需换弹」开启后开火不必换弹，与「无限备弹」独立。电脑瞄准为按住，手机为切换。手机可在设置里把飞机控制切成滑块（默认：右侧加速键、长条偏航滑块、减速键）、摇杆（一个摇杆管偏航和加减速）或按键。飞行时右侧显示当前推力百分比（0% 怠速，80% 军用推力，100% 加力）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)
@@ -2429,12 +2540,15 @@ func _process(_delta: float) -> void:
 	if _player and "play_mode" in _player and int(_player.play_mode) != _last_mode:
 		_last_mode = int(_player.play_mode)
 		_sync_from_systems()
-	if _thrust_lever and _thrust_lever.visible and _vehicle_system:
+	if _vehicle_system:
 		var occ = _vehicle_system.get("occupied")
 		if occ:
 			var th = occ.get("thrust")
 			if th != null:
-				_update_thrust_lever(float(th))
+				if _thrust_lever and _thrust_lever.visible:
+					_update_thrust_lever(float(th))
+				if _thrust_bar and _thrust_bar.visible:
+					_update_thrust_bar(float(th))
 	# 缩放滑条跟随滚轮
 	if _open == PanelId.CAMERA and _player and _zoom_slider and _player.has_method("get_tp_distance"):
 		var d := float(_player.call("get_tp_distance"))
@@ -2974,11 +3088,31 @@ func _on_menu_scroll_input(event: InputEvent, sc: ScrollContainer, w: Control) -
 		_menu_scroll_dragging = false
 
 
+func _flight_mode_id() -> String:
+	var s := _settings()
+	if s and "flight_control_mode" in s:
+		var m := str(s.get("flight_control_mode"))
+		if m in ["slider", "stick", "buttons"]:
+			return m
+	return "slider"
+
+
+func _is_flight_slider_mode() -> bool:
+	var s := _settings()
+	if s and s.has_method("is_flight_slider_mode"):
+		return bool(s.call("is_flight_slider_mode"))
+	return _flight_mode_id() == "slider"
+
+
 func _is_flight_stick_mode() -> bool:
 	var s := _settings()
 	if s and s.has_method("is_flight_stick_mode"):
 		return bool(s.call("is_flight_stick_mode"))
-	return true
+	return _flight_mode_id() == "stick"
+
+
+func _is_flight_buttons_mode() -> bool:
+	return _flight_mode_id() == "buttons"
 
 
 func _sync_flight_mode_ui() -> void:
@@ -2987,16 +3121,25 @@ func _sync_flight_mode_ui() -> void:
 		_flight_mode_row.visible = show
 	if _flight_mode_option == null:
 		return
-	var stick := _is_flight_stick_mode()
-	var idx := 0 if stick else 1
+	var m := _flight_mode_id()
+	var idx := 0
+	if m == "stick":
+		idx = 1
+	elif m == "buttons":
+		idx = 2
 	if _flight_mode_option.selected != idx:
 		_flight_mode_option.select(idx)
 
 
 func _on_flight_mode_selected(idx: int) -> void:
 	var s := _settings()
+	var mode := "slider"
+	if idx == 1:
+		mode = "stick"
+	elif idx == 2:
+		mode = "buttons"
 	if s and s.has_method("set_flight_control_mode"):
-		s.call("set_flight_control_mode", "buttons" if idx == 1 else "stick")
+		s.call("set_flight_control_mode", mode)
 	_refresh_vehicle_touch()
 	if _touch:
 		_touch.queue_redraw()
