@@ -62,6 +62,7 @@ var touch_car_brake: bool = false
 var touch_yaw: float = 0.0  # -1 left, +1 right (mobile yaw buttons)
 var touch_thrust_up: bool = false
 var touch_thrust_down: bool = false
+var touch_flight_stick: Vector2 = Vector2.ZERO  # +x right (yaw right), +y up (accel)
 var _ctrl_was_down: bool = false
 var _g_was_down: bool = false
 var _city_warming: bool = false
@@ -1212,7 +1213,8 @@ func is_observe_orbit() -> bool:
 
 
 func _fp_default_pitch() -> float:
-	return 0.04 if kind_of(occupied) == "plane" else -0.06
+	# Plane: look along the visual nose so the view origin sits in the HUD box.
+	return 0.0 if kind_of(occupied) == "plane" else -0.06
 
 
 func _sync_vehicle_look_from_heading() -> void:
@@ -1406,33 +1408,51 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 		var arm_geom: Dictionary = bed.armrest_geometry() if bed.has_method("armrest_geometry") else {}
 		var leg_geom: Dictionary = bed.stirrup_geometry() if bed.has_method("stirrup_geometry") else {}
 		var arm_half: float = float(arm_geom.get("half_len", 0.166))
-		var arm_skin := 0.026
+		# Raise the forearm a little so it sits flush / level with the armrest.
+		var arm_skin := 0.044
 		# Hand near the foot-end of the pad, on top, slightly inward of the lip.
 		# Do not overshoot the rail (0.2.27 used 0.22 m and crossed the end).
 		var hand_along := clampf(arm_half * 0.72, 0.08, arm_half - 0.02)
 		al = al + feet * hand_along + bed_up * arm_skin - left * 0.035
 		ar = ar + feet * hand_along + bed_up * arm_skin + left * 0.035
-		# Mid-calf stays on the pad; the foot extends past the pad along the
-		# shin (outward a little, mostly toward the feet) so the leg matches
-		# the stirrup instead of hanging off the side.
+		# Mid-calf stays on the pad; lift a little more so the shin does not
+		# clip through the stirrup bar. The foot extends past the pad along
+		# the shin (outward a little, mostly toward the feet).
 		var stir_half: float = float(leg_geom.get("half_len", 0.142))
 		var stir_half_w: float = float(leg_geom.get("half_wid", 0.080))
 		var calf_out := clampf(stir_half_w * 0.45, 0.02, 0.055)
 		var foot_along := stir_half + 0.10
-		var sl: Vector3 = bed.stirrup_l_global() + left * calf_out + feet * foot_along + bed_up * 0.032
-		var sr: Vector3 = bed.stirrup_r_global() - left * calf_out + feet * foot_along + bed_up * 0.032
+		var sl: Vector3 = bed.stirrup_l_global() + left * calf_out + feet * foot_along + bed_up * 0.052
+		var sr: Vector3 = bed.stirrup_r_global() - left * calf_out + feet * foot_along + bed_up * 0.052
 		ExamPose.apply(skel, sl, sr, bed.backrest_angle, al, ar, feet, bed_up)
+		# Alive: subtle chest / belly breath after the static pose, before
+		# head-follow, so it does not fight IK or the waist flex. Skip this
+		# in observation mode — that path calls update() after set_gaze_target.
+		var display_now := player.has_method("is_display_mode") and bool(player.call("is_display_mode"))
+		if (not display_now) and player.has_method("get_secondary"):
+			var life = player.call("get_secondary")
+			if life:
+				if life.has_method("clear_body_look"):
+					life.call("clear_body_look")
+				if life.has_method("clear_gaze_intent"):
+					life.call("clear_gaze_intent")
+				if life.has_method("update"):
+					life.call("update", delta, false)
 		# Capture the eye from the posed head *before* look rotation, so
 		# turning the view cannot hitch the camera origin.
 		_exam_eye_origin = ExamPose.head_world(skel).origin
 		_exam_eye_ready = true
-		# First-person: the visible head follows the camera look (after IK).
-		# Use the continuous yaw/pitch extras (not look_world aiming) so mid
-		# angles stay smooth. Do NOT call clear_gaze afterwards.
+		# First-person: the visible head follows the camera look (after IK
+		# and breath). Aim at the same world-forward the camera uses.
 		var fp_now := bool(player.get("first_person")) and not (player.has_method("is_display_mode") and bool(player.call("is_display_mode")))
 		if fp_now:
 			var yp := _clamp_exam_look()
-			ExamPose.apply_look(skel, yp.x, yp.y)
+			var look_dir := -lie.y * 0.86 - lie.z * 0.38
+			if look_dir.length_squared() < 1e-6:
+				look_dir = Vector3(0, 0, 1)
+			look_dir = look_dir.normalized()
+			var look_b := _exam_look_basis(look_dir, yp.x, yp.y)
+			ExamPose.apply_look(skel, yp.x, yp.y, -look_b.z, look_b.y)
 		ExamPose.offset_hair(skel, Vector3(0.0, 0.02, -0.10))
 		# Observation mode: head / eyes look at the orbit camera.
 		if player.has_method("is_display_mode") and bool(player.call("is_display_mode")) and player.has_method("get_secondary"):
@@ -1450,16 +1470,15 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 			var sec2 = player.call("get_secondary")
 			# Only clear the gaze *intent*. Never reset look bones to rest
 			# here — that would wipe ExamPose.apply_look on the visible head.
-			if sec2 and sec2.has_method("clear_gaze_intent"):
-				sec2.call("clear_gaze_intent")
-			elif sec2:
-				sec2.set("gaze_want", false)
+			# (Intent was already cleared before apply_look.)
 			if sec2 and sec2.has_method("snap_hair_to_pose"):
 				sec2.call("snap_hair_to_pose")
 
 
 func _exam_camera(_delta: float) -> void:
 	if player == null:
+		return
+	if _map_view_open():
 		return
 	# Observation / display mode keeps the pose and uses the normal orbit camera.
 	if player.has_method("is_display_mode") and bool(player.call("is_display_mode")):
@@ -1474,8 +1493,9 @@ func _exam_camera(_delta: float) -> void:
 	if bed == null:
 		return
 	var lie := bed.patient_basis()
-	# Default: from the head, look toward the feet / abdomen, slightly at the body.
-	var look_dir := -lie.y * 0.92 - lie.z * 0.25
+	# Default: from the head, look toward the feet / abdomen so the belly
+	# sits in the lower field of view (soft, not staring straight down).
+	var look_dir := -lie.y * 0.86 - lie.z * 0.38
 	if look_dir.length_squared() < 1e-6:
 		look_dir = bed.global_transform.basis.z
 	look_dir = look_dir.normalized()
@@ -1489,7 +1509,9 @@ func _exam_camera(_delta: float) -> void:
 	# Eye comes from the IK head, captured before apply_look, so rotating
 	# the neck cannot hitch the camera origin mid-swing.
 	var head_o := _exam_eye_origin if _exam_eye_ready else ExamPose.head_world(skel).origin
-	var eye := head_o + Vector3.UP * 0.03 + lie.z * 0.12 + look_dir * 0.10
+	# A little closer to the torso after the soft waist flex, so the belly
+	# is naturally in the lower FOV without burying the camera in the mesh.
+	var eye := head_o + Vector3.UP * 0.02 + lie.z * 0.07 + look_dir * 0.08
 	var look := _exam_look_basis(look_dir, yaw, pitch)
 	cam.global_transform = Transform3D(look, eye)
 	cam.fov = float(player.get("fp_fov"))
@@ -1514,7 +1536,7 @@ func _clamp_exam_look() -> Vector2:
 func _exam_look_forward(yaw: float, pitch: float, lie: Basis) -> Vector3:
 	## Same composition as _exam_camera: default look toward the feet / abdomen,
 	## then the player's yaw/pitch extras, world-up, no roll.
-	var look_dir := -lie.y * 0.92 - lie.z * 0.25
+	var look_dir := -lie.y * 0.86 - lie.z * 0.38
 	if look_dir.length_squared() < 1e-6:
 		look_dir = Vector3(0, 0, 1)
 	look_dir = look_dir.normalized()
@@ -1593,7 +1615,9 @@ func _drive_input(delta: float) -> void:
 		# A = steer left (positive Godot steering), D = right.
 		var steer := -axis_lr
 		var hb := Input.is_key_pressed(KEY_SPACE) or touch_car_brake
-		var nt := Input.is_key_pressed(KEY_SHIFT)
+		# Nitro is ONLY the on-screen 加速 button and/or Shift. W and the
+		# movement joystick never start it.
+		var nt := Input.is_key_pressed(KEY_SHIFT) or touch_car_accel
 		var brake := 1.0 if hb else 0.0
 		var car := occupied as CarController
 		var fwd_speed := car.linear_velocity.dot(-car.global_transform.basis.z)
@@ -1609,6 +1633,12 @@ func _drive_input(delta: float) -> void:
 		# Q / left yaw button = rudder left (positive ctrl_yaw, +Y torque).
 		# touch_yaw is stored as -1 left / +1 right; invert so left is +.
 		var yaw := -touch_yaw
+		# Flight stick (mobile 摇杆模式): +x right = yaw right, +y up = accel.
+		# Full-up lights afterburner the same way holding 加速 does.
+		var fs := touch_flight_stick
+		if absf(fs.x) > 0.08:
+			# touch_yaw is -1 left / +1 right; invert so left is + ctrl_yaw.
+			yaw += -fs.x
 		if Input.is_key_pressed(KEY_Q):
 			yaw += 1.0
 		if Input.is_key_pressed(KEY_E):
@@ -1616,13 +1646,18 @@ func _drive_input(delta: float) -> void:
 		yaw = clampf(yaw, -1.0, 1.0)
 		var td := 0.0
 		var decelerating := false
-		var holding_ab := Input.is_key_pressed(KEY_SHIFT) or touch_thrust_up
+		var stick_ab := fs.y >= 0.82
+		var stick_up := fs.y > 0.12
+		var stick_dn := fs.y < -0.12
+		var holding_ab := Input.is_key_pressed(KEY_SHIFT) or touch_thrust_up or stick_ab
 		if holding_ab:
 			td += delta * 0.45
-		if Input.is_key_pressed(KEY_C) or touch_thrust_down:
-			td -= delta * 0.45
+		elif stick_up:
+			td += delta * 0.45 * clampf(fs.y, 0.0, 1.0)
+		if Input.is_key_pressed(KEY_C) or touch_thrust_down or stick_dn:
+			td -= delta * 0.45 * (1.0 if (Input.is_key_pressed(KEY_C) or touch_thrust_down) else clampf(-fs.y, 0.0, 1.0))
 			decelerating = true
-		if touch_throttle >= 0.0 and not touch_thrust_up and not touch_thrust_down:
+		if touch_throttle >= 0.0 and not touch_thrust_up and not touch_thrust_down and fs.length_squared() < 0.02:
 			pl.set_throttle(touch_throttle)
 			td = 0.0
 		# Hold-to-afterburner: the last 0.2 of the lever is AB only while
@@ -1642,8 +1677,19 @@ func _drive_input(delta: float) -> void:
 		_g_was_down = g_now
 
 
+func _map_view_open() -> bool:
+	var g := get_parent()
+	if g and g.get("map_view"):
+		return bool(g.get("map_view").get("is_open"))
+	return false
+
+
 func _vehicle_camera(delta: float) -> void:
 	if player == null or not player.has_node("CameraPivot/Camera3D"):
+		return
+	# Opening the overhead map from a vehicle must not let the chase / cockpit
+	# camera steal current from the top-down map camera every frame.
+	if _map_view_open():
 		return
 	var pivot: Node3D = player.get_node("CameraPivot")
 	var cam: Camera3D = player.get_node("CameraPivot/Camera3D")

@@ -427,9 +427,13 @@ func _measure_cockpit() -> Dictionary:
 		stick_z = float(a["cz"])
 	var hud := _measure_hud_frame()
 	if not hud.is_empty():
-		# Eye at the HUD-frame midpoint in Y, slightly aft of the combiner
-		# so the view origin sits in the middle of the box (boresight).
-		y = float(hud["y"])
+		# 0.2.28 glued the eye to the thin combiner (Object_36) AABB origin,
+		# which sits below the visible HUD box / pipper. Use the visual
+		# center of the frame: a little above the combiner origin, still
+		# well below the old too-high 1.983 seat, then sit slightly aft
+		# so the look origin is in the middle of the box (boresight).
+		var sy := float(hud.get("sy", 0.10))
+		y = float(hud["y"]) + sy * 0.20 + 0.10
 		z = float(hud["z"]) + 0.66
 	var canopy := VehicleCommon.first_named(wrap, "^door_dside_f")
 	if canopy == null:

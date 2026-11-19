@@ -10,11 +10,13 @@ class_name ExamPose
 ## stirrup cups, spine slightly extended along the already-aligned backrest,
 ## arms relaxed on the belly / along the torso.
 const FK := {
-	"C_Hip_a": Vector3(0.06, 0.0, 0.0),
-	"C_Spine_a": Vector3(0.04, 0.0, 0.0),
-	"C_Spine_b": Vector3(0.03, 0.0, 0.0),
-	"C_Spine_c": Vector3(0.02, 0.0, 0.0),
-	"C_Spine_d": Vector3(0.02, 0.0, 0.0),
+	# Soft waist flex (negative X = crunch toward the belly) so first-person
+	# can see the stomach. Keep it gentle — CharacterBody stays upright.
+	"C_Hip_a": Vector3(-0.05, 0.0, 0.0),
+	"C_Spine_a": Vector3(-0.10, 0.0, 0.0),
+	"C_Spine_b": Vector3(-0.07, 0.0, 0.0),
+	"C_Spine_c": Vector3(-0.04, 0.0, 0.0),
+	"C_Spine_d": Vector3(-0.02, 0.0, 0.0),
 	"C_Neck_a": Vector3(-0.10, 0.0, 0.0),
 	"C_Head_a": Vector3(-0.06, 0.0, 0.0),
 	# Legs: x = flex, y = twist, z = abduct. 0.2.26: slightly less hip flex
@@ -291,47 +293,112 @@ static func _first_child_bone(skel: Skeleton3D, idx: int) -> int:
 	return -1
 
 
-static func apply_look(skel: Skeleton3D, yaw: float, pitch: float, look_world: Vector3 = Vector3.ZERO) -> void:
+static func apply_look(skel: Skeleton3D, yaw: float, pitch: float, look_world: Vector3 = Vector3.ZERO, cam_up: Vector3 = Vector3.UP) -> void:
 	## Rotate neck / head / eyes with the first-person look so the face follows
 	## the camera — this must be visible in a room mirror. Prefer aiming at
-	## look_world (camera forward). yaw / pitch are the exam-bed camera extras
-	## (positive pitch = look up in this project's _pitch convention).
+	## look_world (camera forward) by setting the head's world +Z onto that
+	## direction. yaw / pitch are the fallback if no world aim is given
+	## (positive pitch = look up).
 	if skel == null:
 		return
-	var neck_p := 0.0
-	var neck_y := 0.0
-	var head_p := 0.0
-	var head_y := 0.0
-	# Prefer the continuous camera extras. Aiming via look_world is unstable
-	# when the view points toward the feet (body -Y): the XZ projection of
-	# the direction is tiny and atan2(d.x, d.z) flips around mid angles.
-	var use_world := look_world.length_squared() > 1e-8
-	if use_world:
-		var inv := skel.global_transform.basis.orthonormalized().inverse()
-		var d := (inv * look_world.normalized()).normalized()
-		if Vector2(d.x, d.z).length() < 0.20:
-			use_world = false
-		else:
-			# Body / skeleton space: +Z face, +Y toward the crown, +X left.
-			var yaw_s := atan2(d.x, d.z)
-			var pitch_s := atan2(-d.y, maxf(Vector2(d.x, d.z).length(), 1e-5))
-			yaw_s = clampf(yaw_s, -1.15, 1.15)
-			pitch_s = clampf(pitch_s, -1.05, 1.20)
-			neck_y = yaw_s * 0.42
-			head_y = yaw_s * 0.62
-			neck_p = pitch_s * 0.42
-			head_p = pitch_s * 0.62
-	if not use_world:
-		# Fallback: camera extras. Positive pitch (look up) tilts the head back
-		# (negative local X, matching the lithotomy FK extension).
-		neck_y = yaw * 0.42
-		head_y = yaw * 0.62
-		neck_p = -pitch * 0.42
-		head_p = -pitch * 0.62
+	if look_world.length_squared() > 1e-8:
+		_aim_head_world(skel, look_world.normalized(), cam_up)
+		return
+	# Fallback: camera extras. Positive pitch (look up) tilts the head back
+	# (negative local X, matching the lithotomy FK extension).
+	var neck_y := yaw * 0.42
+	var head_y := yaw * 0.62
+	var neck_p := -pitch * 0.42
+	var head_p := -pitch * 0.62
 	_add_local_euler(skel, "C_Neck_a", Vector3(neck_p, neck_y, 0.0))
 	_add_local_euler(skel, "C_Head_a", Vector3(head_p, head_y, 0.0))
 	_add_local_euler(skel, "L_Eye", Vector3(head_p * 0.35, head_y * 0.35, 0.0))
 	_add_local_euler(skel, "R_Eye", Vector3(head_p * 0.35, head_y * 0.35, 0.0))
+	skel.force_update_transform()
+
+
+static func head_forward(skel: Skeleton3D) -> Vector3:
+	## Visible face direction (head bone +Z) in world space.
+	var xf := head_world(skel)
+	var f := xf.basis.z
+	if f.length_squared() < 1e-8:
+		return Vector3(0, 0, 1)
+	return f.normalized()
+
+
+static func _aim_head_world(skel: Skeleton3D, want: Vector3, cam_up: Vector3 = Vector3.UP) -> void:
+	## Put the head's face axis (+Z) exactly on the camera forward. A limited
+	## neck swing shares the motion so the neck is not frozen, but the head
+	## is always locked to the camera (no mid-angle XZ atan2).
+	if want.length_squared() < 1e-8:
+		return
+	want = want.normalized()
+	var i_neck := skel.find_bone("C_Neck_a")
+	var i_head := skel.find_bone("C_Head_a")
+	if i_head < 0:
+		return
+	var cur := head_forward(skel)
+	if i_neck >= 0 and cur.length_squared() > 1e-8:
+		var swing := Quaternion(cur, want)
+		var ang := swing.get_angle()
+		if ang > 1e-4 and ang < PI - 1e-4:
+			var axis := swing.get_axis()
+			if axis.length_squared() > 1e-8:
+				# Neck takes a limited share; the head will finish the rest exactly.
+				var neck_ang := clampf(ang * 0.42, 0.0, 0.55)
+				_set_bone_world_rotate(skel, i_neck, Quaternion(axis.normalized(), neck_ang))
+	# Desired head basis: Z = camera forward, Y ≈ camera up (no roll).
+	var up := cam_up
+	if up.length_squared() < 1e-8:
+		up = Vector3.UP
+	else:
+		up = up.normalized()
+	if absf(want.dot(up)) > 0.94:
+		up = Vector3.UP if absf(want.dot(Vector3.UP)) < 0.94 else Vector3(0.0, 0.0, 1.0)
+	var x := up.cross(want)
+	if x.length_squared() < 1e-8:
+		x = Vector3.RIGHT
+	x = x.normalized()
+	var y := want.cross(x)
+	if y.length_squared() < 1e-8:
+		y = up
+	else:
+		y = y.normalized()
+	x = y.cross(want).normalized()
+	_set_bone_world_basis(skel, i_head, Basis(x, y, want))
+	# Eyes take a tiny additional look in the same direction (additive, small).
+	var ie_l := skel.find_bone("L_Eye")
+	var ie_r := skel.find_bone("R_Eye")
+	if ie_l >= 0 or ie_r >= 0:
+		var after := head_forward(skel)
+		var extra := Quaternion(after if after.length_squared() > 1e-8 else want, want)
+		if extra.get_angle() > 1e-4 and extra.get_angle() < 0.4:
+			if ie_l >= 0:
+				_set_bone_world_rotate(skel, ie_l, Quaternion.IDENTITY.slerp(extra, 0.35))
+			if ie_r >= 0:
+				_set_bone_world_rotate(skel, ie_r, Quaternion.IDENTITY.slerp(extra, 0.35))
+	skel.force_update_transform()
+
+
+static func _set_bone_world_rotate(skel: Skeleton3D, idx: int, q_world: Quaternion) -> void:
+	if idx < 0 or q_world.get_angle() < 1e-6:
+		return
+	var world_b := (skel.global_transform * skel.get_bone_global_pose(idx)).basis.orthonormalized()
+	_set_bone_world_basis(skel, idx, (Basis(q_world) * world_b).orthonormalized())
+
+
+static func _set_bone_world_basis(skel: Skeleton3D, idx: int, world_b: Basis) -> void:
+	if idx < 0:
+		return
+	world_b = world_b.orthonormalized()
+	var skel_b := skel.global_transform.basis.orthonormalized()
+	var want_skel := skel_b.inverse() * world_b
+	var parent := skel.get_bone_parent(idx)
+	var parent_skel := Basis.IDENTITY
+	if parent >= 0:
+		parent_skel = skel.get_bone_global_pose(parent).basis.orthonormalized()
+	var want_local := parent_skel.inverse() * want_skel
+	skel.set_bone_pose_rotation(idx, want_local.get_rotation_quaternion())
 	skel.force_update_transform()
 
 

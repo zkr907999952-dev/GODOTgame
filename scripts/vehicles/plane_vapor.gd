@@ -10,9 +10,10 @@ const TIP_EMIT_SPEED := 52.0
 const TIP_EMIT_AGL := 18.0
 const TIP_WIDTH := 0.22
 const TIP_FADE := 0.38
-## 高过载云：大约从 2.4 G 抬头开始显现，6 G 附近接近最浓。
-const VAPOR_G_ON := 2.4
-const VAPOR_G_FULL := 6.0
+## 高过载云：只在较大过载下出现。轻抬头 / 小过载转弯不产生涡流；
+## 大约从 4.8 G 开始显现，7.5 G 附近接近最浓。不单独按抬头输入触发。
+const VAPOR_G_ON := 4.8
+const VAPOR_G_FULL := 7.5
 const VAPOR_MIN_SPEED := 55.0
 
 var _shader: Shader
@@ -263,18 +264,23 @@ func _build_clouds() -> void:
 	# Region 2 = wing-root / LEX over the inner wing (z ≈ -0.4 .. 2.2).
 	# Sheets lie in the airframe XZ plane (normal ≈ body up) so they stay
 	# flush with the fuselage and never stand up like vertical fins.
+	# Narrower, slightly outboard sheets: cover the LEX / wing-body junction
+	# but stay off the centerline spine and the engine nacelles (intake-to-nozzle
+	# is roughly |x| < 1.2, z > 1.8). Still locked to the airframe XZ plane.
 	var placements: Array = [
-		# Dorsal / spine over the mid-forward fuselage (region 1)
-		{"pos": Vector3(0.0, 1.72, -3.55), "len": 4.2, "wid": 1.45, "camber": 0.12, "yaw": 0.0, "roll": 0.0, "mode": 0.08},
-		{"pos": Vector3(0.0, 1.58, -2.35), "len": 3.6, "wid": 1.25, "camber": 0.10, "yaw": 0.0, "roll": 0.0, "mode": 0.10},
+		# Dorsal / LEX flanks beside the canopy (region 1) — split off the spine
+		{"pos": Vector3(-0.95, 1.68, -3.45), "len": 3.6, "wid": 0.70, "camber": 0.10, "yaw": 0.06, "roll": -0.08, "mode": 0.08},
+		{"pos": Vector3(0.95, 1.68, -3.45), "len": 3.6, "wid": 0.70, "camber": 0.10, "yaw": -0.06, "roll": 0.08, "mode": 0.08},
+		{"pos": Vector3(-1.15, 1.50, -2.35), "len": 3.0, "wid": 0.65, "camber": 0.09, "yaw": 0.10, "roll": -0.10, "mode": 0.10},
+		{"pos": Vector3(1.15, 1.50, -2.35), "len": 3.0, "wid": 0.65, "camber": 0.09, "yaw": -0.10, "roll": 0.10, "mode": 0.10},
 		# LEX / strake beside the forward fuselage (region 1 sides)
-		{"pos": Vector3(-1.25, 1.38, -2.55), "len": 3.8, "wid": 1.40, "camber": 0.09, "yaw": 0.22, "roll": -0.14, "mode": 0.16},
-		{"pos": Vector3(1.25, 1.38, -2.55), "len": 3.8, "wid": 1.40, "camber": 0.09, "yaw": -0.22, "roll": 0.14, "mode": 0.16},
-		# Wing-root / LEX junction, lying on the wing (region 2)
-		{"pos": Vector3(-2.35, 1.08, 0.40), "len": 4.0, "wid": 2.10, "camber": 0.06, "yaw": 0.34, "roll": -0.08, "mode": 0.08},
-		{"pos": Vector3(2.35, 1.08, 0.40), "len": 4.0, "wid": 2.10, "camber": 0.06, "yaw": -0.34, "roll": 0.08, "mode": 0.08},
-		{"pos": Vector3(-1.85, 1.00, 1.45), "len": 3.2, "wid": 1.70, "camber": 0.05, "yaw": 0.16, "roll": -0.06, "mode": 0.12},
-		{"pos": Vector3(1.85, 1.00, 1.45), "len": 3.2, "wid": 1.70, "camber": 0.05, "yaw": -0.16, "roll": 0.06, "mode": 0.12},
+		{"pos": Vector3(-1.45, 1.36, -2.55), "len": 3.6, "wid": 1.00, "camber": 0.09, "yaw": 0.22, "roll": -0.14, "mode": 0.16},
+		{"pos": Vector3(1.45, 1.36, -2.55), "len": 3.6, "wid": 1.00, "camber": 0.09, "yaw": -0.22, "roll": 0.14, "mode": 0.16},
+		# Wing-root / LEX junction, lying on the wing (region 2), more outward
+		{"pos": Vector3(-2.55, 1.08, 0.25), "len": 3.6, "wid": 1.35, "camber": 0.06, "yaw": 0.34, "roll": -0.08, "mode": 0.08},
+		{"pos": Vector3(2.55, 1.08, 0.25), "len": 3.6, "wid": 1.35, "camber": 0.06, "yaw": -0.34, "roll": 0.08, "mode": 0.08},
+		{"pos": Vector3(-2.35, 1.02, 1.15), "len": 2.8, "wid": 1.15, "camber": 0.05, "yaw": 0.18, "roll": -0.06, "mode": 0.12},
+		{"pos": Vector3(2.35, 1.02, 1.15), "len": 2.8, "wid": 1.15, "camber": 0.05, "yaw": -0.18, "roll": 0.06, "mode": 0.12},
 	]
 	_cloud_alpha.resize(placements.size())
 	for i in placements.size():
@@ -323,22 +329,21 @@ func update(st: Dictionary, delta: float) -> void:
 	var speed := float(st.get("speed", 0.0))
 	var agl := float(st.get("agl", 0.0))
 	var g_load := float(st.get("g_load", 1.0))
-	var pitch_c := float(st.get("ctrl_pitch", 0.0))
-	var aoa := float(st.get("aoa", 0.0))
+	var _pitch_c := float(st.get("ctrl_pitch", 0.0))
+	var _aoa := float(st.get("aoa", 0.0))
 	var xf := _wrap.global_transform
 	var tip_l: Vector3 = xf * _tip_local_l
 	var tip_r: Vector3 = xf * _tip_local_r
 	var emit_tip := airborne and speed > TIP_EMIT_SPEED and agl > TIP_EMIT_AGL
 	_tip_l.push(tip_l, emit_tip, TIP_WIDTH, TIP_FADE, false)
 	_tip_r.push(tip_r, emit_tip, TIP_WIDTH, TIP_FADE, false)
-	# High-G pull-up only (ctrl_pitch > 0 = nose up). Intensity scales with G.
-	var pull_up := airborne and pitch_c > 0.18 and speed > VAPOR_MIN_SPEED
+	# High-G only. A mild pull-up or gentle turn stays clear; vapor appears
+	# once the load factor crosses VAPOR_G_ON, denser toward VAPOR_G_FULL.
+	# Do not key appearance off pitch-up input or AoA alone.
 	var g_term := 0.0
-	if pull_up:
+	if airborne and speed > VAPOR_MIN_SPEED:
 		g_term = clampf((g_load - VAPOR_G_ON) / maxf(VAPOR_G_FULL - VAPOR_G_ON, 0.1), 0.0, 1.0)
-		if aoa > 0.16:
-			g_term = maxf(g_term, clampf((aoa - 0.16) / 0.22, 0.0, 0.55) * clampf(speed / 90.0, 0.0, 1.0))
-	var want := g_term if pull_up else 0.0
+	var want := g_term
 	_intensity = move_toward(_intensity, want, delta * (3.2 if want > _intensity else 2.2))
 	_update_body_vortex(true, _intensity > 0.04)
 	_update_body_vortex(false, _intensity > 0.04)
@@ -350,10 +355,11 @@ func _update_body_vortex(left: bool, emit: bool) -> void:
 	var side := -1.0 if left else 1.0
 	var tr: _Ribbon = _vortex_l if left else _vortex_r
 	var xf := _wrap.global_transform
-	# Path locked to the airframe: LEX (region 1) → wing root (region 2) → aft.
-	var p0: Vector3 = xf * Vector3(1.25 * side, 1.22, -2.70)
-	var p1: Vector3 = xf * Vector3(2.05 * side, 1.05, 0.35)
-	var p2: Vector3 = xf * Vector3(1.70 * side, 0.95, 3.10)
+	# Path locked to the airframe: LEX (region 1) → wing root (region 2) →
+	# outboard aft (staying off the engine nacelles around |x|≈0.62, z>1.8).
+	var p0: Vector3 = xf * Vector3(1.55 * side, 1.28, -2.70)
+	var p1: Vector3 = xf * Vector3(2.40 * side, 1.08, 0.20)
+	var p2: Vector3 = xf * Vector3(2.55 * side, 1.00, 2.20)
 	if emit:
 		if tr.hist.size() < 3:
 			tr.hist = [p0, p1, p2]
@@ -371,7 +377,7 @@ func _update_body_vortex(left: bool, emit: bool) -> void:
 		tr.fade_hist()
 	# Width axis is aircraft up, not world up — otherwise a banked jet
 	# makes the strip stand up like a vertical fin.
-	tr._rebuild(1.35, 0.28 * maxf(_intensity, 0.15), true, xf.basis.y)
+	tr._rebuild(0.72, 0.28 * maxf(_intensity, 0.15), true, xf.basis.y)
 	if tr.hist.size() < 3 or _intensity < 0.04:
 		tr.mesh.visible = false
 
@@ -454,6 +460,16 @@ func cloud_covers_wing_lex() -> bool:
 	## Region 2: at least one sheet over the wing-root / LEX.
 	return _cloud_in_box(Vector3(-3.6, 0.75, -0.6), Vector3(-1.2, 1.35, 2.6)) \
 		and _cloud_in_box(Vector3(1.2, 0.75, -0.6), Vector3(3.6, 1.35, 2.6))
+
+
+func cloud_covers_engines() -> bool:
+	## Intake-to-nozzle / nacelle volume. Main sheets must stay out of this.
+	return _cloud_in_box(Vector3(-1.20, 0.35, 1.80), Vector3(1.20, 1.45, 8.20))
+
+
+func main_vortex_max_width() -> float:
+	## Widest designed body-vortex / dorsal sheet (local X extent).
+	return 1.35
 
 
 func _cloud_in_box(mn: Vector3, mx: Vector3) -> bool:

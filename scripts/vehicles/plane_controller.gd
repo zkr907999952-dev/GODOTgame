@@ -35,7 +35,9 @@ const DECEL_AGILITY := 2.85
 const DECEL_BOOST_HOLD := 1.15  # seconds at peak while held (0.2.27: a little longer)
 const DECEL_BOOST_FADE := 0.48  # seconds of leftover boost after release
 const DECEL_YAW_COUPLE := 0.62
-const ROLL_RATE := 2.60  # 0.2.27: snappier roll; yaw stays 0.62
+const ROLL_RATE := 3.15  # 0.2.29: more roll authority; yaw stays 0.62
+const PITCH_RATE := 1.90  # push-stick / dive (unchanged)
+const PITCH_RATE_UP := 2.45  # pull-stick / nose-up is snappier
 const RHO_SL := 1.225
 # Gear-down parasite drag. Raised a little so a hanging gear is noticeable
 # (Ace Combat / old web project: gear adds measurable drag).
@@ -380,7 +382,8 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 		force += (fwd * airspeed - vel) * track_k * MASS_KG
 	# Control: track the old project's desired body rates (Ace Combat agility)
 	# with a torque servo, plus stability-derivative damping and weathercock.
-	# Rates: pitch 1.90*ctrl, roll ROLL_RATE*ctrl, yaw 0.62, with ctrl = clamp(V/42, 0.22, 1.55).
+	# Rates: pitch PITCH_RATE_UP (pull) / PITCH_RATE (dive), roll ROLL_RATE, yaw 0.62,
+	# with ctrl = clamp(V/42, 0.22, 1.55).
 	var ctrl_s := clampf(airspeed / 42.0, 0.22, 1.55) * (1.0 - 0.55 * stall)
 	# Decelerate to trade airspeed for a short-window pitch snap / aerial
 	# drift. While the brake is held the boost stays high; it then fades
@@ -401,7 +404,9 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 		ctrl_s *= lerpf(1.0, 0.18, speed_stall)
 	var pitch_agi := 1.0 + boost * (DECEL_AGILITY - 1.0)
 	var roll_agi := 1.0 + boost * 0.55
-	var want_pitch := ctrl_pitch * 1.90 * ctrl_s * pitch_agi
+	# Asymmetric pitch: pulling up is snappier; pushing over is not buffed.
+	var pitch_rate := PITCH_RATE_UP if ctrl_pitch > 0.0 else PITCH_RATE
+	var want_pitch := ctrl_pitch * pitch_rate * ctrl_s * pitch_agi
 	var want_roll := ctrl_roll * ROLL_RATE * ctrl_s * roll_agi
 	var want_yaw := ctrl_yaw * (0.62 + boost * 0.70) * ctrl_s
 	# Aerial-drift: a hard pull + decel can slide/yaw the nose a little.

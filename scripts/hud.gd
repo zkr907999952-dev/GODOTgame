@@ -108,6 +108,8 @@ var touch_ui: bool = false
 var compact: bool = false
 var _touch: Control
 var _chk_touch: CheckButton
+var _flight_mode_row: Control
+var _flight_mode_option: OptionButton
 var _chk_bullet_cam: CheckButton
 var _cam_chance_slider: HSlider
 var _cam_chance_value: Label
@@ -1039,7 +1041,7 @@ func _build_vehicle_touch(root: Control) -> void:
 	_btn_enter_exit.pressed.connect(_on_enter_exit_pressed)
 	root.add_child(_btn_enter_exit)
 
-	_btn_observe = _veh_btn("观察", Vector2(108, 40), 14)
+	_btn_observe = _veh_btn("观察", Vector2(80, 32), 14)
 	_btn_observe.visible = false
 	_btn_observe.pressed.connect(func():
 		if _vehicle_system and _vehicle_system.has_method("toggle_observe_mode"):
@@ -1238,12 +1240,16 @@ func _refresh_vehicle_touch() -> void:
 			var orbit := str(vs.get("vehicle_look_mode")) == "orbit"
 			_btn_observe.text = "观察·开" if orbit else "观察"
 			_style_button(_btn_observe, orbit)
-		var obs_pos := Vector2(v.x - _safe.z - 16.0 - 108.0, _safe.y + 16.0)
+		# Match the 透视 button size and sit immediately to its left, no overlap.
+		var obs_sz := Vector2(80, 32)
+		var obs_pos := Vector2(v.x - _safe.z - 16.0 - obs_sz.x, _safe.y + 16.0)
 		if _btn_xray:
 			var xr := _btn_xray.get_global_rect()
+			if xr.size.x > 8.0 and xr.size.y > 8.0:
+				obs_sz = xr.size
 			# root-local: root is typically at (0,0)
-			obs_pos = Vector2(xr.position.x - 8.0 - 108.0, xr.position.y)
-		_place_layout_btn(_btn_observe, "observe", obs_pos, Vector2(108, 40))
+			obs_pos = Vector2(xr.position.x - 8.0 - obs_sz.x, xr.position.y)
+		_place_layout_btn(_btn_observe, "observe", obs_pos, obs_sz)
 	# Top 1st/3rd view-switch, restored in vehicles (in addition to 观察).
 	if _btn_vehicle_cam:
 		_btn_vehicle_cam.visible = in_drive and not editing and not is_map_open()
@@ -1260,11 +1266,12 @@ func _refresh_vehicle_touch() -> void:
 		_btn_car_brake.visible = show_car
 		_place_layout_btn(_btn_car_brake, "brake", Vector2(v.x - _safe.z - 16.0 - 88.0, v.y - _safe.w - 122.0), Vector2(88, 52))
 	var show_plane := occ != null and kind == "plane"
-	var show_plane_btns := touch_ui and show_plane and not editing and not is_map_open()
+	var stick_mode := _is_flight_stick_mode()
+	var show_plane_btns := touch_ui and show_plane and not editing and not is_map_open() and not stick_mode
 	var by := v.y - _safe.w
-	# Thrust bar sits on the right, immediately left of the decelerate button.
+	# Thrust bar sits on the right in 按键模式; 摇杆模式 hides it (the stick covers accel/decel/yaw).
 	if _thrust_lever:
-		_thrust_lever.visible = show_plane and not editing and not is_map_open()
+		_thrust_lever.visible = show_plane and not editing and not is_map_open() and not stick_mode
 		_place_layout_btn(_thrust_lever, "thrust", Vector2(right - 88.0 - 12.0 - 40.0, by - 200.0), Vector2(40, 180))
 		if show_plane and occ:
 			var th = occ.get("thrust")
@@ -1298,6 +1305,10 @@ func _refresh_vehicle_touch() -> void:
 		vs.set("touch_thrust_up", false)
 		vs.set("touch_thrust_down", false)
 		vs.set("touch_yaw", 0.0)
+		vs.set("touch_flight_stick", Vector2.ZERO)
+	elif vs and stick_mode:
+		vs.set("touch_thrust_up", false)
+		vs.set("touch_thrust_down", false)
 	if vs and not show_car:
 		vs.set("touch_car_accel", false)
 		vs.set("touch_car_brake", false)
@@ -1371,6 +1382,20 @@ func _build_settings_panel() -> PanelContainer:
 	_chk_touch.text = "触屏操作（摇杆 / 手势）"
 	_chk_touch.toggled.connect(func(on: bool): set_touch_ui(on))
 	v.add_child(_chk_touch)
+
+	# 仅手机 / 触屏：飞机控制摇杆或按键。默认摇杆。
+	_flight_mode_row = VBoxContainer.new()
+	_flight_mode_row.add_theme_constant_override("separation", 4)
+	var fm_l := Label.new()
+	fm_l.text = "飞机控制（仅手机）"
+	fm_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	_flight_mode_row.add_child(fm_l)
+	_flight_mode_option = OptionButton.new()
+	_flight_mode_option.add_item("摇杆", 0)
+	_flight_mode_option.add_item("按键", 1)
+	_flight_mode_option.item_selected.connect(_on_flight_mode_selected)
+	_flight_mode_row.add_child(_flight_mode_option)
+	v.add_child(_flight_mode_row)
 
 	_chk_breath = CheckButton.new()
 	_chk_breath.text = "呼吸"
@@ -1559,7 +1584,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。受击力度调节子弹对布娃娃的撞击强弱。拉扯力度调节拖拽尸体时的拉力。「武器无需换弹」开启后开火不必换弹，与「无限备弹」独立。电脑瞄准为按住，手机为切换。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。受击力度调节子弹对布娃娃的撞击强弱。拉扯力度调节拖拽尸体时的拉力。「武器无需换弹」开启后开火不必换弹，与「无限备弹」独立。电脑瞄准为按住，手机为切换。手机可在设置里把飞机控制切成摇杆（默认，右侧一个摇杆管偏航和加减速）或按键。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)
@@ -2132,6 +2157,7 @@ func _sync_from_systems() -> void:
 		_chk_infinite_reserve.set_pressed_no_signal(bool(st.get("infinite_reserve")))
 	if st and _chk_no_reload:
 		_chk_no_reload.set_pressed_no_signal(bool(st.get("no_reload")))
+	_sync_flight_mode_ui()
 	if "first_person" in _player and _btn_fp:
 		_btn_fp.text = "第一人称" if bool(_player.first_person) else "第三人称"
 		_style_button(_btn_fp, bool(_player.first_person))
@@ -2588,6 +2614,8 @@ func set_touch_ui(on: bool) -> void:
 		_touch.call("set_enabled", on)
 	_touchify(_root_ui, on)
 	_apply_layout()
+	_sync_flight_mode_ui()
+	_refresh_vehicle_touch()
 
 
 ## 触屏「切换」按钮放在顶部按钮 + 状态提示下面（不遮挡）
@@ -2944,6 +2972,34 @@ func _on_menu_scroll_input(event: InputEvent, sc: ScrollContainer, w: Control) -
 			(w as BaseButton).set_pressed_no_signal(false)
 			(w as BaseButton).release_focus()
 		_menu_scroll_dragging = false
+
+
+func _is_flight_stick_mode() -> bool:
+	var s := _settings()
+	if s and s.has_method("is_flight_stick_mode"):
+		return bool(s.call("is_flight_stick_mode"))
+	return true
+
+
+func _sync_flight_mode_ui() -> void:
+	var show := touch_ui or is_mobile_os()
+	if _flight_mode_row:
+		_flight_mode_row.visible = show
+	if _flight_mode_option == null:
+		return
+	var stick := _is_flight_stick_mode()
+	var idx := 0 if stick else 1
+	if _flight_mode_option.selected != idx:
+		_flight_mode_option.select(idx)
+
+
+func _on_flight_mode_selected(idx: int) -> void:
+	var s := _settings()
+	if s and s.has_method("set_flight_control_mode"):
+		s.call("set_flight_control_mode", "buttons" if idx == 1 else "stick")
+	_refresh_vehicle_touch()
+	if _touch:
+		_touch.queue_redraw()
 
 
 func _settings() -> Node:

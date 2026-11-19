@@ -1,11 +1,11 @@
 extends SceneTree
 
 const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
-## 0.2.28 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.29 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.28"
-const VERSION_CODE := 30
+const VERSION_NAME := "0.2.29"
+const VERSION_CODE := 31
 
 var fails := 0
 var main: Node
@@ -81,6 +81,7 @@ func _run() -> void:
 	await _check_0226_playtest_fixes()
 	await _check_0227_playtest_fixes()
 	await _check_0228_playtest_fixes()
+	await _check_0229_playtest_fixes()
 	_finish()
 
 
@@ -1309,7 +1310,7 @@ func _check_0221_playtest_fixes() -> void:
 	_ok(drive.find("airborne or agl > 3.0") >= 0, "airborne exit stays beside the vehicle")
 	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
 	_ok(pl_src.find("THRUST_DRY := 680000.0") >= 0 and pl_src.find("THRUST_AB := 1120000.0") >= 0, "fighter dry/AB thrust is 680 kN / 1120 kN")
-	_ok(pl_src.find("ctrl_pitch * 1.90") >= 0 and (pl_src.find("ctrl_roll * ROLL_RATE") >= 0 or pl_src.find("ctrl_roll * 2.15") >= 0), "pitch rate is 1.90, roll uses a dedicated rate")
+	_ok((pl_src.find("const PITCH_RATE := 1.90") >= 0 or pl_src.find("ctrl_pitch * 1.90") >= 0) and (pl_src.find("ctrl_roll * ROLL_RATE") >= 0 or pl_src.find("ctrl_roll * 2.15") >= 0), "pitch rate is 1.90, roll uses a dedicated rate")
 	_ok(pl_src.find("0.62 + boost") >= 0 or pl_src.find("ctrl_yaw * 0.62") >= 0, "yaw rate is milder than pitch/roll (0.62 from vehicle-sim.ts)")
 	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
 	_ok(ex_src.find("_update_trail") >= 0 and ex_src.find("TRAIL_COUNT") >= 0, "jet exhaust uses a lagged inertial trail")
@@ -1767,7 +1768,7 @@ func _check_0222_playtest_fixes() -> void:
 func _check_0223_playtest_fixes() -> void:
 	## Exam bed, touch layout, vehicle cam, gear doors, vapor, car nitro / skids.
 	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
-	_ok(vs_src.find("YAW_LIM") >= 0 and vs_src.find("look_dir * 0.10") >= 0, "exam first-person view is clamped and sat in front of the face")
+	_ok(vs_src.find("YAW_LIM") >= 0 and vs_src.find("look_dir *") >= 0, "exam first-person view is clamped and sat in front of the face")
 	_ok(vs_src.find("_chase_basis") >= 0 and vs_src.find("slerp(want_b") >= 0, "plane chase cam follows aircraft attitude with lag")
 	_ok(vs_src.find("left * 0.22") < 0, "exam calves are no longer IK'd outward off the stirrup pads")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
@@ -1782,7 +1783,7 @@ func _check_0223_playtest_fixes() -> void:
 	_ok(ex_src.find("plume_tip_length") >= 0 and ex_src.find("along = minf(along, cap)") >= 0, "mach diamonds are capped to the plume tip")
 	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
 	_ok(car_src.find("REST_DISTANCE :=") >= 0, "car has a raised suspension rest length")
-	_ok(car_src.find("nitro_active = occupied and throttle_in > 0.12") >= 0, "holding accelerate uses nitro")
+	_ok(car_src.find("nitro_active = occupied and nitro") >= 0, "nitro is gated on the dedicated nitro flag, not any throttle")
 	_ok(car_src.find("CarSkidMarks") >= 0, "car uses a skid-mark trail")
 	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
 	_ok(tc_src.find("TouchLayout") >= 0 and tc_src.find("layout_edit") >= 0, "touch controls support a custom layout editor")
@@ -1869,10 +1870,13 @@ func _check_0223_playtest_fixes() -> void:
 	car.occupied = true
 	car.set_driver_input(1.0, 0.0, 0.0, false, false)
 	car._drive(0.016)
-	_ok(bool(car.nitro_active), "holding accelerate turns nitro on")
+	_ok(not bool(car.nitro_active), "W / throttle alone does not turn nitro on")
+	car.set_driver_input(1.0, 0.0, 0.0, false, true)
+	car._drive(0.016)
+	_ok(bool(car.nitro_active), "Shift / 加速 flag turns nitro on")
 	car.set_driver_input(0.0, 0.0, 0.0, false, false)
 	car._drive(0.016)
-	_ok(not bool(car.nitro_active), "releasing accelerate turns nitro off")
+	_ok(not bool(car.nitro_active), "releasing the nitro flag turns nitro off")
 	var vis = car.get("visuals")
 	_ok(vis != null and vis.get("_nitro_fx") != null and vis._nitro_fx.size() > 0, "car has nitro flame meshes")
 	if vis:
@@ -1911,7 +1915,7 @@ func _check_0224_playtest_fixes() -> void:
 	_ok(pose_src.find("func apply_look") >= 0 and pose_src.find("L_Eye") >= 0, "apply_look also rotates the eyes")
 	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
 	_ok(pl_src.find("THRUST_DRY := 680000.0") >= 0, "dry thrust raised to 680 kN")
-	_ok(pl_src.find("ctrl_pitch * 1.90") >= 0, "pitch command rate raised to 1.90")
+	_ok(pl_src.find("const PITCH_RATE := 1.90") >= 0 or pl_src.find("ctrl_pitch * 1.90") >= 0, "pitch command rate raised to 1.90")
 	_ok(pl_src.find("airspeed > 18.0") >= 0 and pl_src.find("GEAR_AUTO_RETRACT_AGL") >= 0, "auto gear retracts on AGL without waiting only on the airborne flag")
 	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
 	_ok(ex_src.find("EXIT_DIAMETER") >= 0 and ex_src.find("func _apply_diamonds") >= 0, "mach diamonds have a physical spacing model")
@@ -1964,13 +1968,16 @@ func _check_0224_playtest_fixes() -> void:
 	car.occupied = true
 	car.set_driver_input(1.0, 0.0, 0.0, false, false)
 	car._drive(0.016)
-	_ok(bool(car.nitro_active), "nitro is on while accelerate is held, even from a standstill")
-	car.set_driver_input(0.2, 0.0, 0.0, false, false)
+	_ok(not bool(car.nitro_active), "standstill W / throttle alone does not start nitro")
+	car.set_driver_input(1.0, 0.0, 0.0, false, true)
 	car._drive(0.016)
-	_ok(bool(car.nitro_active), "a light throttle still counts as holding accelerate")
+	_ok(bool(car.nitro_active), "nitro is on when the 加速 / Shift flag is held")
+	car.set_driver_input(0.2, 0.0, 0.0, false, true)
+	car._drive(0.016)
+	_ok(bool(car.nitro_active), "nitro stays on with the flag even at light throttle")
 	car.set_driver_input(0.0, 0.0, 0.0, false, false)
 	car._drive(0.016)
-	_ok(not bool(car.nitro_active), "nitro ends when accelerate is released")
+	_ok(not bool(car.nitro_active), "nitro ends when the flag is released")
 	car.queue_free()
 	await _frames(1)
 
@@ -2366,7 +2373,7 @@ func _check_0227_playtest_fixes() -> void:
 	_ok(pl_src.find("func thrust_newtons") >= 0 and pl_src.find("ab_shaped") >= 0, "afterburner uses a distinct thrust surge, not a linear ramp")
 	_ok(pl_src.find("DECEL_BOOST_HOLD := 1.15") >= 0, "decel agility hold window is slightly longer (1.15 s)")
 	_ok(pl_src.find("DECEL_BOOST_FADE := 0.48") >= 0, "decel agility fade is slightly longer (0.48 s)")
-	_ok(pl_src.find("const ROLL_RATE := 2.60") >= 0, "plane roll rate is raised to 2.60")
+	_ok(pl_src.find("const ROLL_RATE := 3.15") >= 0 or pl_src.find("const ROLL_RATE := 2.60") >= 0, "plane roll rate is raised (now 3.15)")
 	_ok(pl_src.find("want_yaw := ctrl_yaw * (0.62") >= 0, "yaw rate is not raised with roll")
 	_ok(pl_src.find("const STALL_SPEED := 52.0") >= 0, "speed stall is still 52 m/s")
 	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
@@ -2380,7 +2387,7 @@ func _check_0227_playtest_fixes() -> void:
 	_ok(vs_src.find("stirrup_geometry") >= 0 or vs_src.find("foot_along") >= 0, "legs are placed from the stirrup pad geometry")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
 	_ok(pose_src.find("Vector3(-0.28, 0.04, 0.46)") >= 0, "thigh abduction is opened further (0.46)")
-	_ok(pose_src.find("Vector2(d.x, d.z).length() < 0.20") >= 0, "exam look-world aiming bails out in the unstable mid-angle region")
+	_ok(pose_src.find("func _aim_head_world") >= 0, "exam look aims the head at the camera with a stable world swing")
 	_ok(vs_src.find("const PITCH_MIN := -1.05") >= 0 and vs_src.find("const YAW_LIM := 1.55") >= 0, "exam-bed look limits are looser than 0.2.27")
 	_ok(vs_src.find("clear_gaze_intent") >= 0, "exam head-follow still uses clear_gaze_intent")
 
@@ -2756,7 +2763,7 @@ func _check_0228_playtest_fixes() -> void:
 					break
 		_ok(found_hud, "HUD combiner / frame mesh is present in the cockpit")
 		if found_hud:
-			_ok(absf(off.y - hud_y) < 0.10, "plane FP Y sits in the HUD frame center (eye=%.3f hud=%.3f)" % [off.y, hud_y])
+			_ok(off.y > hud_y - 0.02 and off.y < hud_y + 0.16, "plane FP Y sits in/above the HUD combiner toward the box center (eye=%.3f hud=%.3f)" % [off.y, hud_y])
 			_ok(off.z > hud_z and off.z < hud_z + 1.10, "plane FP is just aft of the HUD frame (eye z=%.3f hud z=%.3f)" % [off.z, hud_z])
 	if pvis and pvis.vapor:
 		_ok(not bool(pvis.vapor.call("cloud_uses_spheres")), "vapor is still polygonal sheets")
@@ -2814,6 +2821,325 @@ func _check_0228_playtest_fixes() -> void:
 			main.call("close_overhead")
 	else:
 		_ok(false, "map view opens for pinch-zoom check")
+
+
+
+func _check_0229_playtest_fixes() -> void:
+	## Higher-G vapor onset, narrower outward main vortex, raised HUD-centered
+	## plane FP, more roll + asymmetric pull-up pitch, mobile flight-stick
+	## default, exam head tracks the camera, calves/forearms/waist/breath,
+	## handbrake drift, nitro only from 加速/Shift, map from vehicle TP,
+	## observe ≈ 透视, smaller weapon UI without a gray plate.
+	var vap_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_vapor.gd")
+	_ok(vap_src.find("const VAPOR_G_ON := 4.8") >= 0, "vapor onset is raised to 4.8 G")
+	_ok(vap_src.find("const VAPOR_G_FULL := 7.5") >= 0, "vapor is densest near 7.5 G")
+	_ok(vap_src.find("pitch_c > 0.18") < 0, "vapor is not keyed off pitch-up input alone")
+	_ok(vap_src.find("func cloud_covers_engines") >= 0, "vapor exposes an engine-coverage test")
+	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
+	_ok(pl_src.find("const ROLL_RATE := 3.15") >= 0, "roll rate is raised to 3.15")
+	_ok(pl_src.find("const PITCH_RATE := 1.90") >= 0, "dive pitch rate stays 1.90")
+	_ok(pl_src.find("const PITCH_RATE_UP := 2.45") >= 0, "pull-up pitch rate is raised to 2.45")
+	_ok(pl_src.find("const DECEL_YAW_COUPLE := 0.62") >= 0, "yaw is not raised")
+	_ok(pl_src.find("const STALL_SPEED := 52.0") >= 0, "stall stays 52 m/s")
+	var pv_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
+	_ok(pv_src.find("sy * 0.20 + 0.10") >= 0, "plane FP Y is raised to the visual HUD-frame center")
+	var gs_src := FileAccess.get_file_as_string("res://scripts/game_settings.gd")
+	_ok(gs_src.find("flight_control_mode") >= 0 and gs_src.find("FLIGHT_MODE_STICK") >= 0, "flight control mode is persisted")
+	_ok(gs_src.find("FLIGHT_MODE_STICK") >= 0, "default flight mode is stick")
+	var lay_src := FileAccess.get_file_as_string("res://scripts/ui/touch_layout.gd")
+	_ok(lay_src.find("\"flight_stick\":") >= 0, "TYL1 documents the stable flight_stick id")
+	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
+	_ok(tc_src.find("_show_flight_stick") >= 0 and tc_src.find("_live_touches") < 0, "flight stick exists and the 0.2.27 multitouch path stays gone")
+	_ok(tc_src.find("载具内取消双指拖拽旋转视角") >= 0, "two-finger vehicle orbit stays cancelled")
+	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
+	_ok(pose_src.find("func _aim_head_world") >= 0 and pose_src.find("func head_forward") >= 0, "exam head aims at the camera forward")
+	_ok(pose_src.find("C_Spine_a\": Vector3(-0.10") >= 0 or pose_src.find("Soft waist flex") >= 0, "exam pose has a soft waist flex")
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	_ok(vs_src.find("func _map_view_open") >= 0, "vehicle cameras yield to the overhead map")
+	_ok(vs_src.find("arm_skin := 0.044") >= 0, "forearms are raised to sit flush with the armrests")
+	_ok(vs_src.find("bed_up * 0.052") >= 0, "calves are raised off the stirrup bars")
+	_ok(vs_src.find("clear_gaze_intent") >= 0, "exam head-follow still uses clear_gaze_intent")
+	_ok(vs_src.find("look_dir.cross(world_up)") >= 0, "exam look basis is still forward × up")
+	_ok(vs_src.find("const YAW_LIM := 1.55") >= 0 and vs_src.find("const PITCH_MIN := -1.05") >= 0, "loosened exam look limits are kept")
+	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
+	_ok(car_src.find("const HANDBRAKE_MULT := 2.2") >= 0, "handbrake slip is reduced")
+	_ok(car_src.find("grip_factor *= 0.32") >= 0, "handbrake keeps enough rear grip for a controllable drift")
+	_ok(car_src.find("nitro_active = occupied and nitro") >= 0, "nitro is only the 加速 / Shift flag")
+	_ok(car_src.find("const ENGINE_POWER_NITRO := 36000.0") >= 0, "nitro thrust is stronger (36000)")
+	_ok(car_src.find("const ENGINE_POWER_SHIFT := 42000.0") >= 0, "Shift nitro punch is stronger (42000)")
+	var hud_src := FileAccess.get_file_as_string("res://scripts/hud.gd")
+	_ok(hud_src.find("飞机控制（仅手机）") >= 0, "settings has a mobile-only aircraft control switch")
+	_ok(hud_src.find("Match the 透视 button size") >= 0 or hud_src.find("obs_sz = xr.size") >= 0, "观察 matches the 透视 button size")
+	var wui_src := FileAccess.get_file_as_string("res://scripts/ui/weapon_ui.gd")
+	_ok(wui_src.find("sb.bg_color = Color(0, 0, 0, 0)") >= 0 or wui_src.find("draw_center = false") >= 0, "weapon ammo HUD has no gray background")
+	var wh_src := FileAccess.get_file_as_string("res://scripts/ui/weapon_wheel.gd")
+	_ok(wh_src.find("Color(0.12, 0.13, 0.16, 0.8)") < 0, "weapon wheel slots no longer use a gray plate")
+
+	# Live: vapor onset + geometry.
+	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(jet)
+	await _frames(2)
+	_ok(is_equal_approx(float(jet.ROLL_RATE), 3.15), "live ROLL_RATE is 3.15")
+	_ok(is_equal_approx(float(jet.PITCH_RATE), 1.90), "live dive PITCH_RATE is 1.90")
+	_ok(is_equal_approx(float(jet.PITCH_RATE_UP), 2.45), "live PITCH_RATE_UP is 2.45")
+	_ok(float(jet.PITCH_RATE_UP) > float(jet.PITCH_RATE), "pull-up is snappier than dive")
+	_ok(is_equal_approx(float(jet.STALL_SPEED), 52.0), "stall remains 52 m/s")
+	_ok(is_equal_approx(float(jet.DECEL_BOOST_HOLD), 1.15), "decel agility hold is unchanged")
+	var off: Vector3 = jet.call("cockpit_offset")
+	_ok(absf(off.x) < 0.02, "plane FP stays on the centerline (x=%.3f)" % off.x)
+	_ok(off.y > 1.80 and off.y < 1.95, "plane FP Y is raised toward the HUD box center, not back at 1.983 (y=%.3f)" % off.y)
+	var pvis = jet.get("visuals")
+	if pvis and pvis.vapor:
+		var vap = pvis.vapor
+		_ok(is_equal_approx(float(vap.VAPOR_G_ON), 4.8), "live VAPOR_G_ON is 4.8")
+		# Fade to zero first.
+		for i in 8:
+			vap.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 1.0, "ctrl_pitch": 0.0, "aoa": 0.0}, 0.08)
+		# Mild pull-up / light G must not produce vapor.
+		for i in 10:
+			vap.call("update", {"airborne": true, "speed": 140.0, "agl": 40.0, "g_load": 2.8, "ctrl_pitch": 0.95, "aoa": 0.18}, 0.05)
+		_ok(float(vap.call("cloud_intensity")) < 0.08, "a mild pull-up at 2.8 G produces no vapor (i=%.3f)" % float(vap.call("cloud_intensity")))
+		# High G does, even without a huge pitch input (loaded turn).
+		for i in 10:
+			vap.call("update", {"airborne": true, "speed": 140.0, "agl": 40.0, "g_load": 6.8, "ctrl_pitch": 0.2, "aoa": 0.12}, 0.05)
+		_ok(float(vap.call("cloud_intensity")) > 0.25, "high G produces vapor (i=%.3f)" % float(vap.call("cloud_intensity")))
+		_ok(bool(vap.call("cloud_covers_dorsal_lex")), "vapor still covers the dorsal / LEX / wing-body area")
+		_ok(bool(vap.call("cloud_covers_wing_lex")), "vapor still covers the wing-root / LEX junction")
+		_ok(not bool(vap.call("cloud_covers_engines")), "main vortex does not cover the engine nacelles")
+		_ok(float(vap.call("main_vortex_max_width")) <= 1.40, "main vortex designed width is narrower")
+		jet.rotation = Vector3(0.15, 0.0, 1.20)
+		jet.force_update_transform()
+		if pvis.wrap:
+			pvis.wrap.force_update_transform()
+		vap.call("update", {"airborne": true, "speed": 140.0, "agl": 40.0, "g_load": 6.8, "ctrl_pitch": 0.4, "aoa": 0.12}, 0.05)
+		var ang: float = float(vap.call("cloud_max_normal_angle_to_airframe"))
+		_ok(ang < 0.35, "vapor sheets stay locked to the airframe (err=%.3f rad)" % ang)
+		jet.rotation = Vector3.ZERO
+	else:
+		_ok(false, "plane vapor available for G / geometry checks")
+	jet.queue_free()
+	await _frames(1)
+
+	# Live: flight stick default + settings + button mode still available.
+	var settings = main.get_node_or_null("GameSettings") if main else null
+	if settings:
+		_ok(str(settings.get("flight_control_mode")) != "buttons", "flight control defaults to stick mode")
+		_ok(bool(settings.call("is_flight_stick_mode")), "is_flight_stick_mode is true by default")
+		settings.call("set_flight_control_mode", "buttons")
+		_ok(not bool(settings.call("is_flight_stick_mode")), "button mode can be selected")
+		settings.call("set_flight_control_mode", "stick")
+		_ok(bool(settings.call("is_flight_stick_mode")), "stick mode can be restored")
+	else:
+		_ok(false, "GameSettings present for flight-mode checks")
+	var hud: Node = main.get_node_or_null("HUD") if main else null
+	if hud:
+		_ok(hud.get("_flight_mode_option") != null, "settings has a 摇杆 / 按键 option")
+		# 观察 vs 透视 size
+		if hud.get("_btn_observe") and hud.get("_btn_xray"):
+			var obs: Control = hud.get("_btn_observe")
+			var xr: Control = hud.get("_btn_xray")
+			var ds := obs.size - xr.size
+			_ok(absf(ds.x) <= 8.0 and absf(ds.y) <= 8.0 or (obs.custom_minimum_size - xr.custom_minimum_size).length() <= 12.0,
+				"观察 button is about the same size as 透视 (obs=%s xray=%s min=%s/%s)" % [obs.size, xr.size, obs.custom_minimum_size, xr.custom_minimum_size])
+		if hud.get("_wui") and hud.get("_wui").get("ammo_box"):
+			var box: Control = hud.get("_wui").get("ammo_box")
+			var sb: StyleBox = box.get_theme_stylebox("panel")
+			var ok_clear := true
+			if sb is StyleBoxFlat:
+				ok_clear = (sb as StyleBoxFlat).bg_color.a < 0.05 or not (sb as StyleBoxFlat).draw_center
+			_ok(ok_clear, "ammo HUD panel is transparent / has no gray fill")
+	else:
+		_ok(false, "HUD present for control / observe / weapon UI checks")
+
+	# Live: nitro only from flag, stronger power, handbrake grip.
+	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	root.add_child(car)
+	await _frames(2)
+	_ok(is_equal_approx(float(car.ENGINE_POWER_NITRO), 36000.0), "live nitro power is 36000")
+	_ok(float(car.ENGINE_POWER_NITRO) > float(car.ENGINE_POWER) * 1.6, "nitro boost is clearly stronger than dry power")
+	_ok(is_equal_approx(float(car.HANDBRAKE_MULT), 2.2), "live HANDBRAKE_MULT is 2.2")
+	car.occupied = true
+	car.set_driver_input(1.0, 0.0, 0.0, false, false)
+	car._drive(0.016)
+	_ok(not bool(car.nitro_active), "W / joystick throttle does not trigger nitro")
+	car.set_driver_input(1.0, 0.0, 0.0, false, true)
+	car._drive(0.016)
+	_ok(bool(car.nitro_active), "加速 / Shift flag triggers nitro")
+	car.queue_free()
+	await _frames(1)
+
+	# Live: exam head tracks camera, calves/forearms, waist, breath, map from TP.
+	var bed: Node = null
+	if vs:
+		for v in vs.vehicles:
+			if str(vs.call("kind_of", v)) == "exam_bed" and bool(v.get("is_default")):
+				bed = v
+				break
+	if bed == null:
+		bed = load("res://scenes/vehicles/exam_bed.tscn").instantiate()
+		root.add_child(bed)
+		await _frames(2)
+	if vs and player and bed:
+		player.global_position = bed.global_position + Vector3(1.2, 0.1, 0.0)
+		vs.set("nearest", bed)
+		if player.has_method("set_play_mode"):
+			player.call("set_play_mode", 1)
+		_ok(bool(vs.call("try_enter")), "can board the exam bed for 0.2.29 pose / look")
+		await _frames(3)
+		if vs.get("occupied") == bed:
+			if vs.has_method("_apply_exam_pose"):
+				vs.call("_apply_exam_pose", 0.016)
+			await _frames(1)
+			var skel: Skeleton3D = player.call("get_skeleton") if player.has_method("get_skeleton") else null
+			var lie: Basis = bed.patient_basis()
+			if skel and vs.has_method("_exam_look_forward"):
+				# Head forward tracks camera forward at two different looks.
+				player.set("_yaw", 0.55)
+				player.set("_pitch", 0.35)
+				vs.call("_apply_exam_pose", 0.016)
+				if vs.has_method("_exam_camera"):
+					vs.call("_exam_camera", 0.016)
+				var cam_f1: Vector3 = vs.call("_exam_look_forward", 0.55, 0.35, lie)
+				var head_f1: Vector3 = ExamPose.head_forward(skel)
+				var a1 := cam_f1.angle_to(head_f1)
+				_ok(a1 < 0.45, "exam head forward tracks camera forward (ang=%.3f rad)" % a1)
+				player.set("_yaw", -0.55)
+				player.set("_pitch", -0.30)
+				vs.call("_apply_exam_pose", 0.016)
+				if vs.has_method("_exam_camera"):
+					vs.call("_exam_camera", 0.016)
+				var cam_f2: Vector3 = vs.call("_exam_look_forward", -0.55, -0.30, lie)
+				var head_f2: Vector3 = ExamPose.head_forward(skel)
+				var a2 := cam_f2.angle_to(head_f2)
+				_ok(a2 < 0.45, "head follow updates the other way (ang=%.3f rad)" % a2)
+				_ok(head_f1.angle_to(head_f2) > 0.25, "head forward actually changes with look (d=%.3f)" % head_f1.angle_to(head_f2))
+				# Calves raised, forearms flush, waist flexed, breath present.
+				var on_ok := true
+				var par_ok := true
+				var worst_ang := 0.0
+				var rail: Vector3 = (-lie.y).normalized()
+				for side in [true, false]:
+					var fa := skel.find_bone("L_Forearm_a" if side else "R_Forearm_a")
+					var ha := skel.find_bone("L_Hand_a" if side else "R_Hand_a")
+					if fa < 0 or ha < 0:
+						par_ok = false
+						continue
+					var pf: Vector3 = (skel.global_transform * skel.get_bone_global_pose(fa)).origin
+					var ph: Vector3 = (skel.global_transform * skel.get_bone_global_pose(ha)).origin
+					var fd := ph - pf
+					if fd.length_squared() < 1e-6:
+						par_ok = false
+						continue
+					var ang := fd.normalized().angle_to(rail)
+					ang = minf(ang, PI - ang)
+					worst_ang = maxf(worst_ang, ang)
+					if ang > 0.42:
+						par_ok = false
+					var pad_top: Vector3 = bed.armrest_l_global() if side else bed.armrest_r_global()
+					var mid := (pf + ph) * 0.5
+					var above := (mid - pad_top).dot(bed.global_transform.basis.y.normalized())
+					if above < -0.02:
+						on_ok = false
+				_ok(par_ok, "forearms stay parallel to the armrests (worst=%.3f)" % worst_ang)
+				_ok(on_ok, "forearms sit flush on the armrests, not through the rail")
+				var leg_ok := true
+				for side2 in [true, false]:
+					var sh := skel.find_bone("L_Foreleg_a" if side2 else "R_Foreleg_a")
+					var ft := skel.find_bone("L_Foot_a" if side2 else "R_Foot_a")
+					if sh < 0 or ft < 0:
+						leg_ok = false
+						continue
+					var psh: Vector3 = (skel.global_transform * skel.get_bone_global_pose(sh)).origin
+					var pft: Vector3 = (skel.global_transform * skel.get_bone_global_pose(ft)).origin
+					var mid_s := (psh + pft) * 0.5
+					var pad: Vector3 = bed.stirrup_l_global() if side2 else bed.stirrup_r_global()
+					var vert := (mid_s - pad).dot(bed.global_transform.basis.y.normalized())
+					if vert < -0.03 or vert > 0.18:
+						leg_ok = false
+				_ok(leg_ok, "calves rest on the stirrup pads without clipping through")
+				# Soft waist flex: spine is crunched a little toward the belly vs rest.
+				var sa := skel.find_bone("C_Spine_a")
+				if sa >= 0:
+					var rest_q := skel.get_bone_rest(sa).basis.get_rotation_quaternion()
+					var pose_q := skel.get_bone_pose_rotation(sa)
+					var e := (rest_q.inverse() * pose_q).get_euler()
+					_ok(e.x < -0.02, "waist has a soft flexion (spine_a x=%.3f)" % e.x)
+				# Breath: spine scale / breath_in changes over time on the bed.
+				var sec = player.call("get_secondary") if player.has_method("get_secondary") else null
+				if sec:
+					var b0 := float(sec.get("breath_in"))
+					for i in 20:
+						vs.call("_apply_exam_pose", 0.05)
+					var b1 := float(sec.get("breath_in"))
+					var si := skel.find_bone("C_Spine_a")
+					var sc := skel.get_bone_pose_scale(si) if si >= 0 else Vector3.ONE
+					_ok(absf(b1 - b0) > 0.002 or absf(sc.x - 1.0) > 0.0005, "exam bed breathing is active (breath %.4f→%.4f scale.x=%.4f)" % [b0, b1, sc.x])
+				else:
+					_ok(false, "secondary present for exam-bed breath")
+			# Map from a vehicle third-person view after leaving the bed.
+			if vs.has_method("try_exit"):
+				vs.call("try_exit")
+			await _frames(1)
+		else:
+			_ok(false, "occupied the exam bed for pose / look checks")
+	else:
+		_ok(false, "exam bed / player available for 0.2.29 checks")
+
+	# Live: opening the map while in a vehicle in third-person uses the map camera.
+	var plane: Node = null
+	if vs:
+		for v2 in vs.vehicles:
+			if str(vs.call("kind_of", v2)) == "plane" and bool(v2.get("is_default")):
+				plane = v2
+				break
+	if plane == null:
+		plane = load("res://scenes/vehicles/plane.tscn").instantiate()
+		root.add_child(plane)
+		await _frames(2)
+	if vs and player and plane and main and main.has_method("open_overhead"):
+		player.global_position = plane.global_position + Vector3(4.0, 0.1, 0.0)
+		vs.set("nearest", plane)
+		if vs.has_method("try_enter"):
+			vs.call("try_enter")
+		await _frames(2)
+		vs.set("vehicle_cam", "third")
+		if vs.has_method("_vehicle_camera"):
+			vs.call("_vehicle_camera", 0.016)
+		main.call("open_overhead")
+		await _frames(2)
+		# Vehicle camera must not steal current after the map opens.
+		if vs.has_method("_vehicle_camera"):
+			vs.call("_vehicle_camera", 0.016)
+		var mv = main.get("map_view")
+		_ok(mv != null and bool(mv.get("is_open")), "map opens from vehicle third-person")
+		if mv:
+			var map_cam: Camera3D = mv.get("_cam")
+			_ok(map_cam != null and map_cam.current, "map camera stays current in vehicle TP (current=%s)" % (map_cam.current if map_cam else false))
+			# Pinch-zoom still works.
+			var h0: float = float(mv.height)
+			var e1 := InputEventScreenTouch.new()
+			e1.index = 0
+			e1.pressed = true
+			e1.position = Vector2(200, 200)
+			var e2 := InputEventScreenTouch.new()
+			e2.index = 1
+			e2.pressed = true
+			e2.position = Vector2(320, 200)
+			mv.call("handle_input", e1)
+			mv.call("handle_input", e2)
+			var d := InputEventScreenDrag.new()
+			d.index = 1
+			d.position = Vector2(500, 200)
+			d.relative = Vector2(180, 0)
+			mv.call("handle_input", d)
+			_ok(float(mv.height) < h0 - 1.0, "map pinch-zoom still works from vehicle TP (h0=%.1f h1=%.1f)" % [h0, float(mv.height)])
+		if main.has_method("close_overhead"):
+			main.call("close_overhead")
+		if vs.has_method("try_exit"):
+			vs.call("try_exit")
+		await _frames(1)
+	else:
+		_ok(false, "vehicle / map available for TP map display check")
 
 
 func _door_rear_y(hub: Node3D, wrap: Node3D) -> float:

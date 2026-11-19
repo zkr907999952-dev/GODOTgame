@@ -26,6 +26,10 @@ var hit_force: float = HIT_FORCE_DEFAULT
 ## 尸体拖拽拉扯力度（0.35..2.5）。1.0 = 加强后的默认拉力，可在设置里再调。
 const PULL_FORCE_DEFAULT := 1.0
 var pull_force: float = PULL_FORCE_DEFAULT
+## 手机飞机控制： "stick"（摇杆，默认）或 "buttons"（按键）。仅影响触屏布局。
+const FLIGHT_MODE_STICK := "stick"
+const FLIGHT_MODE_BUTTONS := "buttons"
+var flight_control_mode: String = FLIGHT_MODE_STICK
 
 
 func _ready() -> void:
@@ -52,6 +56,8 @@ func load_cfg() -> void:
 		render_scale = clampf(float(c.get_value("graphics", "render_scale", 0.0)), 0.0, 1.0)
 	hit_force = clampf(float(c.get_value("combat", "hit_force", HIT_FORCE_DEFAULT)), 0.35, 2.0)
 	pull_force = clampf(float(c.get_value("combat", "pull_force", PULL_FORCE_DEFAULT)), 0.35, 2.5)
+	var fm := str(c.get_value("controls", "flight_mode", FLIGHT_MODE_STICK))
+	flight_control_mode = FLIGHT_MODE_BUTTONS if fm == FLIGHT_MODE_BUTTONS else FLIGHT_MODE_STICK
 
 
 func save_cfg() -> void:
@@ -67,6 +73,7 @@ func save_cfg() -> void:
 	c.set_value("graphics", "render_scale", render_scale)
 	c.set_value("combat", "hit_force", hit_force)
 	c.set_value("combat", "pull_force", pull_force)
+	c.set_value("controls", "flight_mode", flight_control_mode)
 	c.save(PATH)
 	changed.emit()
 
@@ -136,6 +143,18 @@ func set_pull_force(v: float) -> void:
 	if is_equal_approx(pull_force, v):
 		return
 	pull_force = v
+	save_cfg()
+
+
+func is_flight_stick_mode() -> bool:
+	return flight_control_mode != FLIGHT_MODE_BUTTONS
+
+
+func set_flight_control_mode(mode: String) -> void:
+	var m := FLIGHT_MODE_BUTTONS if mode == FLIGHT_MODE_BUTTONS else FLIGHT_MODE_STICK
+	if flight_control_mode == m:
+		return
+	flight_control_mode = m
 	save_cfg()
 
 

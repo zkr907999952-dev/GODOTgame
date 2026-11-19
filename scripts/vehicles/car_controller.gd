@@ -19,19 +19,19 @@ const PEAK_RPM := 5200.0
 const FINAL_DRIVE := 3.54
 const GEAR_RATIOS := [0.0, 3.21, 2.11, 1.47, 1.14, 0.92, 0.74]
 # custom-3d-car: ENGINE_POWER = 15 * HP at ~1000 kg. Scale ~1.42 for this mass.
-# 0.2.24: more power / torque so a hard launch can spin the drive wheels
-# (burnout). Holding accelerate uses nitro (blue flames + extra power);
-# PC Shift still adds a slightly stronger manual punch on top.
+# 0.2.29: nitro is only the 加速 button / Shift (not W or the joystick).
+# When it does engage, the boost is clearly stronger. Shift is still a
+# slightly harder manual punch on top of the button boost.
 const ENGINE_POWER := 18800.0
-const ENGINE_POWER_NITRO := 25200.0
-const ENGINE_POWER_SHIFT := 29200.0
+const ENGINE_POWER_NITRO := 36000.0
+const ENGINE_POWER_SHIFT := 42000.0
 const ENGINE_POWER_REV := 9600.0
 const TIRE_MU := 1.62
 const ARCADE_GRIP := 5.4
 const LONG_SLIP_STIFF := 2800.0
 const WHEEL_INERTIA := 1.15
 const BRAKE_FORCE_MULT := 1.5
-const HANDBRAKE_MULT := 3.0
+const HANDBRAKE_MULT := 2.2
 # Suspension: weight/wheel ≈ 3480 N. 0.2.28 raises the chassis relative to
 # the wheels so the tires sit in the wells with a visible gap and no longer
 # clip / hang up in the body. REST_DISTANCE is spring travel; RIDE_LIFT
@@ -323,10 +323,10 @@ func _drive(delta: float) -> void:
 	var speed := linear_velocity.length()
 	var fwd := -global_transform.basis.z
 	var long_speed := linear_velocity.dot(fwd)
-	# 按下加速使用氮气加速: nitro is on the whole time the accel / throttle
-	# is held. Releasing accel ends it. Shift (nitro flag) is an extra punch.
+	# Nitro only when the dedicated 加速 button or Shift set the nitro flag.
+	# W / movement-joystick throttle does not start it. Flames follow this.
 	nitro_auto = false
-	nitro_active = occupied and throttle_in > 0.12
+	nitro_active = occupied and nitro
 	# Brief slight slip on a hard standing start, then grip returns quickly.
 	# Not a prolonged spin that throws the car out of control.
 	if occupied and throttle_in > 0.72 and absf(long_speed) < 2.4:
@@ -412,7 +412,8 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 		var spd := state.linear_velocity.length()
 		var grip_factor := 1.0 / (1.0 + spd * GRIP_FALLOFF)
 		if handbrake and not _wheel_steer[i]:
-			grip_factor *= 0.12
+			# Keep enough rear grip for a controllable slide, not a spin-out.
+			grip_factor *= 0.32
 		var max_lat := MAX_LATERAL_FORCE * grip_factor
 		var lat := clampf(desired_lat, -max_lat, max_lat)
 		state.apply_force(wheel_side * lat, point - origin)

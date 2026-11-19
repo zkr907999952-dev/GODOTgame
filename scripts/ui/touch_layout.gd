@@ -13,6 +13,8 @@ extends RefCounted
 ##   - crc16 是载荷的 CRC-16/IBM（大写十六进制四位），防止粘贴残缺
 ## 缺省的键表示用内置默认位置。空载荷（TYL1..XXXX 或未保存）= 全部默认。
 ## 把调好的码填到 DEFAULT_CODE 即可成为内置默认（仍可被 user:// 覆盖）。
+## 0.2.29 新增 id `flight_stick`（飞机摇杆模式：左右偏航、上推加速、下拉减速）。
+## 缺省该键时用内置默认位置；旧 TYL1 布局没有这一段也不会坏，只是用默认。
 class_name TouchLayout
 
 const VERSION := 1
@@ -47,6 +49,7 @@ const IDS := {
 	"yaw_r": "右偏航",
 	"gear": "起落架",
 	"thrust": "推力条",
+	"flight_stick": "飞机摇杆",
 }
 
 static var _cache: Dictionary = {}

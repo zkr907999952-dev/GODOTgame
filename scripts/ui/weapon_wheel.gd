@@ -151,18 +151,18 @@ func _input(event: InputEvent) -> void:
 
 func slot_rect(i: int, n: int) -> Rect2:
 	var c := center() + _slot_dir(i, n) * radius()
-	var sz := Vector2(clampf(radius() * 0.78, 110.0, 170.0), clampf(radius() * 0.46, 64.0, 96.0))
+	var sz := Vector2(clampf(radius() * 0.68, 88.0, 140.0), clampf(radius() * 0.40, 52.0, 78.0))
 	return Rect2(c - sz * 0.5, sz)
 
 
 func _draw() -> void:
 	if not is_open:
 		return
-	draw_rect(Rect2(Vector2.ZERO, size), Color(0, 0, 0, 0.35))
+	draw_rect(Rect2(Vector2.ZERO, size), Color(0, 0, 0, 0.18))
 	var c := center()
 	var r := radius()
-	draw_circle(c, r + 70.0, Color(0.08, 0.09, 0.11, 0.55))
-	draw_arc(c, r + 70.0, 0.0, TAU, 96, Color(1, 1, 1, 0.18), 2.0, true)
+	# No gray disc behind the wheel; a thin ring is enough to read the slots.
+	draw_arc(c, r + 54.0, 0.0, TAU, 96, Color(1, 1, 1, 0.16), 1.5, true)
 	var accent := Color(0.93, 0.55, 0.42)
 	var it := _page_items()
 	var n := it.size()
@@ -172,7 +172,8 @@ func _draw() -> void:
 		var on := i == hover
 		var cur: bool = weapons.current == w.id
 		var sb := StyleBoxFlat.new()
-		sb.bg_color = Color(0.93, 0.55, 0.42, 0.35) if on else Color(0.12, 0.13, 0.16, 0.8)
+		sb.bg_color = Color(0.93, 0.55, 0.42, 0.22) if on else Color(0, 0, 0, 0)
+		sb.draw_center = on
 		sb.border_color = accent if (on or cur) else Color(1, 1, 1, 0.25)
 		sb.set_border_width_all(2 if on else 1)
 		sb.set_corner_radius_all(10)
@@ -191,7 +192,7 @@ func _draw() -> void:
 		_text(at, rc.end - Vector2(aw + 8, 8), 13, accent if a.x == 0 else Color(1, 1, 1))
 	# 中心：收枪 / 翻页
 	var hc := hover == HOLSTER
-	draw_circle(c, DEAD + 6.0, Color(0.93, 0.55, 0.42, 0.4) if hc else Color(0.12, 0.13, 0.16, 0.85))
+	draw_circle(c, DEAD + 6.0, Color(0.93, 0.55, 0.42, 0.35) if hc else Color(0, 0, 0, 0.0))
 	draw_arc(c, DEAD + 6.0, 0.0, TAU, 48, Color(1, 1, 1, 0.3), 1.5, true)
 	_text_c("收枪", c + Vector2(0, -4), 14, Color(1, 1, 1))
 	if pages() > 1:

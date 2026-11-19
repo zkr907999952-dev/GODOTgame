@@ -100,7 +100,7 @@ func rebuild() -> void:
 
 func _card(w: Resource) -> Button:
 	var b := Button.new()
-	b.custom_minimum_size = Vector2(228, 70)
+	b.custom_minimum_size = Vector2(200, 56)
 	b.text = "%d  %s" % [weapons.defs.find(w) + 1, w.display_name.get_slice("（", 0)]
 	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	b.vertical_icon_alignment = VERTICAL_ALIGNMENT_TOP
@@ -187,20 +187,22 @@ func refresh() -> void:
 func build_ammo_hud(root: Control) -> void:
 	ammo_box = PanelContainer.new()
 	ammo_box.name = "AmmoHud"
+	# No gray plate behind the ammo / weapon widgets.
 	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.06, 0.07, 0.09, 0.55)
-	sb.set_corner_radius_all(8)
-	sb.content_margin_left = 12
-	sb.content_margin_right = 12
-	sb.content_margin_top = 6
-	sb.content_margin_bottom = 6
+	sb.bg_color = Color(0, 0, 0, 0)
+	sb.draw_center = false
+	sb.set_corner_radius_all(0)
+	sb.content_margin_left = 6
+	sb.content_margin_right = 6
+	sb.content_margin_top = 2
+	sb.content_margin_bottom = 2
 	ammo_box.add_theme_stylebox_override("panel", sb)
 	ammo_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var h := HBoxContainer.new()
 	h.add_theme_constant_override("separation", 10)
 	ammo_box.add_child(h)
 	_ammo_icon = TextureRect.new()
-	_ammo_icon.custom_minimum_size = Vector2(72, 32)
+	_ammo_icon.custom_minimum_size = Vector2(48, 22)
 	_ammo_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	_ammo_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	h.add_child(_ammo_icon)
@@ -212,7 +214,7 @@ func build_ammo_hud(root: Control) -> void:
 	_ammo_name.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
 	v.add_child(_ammo_name)
 	_ammo_num = Label.new()
-	_ammo_num.add_theme_font_size_override("font_size", 26)
+	_ammo_num.add_theme_font_size_override("font_size", 20)
 	v.add_child(_ammo_num)
 	_ammo_mode = Label.new()
 	_ammo_mode.add_theme_font_size_override("font_size", 11)
@@ -234,26 +236,26 @@ func layout_ammo(safe: Vector4, touch: bool) -> void:
 		ammo_box.grow_horizontal = Control.GROW_DIRECTION_BOTH
 		ammo_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
 		if _ammo_icon:
-			_ammo_icon.custom_minimum_size = Vector2(34, 16)
+			_ammo_icon.custom_minimum_size = Vector2(26, 12)
 		if _ammo_num:
-			_ammo_num.add_theme_font_size_override("font_size", 18)
+			_ammo_num.add_theme_font_size_override("font_size", 15)
 		if _ammo_name:
-			_ammo_name.add_theme_font_size_override("font_size", 10)
+			_ammo_name.add_theme_font_size_override("font_size", 9)
 		if _ammo_mode:
-			_ammo_mode.add_theme_font_size_override("font_size", 9)
+			_ammo_mode.add_theme_font_size_override("font_size", 8)
 		var hp_room := 52.0
-		ammo_box.offset_left = -86.0
-		ammo_box.offset_right = 86.0
-		ammo_box.offset_top = -(safe.w + 6.0 + hp_room + 40.0)
+		ammo_box.offset_left = -68.0
+		ammo_box.offset_right = 68.0
+		ammo_box.offset_top = -(safe.w + 6.0 + hp_room + 32.0)
 		ammo_box.offset_bottom = -(safe.w + 6.0 + hp_room)
 	else:
 		ammo_box.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
 		ammo_box.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 		ammo_box.grow_vertical = Control.GROW_DIRECTION_BEGIN
 		if _ammo_icon:
-			_ammo_icon.custom_minimum_size = Vector2(48, 22)
+			_ammo_icon.custom_minimum_size = Vector2(36, 16)
 		if _ammo_num:
-			_ammo_num.add_theme_font_size_override("font_size", 22)
+			_ammo_num.add_theme_font_size_override("font_size", 18)
 		ammo_box.offset_left = 0.0
 		ammo_box.offset_top = 0.0
 		ammo_box.offset_right = -(safe.z + 16.0)

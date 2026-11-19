@@ -13,6 +13,7 @@ const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
 ##   · 左侧 FOV 竖条只在打开「摄像机」面板时显示
 ##   · 其余区域拖动 = 转视角（独立的触屏灵敏度）；第一人称下点画面不会触发工具
 ##   · 两种模式都有「切换」按钮（= Tab），贴在屏幕上边缘（安全区下方）
+## 飞机（仅手机 / 触屏）：默认「摇杆模式」把右侧加速/减速/左右偏航合成一个 `flight_stick`（左右偏航，上推加速，下拉减速，推满加力）。「按键模式」仍是四个独立按键。摇杆不得环绕视角。
 ## 每根手指按 index 单独跟踪角色（摇杆 / 视角 / 按钮 / 工具 / 环绕 / 双指），互不干扰。
 ## 落在 HUD 面板 / 按钮上的手指交给 GUI（触摸模拟鼠标），这里不处理。
 
@@ -39,6 +40,7 @@ var safe: Vector4 = Vector4.ZERO
 
 var fingers: Dictionary = {}  # index -> {role, start, pos, t0}
 var stick_vec: Vector2 = Vector2.ZERO
+var flight_stick_vec: Vector2 = Vector2.ZERO  # +x right, +y down (screen); pushed as +y up
 var _last_tap_t: int = -100000
 var _last_tap_pos: Vector2 = Vector2.ZERO
 var _two_mid: Vector2 = Vector2.ZERO
@@ -167,6 +169,42 @@ func _show_stick() -> bool:
 	if _map_open():
 		return false
 	return _fp() or _in_drive()
+
+
+func _flight_stick_mode() -> bool:
+	if hud:
+		var s = hud.call("_settings") if hud.has_method("_settings") else null
+		if s and s.has_method("is_flight_stick_mode"):
+			return bool(s.call("is_flight_stick_mode"))
+		if s and "flight_control_mode" in s:
+			return str(s.get("flight_control_mode")) != "buttons"
+	return true  # default is 摇杆模式
+
+
+func _in_plane() -> bool:
+	if hud and hud.get("_vehicle_system"):
+		var vs = hud.get("_vehicle_system")
+		var occ = vs.get("occupied") if vs else null
+		if occ and vs.has_method("kind_of"):
+			return str(vs.call("kind_of", occ)) == "plane"
+	return false
+
+
+func _show_flight_stick() -> bool:
+	if layout_edit:
+		return true
+	if _map_open() or not _flight_stick_mode():
+		return false
+	return _in_drive() and _in_plane()
+
+
+func flight_stick_center() -> Vector2:
+	var it := _default_item("flight_stick")
+	return _layout_center("flight_stick", it["center"])
+
+
+func flight_stick_radius() -> float:
+	return STICK_SIZE * 0.5 * _layout_scale("flight_stick")
 
 
 func _usable() -> Rect2:
@@ -335,11 +373,20 @@ func _default_item(id: String) -> Dictionary:
 			if hud and hud.get("_vehicle_system"):
 				orbit = str(hud.get("_vehicle_system").get("vehicle_look_mode")) == "orbit"
 			# Top of the screen, immediately left of 透视 (chrome xray).
-			var obs_c := Vector2(right - 54.0, safe.y + 16.0 + 20.0)
+			# Match the 透视 button size so the two no longer overlap.
+			var obs_sz := Vector2(80, 32)
 			if hud and hud.get("_btn_xray"):
 				var xr: Rect2 = hud.get("_btn_xray").get_global_rect()
-				obs_c = Vector2(xr.position.x - 8.0 - 54.0, xr.position.y + 20.0)
-			return {"center": obs_c, "size": Vector2(108, 40), "label": "观察·开" if orbit else "观察"}
+				if xr.size.x > 8.0 and xr.size.y > 8.0:
+					obs_sz = xr.size
+				var obs_c2 := Vector2(xr.position.x - 8.0 - obs_sz.x * 0.5, xr.position.y + obs_sz.y * 0.5)
+				return {"center": obs_c2, "size": obs_sz, "label": "观察·开" if orbit else "观察"}
+			var obs_c := Vector2(right - obs_sz.x * 0.5, safe.y + 16.0 + obs_sz.y * 0.5)
+			return {"center": obs_c, "size": obs_sz, "label": "观察·开" if orbit else "观察"}
+		"flight_stick":
+			var fs := Vector2(STICK_SIZE, STICK_SIZE)
+			var fsc := Vector2(right - fs.x * 0.5 - 8.0, by - 200.0 + fs.y * 0.5)
+			return {"center": fsc, "size": fs, "label": "飞控摇杆"}
 		"accel":
 			return {"center": Vector2(right - 44.0, by - 180.0 + 26.0), "size": Vector2(88, 52), "label": "加速"}
 		"brake":
@@ -392,7 +439,7 @@ func buttons() -> Dictionary:
 			out["drag"] = [_rect_from("drag", it["center"] - it["size"] * 0.5, it["size"]), "放下" if _drag_holding() else "拖拽"]
 	if layout_edit:
 		# 载具按键也画出来，方便一次编好行走和载具两套位置。
-		for id in ["enter", "vcam", "observe", "accel", "brake", "thrust_up", "thrust_down", "yaw_l", "yaw_r", "gear", "thrust"]:
+		for id in ["enter", "vcam", "observe", "accel", "brake", "thrust_up", "thrust_down", "yaw_l", "yaw_r", "gear", "thrust", "flight_stick"]:
 			var it := _default_item(id)
 			out[id] = [_rect_from(id, it["center"] - it["size"] * 0.5, it["size"]), it["label"]]
 	return out
@@ -507,6 +554,8 @@ func _on_down(idx: int, p: Vector2) -> void:
 		var bid := _hit_button(p)
 		if bid == "" and p.distance_to(stick_center()) <= stick_radius() + 10.0:
 			bid = "stick"
+		if bid == "" and p.distance_to(flight_stick_center()) <= flight_stick_radius() + 10.0:
+			bid = "flight_stick"
 		if bid != "":
 			layout_selected = bid
 			f["role"] = "layout:" + bid
@@ -532,6 +581,12 @@ func _on_down(idx: int, p: Vector2) -> void:
 	if _show_stick() and p.distance_to(stick_center()) <= stick_radius() + 8.0 and not _has_role("stick"):
 		f["role"] = "stick"
 		_stick_to(p)
+		get_viewport().set_input_as_handled()
+		queue_redraw()
+		return
+	if _show_flight_stick() and p.distance_to(flight_stick_center()) <= flight_stick_radius() + 8.0 and not _has_role("flight_stick"):
+		f["role"] = "flight_stick"
+		_flight_stick_to(p)
 		get_viewport().set_input_as_handled()
 		queue_redraw()
 		return
@@ -620,6 +675,8 @@ func _on_drag(idx: int, p: Vector2, rel: Vector2) -> void:
 	match role:
 		"stick":
 			_stick_to(p)
+		"flight_stick":
+			_flight_stick_to(p)
 		"look":
 			player.call("touch_look", rel)
 		"zoom":
@@ -697,6 +754,9 @@ func _end_finger(idx: int, _p: Vector2) -> void:
 	if role == "stick":
 		stick_vec = Vector2.ZERO
 		_push_stick()
+	elif role == "flight_stick":
+		flight_stick_vec = Vector2.ZERO
+		_push_flight_stick()
 	elif role == "tool":
 		if player:
 			player.call("touch_tool_end")
@@ -761,6 +821,27 @@ func _stick_to(p: Vector2) -> void:
 	stick_vec = d / STICK_MAX
 	_push_stick()
 	queue_redraw()
+
+
+func _flight_stick_to(p: Vector2) -> void:
+	var d := p - flight_stick_center()
+	var cap := STICK_MAX * _layout_scale("flight_stick")
+	if d.length() > cap:
+		d = d.normalized() * cap
+	# Store screen-space like the movement stick; push converts +y to up.
+	flight_stick_vec = d / maxf(cap, 0.001)
+	_push_flight_stick()
+	queue_redraw()
+
+
+func _push_flight_stick() -> void:
+	var v := Vector2(clampf(flight_stick_vec.x, -1.0, 1.0), clampf(-flight_stick_vec.y, -1.0, 1.0))
+	if v.length() < DEADZONE:
+		v = Vector2.ZERO
+	if hud and hud.has_method("_set_vs"):
+		hud.call("_set_vs", "touch_flight_stick", v)
+	elif player and player.get_parent() and player.get_parent().get("vehicle_system"):
+		player.get_parent().get("vehicle_system").set("touch_flight_stick", v)
 
 
 func _push_stick() -> void:
@@ -864,7 +945,7 @@ func _process(_dt: float) -> void:
 	if _crouch_t0 >= 0 and not _crouch_long and Time.get_ticks_msec() - _crouch_t0 >= CROUCH_LONG_MS:
 		_crouch_long = true
 		player.call("toggle_prone")
-	if not _show_stick() and _has_role("stick"):
+	if (not _show_stick() and _has_role("stick")) or (not _show_flight_stick() and _has_role("flight_stick")):
 		_release_all_except_buttons()
 	queue_redraw()
 
@@ -916,6 +997,16 @@ func _draw() -> void:
 		draw_circle(c + stick_vec * (STICK_MAX * _layout_scale("stick")), KNOB * 0.5 * _layout_scale("stick"), accent)
 		if not layout_edit:
 			_text_center("奔跑" if sprint else "外圈奔跑", c + Vector2(0, rads + 12.0), 11, Color(0.8, 0.82, 0.86, 0.8))
+	if _show_flight_stick():
+		var fc := flight_stick_center()
+		var fr := flight_stick_radius()
+		var fsel: bool = layout_edit and layout_selected == "flight_stick"
+		draw_circle(fc, fr, Color(0.28, 0.48, 0.78, 0.28) if fsel else Color(0.14, 0.16, 0.2, 0.45))
+		draw_arc(fc, fr, 0.0, TAU, 48, Color(0.95, 0.85, 0.35, 0.95) if fsel else line, 2.0 if fsel else 1.5, true)
+		draw_arc(fc, fr * 0.46, 0.0, TAU, 32, Color(1, 1, 1, 0.25), 1.0, true)
+		draw_circle(fc + flight_stick_vec * (STICK_MAX * _layout_scale("flight_stick")), KNOB * 0.5 * _layout_scale("flight_stick"), accent)
+		if not layout_edit:
+			_text_center("偏航 / 加减速", fc + Vector2(0, fr + 12.0), 11, Color(0.8, 0.82, 0.86, 0.8))
 		# 缩放竖条：只在摄像机面板打开时显示
 		var zr := zoom_rect()
 		if zr.size.y > 1.0:
