@@ -22,6 +22,7 @@ var _vortex_l: _Ribbon
 var _vortex_r: _Ribbon
 var _clouds: Array[MeshInstance3D] = []
 var _cloud_alpha: PackedFloat32Array = PackedFloat32Array()
+var _cloud_local: Array[Transform3D] = []
 var _wrap: Node3D
 var _tip_local_l: Vector3 = Vector3(-5.2, 0.2, 0.3)
 var _tip_local_r: Vector3 = Vector3(5.2, 0.2, 0.3)
@@ -99,20 +100,27 @@ class _Ribbon:
 		if hist.size() > 0:
 			hist.pop_back()
 
-	func _rebuild(width0: float, fade0: float, pale: bool) -> void:
+	func _rebuild(width0: float, fade0: float, pale: bool, up_axis: Vector3 = Vector3.UP) -> void:
 		var h := hist.size()
 		mesh.visible = h > 2
 		if h < 2:
 			return
+		var up := up_axis
+		if up.length_squared() < 1e-8:
+			up = Vector3.UP
+		else:
+			up = up.normalized()
 		for i in n:
 			var p: Vector3 = hist[mini(i, h - 1)]
 			var q: Vector3 = hist[mini(i + 1, h - 1)]
 			var fwd := p - q
 			if fwd.length_squared() < 1e-6:
 				fwd = Vector3(0, 0, 1)
-			var side := fwd.cross(Vector3.UP)
+			var side := fwd.cross(up)
 			if side.length_squared() < 1e-6:
-				side = Vector3.RIGHT
+				side = up.cross(Vector3.FORWARD)
+				if side.length_squared() < 1e-6:
+					side = Vector3.RIGHT
 			else:
 				side = side.normalized()
 			var a := float(i) / float(maxi(n - 1, 1))
@@ -250,18 +258,23 @@ func _build_clouds() -> void:
 	# the F-22 high-G condensation photos: stretching translucent flow
 	# structures along the body and wing roots, not a handful of spheres.
 	# Local positions are in wrap space (visual nose -Z, up +Y).
+	# Positions are in wrap space (visual nose -Z, up +Y, after ORIGIN_Y lift).
+	# Region 1 = dorsal / LEX beside the canopy (z ≈ -4.2 .. -2.0).
+	# Region 2 = wing-root / LEX over the inner wing (z ≈ -0.4 .. 2.2).
+	# Sheets lie in the airframe XZ plane (normal ≈ body up) so they stay
+	# flush with the fuselage and never stand up like vertical fins.
 	var placements: Array = [
-		# Dorsal / spine sheet
-		{"pos": Vector3(0.0, 1.28, -0.6), "len": 4.6, "wid": 1.55, "camber": 0.16, "yaw": 0.0, "roll": 0.0, "mode": 0.08},
-		{"pos": Vector3(0.0, 1.48, -1.8), "len": 3.2, "wid": 1.15, "camber": 0.12, "yaw": 0.0, "roll": 0.0, "mode": 0.10},
-		# LEX / leading-edge extension sheets (left / right)
-		{"pos": Vector3(-1.15, 1.12, -1.15), "len": 3.4, "wid": 1.35, "camber": 0.10, "yaw": 0.28, "roll": -0.18, "mode": 0.16},
-		{"pos": Vector3(1.15, 1.12, -1.15), "len": 3.4, "wid": 1.35, "camber": 0.10, "yaw": -0.28, "roll": 0.18, "mode": 0.16},
-		# Wing-root / strake sheets, stretching aft along the root
-		{"pos": Vector3(-2.15, 0.92, -0.15), "len": 3.8, "wid": 1.85, "camber": 0.08, "yaw": 0.42, "roll": -0.12, "mode": 0.08},
-		{"pos": Vector3(2.15, 0.92, -0.15), "len": 3.8, "wid": 1.85, "camber": 0.08, "yaw": -0.42, "roll": 0.12, "mode": 0.08},
-		{"pos": Vector3(-1.70, 0.78, 0.85), "len": 3.0, "wid": 1.45, "camber": 0.06, "yaw": 0.22, "roll": -0.08, "mode": 0.12},
-		{"pos": Vector3(1.70, 0.78, 0.85), "len": 3.0, "wid": 1.45, "camber": 0.06, "yaw": -0.22, "roll": 0.08, "mode": 0.12},
+		# Dorsal / spine over the mid-forward fuselage (region 1)
+		{"pos": Vector3(0.0, 1.72, -3.55), "len": 4.2, "wid": 1.45, "camber": 0.12, "yaw": 0.0, "roll": 0.0, "mode": 0.08},
+		{"pos": Vector3(0.0, 1.58, -2.35), "len": 3.6, "wid": 1.25, "camber": 0.10, "yaw": 0.0, "roll": 0.0, "mode": 0.10},
+		# LEX / strake beside the forward fuselage (region 1 sides)
+		{"pos": Vector3(-1.25, 1.38, -2.55), "len": 3.8, "wid": 1.40, "camber": 0.09, "yaw": 0.22, "roll": -0.14, "mode": 0.16},
+		{"pos": Vector3(1.25, 1.38, -2.55), "len": 3.8, "wid": 1.40, "camber": 0.09, "yaw": -0.22, "roll": 0.14, "mode": 0.16},
+		# Wing-root / LEX junction, lying on the wing (region 2)
+		{"pos": Vector3(-2.35, 1.08, 0.40), "len": 4.0, "wid": 2.10, "camber": 0.06, "yaw": 0.34, "roll": -0.08, "mode": 0.08},
+		{"pos": Vector3(2.35, 1.08, 0.40), "len": 4.0, "wid": 2.10, "camber": 0.06, "yaw": -0.34, "roll": 0.08, "mode": 0.08},
+		{"pos": Vector3(-1.85, 1.00, 1.45), "len": 3.2, "wid": 1.70, "camber": 0.05, "yaw": 0.16, "roll": -0.06, "mode": 0.12},
+		{"pos": Vector3(1.85, 1.00, 1.45), "len": 3.2, "wid": 1.70, "camber": 0.05, "yaw": -0.16, "roll": 0.06, "mode": 0.12},
 	]
 	_cloud_alpha.resize(placements.size())
 	for i in placements.size():
@@ -293,9 +306,11 @@ func _build_clouds() -> void:
 		else:
 			add_child(mi)
 		mi.position = p["pos"]
+		# Pitch stays 0: the sheet lives in the airframe XZ plane.
 		mi.rotation = Vector3(0.0, float(p["yaw"]), float(p["roll"]))
 		mi.scale = Vector3.ONE
 		_clouds.append(mi)
+		_cloud_local.append(mi.transform)
 		_cloud_alpha[i] = 0.0
 
 
@@ -327,6 +342,7 @@ func update(st: Dictionary, delta: float) -> void:
 	_intensity = move_toward(_intensity, want, delta * (3.2 if want > _intensity else 2.2))
 	_update_body_vortex(true, _intensity > 0.04)
 	_update_body_vortex(false, _intensity > 0.04)
+	_lock_cloud_to_airframe()
 	_update_clouds(_intensity, delta)
 
 
@@ -334,9 +350,10 @@ func _update_body_vortex(left: bool, emit: bool) -> void:
 	var side := -1.0 if left else 1.0
 	var tr: _Ribbon = _vortex_l if left else _vortex_r
 	var xf := _wrap.global_transform
-	var p0: Vector3 = xf * Vector3(1.42 * side, 0.62, -1.2)
-	var p1: Vector3 = xf * Vector3(1.42 * side * 0.22, 0.86, 1.55)
-	var p2: Vector3 = xf * Vector3(1.42 * side * 0.38, 0.42, 5.35)
+	# Path locked to the airframe: LEX (region 1) → wing root (region 2) → aft.
+	var p0: Vector3 = xf * Vector3(1.25 * side, 1.22, -2.70)
+	var p1: Vector3 = xf * Vector3(2.05 * side, 1.05, 0.35)
+	var p2: Vector3 = xf * Vector3(1.70 * side, 0.95, 3.10)
 	if emit:
 		if tr.hist.size() < 3:
 			tr.hist = [p0, p1, p2]
@@ -352,7 +369,9 @@ func _update_body_vortex(left: bool, emit: bool) -> void:
 				tr.hist[2] = p2
 	else:
 		tr.fade_hist()
-	tr._rebuild(1.35, 0.28 * maxf(_intensity, 0.15), true)
+	# Width axis is aircraft up, not world up — otherwise a banked jet
+	# makes the strip stand up like a vertical fin.
+	tr._rebuild(1.35, 0.28 * maxf(_intensity, 0.15), true, xf.basis.y)
 	if tr.hist.size() < 3 or _intensity < 0.04:
 		tr.mesh.visible = false
 
@@ -395,6 +414,58 @@ func tip_local_left() -> Vector3:
 
 func tip_local_right() -> Vector3:
 	return _tip_local_r
+
+
+func _lock_cloud_to_airframe() -> void:
+	## Re-compose every sheet in aircraft space so a bank/pitch cannot
+	## leave a strip standing upright in world axes.
+	if _wrap == null:
+		return
+	var xf := _wrap.global_transform
+	for i in _clouds.size():
+		var mi := _clouds[i]
+		if mi == null:
+			continue
+		var local: Transform3D = _cloud_local[i] if i < _cloud_local.size() else mi.transform
+		mi.global_transform = xf * local
+
+
+func cloud_max_normal_angle_to_airframe() -> float:
+	## Radians between each sheet's normal and aircraft up (ignoring the
+	## small designed roll). Used to assert strips are not world-up fins.
+	if _wrap == null:
+		return 0.0
+	var up := _wrap.global_transform.basis.y.normalized()
+	var worst := 0.0
+	for mi in _clouds:
+		if mi == null:
+			continue
+		var n := mi.global_transform.basis.y.normalized()
+		worst = maxf(worst, n.angle_to(up))
+	return worst
+
+
+func cloud_covers_dorsal_lex() -> bool:
+	## Region 1: at least one sheet near the canopy-adjacent dorsal / LEX.
+	return _cloud_in_box(Vector3(-2.0, 1.15, -4.6), Vector3(2.0, 2.05, -1.6))
+
+
+func cloud_covers_wing_lex() -> bool:
+	## Region 2: at least one sheet over the wing-root / LEX.
+	return _cloud_in_box(Vector3(-3.6, 0.75, -0.6), Vector3(-1.2, 1.35, 2.6)) \
+		and _cloud_in_box(Vector3(1.2, 0.75, -0.6), Vector3(3.6, 1.35, 2.6))
+
+
+func _cloud_in_box(mn: Vector3, mx: Vector3) -> bool:
+	if _wrap == null:
+		return false
+	for mi in _clouds:
+		if mi == null:
+			continue
+		var p: Vector3 = _wrap.to_local(mi.global_position)
+		if p.x >= mn.x and p.x <= mx.x and p.y >= mn.y and p.y <= mx.y and p.z >= mn.z and p.z <= mx.z:
+			return true
+	return false
 
 
 func cloud_min_height() -> float:

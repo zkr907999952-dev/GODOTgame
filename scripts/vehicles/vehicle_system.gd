@@ -1396,19 +1396,32 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 	if skel:
 		var al: Vector3 = bed.armrest_l_global() if bed.has_method("armrest_l_global") else bed.stirrup_l_global()
 		var ar: Vector3 = bed.armrest_r_global() if bed.has_method("armrest_r_global") else bed.stirrup_r_global()
-		# Forearms run parallel to the armrest (along the head-foot axis)
-		# and rest on top of the pad — not diagonally through it.
-		# A little inward of the outer lip so the forearm sits on the rail.
+		# Place the hands on the armrest pads and the feet so the calves
+		# rest along the stirrup tops. Offsets are derived from the actual
+		# pad AABBs (not guessed) so the forearm stays parallel on the rail
+		# and the shin does not overshoot the stirrup sideways.
 		var left := lie.x
 		var feet := -lie.y
-		al = al - lie.y * 0.22 + lie.z * 0.030 - left * 0.04
-		ar = ar - lie.y * 0.22 + lie.z * 0.030 + left * 0.04
-		# Plant the calves ON the stirrup pad tops (not through the bar),
-		# reaching a little farther outward so the legs match the stirrups.
 		var bed_up := bed.global_transform.basis.y.normalized()
-		var sl: Vector3 = bed.stirrup_l_global() + left * 0.16 + feet * 0.13 + bed_up * 0.050
-		var sr: Vector3 = bed.stirrup_r_global() - left * 0.16 + feet * 0.13 + bed_up * 0.050
-		ExamPose.apply(skel, sl, sr, bed.backrest_angle, al, ar)
+		var arm_geom: Dictionary = bed.armrest_geometry() if bed.has_method("armrest_geometry") else {}
+		var leg_geom: Dictionary = bed.stirrup_geometry() if bed.has_method("stirrup_geometry") else {}
+		var arm_half: float = float(arm_geom.get("half_len", 0.166))
+		var arm_skin := 0.026
+		# Hand near the foot-end of the pad, on top, slightly inward of the lip.
+		# Do not overshoot the rail (0.2.27 used 0.22 m and crossed the end).
+		var hand_along := clampf(arm_half * 0.72, 0.08, arm_half - 0.02)
+		al = al + feet * hand_along + bed_up * arm_skin - left * 0.035
+		ar = ar + feet * hand_along + bed_up * arm_skin + left * 0.035
+		# Mid-calf stays on the pad; the foot extends past the pad along the
+		# shin (outward a little, mostly toward the feet) so the leg matches
+		# the stirrup instead of hanging off the side.
+		var stir_half: float = float(leg_geom.get("half_len", 0.142))
+		var stir_half_w: float = float(leg_geom.get("half_wid", 0.080))
+		var calf_out := clampf(stir_half_w * 0.45, 0.02, 0.055)
+		var foot_along := stir_half + 0.10
+		var sl: Vector3 = bed.stirrup_l_global() + left * calf_out + feet * foot_along + bed_up * 0.032
+		var sr: Vector3 = bed.stirrup_r_global() - left * calf_out + feet * foot_along + bed_up * 0.032
+		ExamPose.apply(skel, sl, sr, bed.backrest_angle, al, ar, feet, bed_up)
 		# Capture the eye from the posed head *before* look rotation, so
 		# turning the view cannot hitch the camera origin.
 		_exam_eye_origin = ExamPose.head_world(skel).origin
@@ -1486,9 +1499,11 @@ func _exam_camera(_delta: float) -> void:
 
 func _clamp_exam_look() -> Vector2:
 	## Returns (yaw, pitch). Positive pitch looks UP. Looking down is limited.
-	const YAW_LIM := 1.15
-	const PITCH_MIN := -0.62  # look down (toward the body) — modest limit
-	const PITCH_MAX := 1.55   # look up — essentially free
+	const YAW_LIM := 1.55
+	# Looking down is only limited enough to keep the neck stump off-screen;
+	# mid and down angles are otherwise free. Looking up stays unrestricted.
+	const PITCH_MIN := -1.05
+	const PITCH_MAX := 1.65
 	var yaw := clampf(float(player.get("_yaw")), -YAW_LIM, YAW_LIM)
 	var pitch := clampf(float(player.get("_pitch")), PITCH_MIN, PITCH_MAX)
 	player.set("_yaw", yaw)
@@ -1518,14 +1533,16 @@ func _exam_look_basis(look_dir: Vector3, yaw: float, pitch: float) -> Basis:
 	else:
 		look_dir = look_dir.normalized()
 	var world_up := Vector3.UP
-	var base_right := world_up.cross(look_dir)
+	# right = forward × up (not up × forward). The 0.2.27 cross was flipped,
+	# which inverted pitch (and made the camera feel direction-reversed).
+	var base_right := look_dir.cross(world_up)
 	if base_right.length_squared() < 1e-8:
 		base_right = Vector3.RIGHT
 	base_right = base_right.normalized()
 	var fwd := look_dir.rotated(world_up, yaw)
 	var right := base_right.rotated(world_up, yaw)
 	if right.length_squared() < 1e-8:
-		right = world_up.cross(fwd)
+		right = fwd.cross(world_up)
 		if right.length_squared() < 1e-8:
 			right = Vector3.RIGHT
 		right = right.normalized()

@@ -32,6 +32,8 @@ var ready_ok: bool = false
 var half_l: float = 1.0
 var half_w: float = 0.47
 var height: float = 1.7
+var _armrest_geom: Dictionary = {}
+var _stirrup_geom: Dictionary = {}
 
 
 func _ready() -> void:
@@ -142,6 +144,7 @@ func _identify_markers() -> void:
 	marker_armrest_r = wrap.get_node("ArmrestR") as Marker3D
 	var d: Vector3 = head_c - seat_c
 	backrest_angle = atan2(d.y, maxf(absf(d.z), 0.05))
+	_cache_pad_geometry()
 
 
 func _add_marker(nm: String, local: Vector3) -> void:
@@ -258,6 +261,60 @@ func patient_basis() -> Basis:
 	else:
 		face = face.normalized()
 	return Basis(left, spine, face).orthonormalized()
+
+
+func _cache_pad_geometry() -> void:
+	## Armrest (Object_21) is a wide thin rail; stirrup (Object_4) is the
+	## elevated foot-end bar. half_len is along the bed +Z (head→foot),
+	## half_wid is the half-width of one side pad along +X.
+	_armrest_geom = {
+		"half_len": 0.166,
+		"half_wid": 0.040,
+		"top_y": 1.109,
+	}
+	_stirrup_geom = {
+		"half_len": 0.142,
+		"half_wid": 0.080,
+		"top_y": 1.019,
+	}
+	for mi in VehicleCommon.mesh_instances(wrap):
+		var a := VehicleCommon.aabb_in(wrap, mi)
+		if a.get("empty", false):
+			continue
+		var s: Vector3 = a["max"] - a["min"]
+		var c := Vector3(a["cx"], a["cy"], a["cz"])
+		# Wide thin mid-height rail = armrests.
+		if s.x > 0.70 and s.y < 0.10 and s.z > 0.20 and s.z < 0.50 and c.y > 1.05 and c.y < 1.30:
+			_armrest_geom = {
+				"half_len": s.z * 0.5,
+				"half_wid": 0.040,
+				"top_y": float(a["maxY"]),
+				"min_z": float(a["minZ"]),
+				"max_z": float(a["maxZ"]),
+			}
+		# Wide elevated bar at the foot end = stirrup bar.
+		if s.x > 0.75 and s.y < 0.25 and c.y > 0.90 and c.y < 1.35 and c.z > 0.4:
+			_stirrup_geom = {
+				"half_len": s.z * 0.5,
+				"half_wid": maxf((float(a["maxX"]) - absf(stirrup_l_local().x)), 0.04),
+				"top_y": float(a["maxY"]),
+				"min_z": float(a["minZ"]),
+				"max_z": float(a["maxZ"]),
+				"min_x": float(a["minX"]),
+				"max_x": float(a["maxX"]),
+			}
+
+
+func armrest_geometry() -> Dictionary:
+	if _armrest_geom.is_empty():
+		_cache_pad_geometry()
+	return _armrest_geom
+
+
+func stirrup_geometry() -> Dictionary:
+	if _stirrup_geom.is_empty():
+		_cache_pad_geometry()
+	return _stirrup_geom
 
 
 func exit_offset() -> Vector3:

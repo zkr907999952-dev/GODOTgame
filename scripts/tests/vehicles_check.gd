@@ -1,11 +1,11 @@
 extends SceneTree
 
 const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
-## 0.2.27 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.28 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.27"
-const VERSION_CODE := 29
+const VERSION_NAME := "0.2.28"
+const VERSION_CODE := 30
 
 var fails := 0
 var main: Node
@@ -80,6 +80,7 @@ func _run() -> void:
 	await _check_0225_playtest_fixes()
 	await _check_0226_playtest_fixes()
 	await _check_0227_playtest_fixes()
+	await _check_0228_playtest_fixes()
 	_finish()
 
 
@@ -1676,7 +1677,7 @@ func _check_0222_playtest_fixes() -> void:
 	_ok(ex_src.find("plume_body_visible") >= 0, "exhaust exposes a visibility helper for tests")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
 	_ok(pose_src.find("L_UpperLeg_a") >= 0, "exam pose still has thigh FK")
-	_ok(pose_src.find("L_UpperArm_a") >= 0 and pose_src.find("0.22") >= 0, "arm FK rests naturally on the armrests")
+	_ok(pose_src.find("L_UpperArm_a") >= 0 and (pose_src.find("0.16") >= 0 or pose_src.find("0.22") >= 0), "arm FK rests naturally on the armrests")
 
 	# Visible exhaust body at military and afterburner thrust.
 	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
@@ -1780,7 +1781,7 @@ func _check_0223_playtest_fixes() -> void:
 	var ex_src := FileAccess.get_file_as_string("res://scripts/vehicles/jet_exhaust.gd")
 	_ok(ex_src.find("plume_tip_length") >= 0 and ex_src.find("along = minf(along, cap)") >= 0, "mach diamonds are capped to the plume tip")
 	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
-	_ok(car_src.find("REST_DISTANCE := 0.36") >= 0, "car rest distance was raised to 0.36")
+	_ok(car_src.find("REST_DISTANCE :=") >= 0, "car has a raised suspension rest length")
 	_ok(car_src.find("nitro_active = occupied and throttle_in > 0.12") >= 0, "holding accelerate uses nitro")
 	_ok(car_src.find("CarSkidMarks") >= 0, "car uses a skid-mark trail")
 	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
@@ -1864,7 +1865,7 @@ func _check_0223_playtest_fixes() -> void:
 	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
 	root.add_child(car)
 	await _frames(2)
-	_ok(is_equal_approx(float(car.REST_DISTANCE), 0.36), "car REST_DISTANCE is 0.36")
+	_ok(float(car.REST_DISTANCE) >= 0.36, "car REST_DISTANCE stays at least the 0.2.23 raise (%.3f)" % float(car.REST_DISTANCE))
 	car.occupied = true
 	car.set_driver_input(1.0, 0.0, 0.0, false, false)
 	car._drive(0.016)
@@ -1996,7 +1997,7 @@ func _check_0225_playtest_fixes() -> void:
 	## volumetric vapor, decelerate-for-agility + speed stall, milder burnout.
 	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
 	_ok(vs_src.find("const HEADWARD := 0.16") >= 0, "exam body shifts farther toward the headrest")
-	_ok(vs_src.find("PITCH_MAX := 1.55") >= 0 and vs_src.find("PITCH_MIN := -0.62") >= 0, "looking up is free; looking down is limited a little")
+	_ok(vs_src.find("PITCH_MAX :=") >= 0 and vs_src.find("PITCH_MIN :=") >= 0, "exam-bed pitch is still clamped (up free, down limited)")
 	_ok(vs_src.find("clear_gaze_intent") >= 0, "exam FP does not reset head bones via clear_gaze")
 	_ok(vs_src.find("func _begin_board_anim") >= 0 and vs_src.find("_board_timer = 0.72") >= 0, "car enter/exit plays a scissor-door sequence")
 	_ok(vs_src.find("exp(-1.3 * dt)") >= 0 and vs_src.find("exp(-1.2 * dt)") >= 0, "vehicle camera recenter is softer / slower")
@@ -2146,12 +2147,12 @@ func _check_0226_playtest_fixes() -> void:
 	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
 	_ok(vs_src.find("const HIP_LIFT") >= 0, "exam pose raises the hips along the bed up")
 	_ok(vs_src.find("bed_up * 0.048") >= 0 or vs_src.find("bed_up *") >= 0, "calves are planted on the stirrup tops, not through them")
-	_ok(vs_src.find("- lie.y * 0.22") >= 0 or vs_src.find("- lie.y *") >= 0, "forearms reach forward along the armrests")
+	_ok(vs_src.find("hand_along") >= 0 or vs_src.find("- lie.y *") >= 0 or vs_src.find("feet *") >= 0, "forearms reach forward along the armrests")
 	_ok(vs_src.find("xf.basis.orthonormalized() * Basis.from_euler") >= 0, "vehicle first-person look is composed in the vehicle basis")
 	_ok(vs_src.find("is_drive_occupied()") >= 0 and vs_src.find("vehicle_look_mode == \"orbit\"") >= 0, "观察 works in first- and third-person")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
 	_ok(pose_src.find("Vector3(0.18, 0.0, 0.02)") >= 0, "exam shins are flatter / straighter (FK 0.18)")
-	_ok(pose_src.find("Vector3(0.02, 0.08, 0.22)") >= 0, "upper-arm angle is more gradual / flatter")
+	_ok(pose_src.find("L_UpperArm_a") >= 0 and (pose_src.find("0.16") >= 0 or pose_src.find("0.22") >= 0), "upper-arm angle is more gradual / flatter")
 	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
 	_ok(car_src.find("const MASS_KG := 1760.0") >= 0, "sports-car mass is in the GT ballpark (1760 kg)")
 	_ok(car_src.find("gravity_scale = 1.18") >= 0, "car gravity_scale is raised so it feels planted")
@@ -2369,18 +2370,18 @@ func _check_0227_playtest_fixes() -> void:
 	_ok(pl_src.find("want_yaw := ctrl_yaw * (0.62") >= 0, "yaw rate is not raised with roll")
 	_ok(pl_src.find("const STALL_SPEED := 52.0") >= 0, "speed stall is still 52 m/s")
 	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
-	_ok(tc_src.find("_live_touches") >= 0, "real screen-touch indexes are tracked so emulated mouse cannot steal a second finger")
-	_ok(tc_src.find("已有一根场景手指就把第二指丢掉") >= 0 or tc_src.find("按住摇杆时另一侧仍可偏航") >= 0, "holding the stick no longer drops a second touch")
+	_ok(tc_src.find("_live_touches") < 0 and tc_src.find("func _handle_pointer_event") < 0, "0.2.27 concurrent-touch path was reverted so map pinch-zoom works")
+	_ok(tc_src.find("载具内取消双指拖拽旋转视角") >= 0 and tc_src.find("_live_touches") < 0, "0.2.27 touch rewrite was reverted; two-finger vehicle orbit stays cancelled")
 	_ok(tc_src.find("载具内取消双指拖拽旋转视角") >= 0, "two-finger vehicle orbit stays cancelled")
 	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
 	_ok(vs_src.find("func _exam_look_basis") >= 0, "exam-bed look uses a continuous yaw/pitch basis")
 	_ok(vs_src.find("_exam_eye_origin") >= 0, "exam-bed eye is captured before head-follow rotation")
-	_ok(vs_src.find("- lie.y * 0.22") >= 0, "forearms reach farther along the armrests")
-	_ok(vs_src.find("left * 0.16") >= 0, "legs reach farther outward to match the stirrups")
+	_ok(vs_src.find("armrest_geometry") >= 0 or vs_src.find("hand_along") >= 0, "forearms are placed from the armrest pad geometry")
+	_ok(vs_src.find("stirrup_geometry") >= 0 or vs_src.find("foot_along") >= 0, "legs are placed from the stirrup pad geometry")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
 	_ok(pose_src.find("Vector3(-0.28, 0.04, 0.46)") >= 0, "thigh abduction is opened further (0.46)")
 	_ok(pose_src.find("Vector2(d.x, d.z).length() < 0.20") >= 0, "exam look-world aiming bails out in the unstable mid-angle region")
-	_ok(vs_src.find("const PITCH_MAX := 1.55") >= 0 and vs_src.find("const PITCH_MIN := -0.62") >= 0, "exam-bed pitch limits stay up-free / down-limited")
+	_ok(vs_src.find("const PITCH_MIN := -1.05") >= 0 and vs_src.find("const YAW_LIM := 1.55") >= 0, "exam-bed look limits are looser than 0.2.27")
 	_ok(vs_src.find("clear_gaze_intent") >= 0, "exam head-follow still uses clear_gaze_intent")
 
 	# Live: car nitro tips, calipers, steering wheel, airborne attitude.
@@ -2525,32 +2526,294 @@ func _check_0227_playtest_fixes() -> void:
 			yaw += step
 		# Neighboring samples are 0.08 rad apart; a hitch would be a much larger jump.
 		_ok(max_jump < 0.20, "exam-bed first-person look is continuous across mid angles (max jump=%.3f rad)" % max_jump)
-	# Concurrent multitouch: stick + yaw while occupied.
+	# 0.2.28 restores the 0.2.26 touch path (the 0.2.27 concurrent-touch
+	# rewrite broke map pinch-zoom and did not improve multitouch). Keep
+	# the no-two-finger-orbit rule while occupied.
 	var hud: Node = main.get_node_or_null("HUD") if main else null
 	var tc = hud.get("_touch") if hud else null
-	if tc and player:
-		var prev_occ = player.get("occupancy")
-		player.set("occupancy", "plane")
-		player.set("first_person", true)
-		var was_on := bool(tc.enabled)
-		tc.set_enabled(true)
-		tc.call("_release_all")
-		var stick_c: Vector2 = tc.call("stick_center")
-		var right := Vector2(tc.call("vp").x * 0.80, tc.call("vp").y * 0.55)
-		tc.call("_on_down", 0, stick_c)
-		tc.call("_on_down", 1, right)
-		var r0 := str(tc.fingers[0]["role"]) if tc.fingers.has(0) else ""
-		var r1 := str(tc.fingers[1]["role"]) if tc.fingers.has(1) else ""
-		_ok(r0 == "stick", "first finger on the stick is tracked (role=%s)" % r0)
-		_ok(r1 == "yaw", "second finger on the right side is yaw while the stick is held (role=%s)" % r1)
-		tc.call("_release_all")
-		if not was_on:
-			tc.set_enabled(false)
-		player.set("occupancy", prev_occ)
+	if tc:
+		var src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
+		_ok(src.find("载具内取消双指拖拽旋转视角") >= 0, "two-finger vehicle orbit stays cancelled after the touch revert")
 	else:
-		_ok(false, "touch controls / player available for multitouch check")
+		_ok(false, "touch controls available for orbit-cancel check")
 	jet.queue_free()
 	await _frames(1)
+
+
+
+func _check_0228_playtest_fixes() -> void:
+	## Higher car ride, slightly lower turn downforce, reverted touch path
+	## (map pinch-zoom works again), exam-bed look sign + looser limits,
+	## forearm parallel on the armrests / calves on the stirrups, plane FP
+	## origin in the HUD frame, vapor sheets locked to the airframe.
+	var car_src := FileAccess.get_file_as_string("res://scripts/vehicles/car_controller.gd")
+	_ok(car_src.find("const RIDE_LIFT") >= 0, "car raises the chassis with a ride-height lift")
+	_ok(car_src.find("const REST_DISTANCE := 0.44") >= 0, "car spring rest length is 0.44")
+	_ok(car_src.find("const TURN_DOWNFORCE := 7400.0") >= 0, "turn downforce is lowered a little (7400)")
+	_ok(car_src.find("const TURN_INWARD := 2100.0") >= 0, "turn inward load is lowered a little (2100)")
+	_ok(car_src.find("const AIR_ROLL := 9800.0") >= 0, "airborne attitude control is kept")
+	_ok(car_src.find("const MASS_KG := 1760.0") >= 0, "car mass stays 1760 kg")
+	_ok(car_src.find("const TIRE_MU := 1.62") >= 0, "planted grip is kept")
+	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
+	_ok(tc_src.find("_live_touches") < 0, "0.2.27 _live_touches tracking is gone")
+	_ok(tc_src.find("func _handle_pointer_event") < 0, "0.2.27 _handle_pointer_event swallow path is gone")
+	_ok(tc_src.find("set_process_unhandled_input(true)") < 0, "touch controls no longer also hook unhandled_input")
+	_ok(tc_src.find("载具内取消双指拖拽旋转视角") >= 0, "two-finger vehicle orbit stays cancelled")
+	_ok(tc_src.find("摇杆优先") >= 0 or tc_src.find("绝不转视角") >= 0, "joystick still must not orbit")
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	_ok(vs_src.find("look_dir.cross(world_up)") >= 0, "exam-bed look uses forward × up for the right vector")
+	_ok(vs_src.find("world_up.cross(look_dir)") < 0, "the inverted up × forward cross is gone")
+	_ok(vs_src.find("const PITCH_MIN := -1.05") >= 0, "exam-bed downward look limit is looser (-1.05)")
+	_ok(vs_src.find("const YAW_LIM := 1.55") >= 0, "exam-bed yaw limit is looser (1.55)")
+	_ok(vs_src.find("const HIP_LIFT := 0.085") >= 0, "exam hips stay raised")
+	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
+	_ok(pose_src.find("func _ik_arm_on_rail") >= 0, "forearms are IK'd along the armrest rail")
+	var pv_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
+	_ok(pv_src.find("func _measure_hud_frame") >= 0, "plane cockpit is measured from the HUD frame")
+	_ok(pv_src.find("\"x\": 0.0") >= 0, "plane cockpit X stays on the centerline")
+	var vap_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_vapor.gd")
+	_ok(vap_src.find("func _lock_cloud_to_airframe") >= 0, "vapor sheets are re-composed in aircraft space every frame")
+	_ok(vap_src.find("xf.basis.y") >= 0 and vap_src.find("fwd.cross(up)") >= 0, "body-vortex ribbon width uses aircraft up, not world up")
+
+	# Live: higher ride, wheels sit lower in the wells than the body underside.
+	var car: Node = load("res://scenes/vehicles/car.tscn").instantiate()
+	root.add_child(car)
+	await _frames(2)
+	_ok(is_equal_approx(float(car.RIDE_LIFT), 0.08), "RIDE_LIFT is 0.08 m")
+	_ok(is_equal_approx(float(car.REST_DISTANCE), 0.44), "REST_DISTANCE is 0.44 m")
+	_ok(is_equal_approx(float(car.TURN_DOWNFORCE), 7400.0), "TURN_DOWNFORCE is 7400")
+	var vis = car.get("visuals")
+	if vis and vis.wheels.size():
+		var wr: float = float(vis.wheel_r)
+		var sag: float = (float(car.MASS_KG) * 9.81 / 4.0) / float(car.SPRING_STRENGTH)
+		var well_ok := true
+		var min_gap := 1.0e9
+		for w in vis.wheels:
+			var rest: Vector3 = w["rest_pos"]
+			# After sag the tire moves up by `sag`; the body underside near
+			# the wells must stay above the tire center enough that the
+			# wheel is not buried in the chassis.
+			var eq_y: float = rest.y + sag
+			# Tire top after sag should not sit above a typical fender lip
+			# of the lowered (pre-lift) rest; the lift itself is the gap.
+			if rest.y > -0.14:
+				well_ok = false
+			min_gap = minf(min_gap, -rest.y)
+		_ok(well_ok and min_gap >= 0.14, "visual wheels sit lower in the wells after the ride lift (gap=%.3f, sag=%.3f)" % [min_gap, sag])
+		var hull_min := VehicleCommon.body_collision_min_y(car)
+		var contact := 1.0e9
+		for c in car.get_children():
+			if c is RayCast3D:
+				contact = minf(contact, (c as RayCast3D).position.y - float(car.REST_DISTANCE) - wr)
+		_ok(hull_min + 0.001 >= contact + sag + 0.05, "raised hull still clears the pavement after sag (hull=%.3f contact=%.3f sag=%.3f)" % [hull_min, contact, sag])
+	else:
+		_ok(false, "car wheels available for ride-height check")
+	car.queue_free()
+	await _frames(1)
+
+	# Live: exam-bed look signs + continuity + looser limits + pose contact.
+	if vs and vs.has_method("_exam_look_basis"):
+		var look_dir := Vector3(0.0, -0.20, 1.0).normalized()
+		var b_def: Basis = vs.call("_exam_look_basis", look_dir, 0.0, 0.0)
+		var b_pit: Basis = vs.call("_exam_look_basis", look_dir, 0.0, 0.40)
+		var b_yaw: Basis = vs.call("_exam_look_basis", look_dir, 0.40, 0.0)
+		var f0: Vector3 = -b_def.z
+		var fp: Vector3 = -b_pit.z
+		var fy: Vector3 = -b_yaw.z
+		_ok(fp.y > f0.y + 0.18, "positive exam-bed pitch looks UP (dy=%.3f)" % (fp.y - f0.y))
+		# Looking +Z, positive yaw (standing convention = look left) goes toward +X.
+		_ok(fy.x > f0.x + 0.18, "positive exam-bed yaw looks left, matching input (dx=%.3f)" % (fy.x - f0.x))
+		# Mid-angle continuity across the new looser range.
+		var prev_fwd := Vector3.ZERO
+		var max_jump := 0.0
+		var step := 0.08
+		var yaw := -1.5
+		while yaw <= 1.5:
+			var pitch := -1.05
+			prev_fwd = Vector3.ZERO
+			while pitch <= 1.6:
+				var b: Basis = vs.call("_exam_look_basis", look_dir, yaw, pitch)
+				var fwd := -b.z
+				if prev_fwd.length_squared() > 0.5:
+					max_jump = maxf(max_jump, prev_fwd.angle_to(fwd))
+				prev_fwd = fwd
+				pitch += step
+			yaw += step
+		_ok(max_jump < 0.20, "looser exam-bed look stays continuous (max jump=%.3f rad)" % max_jump)
+		# Camera up stays upright at the default look (not inverted).
+		var b0: Basis = vs.call("_exam_look_basis", look_dir, 0.0, 0.0)
+		_ok(b0.y.dot(Vector3.UP) > 0.70, "exam-bed camera up is world-upright (dot=%.3f)" % b0.y.dot(Vector3.UP))
+
+	var bed: Node = null
+	if vs:
+		for v in vs.vehicles:
+			if str(vs.call("kind_of", v)) == "exam_bed" and bool(v.get("is_default")):
+				bed = v
+				break
+	if bed == null:
+		bed = load("res://scenes/vehicles/exam_bed.tscn").instantiate()
+		root.add_child(bed)
+		await _frames(2)
+	if vs and player and bed:
+		player.global_position = bed.global_position + Vector3(1.2, 0.1, 0.0)
+		vs.set("nearest", bed)
+		if vs.has_method("try_enter"):
+			vs.call("try_enter")
+		await _frames(3)
+		if vs.get("occupied") == bed:
+			if vs.has_method("_apply_exam_pose"):
+				vs.call("_apply_exam_pose", 0.016)
+			await _frames(1)
+			var skel: Skeleton3D = player.call("get_skeleton") if player.has_method("get_skeleton") else null
+			var lie: Basis = bed.patient_basis()
+			if skel:
+				# Forearm direction vs armrest axis (toward the feet = -lie.y).
+				var rail: Vector3 = (-lie.y).normalized()
+				var par_ok := true
+				var on_ok := true
+				var worst_ang := 0.0
+				for side in [true, false]:
+					var fa := skel.find_bone("L_Forearm_a" if side else "R_Forearm_a")
+					var ha := skel.find_bone("L_Hand_a" if side else "R_Hand_a")
+					if fa < 0 or ha < 0:
+						par_ok = false
+						continue
+					var pf: Vector3 = (skel.global_transform * skel.get_bone_global_pose(fa)).origin
+					var ph: Vector3 = (skel.global_transform * skel.get_bone_global_pose(ha)).origin
+					var fd := ph - pf
+					if fd.length_squared() < 1e-6:
+						par_ok = false
+						continue
+					var ang := fd.normalized().angle_to(rail)
+					ang = minf(ang, PI - ang)  # ignore 180 flips
+					worst_ang = maxf(worst_ang, ang)
+					if ang > 0.42:
+						par_ok = false
+					# Hand / mid-forearm should sit on or above the pad, not through it.
+					var pad_top: Vector3 = bed.armrest_l_global() if side else bed.armrest_r_global()
+					var mid := (pf + ph) * 0.5
+					var above := (mid - pad_top).dot(bed.global_transform.basis.y.normalized())
+					if above < -0.04:
+						on_ok = false
+				_ok(par_ok, "forearms are nearly parallel to the armrests (worst=%.3f rad)" % worst_ang)
+				_ok(on_ok, "forearms rest on top of the armrests, not through them")
+				# Legs: mid-shin close to the stirrup pad, not far off to the side.
+				var leg_ok := true
+				for side2 in [true, false]:
+					var sh := skel.find_bone("L_Foreleg_a" if side2 else "R_Foreleg_a")
+					var ft := skel.find_bone("L_Foot_a" if side2 else "R_Foot_a")
+					if sh < 0 or ft < 0:
+						leg_ok = false
+						continue
+					var psh: Vector3 = (skel.global_transform * skel.get_bone_global_pose(sh)).origin
+					var pft: Vector3 = (skel.global_transform * skel.get_bone_global_pose(ft)).origin
+					var mid_s := (psh + pft) * 0.5
+					var pad: Vector3 = bed.stirrup_l_global() if side2 else bed.stirrup_r_global()
+					var lateral := (mid_s - pad).dot(lie.x)
+					# On the pad: not more than ~9 cm off the marker laterally.
+					if (lateral if side2 else -lateral) < -0.12 or absf(lateral) > 0.18:
+						leg_ok = false
+					var vert := (mid_s - pad).dot(bed.global_transform.basis.y.normalized())
+					if vert < -0.06 or vert > 0.16:
+						leg_ok = false
+				_ok(leg_ok, "calves rest along/on the stirrup pads, not off to the side or through the bar")
+				var hip_i := skel.find_bone("C_Hip_a")
+				if hip_i >= 0:
+					var hip_p: Vector3 = (skel.global_transform * skel.get_bone_global_pose(hip_i)).origin
+					var seat: Vector3 = bed.seat_global()
+					_ok(hip_p.y >= seat.y - 0.02, "hips stay raised off the cushion (hip=%.3f seat=%.3f)" % [hip_p.y, seat.y])
+			if vs.has_method("try_exit"):
+				vs.call("try_exit")
+			await _frames(1)
+		else:
+			_ok(false, "could enter the exam bed for pose contact checks")
+	else:
+		_ok(false, "exam bed / player available for pose contact checks")
+
+	# Live: plane FP origin at the HUD frame, vapor locked to airframe.
+	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(jet)
+	await _frames(2)
+	var off: Vector3 = jet.call("cockpit_offset")
+	_ok(absf(off.x) < 0.02, "plane first-person stays on the centerline (x=%.3f)" % off.x)
+	var pvis = jet.get("visuals")
+	if pvis and pvis.has_method("_measure_hud_frame"):
+		# _measure_hud_frame is pre-lift; cockpit y is already in body space.
+		# Compare the live offset to the HUD combiner in wrap space.
+		var hud_y := 0.0
+		var hud_z := 0.0
+		var found_hud := false
+		if pvis.wrap:
+			for mi in VehicleCommon.mesh_instances(pvis.wrap):
+				var a := VehicleCommon.aabb_in(pvis.wrap, mi)
+				if a.get("empty", false):
+					continue
+				var s: Vector3 = a["max"] - a["min"]
+				if absf(float(a["cx"])) <= 0.20 and s.z <= 0.08 and s.z >= 0.004 and s.x >= 0.08 and s.x <= 0.50 and s.y >= 0.05 and s.y <= 0.35 and float(a["cz"]) <= -4.6 and float(a["cz"]) >= -7.2 and float(a["cy"]) >= 1.40:
+					hud_y = float(a["cy"])
+					hud_z = float(a["cz"])
+					found_hud = true
+					break
+		_ok(found_hud, "HUD combiner / frame mesh is present in the cockpit")
+		if found_hud:
+			_ok(absf(off.y - hud_y) < 0.10, "plane FP Y sits in the HUD frame center (eye=%.3f hud=%.3f)" % [off.y, hud_y])
+			_ok(off.z > hud_z and off.z < hud_z + 1.10, "plane FP is just aft of the HUD frame (eye z=%.3f hud z=%.3f)" % [off.z, hud_z])
+	if pvis and pvis.vapor:
+		_ok(not bool(pvis.vapor.call("cloud_uses_spheres")), "vapor is still polygonal sheets")
+		_ok(int(pvis.vapor.call("cloud_sheet_count")) >= 6, "vapor still uses several sheets")
+		_ok(bool(pvis.vapor.call("cloud_covers_dorsal_lex")), "vapor covers the dorsal / LEX region")
+		_ok(bool(pvis.vapor.call("cloud_covers_wing_lex")), "vapor covers the wing-root / LEX region")
+		# Bank the jet: sheets must follow the airframe, not stand on world-up.
+		jet.rotation = Vector3(0.15, 0.0, 1.20)
+		jet.force_update_transform()
+		if pvis.wrap:
+			pvis.wrap.force_update_transform()
+		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 6.5, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
+		var ang: float = float(pvis.vapor.call("cloud_max_normal_angle_to_airframe"))
+		_ok(ang < 0.35, "banked vapor sheets stay flush with the airframe (max normal err=%.3f rad)" % ang)
+		# And they must NOT all be aligned to world-up while the jet is banked.
+		var world_up_aligned := 0
+		var checked := 0
+		for mi in pvis.vapor._clouds:
+			if mi == null:
+				continue
+			checked += 1
+			if mi.global_transform.basis.y.normalized().angle_to(Vector3.UP) < 0.35:
+				world_up_aligned += 1
+		_ok(checked > 0 and world_up_aligned < checked, "vapor sheets do not stand up in world axes when the jet banks (%d/%d world-up)" % [world_up_aligned, checked])
+		jet.rotation = Vector3.ZERO
+	jet.queue_free()
+	await _frames(1)
+
+	# Live: map pinch-zoom works through handle_input (the path 0.2.27 used to starve).
+	var mv = main.get("map_view") if main else null
+	if main and main.has_method("open_overhead"):
+		main.call("open_overhead")
+	await _frames(1)
+	if mv and bool(mv.get("is_open")):
+		var h0: float = float(mv.height)
+		var e1 := InputEventScreenTouch.new()
+		e1.index = 0
+		e1.pressed = true
+		e1.position = Vector2(200, 200)
+		var e2 := InputEventScreenTouch.new()
+		e2.index = 1
+		e2.pressed = true
+		e2.position = Vector2(320, 200)
+		mv.call("handle_input", e1)
+		mv.call("handle_input", e2)
+		var d := InputEventScreenDrag.new()
+		d.index = 1
+		d.position = Vector2(500, 200)
+		d.relative = Vector2(180, 0)
+		mv.call("handle_input", d)
+		var h1: float = float(mv.height)
+		# Fingers moved apart → zoom in → height drops.
+		_ok(h1 < h0 - 1.0, "map pinch-zoom still changes height (h0=%.1f h1=%.1f)" % [h0, h1])
+		if main.has_method("close_overhead"):
+			main.call("close_overhead")
+	else:
+		_ok(false, "map view opens for pinch-zoom check")
 
 
 func _door_rear_y(hub: Node3D, wrap: Node3D) -> float:

@@ -30,8 +30,8 @@ const FK := {
 	# along the armrests rather than tucking in at the elbow.
 	"L_Shoulder_a": Vector3(0.00, 0.02, 0.03),
 	"R_Shoulder_a": Vector3(0.00, -0.02, -0.03),
-	"L_UpperArm_a": Vector3(0.02, 0.08, 0.22),
-	"R_UpperArm_a": Vector3(0.02, -0.08, -0.22),
+	"L_UpperArm_a": Vector3(0.02, 0.06, 0.16),
+	"R_UpperArm_a": Vector3(0.02, -0.06, -0.16),
 	"L_Forearm_a": Vector3(0.04, 0.0, 0.02),
 	"R_Forearm_a": Vector3(0.04, 0.0, -0.02),
 	"L_Hand_a": Vector3(0.04, 0.0, 0.0),
@@ -64,7 +64,7 @@ static func clear(skel: Skeleton3D) -> void:
 	skel.force_update_transform()
 
 
-static func apply(skel: Skeleton3D, left_stirrup: Vector3, right_stirrup: Vector3, _backrest_angle: float = 0.0, left_armrest: Vector3 = Vector3.ZERO, right_armrest: Vector3 = Vector3.ZERO) -> void:
+static func apply(skel: Skeleton3D, left_stirrup: Vector3, right_stirrup: Vector3, _backrest_angle: float = 0.0, left_armrest: Vector3 = Vector3.ZERO, right_armrest: Vector3 = Vector3.ZERO, rail_axis: Vector3 = Vector3.ZERO, rail_up: Vector3 = Vector3.ZERO) -> void:
 	if skel == null:
 		return
 	clear(skel)
@@ -79,9 +79,15 @@ static func apply(skel: Skeleton3D, left_stirrup: Vector3, right_stirrup: Vector
 	_ik_leg(skel, true, left_stirrup)
 	_ik_leg(skel, false, right_stirrup)
 	if left_armrest.length_squared() > 1e-6:
-		_ik_arm(skel, true, left_armrest)
+		if rail_axis.length_squared() > 1e-6:
+			_ik_arm_on_rail(skel, true, left_armrest, rail_axis, rail_up)
+		else:
+			_ik_arm(skel, true, left_armrest)
 	if right_armrest.length_squared() > 1e-6:
-		_ik_arm(skel, false, right_armrest)
+		if rail_axis.length_squared() > 1e-6:
+			_ik_arm_on_rail(skel, false, right_armrest, rail_axis, rail_up)
+		else:
+			_ik_arm(skel, false, right_armrest)
 	skel.force_update_transform()
 
 
@@ -192,6 +198,59 @@ static func _ik_arm(skel: Skeleton3D, left: bool, target: Vector3) -> void:
 	_aim_bone(skel, i_ua, ua_dir)
 	var elbow := p_ua + ua_dir * len1
 	var fa_dir := (tgt - elbow)
+	if fa_dir.length_squared() < 1e-8:
+		return
+	_aim_bone(skel, i_fa, fa_dir.normalized())
+
+
+static func _ik_arm_on_rail(skel: Skeleton3D, left: bool, hand_tgt: Vector3, rail_axis: Vector3, rail_up: Vector3) -> void:
+	## Keep the forearm parallel to the armrest and resting on top of it:
+	## the hand sits on the pad, the elbow is one forearm-length back along
+	## the same rail (same height / same lateral), then the upper arm aims
+	## at that elbow.
+	var ua_n := "L_UpperArm_a" if left else "R_UpperArm_a"
+	var fa_n := "L_Forearm_a" if left else "R_Forearm_a"
+	var ha_n := "L_Hand_a" if left else "R_Hand_a"
+	var i_ua := skel.find_bone(ua_n)
+	var i_fa := skel.find_bone(fa_n)
+	var i_ha := skel.find_bone(ha_n)
+	if i_ua < 0 or i_fa < 0 or i_ha < 0:
+		return
+	if rail_axis.length_squared() < 1e-8:
+		_ik_arm(skel, left, hand_tgt)
+		return
+	var axis := rail_axis.normalized()
+	var skel_inv := skel.global_transform.affine_inverse()
+	var p_ua := skel_inv * _bone_world_pos(skel, i_ua)
+	var p_fa := skel_inv * _bone_world_pos(skel, i_fa)
+	var p_ha := skel_inv * _bone_world_pos(skel, i_ha)
+	var hand := skel_inv * hand_tgt
+	var len1 := p_ua.distance_to(p_fa)
+	var len2 := p_fa.distance_to(p_ha)
+	if len1 < 1e-4 or len2 < 1e-4:
+		return
+	var axis_s: Vector3 = (skel.global_transform.affine_inverse().basis * axis)
+	if axis_s.length_squared() < 1e-8:
+		_ik_arm(skel, left, hand_tgt)
+		return
+	axis_s = axis_s.normalized()
+	# Elbow is along the rail, toward the shoulder / head, on the same pad.
+	var elbow := hand - axis_s * len2
+	var to_el := elbow - p_ua
+	var reach := to_el.length()
+	if reach > len1 - 0.004:
+		# Keep the forearm direction (parallel to the rail) and slide the
+		# hand/elbow along the rail until the upper arm can reach.
+		var over := reach - (len1 - 0.004)
+		elbow += (p_ua - elbow).normalized() * over
+		hand = elbow + axis_s * len2
+		to_el = elbow - p_ua
+		reach = to_el.length()
+	if to_el.length_squared() < 1e-8:
+		_ik_arm(skel, left, hand_tgt)
+		return
+	_aim_bone(skel, i_ua, to_el.normalized())
+	var fa_dir := hand - elbow
 	if fa_dir.length_squared() < 1e-8:
 		return
 	_aim_bone(skel, i_fa, fa_dir.normalized())

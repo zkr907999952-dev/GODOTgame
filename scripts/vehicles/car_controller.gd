@@ -32,19 +32,23 @@ const LONG_SLIP_STIFF := 2800.0
 const WHEEL_INERTIA := 1.15
 const BRAKE_FORCE_MULT := 1.5
 const HANDBRAKE_MULT := 3.0
-# Suspension: weight/wheel ≈ 3480 N. 0.2.23 raises the rest length again
-# (0.30 → 0.36) so the wheels sit clear of the body instead of sinking in.
-const SPRING_STRENGTH := 72000.0
-const SPRING_DAMP := 4600.0
-const REST_DISTANCE := 0.36
+# Suspension: weight/wheel ≈ 3480 N. 0.2.28 raises the chassis relative to
+# the wheels so the tires sit in the wells with a visible gap and no longer
+# clip / hang up in the body. REST_DISTANCE is spring travel; RIDE_LIFT
+# lowers the visual and ray-cast wheel centres in body space, which is what
+# actually lifts the ride (travel length alone does not).
+const SPRING_STRENGTH := 80000.0
+const SPRING_DAMP := 5000.0
+const REST_DISTANCE := 0.44
+const RIDE_LIFT := 0.08
 const TIRE_GRIP := 11800.0
 const GRIP_FALLOFF := 0.018
 const MAX_LATERAL_FORCE := 23000.0
 const ROLLING_FRICTION := 28.0
 const HULL_CLEARANCE := 0.12
 # GTA-like turn plant: extra downward (and inward) load while steering at speed.
-const TURN_DOWNFORCE := 9200.0
-const TURN_INWARD := 2600.0
+const TURN_DOWNFORCE := 7400.0
+const TURN_INWARD := 2100.0
 # Mid-air attitude (wheels unloaded): rotational control so a jumping car can be leveled.
 const AIR_ROLL := 9800.0
 const AIR_YAW := 7200.0
@@ -114,6 +118,7 @@ func _ready() -> void:
 	if not visuals.setup():
 		push_error("CarController: visual setup failed")
 		return
+	_apply_ride_lift()
 	_build_wheels()
 	_build_collision()
 	_freeze_parked(true)
@@ -127,6 +132,22 @@ func _ready() -> void:
 	_wheel_omega.resize(4)
 	_wheel_long_slip.resize(4)
 	call_deferred("_restore_wheel_positions")
+
+
+func _apply_ride_lift() -> void:
+	## Drop the visual wheel hubs in body space so the chassis sits higher
+	## on the same tires. Must run after visuals.setup() and before the
+	## ray-cast wheels are built from wheel_layout().
+	if visuals == null:
+		return
+	for w in visuals.wheels:
+		var rp: Vector3 = w["rest_pos"]
+		rp.y -= RIDE_LIFT
+		w["rest_pos"] = rp
+		w["offset"] = rp
+		var hub: Node3D = w["root"]
+		if hub:
+			hub.position = rp
 
 
 func _build_collision() -> void:

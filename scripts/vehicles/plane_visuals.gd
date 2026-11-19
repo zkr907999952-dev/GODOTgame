@@ -383,27 +383,65 @@ func _make_exhaust(hub: Node3D, pos: Vector3) -> JetExhaust:
 	return fx
 
 
+func _measure_hud_frame() -> Dictionary:
+	## Find the thin centerline combiner / HUD box in front of the stick.
+	## Called before lift_origin(); Y is still in pre-lift wrap space.
+	var best: Dictionary = {}
+	var best_score := -1.0e9
+	for mi in VehicleCommon.mesh_instances(wrap):
+		var a := VehicleCommon.aabb_in(wrap, mi)
+		if a.get("empty", false):
+			continue
+		var s: Vector3 = a["max"] - a["min"]
+		# Thin plate on the centerline, in front of the seat, above the dash.
+		if absf(float(a["cx"])) > 0.20:
+			continue
+		if s.z > 0.08 or s.z < 0.004:
+			continue
+		if s.x < 0.08 or s.x > 0.50:
+			continue
+		if s.y < 0.05 or s.y > 0.35:
+			continue
+		if float(a["cz"]) > -4.6 or float(a["cz"]) < -7.2:
+			continue
+		if float(a["cy"]) < 2.6:  # pre-lift: combiner sits well above the floor
+			continue
+		var score := (0.20 - absf(float(a["cx"]))) * 4.0 + (0.08 - s.z) * 8.0 + s.x
+		if score > best_score:
+			best_score = score
+			best = {"x": 0.0, "y": float(a["cy"]), "z": float(a["cz"]), "sx": s.x, "sy": s.y, "sz": s.z}
+	return best
+
+
 func _measure_cockpit() -> Dictionary:
 	var x := 0.0
 	var y := 2.58
 	var z := -6.05
 	var stick := VehicleCommon.first_named(wrap, "steeringwheel")
+	var stick_z := z
 	if stick is Node3D:
 		var a := VehicleCommon.aabb_in(wrap, stick as Node3D)
-		# Height / station from the stick, but X is forced to the centerline
-		# below so the first-person view matches the HUD / boresight.
-		y = a["cy"] + 0.42
-		z = a["cz"] + 0.4
+		# Fallback height / station from the stick if the HUD frame is missing.
+		y = a["cy"] + 0.20
+		z = a["cz"] + 0.40
+		stick_z = float(a["cz"])
+	var hud := _measure_hud_frame()
+	if not hud.is_empty():
+		# Eye at the HUD-frame midpoint in Y, slightly aft of the combiner
+		# so the view origin sits in the middle of the box (boresight).
+		y = float(hud["y"])
+		z = float(hud["z"]) + 0.66
 	var canopy := VehicleCommon.first_named(wrap, "^door_dside_f")
 	if canopy == null:
 		canopy = VehicleCommon.first_named(wrap, "^window_lf")
 	if canopy is Node3D:
 		var a := VehicleCommon.aabb_in(wrap, canopy as Node3D)
-		y = clampf(y, a["minY"] + (a["maxY"] - a["minY"]) * 0.42, a["maxY"] - 0.16)
+		y = clampf(y, a["minY"] + (a["maxY"] - a["minY"]) * 0.28, a["maxY"] - 0.16)
 		z = clampf(z, a["minZ"] + 0.7, a["maxZ"] - 0.45)
 	# Aircraft centerline (wrap X = 0). The stick is offset to the right;
 	# leaving a fraction of that offset made the HUD sit off the view center.
-	return {"x": 0.0, "y": y - ORIGIN_Y + 0.16, "z": z}
+	# Y is measured before lift_origin, so subtract ORIGIN_Y to get body space.
+	return {"x": 0.0, "y": y - ORIGIN_Y, "z": z}
 
 
 static func petal_gap(thrust: float) -> float:
