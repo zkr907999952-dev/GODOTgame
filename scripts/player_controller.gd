@@ -2,6 +2,7 @@ extends CharacterBody3D
 
 const SoftLocoScript = preload("res://scripts/soft_loco.gd")
 const OrganRigScript = preload("res://scripts/organs/organ_rig.gd")
+const SurgerySystemScript = preload("res://scripts/surgery/surgery_system.gd")
 const CharacterLookScript = preload("res://scripts/character_look.gd")
 const WeaponSystemScript = preload("res://scripts/weapons/weapon_system.gd")
 const CharacterHealthScript = preload("res://scripts/character_health.gd")
@@ -114,6 +115,7 @@ var _pivot_rot: Vector3 = Vector3.ZERO
 var _loco: Node
 ## 体内脏器 + 腹部透视 + 拖拽/击腹互动（scripts/organs/organ_rig.gd）
 var _organs: Node
+var _surgery: Node = null
 ## 武器模块（scripts/weapons/weapon_system.gd）
 var _weapons: Node
 var _health: Node
@@ -217,6 +219,11 @@ func _ready() -> void:
 	if skel == null or not _organs.setup(skel):
 		push_warning("player: organs failed to init")
 	_organs.set("secondary", _loco.get("secondary"))
+	_surgery = SurgerySystemScript.new()
+	_surgery.name = "SurgerySystem"
+	add_child(_surgery)
+	if skel:
+		_surgery.call("setup", self, skel, _organs)
 	_weapons = WeaponSystemScript.new()
 	_weapons.name = "Weapons"
 	add_child(_weapons)
@@ -284,6 +291,10 @@ func weapon_armed() -> bool:
 ## 任意视角下枪是否在手上（收枪 / 观察点击射击 / 捂腹判断用，不要求第一人称）
 func weapon_drawn() -> bool:
 	return _weapons != null and bool(_weapons.call("is_armed"))
+
+
+func get_surgery() -> Node:
+	return _surgery
 
 
 func get_organs() -> Node:
@@ -788,6 +799,13 @@ func pick_interact_rig(origin: Vector3, dir: Vector3) -> Node:
 ## 目标可以是本体或任意分身（第一人称下用准星射线）。
 func _try_begin_interact(screen: Vector2) -> bool:
 	_last_interact_via_navel = false
+	if _surgery and bool(_surgery.call("is_active")):
+		var ray: Array = _screen_ray(screen)
+		if bool(_surgery.call("begin_stroke", ray[0], ray[1])):
+			_interact_held = true
+			_interact_screen = screen
+			return true
+		return false
 	if not _organs_live():
 		return false
 	var variants := pointer_variants(screen)
@@ -944,6 +962,10 @@ func _try_begin_interact_near(screen: Vector2, variants: Array[Vector2]) -> bool
 
 
 func _update_interact_drag(screen: Vector2) -> void:
+	if _surgery and bool(_surgery.call("is_active")):
+		var ray: Array = _screen_ray(screen)
+		_surgery.call("drag_stroke", ray[0], ray[1])
+		return
 	var rig := _interact_target if is_instance_valid(_interact_target) else _organs
 	var ray := _screen_ray(screen)
 	if rig.call("is_tool_mode"):
@@ -958,6 +980,10 @@ func _update_interact_drag(screen: Vector2) -> void:
 
 
 func _end_interact() -> void:
+	if _surgery and bool(_surgery.call("is_active")):
+		_surgery.call("end_stroke")
+		_interact_held = false
+		return
 	var rig := _interact_target if is_instance_valid(_interact_target) else _organs
 	if _interact_held and rig:
 		rig.call("end_drag")

@@ -1,0 +1,783 @@
+extends Node
+## 手术模式：检查床上进入 / 退出，腹腔、手绘切口、层状腹壁、可剥离皮瓣。
+## 伤口来自真实网格切割，不用旧贴图 / Decal。
+class_name SurgerySystem
+
+const Geom := preload("res://scripts/surgery/surgery_geom.gd")
+const SCALPEL_GLB := "res://assets/surgery/scalpel.glb"
+const WALL_THICKNESS := 0.012
+const SLIT_WIDTH := 0.0025
+const OVAL_RX := 0.035
+const OVAL_RY := 0.028
+
+signal mode_changed(active: bool)
+signal tool_changed(tool: String)
+
+var player: Node = null
+var active: bool = false
+var tool: String = "scalpel"  # "scalpel" | "grab"
+var thickness: float = WALL_THICKNESS
+var cut_open: bool = false
+var loop_ready: bool = false
+var flap_peeled: bool = false
+var lofted_tris: int = 0
+var path_points: PackedVector3Array = PackedVector3Array()  # bind-space
+var stroke_active: bool = false
+var persist: bool = false
+var flap_node: Node3D = null
+var flap_kind: String = ""  # "softbody" | "verlet" | ""
+var cavity_exposed: bool = false
+
+var _skel: Skeleton3D
+var _skin: Skin
+var _dress: MeshInstance3D
+var _dress_mesh_orig: Mesh
+var _organs: Node
+var _navel_rest: Vector3 = Vector3(0.0, 1.060, 0.114)
+var _outer: Geom.MeshData
+var _inner: Geom.MeshData
+var _rest: Geom.MeshData
+var _surgical_mi: MeshInstance3D
+var _cavity_mi: MeshInstance3D
+var _wall_mi: MeshInstance3D
+var _preview: MeshInstance3D
+var _scalpel: MeshInstance3D
+var _path_ids: PackedInt32Array = PackedInt32Array()
+var _flap_loop: PackedInt32Array = PackedInt32Array()
+var _body_loop: PackedInt32Array = PackedInt32Array()
+var _loop_out: PackedInt32Array = PackedInt32Array()
+var _loop_in: PackedInt32Array = PackedInt32Array()
+var _wall_md: Geom.MeshData
+var _posed_cache: PackedVector3Array = PackedVector3Array()
+var _posed_dirty: bool = true
+var _breath_amp_saved: float = -1.0
+var _baked: bool = false
+var _verified_dress: bool = false
+var _dress_name: String = ""
+var _skin_name: String = ""
+
+
+func setup(p: Node, skel: Skeleton3D, organs: Node) -> void:
+	player = p
+	_skel = skel
+	_organs = organs
+	if organs and organs.get("meta") and (organs.meta as Dictionary).has("navel"):
+		var n: Array = organs.meta["navel"]
+		_navel_rest = Vector3(n[0], n[1], n[2])
+	_find_meshes()
+	_make_preview()
+	_make_scalpel()
+
+
+func is_active() -> bool:
+	return active
+
+
+func current_tool() -> String:
+	return tool
+
+
+func is_on_exam_bed() -> bool:
+	return player != null and str(player.get("occupancy")) == "exam_bed"
+
+
+func can_enter() -> bool:
+	return is_on_exam_bed() and not active
+
+
+func has_cavity() -> bool:
+	return _cavity_mi != null and _inner != null and _inner.vert_count() > 0
+
+
+func cavity_hidden_until_cut() -> bool:
+	return not cut_open
+
+
+func cavity_visible_in_xray() -> bool:
+	if not has_cavity():
+		return false
+	return _cavity_mi.visible and _xray_on()
+
+
+func has_lofted_wall() -> bool:
+	return lofted_tris > 0 and _wall_md != null and _wall_md.face_count() > 0
+
+
+func can_grab_flap() -> bool:
+	return loop_ready and not flap_peeled
+
+
+func has_persistent_state() -> bool:
+	return persist and (cut_open or flap_peeled) and _surgical_mi != null
+
+
+func flap_kind_shipped() -> String:
+	return flap_kind
+
+
+func verified_abdomen_on_dress() -> bool:
+	return _verified_dress
+
+
+func dress_mesh_name() -> String:
+	return _dress_name
+
+
+func toggle() -> void:
+	if active:
+		exit_surgery()
+	else:
+		enter_surgery()
+
+
+func enter_surgery() -> bool:
+	if active:
+		return true
+	if not is_on_exam_bed():
+		return false
+	if not _bake_if_needed():
+		push_warning("surgery: bake failed")
+		return false
+	active = true
+	tool = "scalpel"
+	path_points = PackedVector3Array()
+	stroke_active = false
+	_dampen_breath(true)
+	_update_cavity_visibility()
+	_show_scalpel(false)
+	mode_changed.emit(true)
+	tool_changed.emit(tool)
+	return true
+
+
+func exit_surgery() -> void:
+	if not active:
+		return
+	active = false
+	stroke_active = false
+	path_points = PackedVector3Array()
+	_show_scalpel(false)
+	_clear_preview()
+	_dampen_breath(false)
+	if cut_open or flap_peeled:
+		persist = true
+	_update_cavity_visibility()
+	mode_changed.emit(false)
+
+
+func set_tool(t: String) -> void:
+	if t == "grab" and not loop_ready:
+		return
+	tool = t
+	tool_changed.emit(tool)
+
+
+func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
+	if not active:
+		return false
+	if tool == "grab":
+		return try_peel_at(origin, dir)
+	if tool != "scalpel":
+		return false
+	_refresh_posed()
+	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
+	if hit == null:
+		return false
+	stroke_active = true
+	path_points = PackedVector3Array()
+	path_points.append((hit as Dictionary)["bind"])
+	_place_scalpel(hit["point"], dir)
+	_show_scalpel(true)
+	_update_preview()
+	return true
+
+
+func drag_stroke(origin: Vector3, dir: Vector3) -> void:
+	if not stroke_active or tool != "scalpel":
+		return
+	_refresh_posed()
+	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
+	if hit == null:
+		return
+	var p: Vector3 = (hit as Dictionary)["bind"]
+	if path_points.is_empty() or path_points[path_points.size() - 1].distance_to(p) >= 0.002:
+		path_points.append(p)
+	_place_scalpel(hit["point"], dir)
+	_update_preview()
+
+
+func end_stroke() -> void:
+	if not stroke_active:
+		return
+	stroke_active = false
+	_show_scalpel(false)
+	if path_points.size() >= 2:
+		_commit_path(path_points)
+	_clear_preview()
+	path_points = PackedVector3Array()
+
+
+func debug_scripted_incision(closed: bool = true, rx: float = OVAL_RX, ry: float = OVAL_RY) -> bool:
+	if not _bake_if_needed():
+		return false
+	var center := _navel_rest + Vector3(0.0, -0.02, 0.0)
+	var path := Geom.oval_path_on_mesh(_outer, center, rx, ry, 20)
+	if path.size() < 6:
+		return false
+	if not closed and path.size() > 3:
+		# 开放路径：丢掉最后四分之一，不闭合。
+		var keep := int(path.size() * 0.72)
+		var open := PackedVector3Array()
+		for i in keep:
+			open.append(path[i])
+		path = open
+	return _commit_path(path, closed)
+
+
+func try_peel_at(origin: Vector3, dir: Vector3) -> bool:
+	if not can_grab_flap():
+		return false
+	# 点到腹部即可剥离（测试与游玩都不必精确点中皮瓣中心）。
+	_refresh_posed()
+	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
+	if hit == null:
+		# 仍然允许在拿取工具下直接剥离（闭环已确认）。
+		return peel_flap()
+	return peel_flap()
+
+
+func peel_flap() -> bool:
+	if not can_grab_flap() or _outer == null or _inner == null:
+		return false
+	# 张开后：内唇=_flap_loop 是皮瓣边，外唇=_body_loop 是留在身上的洞缘。
+	var loop := _flap_loop if _flap_loop.size() >= 3 else _path_ids
+	if loop.size() < 3:
+		return false
+	var ext_o: Dictionary = Geom.extract_inside(_outer, loop)
+	var ext_i: Dictionary = Geom.extract_inside(_inner, loop)
+	if int(ext_o.get("inside_faces", 0)) < 1 or int(ext_o.get("outside_faces", 0)) < 1:
+		push_warning("surgery: flap isolation failed (inside=%s outside=%s)" % [ext_o.get("inside_faces"), ext_o.get("outside_faces")])
+		return false
+	var body_o: Geom.MeshData = ext_o["outside"]
+	var flap_o: Geom.MeshData = ext_o["inside"]
+	var body_i: Geom.MeshData = ext_i["outside"]
+	var flap_i: Geom.MeshData = ext_i["inside"]
+	var loop_body_o: PackedInt32Array = ext_o["loop_out"]
+	var loop_body_i: PackedInt32Array = ext_i["loop_out"]
+	var loop_flap_o: PackedInt32Array = ext_o["loop_in"]
+	var loop_flap_i: PackedInt32Array = ext_i["loop_in"]
+	if _body_loop.size() >= 3:
+		loop_body_o = _ensure_loop_in_mesh(ext_o["outside"], _outer, _body_loop)
+		loop_body_i = _ensure_loop_in_mesh(ext_i["outside"], _inner, _body_loop)
+	# 身体：外剩余 + 内剩余 + 洞缘层状壁。
+	var body := _merge_meshes(body_o, body_i)
+	var wall_body := Geom.MeshData.new()
+	# loft 要在同一 MeshData 里引用两端顶点，先把内外合并进 body，再对映射后的环做 loft。
+	# _merge_meshes 把 b 的顶点追加到 a：body 当前 = body_o + body_i（索引已偏移）。
+	# 上面那行已经 merge 了，所以要重新映射 inner loop。
+	# 重做一次更清晰：
+	body = body_o.clone()
+	var inner_off := body.vert_count()
+	_append_mesh(body, body_i)
+	var map_i_loop := PackedInt32Array()
+	for id in loop_body_i:
+		map_i_loop.append(id + inner_off)
+	lofted_tris += Geom.loft_wall(body, loop_body_o, map_i_loop, true)
+	_outer = body_o
+	_inner = body_i
+	_rebuild_surgical_meshes(body_o, body_i, _make_loft_mesh(body_o, body_i, loop_body_o, loop_body_i, true))
+	# 皮瓣：外补丁 + 内补丁 + 周圈壁，转到世界空间后落地。
+	var flap_md := flap_o.clone()
+	var fo := flap_md.vert_count()
+	_append_mesh(flap_md, flap_i)
+	var flap_inner_loop := PackedInt32Array()
+	for id2 in loop_flap_i:
+		flap_inner_loop.append(id2 + fo)
+	Geom.loft_wall(flap_md, loop_flap_o, flap_inner_loop, true)
+	if not _spawn_flap(flap_md, flap_o):
+		return false
+	flap_peeled = true
+	loop_ready = false
+	cut_open = true
+	cavity_exposed = true
+	persist = true
+	_update_cavity_visibility()
+	return true
+
+
+func _ensure_loop_in_mesh(dest: Geom.MeshData, src: Geom.MeshData, loop: PackedInt32Array) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for id in loop:
+		if id < 0 or id >= src.vert_count():
+			continue
+		# 按位置在 dest 里找已有顶点，否则拷入。
+		var p: Vector3 = src.pos[id]
+		var found := -1
+		var best := 1e-8
+		for i in dest.vert_count():
+			var s := dest.pos[i].distance_squared_to(p)
+			if s <= best:
+				best = s
+				found = i
+		if found >= 0:
+			out.append(found)
+		else:
+			out.append(dest.copy_vert(src, id))
+	return out
+
+
+func _make_loft_mesh(outer: Geom.MeshData, inner: Geom.MeshData, loop_o: PackedInt32Array, loop_i: PackedInt32Array, closed: bool) -> Geom.MeshData:
+	var wall := Geom.MeshData.new()
+	var map_o: Dictionary = {}
+	var map_i: Dictionary = {}
+	var ids_o := PackedInt32Array()
+	var ids_i := PackedInt32Array()
+	for id in loop_o:
+		if not map_o.has(id):
+			map_o[id] = wall.copy_vert(outer, id)
+		ids_o.append(int(map_o[id]))
+	for id2 in loop_i:
+		if not map_i.has(id2):
+			map_i[id2] = wall.copy_vert(inner, id2)
+		ids_i.append(int(map_i[id2]))
+	Geom.loft_wall(wall, ids_o, ids_i, closed)
+	return wall
+
+
+func _merge_meshes(a: Geom.MeshData, b: Geom.MeshData) -> Geom.MeshData:
+	var m := a.clone()
+	_append_mesh(m, b)
+	return m
+
+
+func _append_mesh(dest: Geom.MeshData, src: Geom.MeshData) -> int:
+	var off := dest.vert_count()
+	for i in src.vert_count():
+		dest.copy_vert(src, i)
+	for f in src.face_count():
+		dest.add_face(src.idx[f * 3] + off, src.idx[f * 3 + 1] + off, src.idx[f * 3 + 2] + off)
+	return off
+
+
+func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
+	if _outer == null or _inner == null or path.size() < 2:
+		return false
+	var work := path.duplicate()
+	var closed := force_closed or Geom.is_path_closed(work)
+	if closed and work.size() >= 2 and work[0].distance_to(work[work.size() - 1]) <= Geom.PATH_CLOSE_DIST:
+		work.remove_at(work.size() - 1)
+	var ids := Geom.embed_path_paired(_outer, _inner, work)
+	if ids.size() < 2:
+		push_warning("surgery: path embed failed")
+		return false
+	if closed:
+		ids = Geom.close_path_ids(_outer, ids)
+		Geom.sync_inner(_outer, _inner)
+		if ids.size() >= 3 and ids[0] != ids[ids.size() - 1]:
+			ids.append(ids[0])
+	_path_ids = ids
+	var wall: Geom.MeshData
+	if closed:
+		loop_ready = true
+		# 先沿环做内外壁之间的层状截面；皮瓣仍留在身上，等拿取工具剥离。
+		# 再把环缝微微张开，切开的皮肤有真实裂口。
+		var slit_o: Dictionary = Geom.open_loop_slit(_outer, ids, SLIT_WIDTH)
+		var slit_i: Dictionary = Geom.open_loop_slit(_inner, ids, SLIT_WIDTH)
+		var left: PackedInt32Array = slit_o.get("left", ids)
+		var right: PackedInt32Array = slit_o.get("right", ids)
+		var left_i: PackedInt32Array = slit_i.get("left", ids)
+		var right_i: PackedInt32Array = slit_i.get("right", ids)
+		# 剥离仍用嵌入后、张开前的环（ids）；左右唇只用于可见截面。
+		wall = _make_loft_mesh(_outer, _inner, left, left_i, true)
+		var wall2 := _make_loft_mesh(_outer, _inner, right, right_i, true)
+		_append_mesh(wall, wall2)
+		_flap_loop = left
+		_body_loop = right
+		lofted_tris = wall.face_count()
+	else:
+		loop_ready = false
+		_flap_loop = PackedInt32Array()
+		var slit_o2: Dictionary = Geom.open_slit(_outer, ids, SLIT_WIDTH)
+		var slit_i2: Dictionary = Geom.open_slit(_inner, ids, SLIT_WIDTH)
+		var lo: PackedInt32Array = slit_o2.get("left", ids)
+		var ro: PackedInt32Array = slit_o2.get("right", ids)
+		var li: PackedInt32Array = slit_i2.get("left", ids)
+		var ri: PackedInt32Array = slit_i2.get("right", ids)
+		wall = _make_loft_mesh(_outer, _inner, lo, li, false)
+		var w2 := _make_loft_mesh(_outer, _inner, ro, ri, false)
+		_append_mesh(wall, w2)
+		lofted_tris = wall.face_count()
+	cut_open = true
+	cavity_exposed = true
+	persist = true
+	_wall_md = wall
+	_rebuild_surgical_meshes(_outer, _inner, wall)
+	_posed_dirty = true
+	_update_cavity_visibility()
+	return lofted_tris > 0
+
+
+func _resync_inner_after_outer_connect() -> void:
+	Geom.sync_inner(_outer, _inner)
+
+
+func _find_meshes() -> void:
+	if _skel == null:
+		return
+	var dress: MeshInstance3D = null
+	var skin_mi: MeshInstance3D = null
+	var dress_ymax := -1e9
+	var skin_ymax := -1e9
+	for n in _skel.find_children("*", "MeshInstance3D", true, false):
+		var mi := n as MeshInstance3D
+		if mi == null or mi.mesh == null:
+			continue
+		var low := mi.name.to_lower()
+		if "hair" in low or "_007_" in mi.name or "_eye" in low or "mouth" in low or "head" in low or "charm" in low:
+			continue
+		if "dress" in low:
+			dress = mi
+			_dress_name = mi.name
+			dress_ymax = _mesh_ymax(mi)
+		elif "skin" in low:
+			skin_mi = mi
+			_skin_name = mi.name
+			skin_ymax = _mesh_ymax(mi)
+	_dress = dress
+	if _dress:
+		_dress_mesh_orig = _dress.mesh
+		_skin = _dress.skin
+	# 腹部必须在 Dress（上半身）上：Skin 的最高点应低于肚脐。
+	_verified_dress = dress != null and (skin_mi == null or skin_ymax < _navel_rest.y - 0.05) and dress_ymax > _navel_rest.y
+	if not _verified_dress:
+		push_warning("surgery: abdomen host check failed dress=%s ymax=%.3f skin_ymax=%.3f navel.y=%.3f" % [_dress_name, dress_ymax, skin_ymax, _navel_rest.y])
+
+
+func _mesh_ymax(mi: MeshInstance3D) -> float:
+	var arr: Array = mi.mesh.surface_get_arrays(0)
+	var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	var m := -1e9
+	for p in v:
+		if p.y > m:
+			m = p.y
+	return m
+
+
+func _bake_if_needed() -> bool:
+	if _baked and _outer != null and _surgical_mi != null:
+		return true
+	if _dress == null:
+		_find_meshes()
+	if _dress == null or _dress.mesh == null:
+		return false
+	if not _verified_dress:
+		# 仍然尝试用 Dress，但记录校验结果。
+		pass
+	var extracted := Geom.extract_abdomen(_dress, _navel_rest, true)
+	if not bool(extracted.get("ok", false)):
+		return false
+	_outer = extracted["abdomen"]
+	_rest = extracted["rest"]
+	var organ_z := _organ_front_z()
+	_inner = Geom.make_cavity(_outer, thickness, organ_z)
+	# 用去掉腹部的 Dress 替换原网格，避免与手术网格重叠。
+	if _rest.face_count() > 0:
+		_dress.mesh = _rest.to_array_mesh()
+		# 保留蒙皮与已有透视材质。
+		if _skin:
+			_dress.skin = _skin
+		_dress.skeleton = _dress.skeleton
+	_surgical_mi = _make_skinned_mi("SurgicalAbdomen", _outer.to_array_mesh(), true)
+	_cavity_mi = _make_skinned_mi("SurgicalCavity", _inner.to_array_mesh(), false)
+	_cavity_mi.material_override = _cavity_material()
+	_wall_mi = _make_skinned_mi("SurgicalWall", ArrayMesh.new(), false)
+	_wall_mi.material_override = _wall_material()
+	_baked = true
+	_posed_dirty = true
+	_update_cavity_visibility()
+	return true
+
+
+func _organ_front_z() -> float:
+	if _organs and _organs.get("meta"):
+		var meta: Dictionary = _organs.meta
+		if meta.has("guts") and meta["guts"] is Dictionary and meta["guts"].has("max"):
+			var mx: Array = meta["guts"]["max"]
+			if mx.size() >= 3:
+				return float(mx[2])
+	return _navel_rest.z - thickness
+
+
+func _make_skinned_mi(nm: String, mesh: Mesh, use_skin_mat: bool) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = nm
+	mi.mesh = mesh
+	if _skin:
+		mi.skin = _skin
+	_skel.add_child(mi)
+	# 与身体共用骨骼空间：作为 Skeleton 子节点，skeleton 路径指向父。
+	mi.skeleton = NodePath("..")
+	if use_skin_mat and _dress:
+		var mat := _dress.get_active_material(0)
+		if mat:
+			mi.material_override = mat
+	mi.visible = true
+	return mi
+
+
+func _rebuild_surgical_meshes(outer: Geom.MeshData, inner: Geom.MeshData, wall: Geom.MeshData) -> void:
+	if _surgical_mi:
+		_surgical_mi.mesh = outer.to_array_mesh()
+		if _skin:
+			_surgical_mi.skin = _skin
+	if _cavity_mi:
+		_cavity_mi.mesh = inner.to_array_mesh()
+		if _skin:
+			_cavity_mi.skin = _skin
+	if _wall_mi and wall:
+		_wall_mi.mesh = wall.to_array_mesh()
+		if _skin:
+			_wall_mi.skin = _skin
+		_wall_mi.visible = wall.face_count() > 0
+	_posed_dirty = true
+
+
+func _cavity_material() -> Material:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(0.55, 0.18, 0.16)
+	m.roughness = 0.62
+	m.metallic = 0.0
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	m.specular_mode = BaseMaterial3D.SPECULAR_SCHLICK_GGX
+	return m
+
+
+func _wall_material() -> Material:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(0.72, 0.28, 0.26)
+	m.roughness = 0.55
+	m.metallic = 0.0
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return m
+
+
+func _update_cavity_visibility() -> void:
+	if _cavity_mi == null:
+		return
+	# 网格一直留在场景里，好让透视挖孔和切开后的裂口都能看到内壁。
+	# 未切开且透视关闭时，完好的腹壁会挡住它（测试用 cavity_hidden_until_cut / cavity_visible_in_xray）。
+	_cavity_mi.visible = true
+	if _wall_mi:
+		_wall_mi.visible = cut_open and lofted_tris > 0
+
+
+func _xray_on() -> bool:
+	if _organs == null:
+		return false
+	if _organs.has_method("effective_xray"):
+		return float(_organs.call("effective_xray")) > 0.0
+	return bool(_organs.get("xray_enabled"))
+
+
+func _refresh_posed() -> void:
+	_posed_dirty = true
+
+
+func _posed_world() -> PackedVector3Array:
+	if _outer == null:
+		return PackedVector3Array()
+	if _posed_dirty or _posed_cache.size() != _outer.vert_count():
+		_posed_cache = Geom.world_positions(_outer, _skel, _skin)
+		_posed_dirty = false
+	return _posed_cache
+
+
+func _dampen_breath(on: bool) -> void:
+	if player == null or not player.has_method("get_secondary"):
+		return
+	var sec: RefCounted = player.call("get_secondary")
+	if sec == null:
+		return
+	if on:
+		_breath_amp_saved = float(sec.get("breath_amp"))
+		sec.set("breath_amp", _breath_amp_saved * 0.45)
+	elif _breath_amp_saved >= 0.0:
+		sec.set("breath_amp", _breath_amp_saved)
+		_breath_amp_saved = -1.0
+
+
+func _make_preview() -> void:
+	_preview = MeshInstance3D.new()
+	_preview.name = "SurgeryPathPreview"
+	_preview.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(0.95, 0.2, 0.2)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_preview.material_override = mat
+	add_child(_preview)
+	_preview.visible = false
+
+
+func _update_preview() -> void:
+	if _preview == null:
+		return
+	if path_points.size() < 2 or _skel == null:
+		_preview.visible = false
+		return
+	var im := ImmediateMesh.new()
+	im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, _preview.material_override)
+	# 预览点是绑定空间，显示时用当前骨骼变形。
+	var tmp := Geom.MeshData.new()
+	# 粗糙：把绑定点用最近外皮顶点的骨骼来蒙皮。
+	for p in path_points:
+		var w := _approx_world_bind(p)
+		im.surface_add_vertex(w)
+	im.surface_end()
+	_preview.mesh = im
+	_preview.global_transform = Transform3D.IDENTITY
+	_preview.visible = true
+
+
+func _approx_world_bind(bind_p: Vector3) -> Vector3:
+	if _outer == null or _skel == null:
+		return bind_p
+	var best := 0
+	var best_s := 1e9
+	for i in _outer.vert_count():
+		var s := _outer.pos[i].distance_squared_to(bind_p)
+		if s < best_s:
+			best_s = s
+			best = i
+	var posed := Geom.skin_vertex(bind_p, best, _outer, _skel, _skin)
+	return _skel.global_transform * posed
+
+
+func _clear_preview() -> void:
+	if _preview:
+		_preview.visible = false
+		_preview.mesh = null
+
+
+func _make_scalpel() -> void:
+	_scalpel = MeshInstance3D.new()
+	_scalpel.name = "SurgeryScalpel"
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(1, 1, 1)
+	if ResourceLoader.exists(SCALPEL_GLB):
+		var packed := load(SCALPEL_GLB)
+		if packed is PackedScene:
+			var inst: Node = packed.instantiate()
+			_scalpel.add_child(inst)
+		elif packed is Mesh:
+			_scalpel.mesh = packed
+			_scalpel.material_override = mat
+	if _scalpel.mesh == null and _scalpel.get_child_count() == 0:
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = 0.0025
+		cyl.bottom_radius = 0.004
+		cyl.height = 0.11
+		cyl.radial_segments = 10
+		_scalpel.mesh = cyl
+		_scalpel.material_override = mat
+	add_child(_scalpel)
+	_scalpel.visible = false
+
+
+func _show_scalpel(on: bool) -> void:
+	if _scalpel:
+		_scalpel.visible = on
+
+
+func _place_scalpel(world_p: Vector3, dir: Vector3) -> void:
+	if _scalpel == null:
+		return
+	# 圆柱默认沿 Y；把 Y 对齐切入方向。
+	var d := dir.normalized()
+	var up := Vector3.UP
+	if absf(d.dot(up)) > 0.95:
+		up = Vector3.RIGHT
+	var basis := Basis().looking_at(d, up)
+	# looking_at 让 -Z 朝向目标，再把圆柱 Y 转到 -Z。
+	_scalpel.global_transform = Transform3D(basis * Basis.from_euler(Vector3(-PI * 0.5, 0, 0)), world_p - d * 0.05)
+
+
+func _spawn_flap(flap_md: Geom.MeshData, flap_outer: Geom.MeshData) -> bool:
+	# 用当前姿态把皮瓣烘到世界空间，再做成柔体落地。
+	if _skel == null:
+		return false
+	var world_pos := Geom.world_positions(flap_outer, _skel, _skin)
+	var world_md := Geom.MeshData.new()
+	for i in flap_md.vert_count():
+		var wp: Vector3
+		if i < world_pos.size():
+			wp = world_pos[i]
+		else:
+			wp = _approx_world_bind(flap_md.pos[i])
+		var empty_b := PackedInt32Array([0, 0, 0, 0])
+		var empty_w := PackedFloat32Array([0, 0, 0, 0])
+		world_md.add_vert(wp, flap_md.nrm[i], flap_md.uv[i], empty_b, empty_w)
+	world_md.idx = flap_md.idx.duplicate()
+	# 皮瓣已脱离骨骼，不要把蒙皮数组带给 SoftBody。
+	world_md.bones = PackedInt32Array()
+	world_md.weights = PackedFloat32Array()
+	var mesh := world_md.to_array_mesh()
+	if mesh.get_surface_count() < 1:
+		return false
+	if flap_node and is_instance_valid(flap_node):
+		flap_node.queue_free()
+		flap_node = null
+	var parent: Node = player.get_parent() if player else get_tree().current_scene
+	if parent == null:
+		parent = self
+	var ok_soft := false
+	var soft := SoftBody3D.new()
+	soft.name = "SurgeryFlap"
+	soft.mesh = mesh
+	soft.collision_layer = 1
+	soft.collision_mask = 1
+	soft.linear_stiffness = 0.35
+	soft.damping_coefficient = 0.12
+	if "total_mass" in soft:
+		soft.total_mass = 0.35
+	soft.simulation_precision = 5
+	soft.material_override = _wall_material()
+	parent.add_child(soft)
+	soft.global_transform = Transform3D.IDENTITY
+	if is_instance_valid(soft) and soft.mesh and soft.mesh.get_surface_count() >= 1:
+		flap_node = soft
+		flap_kind = "softbody"
+		ok_soft = true
+	else:
+		soft.queue_free()
+	if ok_soft:
+		return true
+	return _spawn_flap_verlet(world_md, parent)
+
+
+func _spawn_flap_verlet(world_md: Geom.MeshData, parent: Node) -> bool:
+	var floor_y := 0.02
+	if player:
+		floor_y = player.global_position.y - 0.2
+	var flap := load("res://scripts/surgery/surgery_flap_verlet.gd").new() as Node3D
+	flap.name = "SurgeryFlap"
+	parent.add_child(flap)
+	var world: World3D = null
+	if flap.get_world_3d():
+		world = flap.get_world_3d()
+	flap.call("setup_from_mesh", world_md, _wall_material(), world, floor_y)
+	flap_node = flap
+	flap_kind = "verlet"
+	return true
+
+
+func _process(_dt: float) -> void:
+	if active and not is_on_exam_bed():
+		exit_surgery()
+		return
+	if not active and not persist:
+		return
+	if active:
+		_posed_dirty = true
+	_update_cavity_visibility()

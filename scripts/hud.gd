@@ -23,6 +23,12 @@ var _btn_settings: Button
 var _btn_interact: Button
 var _btn_camera: Button
 var _btn_xray: Button
+var _btn_surgery_enter: Button
+var _btn_surgery_exit: Button
+var _btn_surgery_view: Button
+var _btn_tool_scalpel: Button
+var _btn_tool_grab: Button
+var _surgery_bar: HBoxContainer
 var _panel_settings: PanelContainer
 var _panel_interact: PanelContainer
 var _panel_camera: PanelContainer
@@ -157,6 +163,7 @@ var _layout_hint: Label
 
 func setup(player: Node) -> void:
 	_player = player
+	_bind_surgery()
 	_bind_weapons()
 	_sync_bullet_cam_ui()
 	_sync_hit_force_ui()
@@ -314,6 +321,7 @@ func _build_ui() -> void:
 	_touch.name = "TouchControls"
 	add_child(_touch)
 	move_child(_touch, 0)  # 画在 HUD 面板下面
+	_build_surgery_ui(root)
 	get_viewport().size_changed.connect(_apply_layout)
 	call_deferred("_apply_layout")
 
@@ -1286,6 +1294,7 @@ func _on_vehicle_proximity(_v: Node, _occ: bool) -> void:
 
 func _on_vehicle_occupancy(_v: Node) -> void:
 	_refresh_vehicle_touch()
+	_refresh_surgery_ui()
 	sync()
 
 
@@ -2224,6 +2233,8 @@ func open_panel_name() -> String:
 
 func toggle_map_panel() -> void:
 	# 地图按钮默认直接进俯视投影；再点（或 M / Esc）关闭。传送点在地图左侧栏。
+	if is_surgery_active():
+		return
 	var g := _game()
 	if g == null:
 		return
@@ -2246,6 +2257,8 @@ func toggle_ui_hidden() -> void:
 
 
 func cycle_interact_mode() -> void:
+	if _player and str(_player.get("occupancy")) == "exam_bed":
+		return
 	var ids: Array = []
 	for m in INTERACT_MODES:
 		ids.append(str(m["id"]))
@@ -2880,6 +2893,7 @@ func _apply_layout() -> void:
 	right_bar.offset_bottom = st + bh
 	if has_method("_refresh_vehicle_touch"):
 		_refresh_vehicle_touch()
+	_refresh_surgery_ui()
 	_status.position = Vector2(sl, st + bh + 8.0)
 	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART if compact else TextServer.AUTOWRAP_OFF
 	_status.size = Vector2(v.x - sl - sr, 0) if compact else Vector2.ZERO
@@ -3481,3 +3495,173 @@ func _use_layout_code() -> void:
 	if _layout_status:
 		_layout_status.text = "已应用布局码。" if ok else "布局码无效，请检查是否完整（TYL1. 开头，末尾有校验）。"
 	_refresh_vehicle_touch()
+
+
+# ------------------------------------------------------------------ 手术模式
+func _bind_surgery() -> void:
+	if _player == null or not _player.has_method("get_surgery"):
+		_refresh_surgery_ui()
+		return
+	var s: Node = _player.call("get_surgery")
+	if s == null:
+		_refresh_surgery_ui()
+		return
+	if s.has_signal("mode_changed") and not s.is_connected("mode_changed", _on_surgery_mode):
+		s.connect("mode_changed", _on_surgery_mode)
+	if s.has_signal("tool_changed") and not s.is_connected("tool_changed", _on_surgery_tool):
+		s.connect("tool_changed", _on_surgery_tool)
+	_refresh_surgery_ui()
+
+
+func _surgery() -> Node:
+	if _player and _player.has_method("get_surgery"):
+		return _player.call("get_surgery")
+	return null
+
+
+func _build_surgery_ui(root: Control) -> void:
+	_btn_surgery_enter = _make_chrome_button("开始手术")
+	_btn_surgery_enter.name = "SurgeryEnterButton"
+	_btn_surgery_enter.visible = false
+	_btn_surgery_enter.pressed.connect(_on_surgery_enter)
+	root.add_child(_btn_surgery_enter)
+
+	_btn_surgery_exit = _make_chrome_button("退出手术模式")
+	_btn_surgery_exit.name = "SurgeryExitButton"
+	_btn_surgery_exit.visible = false
+	_btn_surgery_exit.custom_minimum_size = Vector2(140, 32)
+	_btn_surgery_exit.pressed.connect(_on_surgery_exit)
+	root.add_child(_btn_surgery_exit)
+
+	_btn_surgery_view = _make_chrome_button("切换·第一人称")
+	_btn_surgery_view.name = "SurgeryViewButton"
+	_btn_surgery_view.visible = false
+	_btn_surgery_view.custom_minimum_size = Vector2(140, 32)
+	_btn_surgery_view.pressed.connect(_on_surgery_view)
+	root.add_child(_btn_surgery_view)
+
+	_surgery_bar = HBoxContainer.new()
+	_surgery_bar.name = "SurgeryToolbar"
+	_surgery_bar.add_theme_constant_override("separation", 8)
+	_surgery_bar.visible = false
+	_surgery_bar.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.add_child(_surgery_bar)
+
+	_btn_tool_scalpel = _make_chrome_button("手术刀")
+	_btn_tool_scalpel.toggle_mode = true
+	_btn_tool_scalpel.pressed.connect(func(): _on_surgery_tool_picked("scalpel"))
+	_surgery_bar.add_child(_btn_tool_scalpel)
+
+	_btn_tool_grab = _make_chrome_button("拿取")
+	_btn_tool_grab.toggle_mode = true
+	_btn_tool_grab.pressed.connect(func(): _on_surgery_tool_picked("grab"))
+	_surgery_bar.add_child(_btn_tool_grab)
+
+	# 预留后续器械空位（缝合、拉钩等），本版不启用。
+	for label in ["缝合", "拉钩"]:
+		var slot := _make_chrome_button(label)
+		slot.disabled = true
+		slot.modulate = Color(1, 1, 1, 0.45)
+		_surgery_bar.add_child(slot)
+
+
+func _on_surgery_enter() -> void:
+	var s := _surgery()
+	if s:
+		s.call("enter_surgery")
+
+
+func _on_surgery_exit() -> void:
+	var s := _surgery()
+	if s:
+		s.call("exit_surgery")
+
+
+func _on_surgery_view() -> void:
+	if _player and _player.has_method("toggle_play_mode"):
+		_player.call("toggle_play_mode")
+		_sync_from_systems()
+		_refresh_surgery_ui()
+
+
+func _on_surgery_tool_picked(tool: String) -> void:
+	var s := _surgery()
+	if s:
+		s.call("set_tool", tool)
+	_refresh_surgery_ui()
+
+
+func _on_surgery_mode(_active: bool) -> void:
+	if _active:
+		close_panels()
+	_refresh_surgery_ui()
+	_sync_from_systems()
+
+
+func _on_surgery_tool(_tool: String) -> void:
+	_refresh_surgery_ui()
+
+
+func is_surgery_active() -> bool:
+	var s := _surgery()
+	return s != null and bool(s.call("is_active"))
+
+
+func _refresh_surgery_ui() -> void:
+	var s := _surgery()
+	var on_bed := _player != null and str(_player.get("occupancy")) == "exam_bed"
+	var active := s != null and bool(s.call("is_active"))
+	var v := get_viewport().get_visible_rect().size if get_viewport() else Vector2(1280, 720)
+	var sl := _safe.x + 16.0
+	var st := _safe.y + 16.0
+	# 手术中隐藏无关顶栏 / 菜单 / 触屏摇杆，保留透视和第一/第三人称切换。
+	# 俯视地图开着时不要把顶栏抢回来。
+	var show_chrome := (not active) and (not is_map_open())
+	if _btn_settings:
+		_btn_settings.visible = show_chrome
+	if _btn_map:
+		_btn_map.visible = show_chrome
+	if _btn_vehicle:
+		_btn_vehicle.visible = show_chrome
+	if _btn_camera:
+		_btn_camera.visible = show_chrome
+	if _btn_interact:
+		_btn_interact.visible = show_chrome
+	if _btn_xray:
+		_btn_xray.visible = not is_map_open()
+	if _status:
+		_status.visible = show_chrome
+	if _touch:
+		_touch.visible = show_chrome
+	if active and _btn_enter_exit:
+		_btn_enter_exit.visible = false
+	if _btn_surgery_enter:
+		_btn_surgery_enter.visible = on_bed and not active and not is_map_open()
+		_btn_surgery_enter.position = Vector2(sl, st + 56.0)
+		_btn_surgery_enter.custom_minimum_size = Vector2(120, 40) if touch_ui else Vector2(100, 32)
+	if _btn_surgery_exit:
+		_btn_surgery_exit.visible = active
+		_btn_surgery_exit.position = Vector2(sl, st)
+		_btn_surgery_exit.custom_minimum_size = Vector2(160, 40) if touch_ui else Vector2(140, 32)
+	if _btn_surgery_view:
+		_btn_surgery_view.visible = active
+		var first := false
+		if _player and "first_person" in _player:
+			first = bool(_player.first_person)
+		elif _player and _player.has_method("is_display_mode"):
+			first = not bool(_player.call("is_display_mode"))
+		_btn_surgery_view.text = "切换·第三人称" if first else "切换·第一人称"
+		_btn_surgery_view.position = Vector2(v.x * 0.5 - 70.0, st)
+	if _surgery_bar:
+		_surgery_bar.visible = active
+		_surgery_bar.position = Vector2(sl, st + 48.0)
+	if active:
+		var tool := str(s.call("current_tool")) if s else "scalpel"
+		if _btn_tool_scalpel:
+			_btn_tool_scalpel.set_pressed_no_signal(tool == "scalpel")
+			_style_button(_btn_tool_scalpel, tool == "scalpel")
+		if _btn_tool_grab:
+			var can_grab := bool(s.call("can_grab_flap")) if s and s.has_method("can_grab_flap") else false
+			_btn_tool_grab.disabled = not can_grab and tool != "grab"
+			_btn_tool_grab.set_pressed_no_signal(tool == "grab")
+			_style_button(_btn_tool_grab, tool == "grab")

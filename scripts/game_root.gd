@@ -175,6 +175,9 @@ func action_for_key(key: int, mode: String = "") -> String:
 	# While driving / on the exam bed, don't steal Q (yaw) or G (holster) from the vehicle.
 	if in_veh and a in ["weapon_wheel", "holster", "weapon_slot", "prone"]:
 		return ""
+	# 检查床上 T 进入 / 退出手术模式，不再循环拖拽/打击/拳交/刺刀/肚脐。
+	if key == KEY_T and _player and str(_player.get("occupancy")) == "exam_bed":
+		return "surgery_toggle"
 	return a
 
 
@@ -222,6 +225,11 @@ func run_action(action: String, key: int = 0) -> void:
 				sec.set("breath_enabled", not bool(sec.get("breath_enabled")))
 		"interact_mode":
 			_hud.call("cycle_interact_mode")
+		"surgery_toggle":
+			if _player and _player.has_method("get_surgery"):
+				var surg: Node = _player.call("get_surgery")
+				if surg:
+					surg.call("toggle")
 		"reset":
 			# 角色控制 + 持枪：R = 换弹；否则 R = 复位视角 / 腹部形变（网页 R）
 			if _player.call("weapon_armed"):
