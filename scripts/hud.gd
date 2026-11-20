@@ -78,6 +78,7 @@ var _btn_vehicle: Button
 var _panel_vehicle: PanelContainer
 var _vehicle_system: Node
 var _btn_enter_exit: Button
+var _btn_place_clone: Button
 var _plane_throttle: VSlider
 var _plane_throttle_box: Control
 var _btn_observe: Button
@@ -1062,6 +1063,11 @@ func _build_vehicle_touch(root: Control) -> void:
 	_btn_enter_exit.pressed.connect(_on_enter_exit_pressed)
 	root.add_child(_btn_enter_exit)
 
+	_btn_place_clone = _veh_btn("放置分身", Vector2(108, 48), 16)
+	_btn_place_clone.visible = false
+	_btn_place_clone.pressed.connect(_on_place_clone_on_bed)
+	root.add_child(_btn_place_clone)
+
 	_btn_observe = _veh_btn("观察", Vector2(80, 32), 14)
 	_btn_observe.visible = false
 	_btn_observe.pressed.connect(func():
@@ -1325,11 +1331,23 @@ func _refresh_vehicle_touch() -> void:
 	if _btn_enter_exit:
 		_btn_enter_exit.visible = show_enter and not (_touch and bool(_touch.get("layout_edit"))) and not is_map_open()
 		_btn_enter_exit.disabled = false
+		var clone_patient = vs.call("exam_bed_with_clone", near if near else occ) if vs and vs.has_method("exam_bed_with_clone") else null
 		if occ:
 			_btn_enter_exit.text = "离开检查床" if kind == "exam_bed" else "离开载具"
+		elif near and kind == "exam_bed" and clone_patient:
+			_btn_enter_exit.text = "开始手术"
 		elif near:
 			_btn_enter_exit.text = "上检查床" if kind == "exam_bed" else "上载具"
 		_place_layout_btn(_btn_enter_exit, "enter", Vector2(enter_x, pair_y), enter_sz)
+	if _btn_place_clone:
+		var show_place := false
+		if vs and vs.has_method("can_place_clone_on_bed"):
+			show_place = (occ == null) and near != null and bool(vs.call("can_place_clone_on_bed", near))
+		show_place = show_place and not (_touch and bool(_touch.get("layout_edit"))) and not is_map_open()
+		_btn_place_clone.visible = show_place
+		_btn_place_clone.disabled = false
+		if show_place:
+			_place_layout_btn(_btn_place_clone, "place_clone", Vector2(enter_x - enter_sz.x - 8.0, pair_y), enter_sz)
 	var in_drive := occ != null and kind in ["car", "plane"]
 	var editing := _touch != null and bool(_touch.get("layout_edit"))
 	# 观察 sits at the TOP, immediately left of 透视.
@@ -3298,12 +3316,34 @@ func _on_enter_exit_pressed() -> void:
 	# 按下处理 + 抬起处理、或触摸+模拟鼠标把同一次点击做成上车立刻下车。
 	# try_toggle 本身还有短锁，防止同一次手势连触发两次。
 	var g := _game()
-	if g and g.get("vehicle_system"):
-		g.get("vehicle_system").call("try_toggle")
+	var vs = g.get("vehicle_system") if g else null
+	# 靠近已躺在检查床上的分身：按下进入手术，而不是再上同一张床。
+	if vs and vs.get("occupied") == null and vs.has_method("exam_bed_with_clone"):
+		var clone = vs.call("exam_bed_with_clone", vs.get("nearest"))
+		if clone and g and g.has_method("toggle_surgery"):
+			g.call("toggle_surgery")
+			_bind_surgery()
+			_refresh_surgery_ui()
+			if _btn_enter_exit:
+				_btn_enter_exit.disabled = false
+				_btn_enter_exit.set_pressed_no_signal(false)
+			_refresh_vehicle_touch()
+			return
+	if vs and vs.has_method("try_toggle"):
+		vs.call("try_toggle")
 	if _btn_enter_exit:
 		_btn_enter_exit.disabled = false
 		_btn_enter_exit.set_pressed_no_signal(false)
 	_refresh_vehicle_touch()
+
+
+func _on_place_clone_on_bed() -> void:
+	var g := _game()
+	if g and g.has_method("place_clone_on_bed"):
+		set_clone_message(str(g.call("place_clone_on_bed")))
+	_refresh_vehicle_touch()
+	_refresh_surgery_ui()
+	_bind_surgery()
 
 
 func _build_layout_overlay(root: Control) -> void:
@@ -3519,10 +3559,7 @@ func _use_layout_code() -> void:
 
 # ------------------------------------------------------------------ 手术模式
 func _bind_surgery() -> void:
-	if _player == null or not _player.has_method("get_surgery"):
-		_refresh_surgery_ui()
-		return
-	var s: Node = _player.call("get_surgery")
+	var s: Node = _surgery()
 	if s == null:
 		_refresh_surgery_ui()
 		return
@@ -3538,6 +3575,11 @@ func _bind_surgery() -> void:
 
 
 func _surgery() -> Node:
+	var g := _game()
+	if g and g.has_method("surgery_system_of"):
+		var s: Node = g.call("surgery_system_of")
+		if s:
+			return s
 	if _player and _player.has_method("get_surgery"):
 		return _player.call("get_surgery")
 	return null
@@ -3633,9 +3675,19 @@ func _on_surgery_preview_changed() -> void:
 
 
 func _on_surgery_enter() -> void:
-	var s := _surgery()
-	if s:
-		s.call("enter_surgery")
+	var g := _game()
+	if g and g.has_method("toggle_surgery"):
+		_bind_surgery()
+		var s := _surgery()
+		if s and not bool(s.call("is_active")):
+			s.call("enter_surgery")
+		elif s:
+			s.call("enter_surgery")
+		_refresh_surgery_ui()
+		return
+	var s2 := _surgery()
+	if s2:
+		s2.call("enter_surgery")
 
 
 func _on_surgery_exit() -> void:
@@ -3676,7 +3728,10 @@ func is_surgery_active() -> bool:
 
 func _refresh_surgery_ui() -> void:
 	var s := _surgery()
+	var g := _game()
 	var on_bed := _player != null and str(_player.get("occupancy")) == "exam_bed"
+	if not on_bed and g and g.has_method("can_toggle_surgery"):
+		on_bed = bool(g.call("can_toggle_surgery"))
 	var active := s != null and bool(s.call("is_active"))
 	var v := get_viewport().get_visible_rect().size if get_viewport() else Vector2(1280, 720)
 	var sl := _safe.x + 16.0
@@ -3707,6 +3762,8 @@ func _refresh_surgery_ui() -> void:
 			_touch.visible = show_chrome
 	if active and _btn_enter_exit:
 		_btn_enter_exit.visible = false
+	if active and _btn_place_clone:
+		_btn_place_clone.visible = false
 	if _btn_surgery_enter:
 		_btn_surgery_enter.visible = on_bed and not active and not is_map_open()
 		_btn_surgery_enter.position = Vector2(sl, st + 56.0)

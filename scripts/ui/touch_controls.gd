@@ -160,22 +160,48 @@ func _in_drive() -> bool:
 	return player != null and str(player.get("occupancy")) in ["car", "plane"]
 
 
+func _vehicle_system() -> Node:
+	if hud and hud.get("_vehicle_system"):
+		return hud.get("_vehicle_system")
+	if player and player.get_parent() and player.get_parent().get("vehicle_system"):
+		return player.get_parent().get("vehicle_system")
+	return null
+
+
+func _vehicle_tp_observe() -> bool:
+	var vs := _vehicle_system()
+	if vs == null:
+		return false
+	if vs.has_method("is_drive_third") and not bool(vs.call("is_drive_third")):
+		return false
+	return vs.has_method("is_observe_orbit") and bool(vs.call("is_observe_orbit"))
+
+
 func _in_vehicle() -> bool:
 	return player != null and str(player.get("occupancy")) != ""
 
 
-func _in_surgery() -> bool:
+func _active_surgery() -> Node:
+	if player and player.has_method("active_surgery"):
+		return player.call("active_surgery")
+	if hud and hud.has_method("_surgery"):
+		return hud.call("_surgery")
 	if player and player.has_method("get_surgery"):
-		var s: Node = player.call("get_surgery")
-		return s != null and bool(s.call("is_active"))
+		return player.call("get_surgery")
+	return null
+
+
+func _in_surgery() -> bool:
+	var s := _active_surgery()
+	if s:
+		return bool(s.call("is_active"))
 	return hud != null and hud.has_method("is_surgery_active") and bool(hud.call("is_surgery_active"))
 
 
 func _surgery_tool() -> String:
-	if player and player.has_method("get_surgery"):
-		var s: Node = player.call("get_surgery")
-		if s:
-			return str(s.call("current_tool"))
+	var s := _active_surgery()
+	if s:
+		return str(s.call("current_tool"))
 	return ""
 
 
@@ -938,12 +964,21 @@ func _two_move() -> void:
 		return
 	var m: Vector2 = tp[0]
 	var d: float = tp[1]
-	# 观察视角双指拖拽只平移。手术无工具、载具「观察」不捏合缩放，以免和地图捏合或载具环绕混淆。
-	player.call("touch_pan", m - _two_mid)
-	var observe_pan_only := _in_surgery() or _in_drive()
-	if not observe_pan_only and absf(d - _two_dist) > 10.0 and _two_dist > 8.0 and d > 8.0:
-		if player and player.has_method("touch_dolly"):
-			player.call("touch_dolly", _two_dist / d)
+	# 中点位移始终只平移，不环绕。捏合缩放：步行观察、以及载具第三人称+「观察」调镜头距离。
+	# 手术和地图捏合不走这里（地图由 map_view 自己处理）。不要恢复双指载具环绕。
+	if player and player.has_method("touch_pan"):
+		player.call("touch_pan", m - _two_mid)
+	var allow_pinch := not _in_surgery() and not _map_open()
+	if allow_pinch and _in_drive():
+		allow_pinch = _vehicle_tp_observe()
+	if allow_pinch and absf(d - _two_dist) > 10.0 and _two_dist > 8.0 and d > 8.0:
+		var scale := _two_dist / d
+		if _in_drive():
+			var vs := _vehicle_system()
+			if vs and vs.has_method("dolly_look"):
+				vs.call("dolly_look", scale)
+		elif player and player.has_method("touch_dolly"):
+			player.call("touch_dolly", scale)
 		_two_dist = d
 	_two_mid = m
 

@@ -13,6 +13,13 @@ const WALL_MAX_SEGMENTS := Geom.WALL_MAX_SEGMENTS
 const BULLET_SIDES := Geom.BULLET_SIDES
 const EVERT_ROLL := 0.0085
 const MAX_BULLET_HOLES := 6
+## 0.3.6：剖切红线比 0.3.5（半宽 0.0064、深红色）更窄更浅。
+const TRAIL_HALF_WIDTH := 0.0036
+const TRAIL_HALF_WIDTH_V035 := 0.0064
+const TRAIL_COLOR_DEEP := Color(0.78, 0.32, 0.32, 1.0)
+const TRAIL_COLOR_BRIGHT := Color(1.0, 0.58, 0.55, 1.0)
+const TRAIL_ALPHA := 0.72
+const TRAIL_FALLBACK_COLOR := Color(0.95, 0.52, 0.50, 0.70)
 
 signal mode_changed(active: bool)
 signal tool_changed(tool: String)
@@ -32,7 +39,7 @@ var path_points: PackedVector3Array = PackedVector3Array()  # bind-space
 var stroke_active: bool = false
 var persist: bool = false
 var flap_node: Node3D = null
-var flap_kind: String = ""  # "softbody" | "verlet" | ""
+var flap_kind: String = ""  # "rigid" | "softbody" | "verlet" | ""
 var cavity_exposed: bool = false
 var pose_locked: bool = false
 var last_path_count: int = 0
@@ -130,6 +137,11 @@ var _lumbar_z: float = -1e9
 var _pull_peak: float = 0.0
 var _pull_rest: Vector3 = Vector3.ZERO
 var last_cut_animated: bool = false
+var last_commit_path: PackedVector3Array = PackedVector3Array()
+var last_embedded_bind: PackedVector3Array = PackedVector3Array()
+var _preview_compare_path: PackedVector3Array = PackedVector3Array()
+var _flap_rest_size: Vector3 = Vector3.ZERO
+var _split_dir: Vector3 = Vector3.ZERO
 
 
 func setup(p: Node, skel: Skeleton3D, organs: Node) -> void:
@@ -279,6 +291,100 @@ func incision_trail_visible_without_xray() -> bool:
 	return _preview.visible and _preview.mesh != null
 
 
+func preview_path_bind() -> PackedVector3Array:
+	return _preview_path_bind()
+
+
+func committed_path_bind() -> PackedVector3Array:
+	if last_embedded_bind.size() >= 2:
+		return last_embedded_bind
+	return last_commit_path
+
+
+func preview_matches_commit(tol: float = 0.004) -> bool:
+	var a := last_commit_path
+	if a.is_empty():
+		a = last_embedded_bind
+	var b := _preview_compare_path
+	if b.is_empty():
+		b = path_points
+	if a.size() < 2 or b.size() < 2:
+		return false
+	return _path_max_deviation(a, b) <= tol
+
+
+func preview_commit_deviation() -> float:
+	var a := last_commit_path
+	if a.is_empty():
+		a = last_embedded_bind
+	var b := _preview_compare_path
+	if b.is_empty():
+		b = path_points
+	return _path_max_deviation(a, b)
+
+
+func trail_half_width() -> float:
+	return TRAIL_HALF_WIDTH
+
+
+func trail_is_narrower_than_v035() -> bool:
+	return TRAIL_HALF_WIDTH < TRAIL_HALF_WIDTH_V035 - 0.0005
+
+
+func trail_is_lighter_than_v035() -> bool:
+	# 0.3.5 深色约 (0.38, 0.02, 0.03) / 亮色 (0.95, 0.12, 0.10)。
+	var deep_old := Color(0.38, 0.02, 0.03)
+	var bright_old := Color(0.95, 0.12, 0.10)
+	return TRAIL_COLOR_DEEP.r + TRAIL_COLOR_DEEP.g + TRAIL_COLOR_DEEP.b > deep_old.r + deep_old.g + deep_old.b + 0.3 \
+		and TRAIL_COLOR_BRIGHT.g + TRAIL_COLOR_BRIGHT.b > bright_old.g + bright_old.b + 0.3
+
+
+func flap_is_independent() -> bool:
+	return flap_peeled and flap_node != null and is_instance_valid(flap_node) and (flap_kind == "rigid" or flap_node is RigidBody3D)
+
+
+func flap_stretch_ratio() -> float:
+	if flap_node == null or not is_instance_valid(flap_node):
+		return 1.0
+	var aabb := _flap_aabb()
+	if aabb.size.length() < 1e-6 or _flap_rest_size.length() < 1e-6:
+		return 1.0
+	var sx := aabb.size.x / maxf(_flap_rest_size.x, 1e-5)
+	var sy := aabb.size.y / maxf(_flap_rest_size.y, 1e-5)
+	var sz := aabb.size.z / maxf(_flap_rest_size.z, 1e-5)
+	return maxf(sx, maxf(sy, sz))
+
+
+func _path_max_deviation(a: PackedVector3Array, b: PackedVector3Array) -> float:
+	if a.is_empty() or b.is_empty():
+		return 1e9
+	var worst := 0.0
+	for p in a:
+		var best := 1e9
+		for i in range(b.size() - 1):
+			best = minf(best, _dist_point_segment(p, b[i], b[i + 1]))
+		best = minf(best, _dist_point_segment(p, b[b.size() - 1], b[0]) if b.size() >= 3 and a[0].distance_to(a[a.size() - 1]) <= Geom.PATH_CLOSE_DIST * 3.0 else best)
+		# also endpoints
+		best = minf(best, p.distance_to(b[0]))
+		best = minf(best, p.distance_to(b[b.size() - 1]))
+		worst = maxf(worst, best)
+	for p2 in b:
+		var best2 := 1e9
+		for j in range(a.size() - 1):
+			best2 = minf(best2, _dist_point_segment(p2, a[j], a[j + 1]))
+		best2 = minf(best2, p2.distance_to(a[0]))
+		best2 = minf(best2, p2.distance_to(a[a.size() - 1]))
+		worst = maxf(worst, best2)
+	return worst
+
+
+func _dist_point_segment(p: Vector3, a: Vector3, b: Vector3) -> float:
+	var ab := b - a
+	var t := 0.0 if ab.length_squared() < 1e-12 else clampf((p - a).dot(ab) / ab.length_squared(), 0.0, 1.0)
+	return p.distance_to(a.lerp(b, t))
+
+
+
 func can_use_grab() -> bool:
 	if flap_node and is_instance_valid(flap_node):
 		return true
@@ -412,7 +518,14 @@ func cavity_xray_alpha() -> float:
 
 
 func is_on_exam_bed() -> bool:
-	return player != null and str(player.get("occupancy")) == "exam_bed"
+	if player == null:
+		return false
+	if str(player.get("occupancy")) == "exam_bed":
+		return true
+	# 分身躺在检查床上时也可进入手术（操作者站在旁边）。
+	if player.has_method("is_on_exam_bed"):
+		return bool(player.call("is_on_exam_bed"))
+	return player.get("on_exam_bed") != null and is_instance_valid(player.get("on_exam_bed"))
 
 
 func can_enter() -> bool:
@@ -489,25 +602,39 @@ func flap_clear_of_bed(margin: float = 0.04) -> bool:
 	return mn.y >= top - margin
 
 
-func _flap_aabb_min() -> Vector3:
+func _flap_aabb() -> AABB:
 	if flap_node == null or not is_instance_valid(flap_node):
-		return Vector3(0, -999, 0)
+		return AABB()
+	if flap_node is RigidBody3D:
+		for c in flap_node.get_children():
+			if c is MeshInstance3D and (c as MeshInstance3D).mesh:
+				var ab := (c as MeshInstance3D).mesh.get_aabb()
+				return (c as MeshInstance3D).global_transform * ab
+			if c is CollisionShape3D and (c as CollisionShape3D).shape is BoxShape3D:
+				var box := (c as CollisionShape3D).shape as BoxShape3D
+				var xf := (c as CollisionShape3D).global_transform
+				return xf * AABB(-box.size * 0.5, box.size)
+		return AABB(flap_node.global_position, Vector3.ZERO)
 	if flap_node is SoftBody3D:
 		var mi := flap_node as SoftBody3D
 		if mi.mesh:
-			var ab := mi.mesh.get_aabb()
-			return mi.global_transform * ab.position
+			return mi.global_transform * mi.mesh.get_aabb()
 	if flap_node is MeshInstance3D and (flap_node as MeshInstance3D).mesh:
-		var ab2 := (flap_node as MeshInstance3D).mesh.get_aabb()
-		return flap_node.global_transform * ab2.position
-	# Verlet holder
-	for c in flap_node.get_children():
-		if c is MeshInstance3D and (c as MeshInstance3D).mesh:
-			var ab3 := (c as MeshInstance3D).mesh.get_aabb()
-			return (c as MeshInstance3D).global_transform * ab3.position
+		return flap_node.global_transform * (flap_node as MeshInstance3D).mesh.get_aabb()
+	for c2 in flap_node.get_children():
+		if c2 is MeshInstance3D and (c2 as MeshInstance3D).mesh:
+			return (c2 as MeshInstance3D).global_transform * (c2 as MeshInstance3D).mesh.get_aabb()
 	if flap_node is Node3D:
-		return (flap_node as Node3D).global_position
-	return Vector3(0, -999, 0)
+		return AABB((flap_node as Node3D).global_position, Vector3.ZERO)
+	return AABB()
+
+
+func _flap_aabb_min() -> Vector3:
+	var ab := _flap_aabb()
+	if ab.size.length_squared() < 1e-12:
+		return Vector3(0, -999, 0)
+	return ab.position
+
 
 
 func verified_abdomen_on_dress() -> bool:
@@ -962,8 +1089,11 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 	var closed := force_closed or Geom.is_path_closed(work)
 	if closed:
 		work = Geom.clean_closed_loop(work)
-	else:
+	elif work.size() > 24:
+		# 预览直线/环状路径已经很稀疏，不再简化，以免切口偏离虚线。
 		work = Geom.simplify_path(work, 0.003, 48)
+	_preview_compare_path = path.duplicate()
+	last_commit_path = work.duplicate()
 	last_path_count = work.size()
 	if closed and work.size() >= 2 and work[0].distance_to(work[work.size() - 1]) <= Geom.PATH_CLOSE_DIST:
 		work.remove_at(work.size() - 1)
@@ -977,6 +1107,10 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 		if ids.size() >= 3 and ids[0] != ids[ids.size() - 1]:
 			ids.append(ids[0])
 	_path_ids = ids
+	last_embedded_bind = PackedVector3Array()
+	for id in ids:
+		if id >= 0 and id < _outer.vert_count():
+			last_embedded_bind.append(_outer.pos[id])
 	var wall: Geom.MeshData
 	if closed:
 		loop_ready = true
@@ -1027,8 +1161,9 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 	_start_eversion()
 	_rebuild_surgical_meshes(_outer, _inner, wall)
 	_posed_dirty = true
-	if path.size() >= 2:
-		_trail_bind = path.duplicate()
+	if work.size() >= 2:
+		# 涂鸦跟提交路径一致，不再用未经同一套嵌入的原始副本。
+		_trail_bind = work.duplicate()
 		_update_trail()
 	_update_cavity_visibility()
 	return lofted_tris > 0
@@ -1339,12 +1474,15 @@ func _make_trail() -> void:
 	if sh:
 		mat.shader = sh
 		mat.render_priority = 1
+		mat.set_shader_parameter("trail_color_deep", Vector3(TRAIL_COLOR_DEEP.r, TRAIL_COLOR_DEEP.g, TRAIL_COLOR_DEEP.b))
+		mat.set_shader_parameter("trail_color_bright", Vector3(TRAIL_COLOR_BRIGHT.r, TRAIL_COLOR_BRIGHT.g, TRAIL_COLOR_BRIGHT.b))
+		mat.set_shader_parameter("trail_alpha", TRAIL_ALPHA)
 		_trail_mat = mat
 		_register_deform_mat(mat)
 	else:
 		var fb := StandardMaterial3D.new()
 		fb.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-		fb.albedo_color = Color(0.86, 0.1, 0.1, 0.85)
+		fb.albedo_color = TRAIL_FALLBACK_COLOR
 		fb.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		fb.cull_mode = BaseMaterial3D.CULL_DISABLED
 		fb.render_priority = 1
@@ -1412,8 +1550,8 @@ func _build_trail_mesh(bind_pts: PackedVector3Array) -> ArrayMesh:
 		lengths[i] = total
 	if total < 1e-6:
 		total = 1.0
-	var half := 0.0064
-	var lift := 0.0018
+	var half := TRAIL_HALF_WIDTH
+	var lift := 0.0016
 	var md := Geom.MeshData.new()
 	for i in range(n - 1):
 		var t0 := worlds[i + 1] - worlds[i]
@@ -1632,26 +1770,29 @@ func _catch_top_y() -> float:
 
 
 func _spawn_flap(flap_md: Geom.MeshData, flap_outer: Geom.MeshData) -> bool:
-	# 用当前姿态把皮瓣烘到世界空间，再做成柔体落地。
+	# 把皮瓣烘到世界空间，做成像空弹匣一样的独立刚体，不再用会异常拉伸的柔体。
 	if _skel == null:
 		return false
-	var world_pos := Geom.world_positions(flap_outer, _skel, _skin)
 	var world_md := Geom.MeshData.new()
+	var empty_b := PackedInt32Array([0, 0, 0, 0])
+	var empty_w := PackedFloat32Array([0, 0, 0, 0])
 	for i in flap_md.vert_count():
 		var wp: Vector3
-		if i < world_pos.size():
-			wp = world_pos[i]
+		if flap_md.bones.size() >= (i + 1) * 4 and _skin:
+			wp = Geom.skin_vertex(flap_md.pos[i], i, flap_md, _skel, _skin)
+			if _skel:
+				wp = _skel.global_transform * wp
+		elif i < flap_outer.vert_count():
+			var posed := Geom.world_positions(flap_outer, _skel, _skin)
+			wp = posed[i] if i < posed.size() else _approx_world_bind(flap_md.pos[i])
 		else:
 			wp = _approx_world_bind(flap_md.pos[i])
-		var empty_b := PackedInt32Array([0, 0, 0, 0])
-		var empty_w := PackedFloat32Array([0, 0, 0, 0])
 		world_md.add_vert(wp, flap_md.nrm[i], flap_md.uv[i], empty_b, empty_w)
 	world_md.idx = flap_md.idx.duplicate()
 	world_md.bones = PackedInt32Array()
 	world_md.weights = PackedFloat32Array()
 	_ensure_flap_catch()
 	var top := _catch_top_y()
-	# 略向外、向下推开，避免一开始嵌进腹壁；并抬到床面上方以防穿模。
 	var nsum := Vector3.ZERO
 	var c := Vector3.ZERO
 	for i2 in world_md.vert_count():
@@ -1673,6 +1814,14 @@ func _spawn_flap(flap_md: Geom.MeshData, flap_outer: Geom.MeshData) -> bool:
 		var lift := (top + 0.03) - min_y
 		for i4 in world_md.vert_count():
 			world_md.pos[i4].y += lift
+	# 重新计算质心，顶点改成本地坐标，刚体原点放在质心，避免巨型未居中网格把物理撑坏。
+	c = Vector3.ZERO
+	for i5 in world_md.vert_count():
+		c += world_md.pos[i5]
+	if world_md.vert_count() > 0:
+		c /= float(world_md.vert_count())
+	for i6 in world_md.vert_count():
+		world_md.pos[i6] -= c
 	var mesh := world_md.to_array_mesh()
 	if mesh.get_surface_count() < 1:
 		return false
@@ -1682,29 +1831,47 @@ func _spawn_flap(flap_md: Geom.MeshData, flap_outer: Geom.MeshData) -> bool:
 	var parent: Node = player.get_parent() if player else get_tree().current_scene
 	if parent == null:
 		parent = self
-	var soft := SoftBody3D.new()
-	soft.name = "SurgeryFlap"
-	soft.mesh = mesh
-	soft.collision_layer = 1
-	soft.collision_mask = 1 | (1 << (CATCH_LAYER - 1))
-	soft.linear_stiffness = 0.42
-	soft.damping_coefficient = 0.22
-	if "total_mass" in soft:
-		soft.total_mass = 0.40
-	soft.simulation_precision = 8
-	if "parent_collision_ignore" in soft and player:
-		soft.parent_collision_ignore = soft.get_path_to(player) if soft.is_inside_tree() else NodePath()
-	soft.material_override = _wall_material()
-	parent.add_child(soft)
-	soft.global_transform = Transform3D.IDENTITY
-	if player and "parent_collision_ignore" in soft:
-		soft.parent_collision_ignore = soft.get_path_to(player)
-	if is_instance_valid(soft) and soft.mesh and soft.mesh.get_surface_count() >= 1:
-		flap_node = soft
-		flap_kind = "softbody"
+	if _spawn_flap_rigid(mesh, c, parent):
 		return true
-	soft.queue_free()
+	# 刚体创建失败时才退回 Verlet，仍保持独立实体、不粘在骨架上。
+	for i7 in world_md.vert_count():
+		world_md.pos[i7] += c
 	return _spawn_flap_verlet(world_md, parent)
+
+
+func _spawn_flap_rigid(mesh: ArrayMesh, origin: Vector3, parent: Node) -> bool:
+	var body := RigidBody3D.new()
+	body.name = "SurgeryFlap"
+	body.mass = 0.28
+	body.gravity_scale = 1.0
+	body.continuous_cd = true
+	body.linear_damp = 0.35
+	body.angular_damp = 0.55
+	body.collision_layer = 1
+	body.collision_mask = 1 | (1 << (CATCH_LAYER - 1))
+	var mi := MeshInstance3D.new()
+	mi.name = "FlapMesh"
+	mi.mesh = mesh
+	mi.material_override = _wall_material()
+	body.add_child(mi)
+	var col := CollisionShape3D.new()
+	col.name = "FlapShape"
+	var aabb := mesh.get_aabb()
+	var box := BoxShape3D.new()
+	# 薄皮瓣用略加厚的盒子，保证能被抓取和碰撞，又不会像柔体那样被拉长。
+	box.size = Vector3(maxf(aabb.size.x, 0.012), maxf(aabb.size.y, 0.008), maxf(aabb.size.z, 0.012))
+	col.shape = box
+	col.position = aabb.get_center()
+	body.add_child(col)
+	parent.add_child(body)
+	body.global_transform = Transform3D(Basis.IDENTITY, origin)
+	if "max_contacts_reported" in body:
+		body.max_contacts_reported = 4
+	flap_node = body
+	flap_kind = "rigid"
+	_flap_rest_size = box.size
+	return true
+
 
 
 func _spawn_flap_verlet(world_md: Geom.MeshData, parent: Node) -> bool:
@@ -2069,6 +2236,8 @@ func _ray_hits_flap(origin: Vector3, dir: Vector3) -> bool:
 func flap_centroid() -> Vector3:
 	if flap_node == null or not is_instance_valid(flap_node):
 		return Vector3.ZERO
+	if flap_node is RigidBody3D:
+		return (flap_node as RigidBody3D).global_position
 	if flap_node.has_method("centroid"):
 		return flap_node.call("centroid")
 	if flap_node is SoftBody3D:
@@ -2133,9 +2302,10 @@ func _begin_skin_grab(origin: Vector3, dir: Vector3) -> bool:
 	_split_drag = 0.0
 	_pull_p = _to_ab_local(world_p)
 	_pull_off = Vector3.ZERO
-	_pull_r = 0.08
+	_pull_r = 0.11
 	_pull_peak = 0.0
 	_pull_rest = Vector3.ZERO
+	_split_dir = _skin_split_dir(bind_p)
 	_apply_pull_uniforms()
 	return true
 
@@ -2155,14 +2325,18 @@ func _drag_grab(origin: Vector3, dir: Vector3) -> void:
 	if _grab_kind == "skin":
 		var nxt2 := _grab_plane_hit(origin, dir, _grab_last)
 		var off: Vector3 = nxt2 - _grab_last
-		# 限制拉扯幅度，像有弹性的皮肉，而不是把网格拽坏。
-		_pull_off += _to_ab_delta(off)
-		if _pull_off.length() > 0.11:
-			_pull_off = _pull_off.normalized() * 0.11
+		# 优先沿着切口两侧把皮肉拉开，带弹性，避免把网格拽变形。
+		var local := _to_ab_delta(off)
+		if _split_dir.length_squared() > 1e-6:
+			var along := _split_dir * local.dot(_split_dir)
+			local = along * 0.85 + local * 0.15
+		_pull_off += local
+		if _pull_off.length() > 0.13:
+			_pull_off = _pull_off.normalized() * 0.13
 		_split_drag = _pull_off.length()
 		if _split_drag > _pull_peak:
 			_pull_peak = _split_drag
-			_pull_rest = _pull_off * 0.38
+			_pull_rest = _pull_off * 0.42
 		_apply_pull_uniforms()
 
 
@@ -2229,12 +2403,16 @@ func debug_drag_split_skin(off: Vector3) -> bool:
 		mid = _outer.pos[_lip_left[_lip_left.size() / 2]]
 	_pull_p = mid
 	_pull_off = off
-	if _pull_off.length() > 0.11:
-		_pull_off = _pull_off.normalized() * 0.11
-	_pull_r = 0.08
+	_split_dir = _skin_split_dir(_pull_p)
+	if _split_dir.length_squared() > 1e-6:
+		var along2 := _split_dir * _pull_off.dot(_split_dir)
+		_pull_off = along2 * 0.85 + _pull_off * 0.15
+	if _pull_off.length() > 0.13:
+		_pull_off = _pull_off.normalized() * 0.13
+	_pull_r = 0.11
 	_split_drag = _pull_off.length()
 	_pull_peak = _split_drag
-	_pull_rest = _pull_off * 0.38
+	_pull_rest = _pull_off * 0.42
 	_apply_pull_uniforms()
 	return _split_drag > 0.0
 
@@ -2274,6 +2452,12 @@ func _pin_flap_to_anchor() -> void:
 	_pinned_points = PackedInt32Array()
 	if flap_node == null or _grab_anchor == null:
 		return
+	if flap_node is RigidBody3D:
+		var rb := flap_node as RigidBody3D
+		rb.freeze = true
+		rb.linear_velocity = Vector3.ZERO
+		rb.angular_velocity = Vector3.ZERO
+		return
 	if flap_node is SoftBody3D:
 		var soft := flap_node as SoftBody3D
 		var mesh := soft.mesh
@@ -2302,6 +2486,11 @@ func _move_flap_by(delta: Vector3) -> void:
 		return
 	if _grab_anchor:
 		_grab_anchor.global_position += delta
+	if flap_node is RigidBody3D:
+		var rb := flap_node as RigidBody3D
+		rb.freeze = true
+		rb.global_position += delta
+		return
 	if flap_node is SoftBody3D:
 		var soft := flap_node as SoftBody3D
 		var rid: RID = soft.get_physics_rid()
@@ -2316,6 +2505,8 @@ func _move_flap_by(delta: Vector3) -> void:
 
 
 func _unpin_flap() -> void:
+	if flap_node is RigidBody3D:
+		(flap_node as RigidBody3D).freeze = false
 	if flap_node is SoftBody3D:
 		var soft := flap_node as SoftBody3D
 		for i in _pinned_points:
@@ -2326,6 +2517,12 @@ func _unpin_flap() -> void:
 
 func _apply_flap_throw(vel: Vector3) -> void:
 	if flap_node == null or not is_instance_valid(flap_node):
+		return
+	if flap_node is RigidBody3D:
+		var rb := flap_node as RigidBody3D
+		rb.freeze = false
+		rb.linear_velocity = vel
+		rb.angular_velocity = vel.cross(Vector3.UP) * 0.6
 		return
 	if flap_node.has_method("end_hold"):
 		flap_node.call("end_hold", vel)
@@ -2340,6 +2537,39 @@ func _apply_flap_throw(vel: Vector3) -> void:
 			var imp := vel * 0.08
 			for i in n:
 				PhysicsServer3D.soft_body_apply_point_impulse(rid, i, imp)
+
+
+func _skin_split_dir(bind_hint: Vector3) -> Vector3:
+	## 切口左右唇的张开方向（绑定/腹局部空间）。
+	if _outer == null or _lip_left.size() < 2 or _lip_right.size() < 2:
+		return Vector3.ZERO
+	var n := mini(_lip_left.size(), _lip_right.size())
+	var best_i := int(n / 2)
+	var best_s := 1e9
+	for i in n:
+		var a: int = _lip_left[i]
+		var b: int = _lip_right[i]
+		if a < 0 or b < 0 or a >= _outer.vert_count() or b >= _outer.vert_count():
+			continue
+		var mid: Vector3 = (_outer.pos[a] + _outer.pos[b]) * 0.5
+		var s := mid.distance_squared_to(bind_hint)
+		if s < best_s:
+			best_s = s
+			best_i = i
+	var la: int = _lip_left[best_i]
+	var ra: int = _lip_right[best_i]
+	if la < 0 or ra < 0 or la >= _outer.vert_count() or ra >= _outer.vert_count():
+		return Vector3.ZERO
+	var side := _outer.pos[ra] - _outer.pos[la]
+	if side.length_squared() < 1e-10:
+		return Vector3.ZERO
+	# 转到腹局部，便于 pull uniform 使用。
+	var w0 := _approx_world_bind(_outer.pos[la])
+	var w1 := _approx_world_bind(_outer.pos[ra])
+	var d := _to_ab_delta(w1 - w0)
+	if d.length_squared() < 1e-10:
+		d = side
+	return d.normalized()
 
 
 func _to_ab_local(world_p: Vector3) -> Vector3:
@@ -2960,12 +3190,15 @@ func _update_preview_handles() -> void:
 	if pts.is_empty():
 		_handles.visible = false
 		return
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# 手柄与虚线一样用绑定空间 + 蒙皮，避免世界坐标再挂到骨骼上产生偏移。
+	var md := Geom.MeshData.new()
 	var r := 0.0045
 	for h in pts:
-		var w: Vector3 = _approx_world_bind(_handle_bind(str(h)))
-		# 简易八面体手柄。
+		var bind_p: Vector3 = _handle_bind(str(h))
+		var bn: Array = _approx_bind_and_normal(bind_p)
+		var w: Vector3 = bn[0]
+		var bones = bn[2]
+		var weights = bn[3]
 		var px := w + Vector3(r, 0, 0)
 		var nx := w + Vector3(-r, 0, 0)
 		var py := w + Vector3(0, r, 0)
@@ -2978,17 +3211,19 @@ func _update_preview_handles() -> void:
 				n = Vector3.UP
 			else:
 				n = n.normalized()
-			st.set_normal(n)
-			st.add_vertex(tri[0])
-			st.set_normal(n)
-			st.add_vertex(tri[1])
-			st.set_normal(n)
-			st.add_vertex(tri[2])
-	_handles.mesh = st.commit()
+			var ia := md.add_vert(tri[0], n, Vector2.ZERO, bones, weights)
+			var ib := md.add_vert(tri[1], n, Vector2.ZERO, bones, weights)
+			var ic := md.add_vert(tri[2], n, Vector2.ZERO, bones, weights)
+			md.add_face(ia, ib, ic)
+	_handles.mesh = md.to_array_mesh()
 	_parent_trail(_handles)
 	if _handles.get_parent() == _skel:
 		_handles.transform = Transform3D.IDENTITY
+		if _skin:
+			_handles.skin = _skin
+		_handles.skeleton = NodePath("..")
 	_handles.visible = true
+
 
 
 func _measure_evert_profile(md = null) -> Dictionary:

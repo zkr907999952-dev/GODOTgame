@@ -1,4 +1,5 @@
 extends SceneTree
+## 0.3.6 手术模式自检：预览与切口对齐、更浅更窄红线、独立刚体皮瓣、分身可上检查床并进入手术。
 ## 0.3.5 手术模式自检：弹孔贯穿设置默认关且仅特写可穿孔；腹腔不穿后腰；
 ## 直线/环状预览切割（松手不提交，按「切割」才切开并播手术刀动画）；
 ## 直线切口中重端轻外翻、两侧可拉开；环状切口可抓取独立皮瓣。保留 0.3.0–0.3.4 约定。
@@ -6,8 +7,8 @@ extends SceneTree
 ##     --rendering-method gl_compatibility --rendering-driver opengl3 \
 ##     -s res://scripts/tests/surgery_check.gd
 
-const VERSION_NAME := "0.3.5"
-const VERSION_CODE := 39
+const VERSION_NAME := "0.3.6"
+const VERSION_CODE := 40
 const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 
 var fails := 0
@@ -65,6 +66,7 @@ func _run() -> void:
 	_check_cannot_enter_off_bed()
 	await _check_enter_exit_and_t_key()
 	await _check_cavity_and_incision()
+	await _check_036_clone_bed_and_ring_align()
 
 	print("surgery_check: fails=", fails)
 	if fails == 0:
@@ -146,6 +148,11 @@ func _check_source_contracts() -> void:
 	_ok(sys.find("func _place_scalpel_on_path") >= 0, "confirm plays a scalpel animation along the preview path")
 	_ok(sys.find("func _bullet_holes_allowed") >= 0 and sys.find("cinematic") >= 0, "mesh perforation is gated on the setting and a 特写 shot")
 	_ok(geom.find("func lumbar_exterior_z") >= 0 and sys.find("func cavity_clears_lower_back") >= 0, "cavity lumbar clearance API exists")
+	_ok(sys.find("func preview_path_bind") >= 0 and sys.find("func committed_path_bind") >= 0, "preview / committed cut path APIs exist")
+	_ok(sys.find("const TRAIL_HALF_WIDTH := 0.0036") >= 0 or sys.find("TRAIL_HALF_WIDTH := 0.0036") >= 0, "red trail half-width constant is narrower than 0.3.5")
+	_ok(sys.find("flap_kind = \"rigid\"") >= 0 or sys.find('flap_kind = "rigid"') >= 0, "extracted flaps spawn as independent rigid bodies")
+	_ok(hud_src.find("放置分身") >= 0, "HUD has 放置分身 aim / proximity option")
+	_ok(root_src.find("func place_clone_on_bed") >= 0 and root_src.find("func can_toggle_surgery") >= 0, "clone can be placed on the exam bed and surgery can start on that clone")
 
 
 
@@ -417,6 +424,8 @@ func _check_cavity_and_incision() -> void:
 	if surgery.get("_outer"):
 		verts_before = int(surgery.get("_outer").vert_count())
 		faces_before = int(surgery.get("_outer").face_count())
+		# 尚未下刀：预览折线与嵌入切口必须重合（环状原先用第一张 XY 命中面，会偏）。
+		_check_preview_embed_align(surgery.get("_outer"))
 	var navel_b: Vector3 = surgery.call("_navel_world") if surgery.has_method("_navel_world") else player.global_position
 	# 旧手绘松手提交已取消：debug_freehand 现在只拉预览。
 	var preview_only := bool(surgery.call("debug_freehand_cut_from_navel"))
@@ -454,6 +463,15 @@ func _check_cavity_and_incision() -> void:
 	await _frames(3)
 	var cut_ok := bool(surgery.get("cut_open"))
 	_ok(cut_ok, "pressing 切割 commits the straight incision")
+	if surgery.has_method("preview_commit_deviation"):
+		var dev := float(surgery.call("preview_commit_deviation"))
+		_ok(dev <= 0.006, "straight cut lands on the dashed preview (max deviation %.4f)" % dev)
+		_ok(bool(surgery.call("preview_matches_commit", 0.006)), "straight preview path and committed cut coincide")
+	if surgery.has_method("trail_is_narrower_than_v035"):
+		_ok(bool(surgery.call("trail_is_narrower_than_v035")), "red incision line is narrower than 0.3.5")
+		_ok(float(surgery.call("trail_half_width")) <= 0.0045, "trail half-width is %.4f (0.3.5 was 0.0064)" % float(surgery.call("trail_half_width")))
+	if surgery.has_method("trail_is_lighter_than_v035"):
+		_ok(bool(surgery.call("trail_is_lighter_than_v035")), "red incision line is lighter than 0.3.5")
 	_ok(not bool(surgery.call("can_grab_flap")), "a straight cut is an open knife wound, not a closed flap")
 	if surgery.get("_outer"):
 		var changed := int(surgery.get("_outer").face_count()) != faces_before or int(surgery.get("_outer").vert_count()) != verts_before or int(surgery.get("lofted_tris")) > 0
@@ -526,7 +544,8 @@ func _check_cavity_and_incision() -> void:
 	_ok(peeled, "grab / peel removed the enclosed skin flap")
 	_ok(bool(surgery.get("flap_peeled")), "flap_peeled flag set")
 	var kind := str(surgery.call("flap_kind_shipped"))
-	_ok(kind == "softbody" or kind == "verlet", "flap uses SoftBody3D or Verlet fallback (got '%s')" % kind)
+	# 0.3.6：切下的皮瓣改为独立刚体（像空弹匣），不再用会异常拉伸的柔体。
+	_ok(kind == "rigid" or (surgery.has_method("flap_is_independent") and bool(surgery.call("flap_is_independent"))), "cut-off flap is an independent rigid entity (got '%s')" % kind)
 	var flap: Node = surgery.get("flap_node")
 	_ok(flap != null and is_instance_valid(flap), "flap node exists in the tree after peel")
 	_ok(str(player.get("occupancy")) == "exam_bed", "still on the exam bed after peel")
@@ -539,6 +558,9 @@ func _check_cavity_and_incision() -> void:
 	await _frames(2)
 	var c1: Vector3 = surgery.call("flap_centroid")
 	_ok(c1.distance_to(c0) > 0.02, "held flap moved with the grab (%s -> %s)" % [c0, c1])
+	if surgery.has_method("flap_stretch_ratio"):
+		var stretch := float(surgery.call("flap_stretch_ratio"))
+		_ok(stretch <= 1.35, "moved flap does not abnormally stretch (ratio=%.3f)" % stretch)
 	_ok(bool(surgery.call("flap_is_held")), "flap is held while 拿取 is dragging it")
 	_ok(bool(surgery.call("debug_throw_flap", Vector3(0.6, 0.4, 0.2))), "releasing the flap throws it with residual velocity")
 	_ok(float(surgery.call("flap_throw_speed")) > 0.05, "throw speed is recorded (%.3f)" % float(surgery.call("flap_throw_speed")))
@@ -657,3 +679,107 @@ func _check_cavity_and_incision() -> void:
 			if settings.has_method("set_bullet_hole_penetrate"):
 				settings.call("set_bullet_hole_penetrate", false)
 			bcam.set("debug_roll", -1.0)
+
+
+func _path_poly_deviation(a: PackedVector3Array, b: PackedVector3Array) -> float:
+	## 两条折线的最大偏离（点到对折线段的距离），不按下标一一对应。
+	if a.size() < 2 or b.size() < 2:
+		return 1e9
+	var worst := 0.0
+	for p in a:
+		worst = maxf(worst, _dist_point_poly(p, b))
+	for p2 in b:
+		worst = maxf(worst, _dist_point_poly(p2, a))
+	return worst
+
+
+func _dist_point_poly(p: Vector3, poly: PackedVector3Array) -> float:
+	var best := 1e9
+	for i in range(poly.size() - 1):
+		best = minf(best, _dist_point_seg(p, poly[i], poly[i + 1]))
+	best = minf(best, _dist_point_seg(p, poly[poly.size() - 1], poly[0]))
+	return best
+
+
+func _dist_point_seg(p: Vector3, a: Vector3, b: Vector3) -> float:
+	var ab := b - a
+	var l2 := ab.length_squared()
+	if l2 <= 1e-12:
+		return p.distance_to(a)
+	var t := clampf((p - a).dot(ab) / l2, 0.0, 1.0)
+	return p.distance_to(a + ab * t)
+
+
+func _check_preview_embed_align(md) -> void:
+	## 在尚未下刀的腹网上，环状/直线预览路径与 embed 后的切口应重合。
+	if md == null:
+		_ok(false, "abdomen mesh available for preview/embed alignment")
+		return
+	var navel_r: Vector3 = surgery.get("_navel_rest") if surgery.get("_navel_rest") != null else Vector3(0, 1.06, 0.11)
+	var rpath: PackedVector3Array = Geom.oval_path_on_mesh(md, navel_r, 0.028, 0.022, 24)
+	if rpath.size() >= 3:
+		var md_r = md.clone()
+		var ids: PackedInt32Array = Geom.embed_path(md_r, rpath)
+		var epts := PackedVector3Array()
+		for id in ids:
+			if id >= 0 and id < md_r.vert_count():
+				epts.append(md_r.pos[id])
+		var worst := _path_poly_deviation(rpath, epts)
+		_ok(ids.size() >= 3 and worst <= 0.006, "ring preview path and embedded cut coincide (dev=%.4f)" % worst)
+	else:
+		_ok(false, "ring preview path could be built on the abdomen mesh")
+	var a: Vector3 = navel_r + Vector3(-0.025, 0.008, 0.0)
+	var b: Vector3 = navel_r + Vector3(0.025, -0.008, 0.0)
+	var lpath: PackedVector3Array = Geom.line_path_on_mesh(md, a, b, 12)
+	if lpath.size() >= 2:
+		var md2 = md.clone()
+		var ids2: PackedInt32Array = Geom.embed_path(md2, lpath)
+		var e2 := PackedVector3Array()
+		for id2 in ids2:
+			if id2 >= 0 and id2 < md2.vert_count():
+				e2.append(md2.pos[id2])
+		var worst2 := _path_poly_deviation(lpath, e2)
+		_ok(ids2.size() >= 2 and worst2 <= 0.006, "straight preview segment and embedded cut coincide (dev=%.4f)" % worst2)
+	else:
+		_ok(false, "straight preview path could be built on the abdomen mesh")
+
+
+func _check_036_clone_bed_and_ring_align() -> void:
+	## 对准检查床可放置分身，靠近后可对分身进入手术（预览/嵌入对齐已在下刀前检查）。
+	# 玩家离开检查床后，对准床放置分身，再靠近进入手术。
+	if vs and vs.get("occupied"):
+		vs.call("try_exit")
+		await _frames(6)
+		await _phys(2)
+	_ok(str(player.get("occupancy")) != "exam_bed", "player left the exam bed before placing a clone")
+	var bed := _find_exam_bed()
+	_ok(bed != null, "exam bed available for 放置分身")
+	if bed == null or not main.has_method("place_clone_on_bed"):
+		return
+	player.global_position = bed.global_position + Vector3(1.3, 0.1, 0.0)
+	if vs.has_method("_update_nearest"):
+		vs.call("_update_nearest")
+	_ok(bool(main.call("can_place_clone_on_bed", bed)), "aiming / standing at an empty exam bed offers 放置分身")
+	var msg: String = str(main.call("place_clone_on_bed", bed))
+	await _frames(8)
+	await _phys(4)
+	var clone: Node = main.call("clone_on_nearby_bed") if main.has_method("clone_on_nearby_bed") else null
+	_ok(clone != null, "tapping 放置分身 puts a clone on the exam bed (%s)" % msg)
+	if clone:
+		_ok(bool(clone.call("is_on_exam_bed")), "clone is using the exam bed pose")
+		_ok(str(clone.get("occupancy")) == "exam_bed", "clone occupancy is exam_bed")
+	player.global_position = bed.global_position + Vector3(1.3, 0.1, 0.0)
+	if vs.has_method("_update_nearest"):
+		vs.call("_update_nearest")
+	_ok(bool(main.call("can_toggle_surgery")), "approaching a clone on the exam bed can start surgery")
+	_ok(str(main.call("action_for_key", KEY_T, "control")) == "surgery_toggle", "T starts surgery when a clone is on the nearby exam bed")
+	_ok(bool(main.call("toggle_surgery")), "surgery starts on the clone lying on the exam bed")
+	await _frames(4)
+	var cs = main.call("surgery_system_of") if main.has_method("surgery_system_of") else null
+	_ok(cs != null and bool(cs.call("is_active")), "surgery mode is active on the bedded clone")
+	if cs and cs.has_method("exit_surgery"):
+		cs.call("exit_surgery")
+	if clone and clone.has_method("leave_exam_bed"):
+		clone.call("leave_exam_bed")
+
+

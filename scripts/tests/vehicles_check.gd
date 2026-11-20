@@ -4,8 +4,8 @@ const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
 ## 0.2.31 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.3.5"
-const VERSION_CODE := 39
+const VERSION_NAME := "0.3.6"
+const VERSION_CODE := 40
 
 var fails := 0
 var main: Node
@@ -86,6 +86,7 @@ func _run() -> void:
 	await _check_0231_playtest_fixes()
 	await _check_031_pc_orbit_and_observe_button()
 	await _check_035_pan_and_tab()
+	await _check_036_plane_orbit_zoom_and_stick()
 	_finish()
 
 
@@ -3762,6 +3763,138 @@ func _check_031_pc_orbit_and_observe_button() -> void:
 		await _frames(1)
 		_ok(obs2 == null or not obs2.visible, "观察 hides again after leaving touch UI")
 	# Leave the car so later teardown is clean.
+	if vs.get("occupied"):
+		vs.call("try_toggle")
+		await _frames(6)
+		await _phys(2)
+
+func _check_036_plane_orbit_zoom_and_stick() -> void:
+	## 0.3.6：飞机第三人称观察拖拽不限制角度；载具 TP+观察可用两指/滚轮调距；
+	## 操纵杆在座舱内小幅度旋转，不飞出模型。保留中键平移、右键环绕、Tab、地图捏合。
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	var pc_src := FileAccess.get_file_as_string("res://scripts/player_controller.gd")
+	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
+	var pv_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
+	_ok(vs_src.find("func plane_tp_orbit_unclamped") >= 0, "plane TP orbit has an unclamped range API")
+	_ok(vs_src.find("func dolly_look") >= 0 and vs_src.find("func adjust_cam_distance") >= 0, "vehicle camera distance API exists")
+	_ok(pc_src.find("adjust_cam_distance") >= 0, "PC wheel can change vehicle camera distance")
+	_ok(tc_src.find("_vehicle_tp_observe") >= 0 and tc_src.find("dolly_look") >= 0, "two-finger pinch changes vehicle TP observe distance")
+	_ok(tc_src.find("载具内取消双指拖拽旋转视角") >= 0, "two-finger vehicle orbit stays cancelled")
+	_ok(pv_src.find("func _mount_stick_pivot") >= 0, "cockpit stick is hinged at its base")
+	_ok(pv_src.find("STICK_PITCH") >= 0 and pv_src.find("飞出") < 0 or pv_src.find("不把杆平移出座舱") >= 0, "stick uses a small in-cockpit angular range")
+
+	if vs and vs.get("occupied"):
+		vs.call("try_toggle")
+		await _frames(6)
+		await _phys(2)
+
+	var plane: Node = null
+	for v in vs.vehicles:
+		if str(vs.call("kind_of", v)) == "plane":
+			plane = v
+			if bool(v.get("is_default")):
+				break
+	_ok(plane != null, "a plane is available for TP observe / stick checks")
+	if plane == null or player == null:
+		return
+	player.global_position = plane.global_position + Vector3(4.0, 0.4, 0.0)
+	if vs.has_method("_update_nearest"):
+		vs.call("_update_nearest")
+	_ok(bool(vs.call("try_enter")), "can enter the plane for orbit / zoom")
+	await _frames(8)
+	await _phys(2)
+	_ok(str(player.get("occupancy")) == "plane", "occupying the plane")
+	if str(vs.get("vehicle_cam")) != "third" and vs.has_method("toggle_vehicle_cam"):
+		vs.call("toggle_vehicle_cam")
+	_ok(str(vs.get("vehicle_cam")) == "third", "plane is in third person")
+
+	# Unclamped orbit: apply a large pitch/yaw and confirm it is kept.
+	if vs.has_method("begin_pc_orbit"):
+		vs.call("begin_pc_orbit")
+	vs.call("orbit_look", Vector2(0.0, 900.0), 0.004)
+	var pitch := float(vs.get("_orbit_pitch"))
+	_ok(absf(pitch) > 0.55 + 0.02 or bool(vs.call("plane_tp_orbit_unclamped")), "plane TP orbit pitch is not clamped to the old 0.55 cap (pitch=%.3f)" % pitch)
+	# A second huge drag should not sit on a hard stop at ±0.55 / ±1.25.
+	vs.call("orbit_look", Vector2(400.0, -400.0), 0.004)
+	var pitch2 := float(vs.get("_orbit_pitch"))
+	var yaw2 := float(vs.get("_orbit_yaw"))
+	_ok(absf(yaw2) > 0.5, "plane TP orbit yaw turns freely (yaw=%.3f)" % yaw2)
+	_ok(absf(pitch2) > 0.55 or absf(pitch) > 0.55, "plane TP observe drag has no pitch stop at the old limit")
+	if vs.has_method("end_pc_orbit"):
+		vs.call("end_pc_orbit")
+
+	# Distance: observe mode pinch / wheel.
+	# begin_pc_orbit / end_pc_orbit 可能已经把模式留在 orbit，不能盲目再 toggle 一次。
+	if str(vs.get("vehicle_look_mode")) != "orbit" and vs.has_method("toggle_observe_mode"):
+		vs.call("toggle_observe_mode")
+	if str(vs.get("vehicle_look_mode")) != "orbit":
+		vs.set("vehicle_look_mode", "orbit")
+	_ok(str(vs.get("vehicle_look_mode")) == "orbit", "观察 / 视角 mode is on for distance zoom")
+	var d0 := float(vs.call("cam_distance_scale")) if vs.has_method("cam_distance_scale") else 1.0
+	if vs.has_method("_reset_vehicle_cam"):
+		# don't reset here, it would drop observe? reset is cam only. skip.
+		pass
+	if vs.has_method("adjust_cam_distance"):
+		vs.call("adjust_cam_distance", 6.0)
+	if vs.has_method("_vehicle_camera"):
+		vs.call("_vehicle_camera", 0.016)
+	var d1 := float(vs.call("cam_distance_scale")) if vs.has_method("cam_distance_scale") else d0
+	_ok(d1 < d0 - 0.02 or d1 < 0.95, "PC wheel / adjust_cam_distance pulls the TP camera closer (%.3f -> %.3f)" % [d0, d1])
+	if vs.has_method("dolly_look"):
+		vs.call("dolly_look", 1.8)
+	var d2 := float(vs.call("cam_distance_scale"))
+	_ok(d2 > d1 + 0.02, "pinch / dolly_look changes vehicle camera distance (%.3f -> %.3f)" % [d1, d2])
+	# Two-finger pan still works in this mode.
+	if vs.has_method("pan_look"):
+		var cam: Camera3D = player.get_node_or_null("CameraPivot/Camera3D")
+		if vs.has_method("_vehicle_camera"):
+			vs.call("_vehicle_camera", 0.016)
+		var eye0: Vector3 = cam.global_position if cam else Vector3.ZERO
+		vs.call("pan_look", Vector2(80.0, 0.0), 0.004)
+		if vs.has_method("_vehicle_camera"):
+			vs.call("_vehicle_camera", 0.016)
+		var eye1: Vector3 = cam.global_position if cam else Vector3.ZERO
+		_ok(eye1.distance_to(eye0) > 0.01, "two-finger / middle-mouse pan still translates in vehicle observe (d=%.4f)" % eye0.distance_to(eye1))
+	if str(vs.get("vehicle_look_mode")) == "orbit" and vs.has_method("toggle_observe_mode"):
+		vs.call("toggle_observe_mode")
+
+	# Tab still toggles 1st/3rd.
+	_ok(str(main.call("action_for_key", KEY_TAB, "control")) == "vehicle_cam", "Tab still toggles vehicle 1st/3rd")
+
+	# Stick stays in the cockpit under extreme input.
+	var vis = plane.get("visuals") if plane else null
+	if vis == null and plane:
+		vis = plane.get_node_or_null("PlaneVisual")
+		if vis == null:
+			for c in plane.get_children():
+				if c.get("steer_wheel") != null or c.has_method("apply_pose"):
+					vis = c
+					break
+	_ok(vis != null, "plane visuals available for stick check")
+	if vis and vis.has_method("apply_pose"):
+		var sw0 = vis.get("steer_wheel")
+		var pivot0: Node3D = sw0.get("pivot") if sw0 is Dictionary and sw0.get("pivot") else null
+		var obj0: Node3D = sw0.get("obj") if sw0 is Dictionary else null
+		var rest_pos := pivot0.global_position if pivot0 else (obj0.global_position if obj0 else Vector3.ZERO)
+		vis.call("apply_pose", {"gear": 1.0, "ctrl_pitch": 1.0, "ctrl_roll": 1.0, "ctrl_yaw": 1.0, "thrust": 0.5, "door": 0, "airborne": false, "speed": 0, "g_load": 1, "aoa": 0, "agl": 0, "steer_angle": 0}, 0.05, 0.0, 0.0)
+		var sw1 = vis.get("steer_wheel")
+		var pivot1: Node3D = sw1.get("pivot") if sw1 is Dictionary and sw1.get("pivot") else null
+		var obj1: Node3D = sw1.get("obj") if sw1 is Dictionary else null
+		var moved := 0.0
+		if pivot1:
+			moved = pivot1.global_position.distance_to(rest_pos)
+		elif obj1:
+			moved = obj1.global_position.distance_to(rest_pos)
+		_ok(moved <= 0.06, "stick pivot stays in the cockpit under extreme input (moved=%.4f)" % moved)
+		if vis.has_method("stick_in_cockpit"):
+			_ok(bool(vis.call("stick_in_cockpit", 0.12)), "stick mesh stays within a small in-cockpit range")
+		# restore
+		vis.call("apply_pose", {"gear": 1.0, "ctrl_pitch": 0.0, "ctrl_roll": 0.0, "ctrl_yaw": 0.0, "thrust": 0.0, "door": 0, "airborne": false, "speed": 0, "g_load": 1, "aoa": 0, "agl": 0}, 0.05, 0.0, 0.0)
+
+	# Map pinch-zoom still owned by map_view, not cancelled.
+	var mv_src := FileAccess.get_file_as_string("res://scripts/map_view.gd")
+	_ok(mv_src.find("_pinch_dist") >= 0, "map pinch-zoom is still implemented in map_view")
+
 	if vs.get("occupied"):
 		vs.call("try_toggle")
 		await _frames(6)

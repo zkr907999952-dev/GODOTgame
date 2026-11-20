@@ -298,16 +298,27 @@ func get_surgery() -> Node:
 	return _surgery
 
 
+func active_surgery() -> Node:
+	var g := get_parent()
+	if g and g.has_method("surgery_system_of"):
+		var s: Node = g.call("surgery_system_of")
+		if s:
+			return s
+	return _surgery
+
+
 func surgery_look_locked() -> bool:
-	if _surgery == null or not _surgery.has_method("look_locked"):
+	var s := active_surgery()
+	if s == null or not s.has_method("look_locked"):
 		return false
-	return bool(_surgery.call("look_locked"))
+	return bool(s.call("look_locked"))
 
 
 func surgery_look_enabled() -> bool:
-	if _surgery == null or not _surgery.has_method("look_enabled"):
+	var s := active_surgery()
+	if s == null or not s.has_method("look_enabled"):
 		return false
-	return bool(_surgery.call("look_enabled"))
+	return bool(s.call("look_enabled"))
 
 
 func get_organs() -> Node:
@@ -812,11 +823,12 @@ func pick_interact_rig(origin: Vector3, dir: Vector3) -> Node:
 ## 目标可以是本体或任意分身（第一人称下用准星射线）。
 func _try_begin_interact(screen: Vector2) -> bool:
 	_last_interact_via_navel = false
-	if _surgery and bool(_surgery.call("is_active")):
-		if not bool(_surgery.call("has_tool")):
+	var surg := active_surgery()
+	if surg and bool(surg.call("is_active")):
+		if not bool(surg.call("has_tool")):
 			return false
 		var ray: Array = _screen_ray(screen)
-		if bool(_surgery.call("begin_stroke", ray[0], ray[1])):
+		if bool(surg.call("begin_stroke", ray[0], ray[1])):
 			_interact_held = true
 			_interact_screen = screen
 			return true
@@ -995,8 +1007,9 @@ func _update_interact_drag(screen: Vector2) -> void:
 
 
 func _end_interact() -> void:
-	if _surgery and bool(_surgery.call("is_active")):
-		_surgery.call("end_stroke")
+	var surg_end := active_surgery()
+	if surg_end and bool(surg_end.call("is_active")):
+		surg_end.call("end_stroke")
 		_interact_held = false
 		return
 	var rig := _interact_target if is_instance_valid(_interact_target) else _organs
@@ -1835,6 +1848,11 @@ func touch_pan(rel: Vector2) -> void:
 
 ## 双指捏合：scale = 旧间距 / 新间距（网页 dollyCam）
 func touch_dolly(scale: float) -> void:
+	var vs := _vehicle_system_node()
+	if vs and vs.has_method("is_drive_third") and bool(vs.call("is_drive_third")):
+		if vs.has_method("is_observe_orbit") and bool(vs.call("is_observe_orbit")) and vs.has_method("dolly_look"):
+			vs.call("dolly_look", scale)
+			return
 	_tp_dist_goal = clampf(_tp_dist_goal * scale, camera_distance_min, camera_distance_max)
 
 
@@ -2013,6 +2031,16 @@ func _try_handle_observe_wheel(event: InputEvent) -> bool:
 		return false
 	var dir := 1.0 if mb.button_index == MOUSE_BUTTON_WHEEL_UP else -1.0
 	var steps := dir * maxf(1.0, mb.factor if mb.factor > 0.0 else 1.0)
+	# 载具第三人称：滚轮调追逐镜头距离。手机「观察」打开时、电脑第三人称均可。
+	# 不得改 FOV，也不要打断地图捏合（地图开着时载具相机本就不接管）。
+	var vs := _vehicle_system_node()
+	if vs and vs.has_method("is_drive_third") and bool(vs.call("is_drive_third")):
+		var observe := vs.has_method("is_observe_orbit") and bool(vs.call("is_observe_orbit"))
+		if observe or not _is_touch_ui_mode():
+			if vs.has_method("adjust_cam_distance"):
+				vs.call("adjust_cam_distance", steps)
+				get_viewport().set_input_as_handled()
+				return true
 	# Wheel always dollies distance to the look-at / follow center.
 	# It must not change FOV in observation or character view.
 	_tp_dolly(steps)

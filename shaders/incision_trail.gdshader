@@ -7,7 +7,11 @@ render_mode blend_mix, depth_draw_always, cull_disabled, diffuse_burley, specula
 uniform vec3 surgery_pull_p = vec3(0.0);
 uniform vec3 surgery_pull_off = vec3(0.0);
 uniform float surgery_pull_r = 0.0;
-uniform float surface_lift = 0.0018;
+uniform float surface_lift = 0.0016;
+// 0.3.6：比 0.3.5 更浅、更淡的红色涂鸦。脚本 TRAIL_COLOR_* 与此保持一致。
+uniform vec3 trail_color_deep = vec3(0.78, 0.32, 0.32);
+uniform vec3 trail_color_bright = vec3(1.0, 0.58, 0.55);
+uniform float trail_alpha = 0.72;
 
 vec3 surgery_pull_offset(vec3 l) {
 	if (surgery_pull_r < 1e-5) return vec3(0.0);
@@ -30,12 +34,10 @@ void vertex() {
 void fragment() {
 	float across = 1.0 - abs(UV.y * 2.0 - 1.0);
 	float soft = smoothstep(0.0, 0.62, across);
-	vec3 deep = vec3(0.38, 0.02, 0.03);
-	vec3 bright = vec3(0.95, 0.12, 0.10);
-	ALBEDO = mix(deep, bright, pow(soft, 0.7));
-	ROUGHNESS = 0.42;
+	ALBEDO = mix(trail_color_deep, trail_color_bright, pow(soft, 0.7));
+	ROUGHNESS = 0.48;
 	METALLIC = 0.0;
 	float ends = smoothstep(0.0, 0.07, UV.x) * smoothstep(1.0, 0.93, UV.x);
 	ends = max(ends, 0.72);
-	ALPHA = mix(0.18, 0.96, pow(soft, 1.05)) * ends;
+	ALPHA = mix(0.12, trail_alpha, pow(soft, 1.05)) * ends;
 }

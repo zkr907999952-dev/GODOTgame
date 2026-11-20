@@ -57,7 +57,7 @@ func setup() -> bool:
 	_bind_canopy()
 	var steer := VehicleCommon.first_named(wrap, "steeringwheel")
 	if steer is Node3D:
-		steer_wheel = {"obj": steer, "rest": (steer as Node3D).quaternion, "axis": VehicleCommon.local_thin_axis(steer as Node3D)}
+		steer_wheel = _mount_stick_pivot(steer as Node3D)
 	VehicleCommon.make_glass(wrap, "window_lf|door_dside_f", 0.1)
 	_attach_exhausts()
 	vapor = PlaneVaporScript.new()
@@ -476,6 +476,85 @@ static func petal_gap(thrust: float) -> float:
 	return lerpf(-0.28, 0.0, u / 0.4)
 
 
+func _mount_stick_pivot(stick: Node3D) -> Dictionary:
+	## 操纵杆网格原点往往不在底座，直接改 quaternion 会把杆身甩出座舱。
+	## 在杆的长轴底端建一个铰链，只做小幅度俯仰/滚转，不再平移。
+	var box := AABB()
+	var any := false
+	var xform_to := stick.global_transform.affine_inverse()
+	for n in stick.find_children("*", "MeshInstance3D", true, false):
+		var mi := n as MeshInstance3D
+		if mi == null or mi.mesh == null:
+			continue
+		if mi.mesh.get_surface_count() < 1:
+			continue
+		var arr := mi.mesh.surface_get_arrays(0)
+		if arr.is_empty() or arr[Mesh.ARRAY_VERTEX] == null:
+			continue
+		var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var xf := xform_to * mi.global_transform
+		var step := maxi(1, verts.size() / 280)
+		var i := 0
+		while i < verts.size():
+			var p: Vector3 = xf * verts[i]
+			if not any:
+				box = AABB(p, Vector3.ZERO)
+				any = true
+			else:
+				box = box.expand(p)
+			i += step
+	if not any:
+		box = AABB(Vector3.ZERO, Vector3(0.02, 0.08, 0.02))
+	var size := box.size
+	var axis := "y"
+	if size.x >= size.y and size.x >= size.z:
+		axis = "x"
+	elif size.z >= size.x and size.z >= size.y:
+		axis = "z"
+	# 底座取长轴更靠近机身下方 / 后方的一端（局部 y 更小，其次 z 更大/靠后）。
+	var base_local := box.get_center()
+	if axis == "y":
+		base_local.y = box.position.y
+	elif axis == "x":
+		base_local.x = box.position.x if absf(box.position.x) < absf(box.position.x + box.size.x) else box.position.x + box.size.x
+	else:
+		base_local.z = box.position.z + box.size.z
+	var pivot := Node3D.new()
+	pivot.name = "StickPivot"
+	var parent := stick.get_parent()
+	var stick_xf := stick.global_transform
+	if parent:
+		parent.add_child(pivot)
+	else:
+		wrap.add_child(pivot)
+	pivot.global_position = stick.to_global(base_local)
+	pivot.global_basis = stick.global_basis
+	VehicleCommon.reparent_keep_global(stick, pivot)
+	stick.global_transform = stick_xf
+	return {
+		"obj": stick,
+		"pivot": pivot,
+		"rest": pivot.quaternion,
+		"axis": axis,
+		"base": base_local,
+	}
+
+
+func stick_in_cockpit(max_offset: float = 0.08) -> bool:
+	if steer_wheel.is_empty():
+		return false
+	var sw: Node3D = steer_wheel.get("obj")
+	var pivot: Node3D = steer_wheel.get("pivot")
+	if sw == null or not is_instance_valid(sw):
+		return false
+	# 杆身仍应靠近铰链，不能飞出模型。
+	var origin: Vector3 = pivot.global_position if pivot else sw.global_position
+	var box := VehicleCommon.aabb_in(wrap, sw)
+	var cx := Vector3(float(box["cx"]), float(box["cy"]), float(box["cz"]))
+	var world_c := wrap.to_global(cx) if wrap else cx
+	return origin.distance_to(world_c) <= max_offset + 0.25
+
+
 func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0) -> void:
 	if not ready_ok:
 		return
@@ -591,9 +670,13 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 		aim.position = Vector3((tx + bx) * 0.5, (ty + by) * 0.5, float(eng["throat_z"]))
 		aim.quaternion = top.obj.quaternion.slerp(bot.obj.quaternion, 0.5)
 	if not steer_wheel.is_empty():
-		var sw: Node3D = steer_wheel["obj"]
-		var e := Vector3(-pitch_c * 0.22, 0.0, roll_c * 0.2)
-		sw.quaternion = steer_wheel["rest"] * Quaternion.from_euler(e)
+		# 小幅度角度跟随俯仰/滚转输入，只转铰链，不把杆平移出座舱。
+		const STICK_PITCH := 0.18  # ≈10°
+		const STICK_ROLL := 0.16
+		var e := Vector3(-pitch_c * STICK_PITCH, yaw_c * 0.06, roll_c * STICK_ROLL)
+		var target: Node3D = steer_wheel["pivot"] if steer_wheel.get("pivot") else steer_wheel["obj"]
+		if target:
+			target.quaternion = steer_wheel["rest"] * Quaternion.from_euler(e)
 	for fx in exhausts:
 		(fx as JetExhaust).apply(thrust, time, altitude, delta)
 	if vapor:

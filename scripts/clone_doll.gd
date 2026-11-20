@@ -28,11 +28,14 @@ var hit_react: Node
 var body_hit: StaticBody3D
 var spawn_map: String = "room"
 var _map_visible: bool = true
+var on_exam_bed: Node = null
+var occupancy: String = ""
 
 
 func _ready() -> void:
 	add_to_group("wound_body")
 	add_to_group("health_body")
+	add_to_group("clone_dolls")
 	var hit := StaticBody3D.new()
 	hit.name = "BodyHit"
 	hit.collision_layer = 2
@@ -233,7 +236,75 @@ func _sync_from_source() -> void:
 			sec.set(k, ssec.get(k))
 
 
+func is_on_exam_bed() -> bool:
+	return on_exam_bed != null and is_instance_valid(on_exam_bed)
+
+
+func get_loco() -> Node:
+	return loco
+
+
+func place_on_exam_bed(bed: Node) -> bool:
+	if bed == null or is_dead():
+		return false
+	if on_exam_bed and is_instance_valid(on_exam_bed) and on_exam_bed != bed:
+		leave_exam_bed()
+	on_exam_bed = bed
+	occupancy = "exam_bed"
+	if bed.has_method("set_patient"):
+		bed.call("set_patient", self)
+	elif bed.has_method("on_enter"):
+		bed.call("on_enter", self)
+	_apply_bed_pose(0.016)
+	return true
+
+
+func leave_exam_bed() -> void:
+	var bed := on_exam_bed
+	on_exam_bed = null
+	occupancy = ""
+	if bed and is_instance_valid(bed):
+		if bed.has_method("on_exit"):
+			bed.call("on_exit", self)
+		elif bed.get("patient") == self:
+			bed.set("patient", null)
+			bed.set("occupied", false)
+	if loco:
+		loco.set("frozen", false)
+	if skeleton:
+		var ExamPose = preload("res://scripts/vehicles/exam_pose.gd")
+		ExamPose.clear(skeleton)
+	if has_node("Body"):
+		var body: Node3D = get_node("Body")
+		body.position = Vector3.ZERO
+		body.rotation = Vector3.ZERO
+
+
+func _vehicle_system() -> Node:
+	var n: Node = get_parent()
+	while n:
+		if n.get("vehicle_system") != null:
+			return n.get("vehicle_system")
+		n = n.get_parent()
+	var tree := get_tree()
+	if tree:
+		return tree.root.find_child("VehicleSystem", true, false)
+	return null
+
+
+func _apply_bed_pose(delta: float) -> void:
+	if not is_on_exam_bed():
+		return
+	var vs := _vehicle_system()
+	if vs and vs.has_method("apply_patient_pose"):
+		vs.call("apply_patient_pose", self, on_exam_bed, delta)
+
+
 func _physics_process(delta: float) -> void:
+	if is_on_exam_bed() and not is_dead():
+		_sync_from_source()
+		_apply_bed_pose(delta)
+		return
 	if is_dead():
 		_sync_from_source()
 		if loco:

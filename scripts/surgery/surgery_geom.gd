@@ -377,10 +377,17 @@ static func _point_in_tri_2d(p: Vector2, a: Vector2, b: Vector2, c: Vector2) -> 
 
 static func insert_point_in_mesh(md: MeshData, p2: Vector2, p3_hint: Vector3 = Vector3.INF) -> int:
 	## 在 2D 投影里把点插进某个三角，返回顶点索引。已有近点则复用。
+	## 复用顶点必须在三维上也足够近；选三角时与 _project_to_mesh 一样，
+	## 在所有覆盖该 XY 的面里取离 p3_hint 最近的一张，避免预览和真正切口错位。
+	var has_hint := p3_hint.x < 1e8
 	var best_i := -1
-	var best_d := 0.0008 * 0.0008
+	var best_d := (0.00035 * 0.00035) if has_hint else (0.00045 * 0.00045)
 	for i in md.vert_count():
-		var d := _v2(md.pos[i]).distance_squared_to(p2)
+		var d: float
+		if has_hint:
+			d = md.pos[i].distance_squared_to(p3_hint)
+		else:
+			d = _v2(md.pos[i]).distance_squared_to(p2)
 		if d < best_d:
 			best_d = d
 			best_i = i
@@ -391,40 +398,56 @@ static func insert_point_in_mesh(md: MeshData, p2: Vector2, p3_hint: Vector3 = V
 	var fa := 0
 	var fb := 0
 	var fc := 0
+	var best_s := 1e9
 	for f in md.face_count():
 		var a := md.idx[f * 3]
 		var b := md.idx[f * 3 + 1]
 		var c := md.idx[f * 3 + 2]
 		var ba := _bary_2d(p2, _v2(md.pos[a]), _v2(md.pos[b]), _v2(md.pos[c]))
 		if ba.x >= -1e-4 and ba.y >= -1e-4 and ba.z >= -1e-4:
-			found = f
-			bary = ba
-			fa = a
-			fb = b
-			fc = c
-			break
+			var got: Vector3 = md.pos[a] * ba.x + md.pos[b] * ba.y + md.pos[c] * ba.z
+			var s := got.distance_squared_to(p3_hint) if has_hint else got.distance_squared_to(Vector3(p2.x, p2.y, got.z))
+			if s < best_s:
+				best_s = s
+				found = f
+				bary = ba
+				fa = a
+				fb = b
+				fc = c
 	if found < 0:
-		# 最近三角的投影。
-		var best_s := 1e9
+		# 最近三角的投影：有三维提示时按 3D 距离，否则按 XY 重心。
+		best_s = 1e9
 		for f2 in md.face_count():
 			var a2 := md.idx[f2 * 3]
 			var b2 := md.idx[f2 * 3 + 1]
 			var c2 := md.idx[f2 * 3 + 2]
-			var cen := (_v2(md.pos[a2]) + _v2(md.pos[b2]) + _v2(md.pos[c2])) / 3.0
-			var s := cen.distance_squared_to(p2)
-			if s < best_s:
-				best_s = s
+			var ba2 := _bary_2d(p2, _v2(md.pos[a2]), _v2(md.pos[b2]), _v2(md.pos[c2]))
+			var bx := maxf(ba2.x, 0.0)
+			var by := maxf(ba2.y, 0.0)
+			var bz := maxf(ba2.z, 0.0)
+			var sm := bx + by + bz
+			if sm > EPS:
+				bx /= sm
+				by /= sm
+				bz /= sm
+			else:
+				bx = 1.0 / 3.0
+				by = 1.0 / 3.0
+				bz = 1.0 / 3.0
+			var got2: Vector3 = md.pos[a2] * bx + md.pos[b2] * by + md.pos[c2] * bz
+			var s2: float
+			if has_hint:
+				s2 = got2.distance_squared_to(p3_hint)
+			else:
+				var cen := (_v2(md.pos[a2]) + _v2(md.pos[b2]) + _v2(md.pos[c2])) / 3.0
+				s2 = cen.distance_squared_to(p2)
+			if s2 < best_s:
+				best_s = s2
 				found = f2
 				fa = a2
 				fb = b2
 				fc = c2
-				bary = _bary_2d(p2, _v2(md.pos[fa]), _v2(md.pos[fb]), _v2(md.pos[fc]))
-				bary.x = maxf(bary.x, 0.0)
-				bary.y = maxf(bary.y, 0.0)
-				bary.z = maxf(bary.z, 0.0)
-				var sm := bary.x + bary.y + bary.z
-				if sm > EPS:
-					bary /= sm
+				bary = Vector3(bx, by, bz)
 	if found < 0:
 		return -1
 	# 用三维重心插值，保证点落在原来的曲面上。
@@ -989,30 +1012,13 @@ static func ray_hit_mesh(md: MeshData, posed: PackedVector3Array, origin: Vector
 
 static func oval_path_on_mesh(md: MeshData, center: Vector3, rx: float, ry: float, steps: int = 24) -> PackedVector3Array:
 	## 在腹前用绑定空间 XY 椭圆取样，再投影到网格表面，生成闭合路径。
+	## 投影与 line_path_on_mesh / _project_to_mesh 相同：在覆盖该 XY 的面里取离提示点最近的一张，
+	## 避免环状预览落在第一张 XY 命中面上、嵌入却贴到另一层而错位。
 	var path := PackedVector3Array()
 	for i in steps:
 		var ang := TAU * float(i) / float(steps)
-		var p2 := Vector2(center.x + cos(ang) * rx, center.y + sin(ang) * ry)
-		# 找包含该 2D 点的三角并取 3D。
-		var got := Vector3(p2.x, p2.y, center.z)
-		var found := false
-		for f in md.face_count():
-			var a := md.pos[md.idx[f * 3]]
-			var b := md.pos[md.idx[f * 3 + 1]]
-			var c := md.pos[md.idx[f * 3 + 2]]
-			var bary := _bary_2d(p2, _v2(a), _v2(b), _v2(c))
-			if bary.x >= -1e-3 and bary.y >= -1e-3 and bary.z >= -1e-3:
-				got = a * bary.x + b * bary.y + c * bary.z
-				found = true
-				break
-		if not found:
-			var best_s := 1e9
-			for j in md.vert_count():
-				var s := _v2(md.pos[j]).distance_squared_to(p2)
-				if s < best_s:
-					best_s = s
-					got = md.pos[j]
-		path.append(got)
+		var hint := Vector3(center.x + cos(ang) * rx, center.y + sin(ang) * ry, center.z)
+		path.append(_project_to_mesh(md, hint, hint))
 	# 闭合：末点不要重复，判定时再连回起点。
 	return path
 

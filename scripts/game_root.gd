@@ -161,6 +161,9 @@ func action_for_key(key: int, mode: String = "") -> String:
 	if m == "overhead":
 		return str(KEYMAP["overhead"].get(key, ""))
 	# F: enter/exit a nearby (or occupied) vehicle; otherwise keep display-mode focus.
+	# 靠近已躺在检查床上的分身时，F 与按钮一样进入手术。
+	if key == KEY_F and vehicle_system and vehicle_system.get("occupied") == null and has_method("clone_on_nearby_bed") and clone_on_nearby_bed() != null:
+		return "surgery_toggle"
 	if key == KEY_F and vehicle_system and vehicle_system.has_method("can_toggle") and bool(vehicle_system.call("can_toggle")):
 		return "vehicle_toggle"
 	var in_veh := vehicle_system != null and vehicle_system.get("occupied") != null
@@ -178,8 +181,8 @@ func action_for_key(key: int, mode: String = "") -> String:
 	# While driving / on the exam bed, don't steal Q (yaw) or G (holster) from the vehicle.
 	if in_veh and a in ["weapon_wheel", "holster", "weapon_slot", "prone"]:
 		return ""
-	# 检查床上 T 进入 / 退出手术模式，不再循环拖拽/打击/拳交/刺刀/肚脐。
-	if key == KEY_T and _player and str(_player.get("occupancy")) == "exam_bed":
+	# 检查床上，或靠近已躺在检查床上的分身时，T 进入 / 退出手术模式。
+	if key == KEY_T and can_toggle_surgery():
 		return "surgery_toggle"
 	return a
 
@@ -229,10 +232,7 @@ func run_action(action: String, key: int = 0) -> void:
 		"interact_mode":
 			_hud.call("cycle_interact_mode")
 		"surgery_toggle":
-			if _player and _player.has_method("get_surgery"):
-				var surg: Node = _player.call("get_surgery")
-				if surg:
-					surg.call("toggle")
+			toggle_surgery()
 		"reset":
 			# 角色控制 + 持枪：R = 换弹；否则 R = 复位视角 / 腹部形变（网页 R）
 			if _player.call("weapon_armed"):
@@ -594,12 +594,133 @@ func spawn_clone(at: Variant = null) -> String:
 	return "已创建分身 %d / %d" % [n, CLONE_MAX]
 
 
+func nearby_exam_bed() -> Node:
+	if vehicle_system == null:
+		return null
+	var occ = vehicle_system.get("occupied")
+	if occ and str(vehicle_system.call("kind_of", occ)) == "exam_bed":
+		return occ
+	var near = vehicle_system.get("nearest")
+	if near and str(vehicle_system.call("kind_of", near)) == "exam_bed":
+		return near
+	return null
+
+
+func can_place_clone_on_bed(bed: Node = null) -> bool:
+	if vehicle_system and vehicle_system.has_method("can_place_clone_on_bed"):
+		return bool(vehicle_system.call("can_place_clone_on_bed", bed))
+	var b := bed if bed else nearby_exam_bed()
+	return b != null
+
+
+func place_clone_on_bed(bed: Node = null) -> String:
+	var b := bed if bed else nearby_exam_bed()
+	if b == null:
+		return "请先对准检查床"
+	if clone_count() >= CLONE_MAX:
+		return "分身已达上限（%d 个），先「清除所有分身」" % CLONE_MAX
+	if not can_place_clone_on_bed(b):
+		return "这张检查床已经有人"
+	# 优先把已有、未占用的分身放上去；没有就新建一个。
+	var c: Node = null
+	for ex in get_clones():
+		if ex.has_method("is_dead") and bool(ex.call("is_dead")):
+			continue
+		if ex.has_method("is_on_exam_bed") and bool(ex.call("is_on_exam_bed")):
+			continue
+		c = ex
+		break
+	var created := false
+	if c == null:
+		var msg := spawn_clone(b.call("seat_global") if b.has_method("seat_global") else b.global_position)
+		if clone_count() < 1:
+			return msg
+		for ex2 in get_clones():
+			if ex2.has_method("is_on_exam_bed") and bool(ex2.call("is_on_exam_bed")):
+				continue
+			if ex2.has_method("is_dead") and bool(ex2.call("is_dead")):
+				continue
+			c = ex2
+		created = true
+		if c == null:
+			return msg
+	if c.has_method("place_on_exam_bed"):
+		if not bool(c.call("place_on_exam_bed", b)):
+			return "无法让分身使用检查床"
+	if vehicle_system:
+		vehicle_system.call("_update_nearest")
+		vehicle_system.emit_signal("proximity_changed", vehicle_system.get("nearest"), false)
+	return "分身已躺上检查床" if not created else "已创建分身并放到检查床上"
+
+
+func clone_on_nearby_bed() -> Node:
+	var b := nearby_exam_bed()
+	if b == null or vehicle_system == null:
+		return null
+	if vehicle_system.has_method("exam_bed_with_clone"):
+		return vehicle_system.call("exam_bed_with_clone", b)
+	return null
+
+
+func surgery_subject() -> Node:
+	# 进行中的手术优先。
+	if _player and _player.has_method("get_surgery"):
+		var ps: Node = _player.call("get_surgery")
+		if ps and bool(ps.call("is_active")):
+			return _player
+	for c in get_clones():
+		if c and c.has_method("get_surgery"):
+			var cs: Node = c.call("get_surgery")
+			if cs and bool(cs.call("is_active")):
+				return c
+	# 玩家自己躺在床上时操作本体；否则操作附近床上的分身。
+	if _player and str(_player.get("occupancy")) == "exam_bed":
+		return _player
+	var clone := clone_on_nearby_bed()
+	if clone:
+		return clone
+	return _player
+
+
+func surgery_system_of(host: Node = null) -> Node:
+	var h := host if host else surgery_subject()
+	if h and h.has_method("get_surgery"):
+		return h.call("get_surgery")
+	return null
+
+
+func can_toggle_surgery() -> bool:
+	var host := surgery_subject()
+	if host == null:
+		return false
+	var surg := surgery_system_of(host)
+	if surg and bool(surg.call("is_active")):
+		return true
+	if host == _player and str(_player.get("occupancy")) == "exam_bed":
+		return true
+	if host != _player and host.has_method("is_on_exam_bed") and bool(host.call("is_on_exam_bed")):
+		# 靠近床上的分身即可。
+		return nearby_exam_bed() != null
+	return false
+
+
+func toggle_surgery() -> bool:
+	var host := surgery_subject()
+	var surg := surgery_system_of(host)
+	if surg == null:
+		return false
+	surg.call("toggle")
+	return bool(surg.call("is_active")) if surg.has_method("is_active") else true
+
+
 ## 菜单「清除所有分身」
 func clear_clones() -> String:
 	var n := 0
 	for c in _clones_root.get_children():
 		if c.is_queued_for_deletion():
 			continue
+		if c.has_method("leave_exam_bed"):
+			c.call("leave_exam_bed")
 		_clones_root.remove_child(c)
 		c.queue_free()
 		n += 1

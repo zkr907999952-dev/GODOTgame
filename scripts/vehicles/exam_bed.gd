@@ -17,6 +17,7 @@ var vehicle_id: String = ""
 var is_default: bool = false
 var is_menu_spawned: bool = false
 var occupied: bool = false
+var patient: Node = null  # 躺在床上的本体或分身
 var spawn_map: String = "room"
 var scale_factor: float = 1.0
 var backrest_angle: float = 0.45
@@ -321,11 +322,32 @@ func exit_offset() -> Vector3:
 	return global_transform.basis * Vector3(half_w + 0.65, 0.0, 0.1)
 
 
-func on_enter() -> void:
+func on_enter(who: Node = null) -> void:
 	occupied = true
+	if who:
+		patient = who
 	occupied_changed.emit(true)
 
 
-func on_exit() -> void:
+func on_exit(who: Node = null) -> void:
+	if who != null and patient != null and who != patient:
+		return
 	occupied = false
+	patient = null
 	occupied_changed.emit(false)
+
+
+func set_patient(who: Node) -> void:
+	patient = who
+	occupied = who != null and is_instance_valid(who)
+	occupied_changed.emit(occupied)
+
+
+func has_patient() -> bool:
+	return patient != null and is_instance_valid(patient)
+
+
+func has_clone_patient() -> bool:
+	if not has_patient():
+		return false
+	return patient.is_in_group("clone_dolls") or patient.get("source_player") != null

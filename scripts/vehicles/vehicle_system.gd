@@ -89,6 +89,9 @@ var _exam_eye_origin: Vector3 = Vector3.ZERO  # head origin after IK, before loo
 var _exam_eye_ready: bool = false
 const CAM_PITCH_DEFAULT := -0.18
 const CAM_PITCH_AIR := -0.12
+const CAM_DIST_MIN := 0.35
+const CAM_DIST_MAX := 2.6
+var _cam_dist: float = 1.0
 
 
 func setup(g: Node, p: CharacterBody3D) -> void:
@@ -901,8 +904,12 @@ func _update_nearest() -> void:
 	for v in vehicles:
 		if not is_instance_valid(v) or not v.visible:
 			continue
+		# 载具被占用则跳过；检查床上若只躺着分身，玩家仍可靠近开始手术。
 		if bool(v.get("occupied")):
-			continue
+			if kind_of(v) != "exam_bed":
+				continue
+			if v == occupied:
+				continue
 		var r := enter_radius(v)
 		var d := p.distance_squared_to(v.global_position)
 		# Flatten y a little, like the web sim.
@@ -935,6 +942,95 @@ func try_toggle() -> bool:
 	if ok:
 		_toggle_lock_until_ms = now + TOGGLE_LOCK_MS
 	return ok
+
+
+func exam_bed_with_clone(v: Node = null) -> Node:
+	var bed: Node = v if v else nearest
+	if bed == null or kind_of(bed) != "exam_bed":
+		return null
+	if bed.has_method("has_clone_patient") and bool(bed.call("has_clone_patient")):
+		return bed.get("patient")
+	var who = bed.get("patient")
+	if who != null and is_instance_valid(who) and (who.is_in_group("clone_dolls") or who.get("source_player") != null):
+		return who
+	return null
+
+
+func can_place_clone_on_bed(v: Node = null) -> bool:
+	var bed: Node = v if v else nearest
+	if bed == null or kind_of(bed) != "exam_bed":
+		return false
+	if occupied == bed:
+		return false
+	if exam_bed_with_clone(bed) != null:
+		return false
+	# 床上已有本体时不要再放分身。
+	if bool(bed.get("occupied")) and bed.get("patient") != null and is_instance_valid(bed.get("patient")):
+		return false
+	return true
+
+
+func apply_patient_pose(host: Node, bed: Node, delta: float = 0.016) -> void:
+	## 把本体或分身按检查床姿势摆好（不含第一人称相机）。
+	if host == null or bed == null or not host.has_node("Body"):
+		return
+	var loco = host.call("get_loco") if host.has_method("get_loco") else null
+	if loco:
+		loco.set("frozen", true)
+	var body: Node3D = host.get_node("Body")
+	var skel: Skeleton3D = host.call("get_skeleton") if host.has_method("get_skeleton") else null
+	var bed3: Node3D = bed as Node3D
+	var host3: Node3D = host as Node3D
+	var seat: Vector3 = bed.call("seat_global") if bed.has_method("seat_global") else bed3.global_position
+	if host is CharacterBody3D:
+		host.velocity = Vector3.ZERO
+	if host3:
+		host3.global_transform = Transform3D(Basis.IDENTITY, Vector3(seat.x, 0.0, seat.z))
+	body.visible = true
+	if skel:
+		ExamPose.clear(skel)
+	var hip_local: Vector3 = ExamPose.hip_local(skel, body) if skel else Vector3(0.0, 0.917, 0.033)
+	var lie: Basis = bed.call("patient_basis") if bed.has_method("patient_basis") else Basis.IDENTITY
+	const BUTTOCK := Vector3(0.0, 0.03, -0.08)
+	const SEAT_SKIN := 0.10
+	const HIP_LIFT := 0.085
+	const BACK_SHIFT := 0.05
+	const HEADWARD := 0.16
+	var sit: Vector3 = hip_local + BUTTOCK
+	var headward: Vector3 = -bed3.global_transform.basis.z * HEADWARD
+	headward.y = 0.0
+	var hip_up: Vector3 = bed3.global_transform.basis.y.normalized() * HIP_LIFT
+	body.global_transform = Transform3D(lie, seat - lie * sit + lie.z * SEAT_SKIN + lie.y * BACK_SHIFT + headward + hip_up)
+	if skel:
+		var al: Vector3 = bed.call("armrest_l_global") if bed.has_method("armrest_l_global") else bed.call("stirrup_l_global")
+		var ar: Vector3 = bed.call("armrest_r_global") if bed.has_method("armrest_r_global") else bed.call("stirrup_r_global")
+		var left: Vector3 = lie.x
+		var feet: Vector3 = -lie.y
+		var bed_up: Vector3 = bed3.global_transform.basis.y.normalized()
+		var arm_geom: Dictionary = bed.call("armrest_geometry") if bed.has_method("armrest_geometry") else {}
+		var leg_geom: Dictionary = bed.call("stirrup_geometry") if bed.has_method("stirrup_geometry") else {}
+		var arm_half: float = float(arm_geom.get("half_len", 0.166))
+		var arm_skin := 0.044
+		var hand_along := clampf(arm_half * 0.72, 0.08, arm_half - 0.02)
+		al = al + feet * hand_along + bed_up * arm_skin - left * 0.035
+		ar = ar + feet * hand_along + bed_up * arm_skin + left * 0.035
+		var stir_half: float = float(leg_geom.get("half_len", 0.142))
+		var stir_half_w: float = float(leg_geom.get("half_wid", 0.080))
+		var calf_out := clampf(stir_half_w * 0.45, 0.02, 0.055)
+		var foot_along := stir_half + 0.10
+		var sl: Vector3 = bed.call("stirrup_l_global") + left * calf_out + feet * foot_along + bed_up * 0.052
+		var sr: Vector3 = bed.call("stirrup_r_global") - left * calf_out + feet * foot_along + bed_up * 0.052
+		var back_ang := float(bed.get("backrest_angle")) if "backrest_angle" in bed else 0.0
+		ExamPose.apply(skel, sl, sr, back_ang, al, ar, feet, bed_up)
+		ExamPose.offset_hair(skel, Vector3(0.0, 0.02, -0.10))
+		var sec = host.call("get_secondary") if host.has_method("get_secondary") else null
+		if sec:
+			if sec.has_method("clear_body_look"):
+				sec.call("clear_body_look")
+			if sec.has_method("update"):
+				sec.call("update", delta, false)
+			if sec.has_method("snap_hair_to_pose"):
+				sec.call("snap_hair_to_pose")
 
 
 func try_enter() -> bool:
@@ -973,7 +1069,13 @@ func try_enter() -> bool:
 	player.set("occupier", v)
 	_holster_occupied_weapons()
 	if v.has_method("on_enter"):
-		v.call("on_enter")
+		# 检查床接收乘客参数；汽车/飞机的 on_enter 无参，不能硬传。
+		if v.get_method_argument_count("on_enter") >= 1:
+			v.call("on_enter", player)
+		else:
+			v.call("on_enter")
+	elif "patient" in v:
+		v.set("patient", player)
 	var k := kind_of(v)
 	if k == "exam_bed":
 		# Keep the current play mode. Observation must keep the pose.
@@ -1301,18 +1403,43 @@ func end_orbit() -> void:
 	# 不在这里清掉 PC 右键状态：PC 松开由 end_pc_orbit 负责。
 
 
+func plane_tp_orbit_unclamped() -> bool:
+	return is_drive_occupied() and vehicle_cam == "third" and kind_of(occupied) == "plane"
+
+
+func dolly_look(scale: float) -> void:
+	if scale <= 0.0:
+		return
+	_cam_dist = clampf(_cam_dist * scale, CAM_DIST_MIN, CAM_DIST_MAX)
+
+
+func adjust_cam_distance(steps: float) -> void:
+	# 与观察视角滚轮相同：每格 ×0.92。
+	_cam_dist = clampf(_cam_dist * pow(0.92, steps), CAM_DIST_MIN, CAM_DIST_MAX)
+
+
+func cam_distance_scale() -> float:
+	return _cam_dist
+
+
 func orbit_look(rel: Vector2, sens: float = 0.004) -> void:
 	if not is_observe_orbit() and not _pc_orbit_held:
 		return
 	_orbit_held = true
 	_orbit_yaw -= rel.x * sens
-	var pmin := -1.25
-	var pmax := 0.85 if vehicle_cam == "first" else 0.55
-	_orbit_pitch = clampf(_orbit_pitch - rel.y * sens, pmin, pmax)
+	_orbit_pitch -= rel.y * sens
+	# 飞机第三人称观察：拖拽不限制俯仰/偏航，可绕一圈。其他载具/第一人称仍保留限位。
+	if not plane_tp_orbit_unclamped():
+		var pmin := -1.25
+		var pmax := 0.85 if vehicle_cam == "first" else 0.55
+		_orbit_pitch = clampf(_orbit_pitch, pmin, pmax)
+	else:
+		_orbit_pitch = wrapf(_orbit_pitch, -PI, PI)
 
 
 func _reset_vehicle_cam() -> void:
 	_cam_pan = Vector3.ZERO
+	_cam_dist = 1.0
 	_cam_ready = false
 	_orbit_held = false
 	_touch_orbit = false
@@ -1778,7 +1905,10 @@ func _vehicle_camera(delta: float) -> void:
 		# (tau ≈ 0.77 s / 0.83 s). Recenter target is vehicle-forward.
 		_orbit_yaw += wrapf(0.0 - _orbit_yaw, -PI, PI) * (1.0 - exp(-1.3 * dt))
 		_orbit_pitch += (want_pitch - _orbit_pitch) * (1.0 - exp(-1.2 * dt))
-	_orbit_pitch = clampf(_orbit_pitch, -1.25, 0.85 if fp else 0.55)
+	if not (not fp and k == "plane"):
+		_orbit_pitch = clampf(_orbit_pitch, -1.25, 0.85 if fp else 0.55)
+	else:
+		_orbit_pitch = wrapf(_orbit_pitch, -PI, PI)
 	if fp:
 		# Cockpit camera is parented in vehicle space: the eye rides the
 		# seat offset, and the basis is the vehicle basis times a look
@@ -1796,7 +1926,7 @@ func _vehicle_camera(delta: float) -> void:
 	# follow and for drag-to-orbit. For the plane, the camera follows the
 	# nose attitude (with a little lag on hard turns) and rolls with the
 	# airframe — a hardcore fighter view, not a horizon-locked inertia cam.
-	var dist := 8.5 if k == "car" else 16.0
+	var dist := (8.5 if k == "car" else 16.0) * clampf(_cam_dist, CAM_DIST_MIN, CAM_DIST_MAX)
 	var height := 2.4 if k == "car" else 4.6
 	var look_y_off := 1.2 if k == "car" else 1.8
 	var fwd := _vehicle_forward(xf)
