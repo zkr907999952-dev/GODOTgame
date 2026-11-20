@@ -233,6 +233,38 @@ func bullet_plug_removed() -> bool:
 	return bullet_plugs_removed > 0
 
 
+func abdomen_world_centroid() -> Vector3:
+	if _outer != null and _outer.vert_count() > 0 and _skel:
+		return _mesh_centroid_world(_outer)
+	return _navel_world()
+
+
+func body_marker_world() -> Dictionary:
+	## 稳定标记：肚脐、腹网质心、髋骨，用于确认手术/切开后躯体没有被抬到上方。
+	var navel := _navel_world()
+	var hip := navel
+	var spine := navel
+	if _skel:
+		var hi := _skel.find_bone("C_Hip_a")
+		if hi >= 0:
+			hip = _skel.global_transform * _skel.get_bone_global_pose(hi).origin
+		var si := _skel.find_bone("C_Spine_a")
+		if si >= 0:
+			spine = _skel.global_transform * _skel.get_bone_global_pose(si).origin
+	var body_o := Vector3.ZERO
+	if player and player.has_node("Body"):
+		body_o = (player.get_node("Body") as Node3D).global_position
+	elif player:
+		body_o = player.global_position
+	return {
+		"navel": navel,
+		"abdomen": abdomen_world_centroid(),
+		"hip": hip,
+		"spine": spine,
+		"body": body_o,
+	}
+
+
 func cavity_xray_is_transparent() -> bool:
 	if _cavity_mi == null:
 		return false
@@ -430,8 +462,7 @@ func set_tool(t: String) -> void:
 		_show_scalpel(false)
 		tool_changed.emit(tool)
 		return
-	if t == "grab" and not can_use_grab():
-		return
+	# 拿取与手术刀一样随时可切换，不必先切开或先剥皮瓣。
 	if t != "" and t != "scalpel" and t != "grab":
 		t = ""
 	if stroke_active:
@@ -1674,13 +1705,8 @@ func _measure_lip_width(md: Geom.MeshData) -> float:
 
 
 func _resolve_bone(bind_i: int) -> int:
-	if _skin and bind_i >= 0 and bind_i < _skin.get_bind_count():
-		var bi := _skin.get_bind_bone(bind_i)
-		if bi >= 0:
-			return bi
-	if _skel and bind_i >= 0 and bind_i < _skel.get_bone_count():
-		return bind_i
-	return -1
+	var rec: Dictionary = Geom.resolve_skin_bind(_skin, _skel, bind_i)
+	return int(rec.get("bone", -1))
 
 
 func _dominant_bone(md: Geom.MeshData) -> int:
@@ -2130,7 +2156,8 @@ func apply_bullet_hit(info: Dictionary, par: Dictionary = {}) -> Dictionary:
 		else:
 			dir = Vector3(0, 0, -1)
 	var energy := float(par.get("energy", 0.5))
-	var radius := clampf(0.007 + energy * 0.007, 0.0075, 0.016)
+	# 特写镜头离体表约 0.4m，通道要够大、够深才看得出柱状内壁。
+	var radius := clampf(0.010 + energy * 0.008, 0.010, 0.020)
 	if bullet_holes < MAX_BULLET_HOLES:
 		var entry: Variant = info.get("entry")
 		if entry is Vector3:
@@ -2163,17 +2190,39 @@ func _punch_bullet_hole_world(world_p: Vector3, world_dir: Vector3, radius: floa
 	if _outer == null:
 		return false
 	_posed_dirty = true
-	var origin: Vector3 = world_p - world_dir * 0.08
+	var origin: Vector3 = world_p - world_dir * 0.25
 	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, world_dir)
 	if hit == null:
 		# 从另一侧再试（出口）。
-		hit = Geom.ray_hit_mesh(_outer, _posed_world(), world_p + world_dir * 0.08, -world_dir)
+		hit = Geom.ray_hit_mesh(_outer, _posed_world(), world_p + world_dir * 0.25, -world_dir)
+	if hit == null:
+		# 特写命中用的是腹部椭球，可能稍稍偏离腹网，改落在最近的腹点上。
+		hit = _closest_mesh_hit_world(world_p)
 	if hit == null:
 		return false
 	var bind_c: Vector3 = (hit as Dictionary)["bind"]
 	var vi: int = int((hit as Dictionary).get("i0", 0))
 	var bind_dir := Geom.world_dir_to_bind(world_dir, vi, _outer, _skel, _skin)
 	return _punch_bullet_hole_bind(bind_c, bind_dir, radius)
+
+
+func _closest_mesh_hit_world(world_p: Vector3) -> Variant:
+	if _outer == null:
+		return null
+	var posed := _posed_world()
+	if posed.size() != _outer.vert_count() or posed.is_empty():
+		return null
+	var best := -1
+	var best_s := 1e9
+	for i in posed.size():
+		var s := posed[i].distance_squared_to(world_p)
+		if s < best_s:
+			best_s = s
+			best = i
+	# 超过约 10cm 就不是打在这片手术腹网上。
+	if best < 0 or best_s > 0.10 * 0.10:
+		return null
+	return {"bind": _outer.pos[best], "point": posed[best], "i0": best}
 
 
 func _punch_bullet_hole_bind(center: Vector3, axis: Vector3, radius: float) -> bool:

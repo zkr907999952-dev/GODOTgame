@@ -3667,7 +3667,7 @@ func _refresh_surgery_ui() -> void:
 			_btn_tool_scalpel.set_pressed_no_signal(tool == "scalpel")
 			_style_button(_btn_tool_scalpel, tool == "scalpel")
 		if _btn_tool_grab:
-			var can_grab := bool(s.call("can_grab_flap")) if s and s.has_method("can_grab_flap") else false
-			_btn_tool_grab.disabled = not can_grab and tool != "grab"
+			# 与手术刀一样随时可点，不必先切开；无皮瓣时只是抓不到东西。
+			_btn_tool_grab.disabled = false
 			_btn_tool_grab.set_pressed_no_signal(tool == "grab")
 			_style_button(_btn_tool_grab, tool == "grab")

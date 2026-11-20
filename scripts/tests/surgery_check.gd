@@ -1,13 +1,12 @@
 extends SceneTree
-## 0.3.3 手术模式自检：断面降分面并跟随腹部柔体、拿取可拖/抛皮瓣与分割皮肤、
-## 非透视下仍可见切口涂鸦、切开后唇缘弹性外翻；特写弹孔为去掉圆心皮瓣的柱状断面；
-## 以及 0.3.2 进入默认无工具、轨迹、透视半透明腹腔与既有进入/退出、闭环剥瓣、退出后保留。
+## 0.3.4 手术模式自检：切开/外翻后躯体不得上移；拿取可从无工具或手术刀直接切换；
+## 真实弹道特写命中路径会打出去掉圆心皮瓣的柱状弹孔通道。保留 0.3.0–0.3.3 既有约定。
 ##   LIBGL_ALWAYS_SOFTWARE=1 godot --headless --path . \
 ##     --rendering-method gl_compatibility --rendering-driver opengl3 \
 ##     -s res://scripts/tests/surgery_check.gd
 
-const VERSION_NAME := "0.3.3"
-const VERSION_CODE := 37
+const VERSION_NAME := "0.3.4"
+const VERSION_CODE := 38
 const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 
 var fails := 0
@@ -16,6 +15,7 @@ var player: Node
 var hud: Node
 var vs: Node
 var surgery: Node
+var _bed_pose: Dictionary = {}
 
 
 func _initialize() -> void:
@@ -130,6 +130,11 @@ func _check_source_contracts() -> void:
 	_ok(geom.find("func resample_index_loop") >= 0 and geom.find("WALL_MAX_SEGMENTS") >= 0, "wall tessellation is capped")
 	var org := FileAccess.get_file_as_string("res://scripts/organs/organ_rig.gd")
 	_ok(org.find("register_deform_material") >= 0 and org.find("apply_bullet_hit") >= 0, "ballistic hits hook into mesh bullet holes")
+	_ok(geom.find("BLEND_SHAPE_MODE_NORMALIZED") >= 0, "eversion blend shapes use NORMALIZED absolute targets, not RELATIVE doubles")
+	_ok(sys.find("if t == \"grab\" and not can_use_grab()") < 0, "set_tool allows selecting 拿取 without a prior cut")
+	_ok(hud_src.find("_btn_tool_grab.disabled = not can_grab") < 0, "HUD does not disable 拿取 until a flap exists")
+	var clone_src := FileAccess.get_file_as_string("res://scripts/clone_doll.gd")
+	_ok(clone_src.find("func get_surgery") >= 0 and clone_src.find("SurgerySystem") >= 0, "clones also host SurgerySystem so 特写 holes can be punched")
 
 
 
@@ -224,6 +229,26 @@ func _interact_mode() -> String:
 	return str(organs.get("interact_mode"))
 
 
+func _pose_snapshot() -> Dictionary:
+	if surgery and surgery.has_method("body_marker_world"):
+		return surgery.call("body_marker_world")
+	var organs: Node = player.call("get_organs") if player.has_method("get_organs") else null
+	var navel := Vector3.ZERO
+	if organs and organs.has_method("navel_world"):
+		navel = organs.call("navel_world")
+	return {"navel": navel, "abdomen": navel, "hip": navel, "spine": navel, "body": player.global_position if player else navel}
+
+
+func _assert_pose_stable(before: Dictionary, after: Dictionary, label: String, tol: float = 0.025) -> void:
+	for key in ["navel", "hip", "spine", "body", "abdomen"]:
+		if not before.has(key) or not after.has(key):
+			continue
+		var a: Vector3 = before[key]
+		var b: Vector3 = after[key]
+		# 检查床上主要看世界 Y：错误的相对 blend 会把腹网抬高几十厘米。
+		_ok(absf(b.y - a.y) <= tol, "%s %s Y stays put (%.4f -> %.4f, dy=%.4f)" % [label, key, a.y, b.y, b.y - a.y])
+
+
 func _find_exam_bed() -> Node:
 	if vs == null:
 		return null
@@ -246,6 +271,8 @@ func _check_enter_exit_and_t_key() -> void:
 	await _frames(8)
 	await _phys(4)
 	_ok(str(player.get("occupancy")) == "exam_bed", "player occupancy is exam_bed")
+	_bed_pose = _pose_snapshot()
+	var pose_on_bed: Dictionary = _bed_pose
 	_ok(str(main.call("action_for_key", KEY_T, "display")) == "surgery_toggle", "T is surgery_toggle on the exam bed")
 	_ok(bool(surgery.call("can_enter")), "can_enter is true on the exam bed")
 	_ok(bool(surgery.call("verified_abdomen_on_dress")), "abdomen is hosted on upper-body Dress, not lower-body Skin")
@@ -258,6 +285,7 @@ func _check_enter_exit_and_t_key() -> void:
 	await _phys(2)
 	_ok(bool(surgery.call("is_active")), "T / surgery_toggle enters surgery on the bed")
 	_ok(str(player.get("occupancy")) == "exam_bed", "character stays on the exam bed in surgery")
+	_assert_pose_stable(pose_on_bed, _pose_snapshot(), "after first enter")
 	_ok(_interact_mode() == mode0, "T did not cycle interact_mode while on the bed")
 	# 再按 T 应退出，仍不循环互动。
 	main.call("run_action", "surgery_toggle", KEY_T)
@@ -270,8 +298,21 @@ func _check_enter_exit_and_t_key() -> void:
 	_ok(bool(surgery.call("is_active")), "surgery is active after enter_surgery")
 	if hud and hud.has_method("is_surgery_active"):
 		_ok(bool(hud.call("is_surgery_active")), "HUD reports surgery active")
+	_assert_pose_stable(pose_on_bed, _pose_snapshot(), "after re-enter")
 	# 0.3.2：进入手术默认不选工具，可控制视角；选工具后锁定视角。
 	_ok(str(surgery.call("current_tool")) == "", "default tool is none so the player can look")
+	# 0.3.4：拿取不必先切开，可从无工具或手术刀直接切换。
+	surgery.call("set_tool", "grab")
+	_ok(str(surgery.call("current_tool")) == "grab", "拿取 can be selected from default no-tool")
+	_ok(bool(surgery.call("look_locked")), "selecting 拿取 locks the view")
+	_ok(bool(surgery.call("tool_interaction_enabled")), "tool interaction is on after selecting 拿取")
+	surgery.call("set_tool", "scalpel")
+	_ok(str(surgery.call("current_tool")) == "scalpel", "can switch from 拿取 to 手术刀")
+	surgery.call("set_tool", "grab")
+	_ok(str(surgery.call("current_tool")) == "grab", "拿取 can be selected from 手术刀")
+	surgery.call("set_tool", "grab")
+	_ok(str(surgery.call("current_tool")) == "", "tapping 拿取 deselects it and restores look")
+	_ok(bool(surgery.call("look_enabled")), "look is enabled after deselecting 拿取")
 	_ok(bool(surgery.call("look_enabled")), "look is enabled when no tool is selected")
 	_ok(not bool(surgery.call("look_locked")), "look is not locked when no tool is selected")
 	_ok(not bool(surgery.call("tool_interaction_enabled")), "tool interaction is off when no tool is selected")
@@ -368,8 +409,12 @@ func _check_cavity_and_incision() -> void:
 	if organs and organs.has_method("set_xray_enabled"):
 		organs.call("set_xray_enabled", false)
 	_ok(bool(surgery.call("incision_trail_visible_without_xray")), "incision graffiti remains visible with 透视 off")
+	var pose_before_evert: Dictionary = _pose_snapshot()
 	surgery.call("debug_settle_eversion")
 	_ok(bool(surgery.call("cut_is_everted")), "committed open cut everts so the inner wall is exposed")
+	_assert_pose_stable(pose_before_evert, _pose_snapshot(), "after eversion settles")
+	if not _bed_pose.is_empty():
+		_assert_pose_stable(_bed_pose, _pose_snapshot(), "after cut vs pre-surgery bed pose", 0.04)
 	var open_w := float(surgery.call("lip_opening_width"))
 	_ok(open_w > 0.003, "everted open lips are wider than the raw slit (%.4f)" % open_w)
 	var dense_open := int(surgery.call("last_dense_wall_tris"))
@@ -480,3 +525,48 @@ func _check_cavity_and_incision() -> void:
 	var fol2: Dictionary = surgery.call("debug_wall_follow_delta")
 	_ok(bool(fol2.get("ok", false)), "bullet-hole / incision wall still follows a pose or deform change")
 	_ok(bool(surgery.call("has_persistent_state")), "bullet hole persists on the body after being punched outside a new surgery session")
+
+	# 真实特写路径：对分身开火 → BulletCam.consider 推迟命中 → 弹头到体表再 flush apply_ballistic_hit。
+	var settings: Node = main.get_node_or_null("GameSettings")
+	var bcam: Node = main.get_node_or_null("BulletCam")
+	var ws: Node = player.call("get_weapons") if player.has_method("get_weapons") else null
+	var bal: Node = ws.get("ballistics") if ws else null
+	_ok(settings != null and bcam != null and bal != null, "weapon / bullet-cam systems exist for the live close-up path")
+	if settings and bcam and bal and main.has_method("spawn_clone"):
+		var msg: String = str(main.call("spawn_clone", player.global_position + Vector3(1.1, 0.0, 0.35)))
+		await _frames(10)
+		await _phys(4)
+		var clones: Array = main.call("get_clones") if main.has_method("get_clones") else []
+		_ok(clones.size() >= 1, "clone spawned for close-up hole (%s)" % msg)
+		if clones.size() >= 1:
+			var cl: Node = clones[0]
+			_ok(cl.has_method("get_surgery") and cl.call("get_surgery") != null, "clone exposes get_surgery")
+			var corg: Node = cl.call("get_organs")
+			var csurg: Node = cl.call("get_surgery")
+			var cn: Vector3 = corg.call("navel_world")
+			var cfwd: Vector3 = (corg.call("abdomen_frame") as Transform3D).basis.z.normalized()
+			var co: Vector3 = cn + cfwd * 0.55
+			var cd: Vector3 = (cn - co).normalized()
+			settings.call("set_bullet_cam_enabled", true)
+			settings.call("set_bullet_cam_chance", 1.0)
+			bcam.set("debug_roll", 0.0)
+			var def = ws.call("get_def", "rifle") if ws.has_method("get_def") else null
+			bal.call("fire_projectile", co, cd, "rifle", def)
+			await _phys(20)
+			await _frames(8)
+			if bool(bcam.get("playing")) and bcam.has_method("debug_advance"):
+				bcam.call("debug_advance", 0.9)
+				await _frames(2)
+			var live_hole := csurg != null and bool(csurg.call("has_bullet_hole"))
+			if not live_hole and bool(bcam.get("playing")) and bcam.has_method("skip"):
+				bcam.call("skip")
+				await _frames(2)
+				live_hole = csurg != null and bool(csurg.call("has_bullet_hole"))
+			_ok(live_hole, "live close-up / weapon path punches a visible mesh bullet hole on the body")
+			if csurg:
+				_ok(bool(csurg.call("bullet_plug_removed")), "close-up hole has the center plug removed")
+				_ok(int(csurg.get("bullet_wall_tris")) > 0, "close-up hole has a cylindrical channel wall (%d tris)" % int(csurg.get("bullet_wall_tris")))
+			if bool(bcam.get("playing")) and bcam.has_method("skip"):
+				bcam.call("skip")
+			settings.call("set_bullet_cam_chance", 0.20)
+			bcam.set("debug_roll", -1.0)

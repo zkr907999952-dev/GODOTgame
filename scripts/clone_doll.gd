@@ -7,6 +7,7 @@ extends Node3D
 const BODY_SCENE := preload("res://assets/characters/tifa/Tifa_Web_Skinned.glb")
 const SoftLocoScript := preload("res://scripts/soft_loco.gd")
 const OrganRigScript := preload("res://scripts/organs/organ_rig.gd")
+const SurgerySystemScript := preload("res://scripts/surgery/surgery_system.gd")
 const CharacterLookScript := preload("res://scripts/character_look.gd")
 const CharacterHealthScript := preload("res://scripts/character_health.gd")
 const RagdollSystemScript := preload("res://scripts/ragdoll_system.gd")
@@ -20,6 +21,7 @@ var body: Node3D
 var skeleton: Skeleton3D
 var loco: Node
 var organs: Node
+var surgery: Node
 var health: Node
 var ragdoll: Node
 var hit_react: Node
@@ -62,6 +64,12 @@ func _ready() -> void:
 	if skeleton == null or not organs.setup(skeleton):
 		push_warning("clone: organs failed")
 	organs.set("secondary", loco.get("secondary"))
+	# 特写弹孔走与本体相同的手术腹网冲压，分身也要挂 SurgerySystem。
+	surgery = SurgerySystemScript.new()
+	surgery.name = "SurgerySystem"
+	add_child(surgery)
+	if skeleton:
+		surgery.call("setup", self, skeleton, organs)
 	health = CharacterHealthScript.new()
 	health.name = "Health"
 	add_child(health)
@@ -82,6 +90,10 @@ func _ready() -> void:
 
 func get_organs() -> Node:
 	return organs
+
+
+func get_surgery() -> Node:
+	return surgery
 
 
 func get_skeleton() -> Skeleton3D:

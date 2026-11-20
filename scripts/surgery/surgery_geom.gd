@@ -155,6 +155,9 @@ class MeshData:
 		if blended.nrm.size() == pos.size():
 			blend[Mesh.ARRAY_NORMAL] = blended.nrm
 		var am := ArrayMesh.new()
+		# Godot ArrayMesh 默认是 RELATIVE。这里传入的是目标绝对坐标；若按相对位移叠加，
+		# 外翻权重到 1 时顶点会变成 rest+evert≈两倍绑定坐标，躺在检查床上的腹部会整片抬到上方。
+		am.blend_shape_mode = Mesh.BLEND_SHAPE_MODE_NORMALIZED
 		am.add_blend_shape(shape)
 		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [blend])
 		return am
@@ -284,6 +287,24 @@ static func make_cavity(outer: MeshData, thickness: float, organ_front_z: float 
 	return inner
 
 
+static func resolve_skin_bind(skin: Skin, skel: Skeleton3D, bind_i: int) -> Dictionary:
+	## 本模型的 Skin.get_bind_bone 常为 -1，要靠 bind 名称找到骨骼；再不行才把槽位当骨骼索引。
+	var bone_i := -1
+	var bind_pose := Transform3D.IDENTITY
+	if skin and bind_i >= 0 and bind_i < skin.get_bind_count():
+		bone_i = skin.get_bind_bone(bind_i)
+		bind_pose = skin.get_bind_pose(bind_i)
+		if bone_i < 0:
+			var nm := String(skin.get_bind_name(bind_i))
+			if nm != "" and skel:
+				bone_i = skel.find_bone(nm)
+	if bone_i < 0 and skel and bind_i >= 0 and bind_i < skel.get_bone_count():
+		bone_i = bind_i
+		if bind_pose == Transform3D.IDENTITY:
+			bind_pose = skel.get_bone_rest(bone_i).affine_inverse()
+	return {"bone": bone_i, "pose": bind_pose}
+
+
 static func skin_vertex(p: Vector3, vi: int, md: MeshData, skel: Skeleton3D, skin: Skin) -> Vector3:
 	if skel == null or skin == null or md.bones.is_empty():
 		return p
@@ -294,19 +315,11 @@ static func skin_vertex(p: Vector3, vi: int, md: MeshData, skel: Skeleton3D, ski
 		if w <= 1e-8:
 			continue
 		var bind_i: int = md.bones[vi * 4 + k]
-		var bone_i := -1
-		var bind_pose := Transform3D.IDENTITY
-		if skin and bind_i >= 0 and bind_i < skin.get_bind_count():
-			bone_i = skin.get_bind_bone(bind_i)
-			bind_pose = skin.get_bind_pose(bind_i)
-		if bone_i < 0:
-			# 有的 Skin 槽位 get_bind_bone 为 -1，网格里存的是骨骼索引。
-			bone_i = bind_i
-			if bone_i < 0 or bone_i >= skel.get_bone_count():
-				continue
-			if bind_pose == Transform3D.IDENTITY:
-				bind_pose = skel.get_bone_rest(bone_i).affine_inverse()
-		var xform := skel.get_bone_global_pose(bone_i) * bind_pose
+		var rec: Dictionary = resolve_skin_bind(skin, skel, bind_i)
+		var bone_i: int = int(rec["bone"])
+		if bone_i < 0 or bone_i >= skel.get_bone_count():
+			continue
+		var xform := skel.get_bone_global_pose(bone_i) * (rec["pose"] as Transform3D)
 		acc += w * (xform * p)
 		wsum += w
 	if wsum <= EPS:
@@ -1556,18 +1569,11 @@ static func skin_basis(vi: int, md: MeshData, skel: Skeleton3D, skin: Skin) -> B
 		if w <= 0.0:
 			continue
 		var bind_i: int = md.bones[vi * 4 + k]
-		var bone_i := -1
-		var bind_pose := Transform3D.IDENTITY
-		if skin and bind_i >= 0 and bind_i < skin.get_bind_count():
-			bone_i = skin.get_bind_bone(bind_i)
-			bind_pose = skin.get_bind_pose(bind_i)
-		if bone_i < 0:
-			bone_i = bind_i
-			if bone_i < 0 or bone_i >= skel.get_bone_count():
-				continue
-			if bind_pose == Transform3D.IDENTITY:
-				bind_pose = skel.get_bone_rest(bone_i).affine_inverse()
-		var xform := skel.get_bone_global_pose(bone_i) * bind_pose
+		var rec: Dictionary = resolve_skin_bind(skin, skel, bind_i)
+		var bone_i: int = int(rec["bone"])
+		if bone_i < 0 or bone_i >= skel.get_bone_count():
+			continue
+		var xform := skel.get_bone_global_pose(bone_i) * (rec["pose"] as Transform3D)
 		acc.x += xform.basis.x * w
 		acc.y += xform.basis.y * w
 		acc.z += xform.basis.z * w
