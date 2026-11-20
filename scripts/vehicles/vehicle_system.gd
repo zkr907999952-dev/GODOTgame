@@ -75,6 +75,7 @@ var _runway_cache: Dictionary = {}
 # so the default and the recenter pose are always behind the nose, never a
 # leftover world or player yaw. Hold LMB / swipe to orbit; release recenters.
 var _orbit_held: bool = false
+var _pc_orbit_held: bool = false
 var _touch_orbit: bool = false
 var _orbit_yaw: float = 0.0
 var _orbit_pitch: float = -0.18
@@ -1220,8 +1221,25 @@ func is_drive_occupied() -> bool:
 
 
 func is_observe_orbit() -> bool:
-	## 观察 mode on a car/plane, in first- or third-person.
+	## 观察 mode on a car/plane, in first- or third-person. Mobile only.
 	return is_drive_occupied() and vehicle_look_mode == "orbit"
+
+
+func is_pc_orbit_held() -> bool:
+	return is_drive_occupied() and _pc_orbit_held
+
+
+func begin_pc_orbit() -> void:
+	## PC：按住右键即可环绕观察，不必先切到「观察」模式。
+	if not is_drive_occupied():
+		return
+	_pc_orbit_held = true
+	_orbit_held = true
+
+
+func end_pc_orbit() -> void:
+	_pc_orbit_held = false
+	_orbit_held = false
 
 
 func _fp_default_pitch() -> float:
@@ -1249,19 +1267,21 @@ func is_drive_third() -> bool:
 
 
 func begin_orbit() -> void:
-	if not is_observe_orbit():
+	if not is_observe_orbit() and not _pc_orbit_held:
 		return
 	_orbit_held = true
-	_touch_orbit = true
+	if is_observe_orbit():
+		_touch_orbit = true
 
 
 func end_orbit() -> void:
 	_orbit_held = false
 	_touch_orbit = false
+	# 不在这里清掉 PC 右键状态：PC 松开由 end_pc_orbit 负责。
 
 
 func orbit_look(rel: Vector2, sens: float = 0.004) -> void:
-	if not is_observe_orbit():
+	if not is_observe_orbit() and not _pc_orbit_held:
 		return
 	_orbit_held = true
 	_orbit_yaw -= rel.x * sens
@@ -1274,6 +1294,7 @@ func _reset_vehicle_cam() -> void:
 	_cam_ready = false
 	_orbit_held = false
 	_touch_orbit = false
+	_pc_orbit_held = false
 	_orbit_yaw = 0.0
 	_orbit_pitch = CAM_PITCH_DEFAULT
 	_chase_dir = Vector3.ZERO
@@ -1714,12 +1735,13 @@ func _vehicle_camera(delta: float) -> void:
 	# Observe-mode drag holds the look offset; anything else (including
 	# two-finger leftovers) must not orbit. Recenter is always to the
 	# vehicle heading (car body forward / plane nose).
-	var held := is_observe_orbit() and (_orbit_held or _touch_orbit)
+	var held := (is_observe_orbit() and (_orbit_held or _touch_orbit)) or _pc_orbit_held
 	if is_observe_orbit() and not fp and not bool(player.get("ui_blocks_capture")) and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
 		held = true
-	if not is_observe_orbit():
+	if not is_observe_orbit() and not _pc_orbit_held:
 		held = false
-	_orbit_held = held
+	if not _pc_orbit_held:
+		_orbit_held = held
 	var airborne := k == "plane" and bool(occupied.get("airborne"))
 	var want_pitch := _fp_default_pitch() if fp else (CAM_PITCH_AIR if airborne else CAM_PITCH_DEFAULT)
 	var just_ready := not _cam_ready

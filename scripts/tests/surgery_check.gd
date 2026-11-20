@@ -5,8 +5,9 @@ extends SceneTree
 ##     --rendering-method gl_compatibility --rendering-driver opengl3 \
 ##     -s res://scripts/tests/surgery_check.gd
 
-const VERSION_NAME := "0.3.0"
-const VERSION_CODE := 34
+const VERSION_NAME := "0.3.1"
+const VERSION_CODE := 35
+const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 
 var fails := 0
 var main: Node
@@ -58,6 +59,7 @@ func _run() -> void:
 
 	_check_version()
 	_check_source_contracts()
+	_check_geom_refinements()
 	_check_cannot_enter_off_bed()
 	await _check_enter_exit_and_t_key()
 	await _check_cavity_and_incision()
@@ -102,6 +104,68 @@ func _check_source_contracts() -> void:
 	var pose := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
 	_ok(pose.find("EYE_TOWARD_LEGS") >= 0, "0.2.31 exam pose EYE_TOWARD_LEGS still present")
 	_ok(sys.find("ExamPose.clear") < 0, "entering surgery does not clear the exam pose")
+	_ok(sys.find("_lock_pose_for_stroke") >= 0 and geom.find("func simplify_path") >= 0, "stroke pose lock and path simplify exist")
+	_ok(geom.find("func make_cavity_wrap") >= 0 and geom.find("func clean_closed_loop") >= 0, "cavity wrap and closed-loop cleanup exist")
+	_ok(sys.find("SurgeryFlapCatch") >= 0, "flap catch collider is created for the exam bed")
+	var pc := FileAccess.get_file_as_string("res://scripts/player_controller.gd")
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	var hud := FileAccess.get_file_as_string("res://scripts/hud.gd")
+	_ok(pc.find("begin_pc_orbit") >= 0 and vs_src.find("func begin_pc_orbit") >= 0, "PC right-mouse vehicle orbit API exists")
+	_ok(hud.find("电脑按住右键即可环绕") >= 0 or hud.find("touch_ui and not editing") >= 0, "观察 button is hidden in PC mode")
+
+
+
+func _check_geom_refinements() -> void:
+	var dense := PackedVector3Array()
+	for i in 80:
+		var t0 := float(i) / 79.0
+		# 密采样折线，带轻微抖动。
+		dense.append(Vector3(t0 * 0.10, 0.002 * sin(float(i) * 1.7), 0.11))
+	var simple: PackedVector3Array = Geom.simplify_path(dense, 0.003, 48)
+	_ok(simple.size() < dense.size(), "simplify_path reduces a dense freehand stroke (%d -> %d)" % [dense.size(), simple.size()])
+	_ok(simple.size() >= 2, "simplify_path keeps a usable path")
+	_ok(simple[0].distance_to(dense[0]) < 1e-6 and simple[simple.size() - 1].distance_to(dense[dense.size() - 1]) < 1e-6, "simplify_path keeps endpoints")
+
+	# 8 字形（双纽线）：清理后应得到一个简单闭环，而不是整段自交路径。
+	var eight := PackedVector3Array()
+	for i in 32:
+		var a := TAU * float(i) / 32.0
+		eight.append(Vector3(0.05 * cos(a), 0.05 * sin(a) * cos(a), 0.11))
+	var cleaned: PackedVector3Array = Geom.clean_closed_loop(eight)
+	_ok(cleaned.size() >= 3, "clean_closed_loop returns a loop from a self-crossing stroke")
+	var area_all: float = Geom.path_area_xy(eight)
+	var area_one: float = Geom.path_area_xy(cleaned)
+	_ok(area_one > 0.0001, "cleaned loop has a real enclosed area")
+	# 单个简单环面积应明显小于 8 字两叶面积之和（或最多相当其中较大一叶）。
+	_ok(area_one <= area_all * 0.9 + 1e-6 or cleaned.size() < eight.size(), "self-crossing stroke is reduced to a simple flap loop")
+
+	# 网格分类：中间小环应为较小内侧；反向/几乎外接的环不应把整片判成皮瓣。
+	var md = Geom.MeshData.new()
+	for y in range(0, 6):
+		for x in range(0, 6):
+			var p := Vector3(-0.05 + 0.02 * x, 1.00 + 0.02 * y, 0.11)
+			var b := PackedInt32Array([0, 0, 0, 0])
+			var w := PackedFloat32Array([1, 0, 0, 0])
+			md.add_vert(p, Vector3.FORWARD, Vector2(x, y), b, w)
+	for y2 in range(0, 5):
+		for x2 in range(0, 5):
+			var i0 := y2 * 6 + x2
+			md.add_face(i0, i0 + 1, i0 + 7)
+			md.add_face(i0, i0 + 7, i0 + 6)
+	var loop := PackedInt32Array()
+	# 中心 2x2 方环（顶点 8,9,15,14）
+	for id in [8, 9, 15, 14, 8]:
+		loop.append(id)
+	var ext: Dictionary = Geom.extract_inside(md, loop)
+	_ok(int(ext["inside_faces"]) > 0 and int(ext["inside_faces"]) < int(ext["outside_faces"]), "small closed loop isolates the smaller interior patch")
+	# 几乎绕过整张网格的大环：较小一侧仍应是“内”还是被交换后的小块，且不能吞掉整网。
+	# 靠近外圈但留一圈边框，避免“整网上都在环内”的退化。
+	var rim := PackedInt32Array()
+	for id2 in [1, 2, 3, 4, 10, 16, 22, 28, 34, 33, 32, 31, 25, 19, 13, 7, 1]:
+		rim.append(id2)
+	var ext2: Dictionary = Geom.extract_inside(md, rim)
+	var total := md.face_count()
+	_ok(int(ext2["inside_faces"]) < total and int(ext2["outside_faces"]) > 0, "a near-rim loop does not peel the entire patch")
 
 
 func _check_cannot_enter_off_bed() -> void:
@@ -172,6 +236,20 @@ func _check_enter_exit_and_t_key() -> void:
 		_ok(bool(hud.call("is_surgery_active")), "HUD reports surgery active")
 	# 工具栏默认手术刀。
 	_ok(str(surgery.call("current_tool")) == "scalpel", "default tool is scalpel")
+	_ok(int(surgery.call("wrap_face_count")) > 0, "cavity wrap has side/back faces")
+	_ok(bool(surgery.call("cavity_wraps_organs")), "procedural cavity bag wraps the gut volume")
+	# 落刀期间锁定腹部形变，预览与绑定空间提交一致。
+	var sec: RefCounted = player.call("get_secondary") if player.has_method("get_secondary") else null
+	var began := bool(surgery.call("debug_begin_stroke_at_navel"))
+	_ok(began, "debug stroke at navel begins")
+	_ok(bool(surgery.call("is_pose_locked")), "abdomen pose is fully locked during a scalpel stroke")
+	if sec:
+		_ok(float(sec.get("breath_amp")) <= 0.0001, "breath amp is zero while the stroke is locked")
+		_ok(not bool(sec.get("breath_enabled")), "breathing is disabled during the stroke")
+	surgery.call("end_stroke")
+	await _frames(2)
+	_ok(not bool(surgery.call("is_pose_locked")), "pose lock released after the stroke ends")
+	_ok(not bool(surgery.get("cut_open")), "a one-point / cancelled stroke does not cut")
 
 
 func _check_cavity_and_incision() -> void:
@@ -219,6 +297,9 @@ func _check_cavity_and_incision() -> void:
 	var flap: Node = surgery.get("flap_node")
 	_ok(flap != null and is_instance_valid(flap), "flap node exists in the tree after peel")
 	_ok(str(player.get("occupancy")) == "exam_bed", "still on the exam bed after peel")
+	await _phys(36)
+	await _frames(8)
+	_ok(bool(surgery.call("flap_clear_of_bed", 0.05)), "flap is not intersecting through the exam bed at rest")
 
 	# 退出后躯体改变仍在。
 	surgery.call("exit_surgery")

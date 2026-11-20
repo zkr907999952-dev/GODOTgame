@@ -27,6 +27,10 @@ var persist: bool = false
 var flap_node: Node3D = null
 var flap_kind: String = ""  # "softbody" | "verlet" | ""
 var cavity_exposed: bool = false
+var pose_locked: bool = false
+var last_path_count: int = 0
+const CATCH_LAYER := 8
+const STROKE_MIN_SPACING := 0.0045
 
 var _skel: Skeleton3D
 var _skin: Skin
@@ -51,6 +55,12 @@ var _wall_md: Geom.MeshData
 var _posed_cache: PackedVector3Array = PackedVector3Array()
 var _posed_dirty: bool = true
 var _breath_amp_saved: float = -1.0
+var _breath_enabled_saved: Variant = null
+var _posed_frozen: PackedVector3Array = PackedVector3Array()
+var _wrap: Geom.MeshData
+var _flap_catch: StaticBody3D
+var _guts_min: Vector3 = Vector3(-0.09, 0.956, 0.005)
+var _guts_max: Vector3 = Vector3(0.078, 1.180, 0.102)
 var _baked: bool = false
 var _verified_dress: bool = false
 var _dress_name: String = ""
@@ -64,6 +74,16 @@ func setup(p: Node, skel: Skeleton3D, organs: Node) -> void:
 	if organs and organs.get("meta") and (organs.meta as Dictionary).has("navel"):
 		var n: Array = organs.meta["navel"]
 		_navel_rest = Vector3(n[0], n[1], n[2])
+	if organs and organs.get("meta"):
+		var meta: Dictionary = organs.meta
+		if meta.has("guts") and meta["guts"] is Dictionary:
+			var g: Dictionary = meta["guts"]
+			if g.has("min") and g.has("max"):
+				var mn: Array = g["min"]
+				var mx: Array = g["max"]
+				if mn.size() >= 3 and mx.size() >= 3:
+					_guts_min = Vector3(mn[0], mn[1], mn[2])
+					_guts_max = Vector3(mx[0], mx[1], mx[2])
 	_find_meshes()
 	_make_preview()
 	_make_scalpel()
@@ -115,6 +135,67 @@ func flap_kind_shipped() -> String:
 	return flap_kind
 
 
+func is_pose_locked() -> bool:
+	return pose_locked
+
+
+func cavity_wraps_organs() -> bool:
+	if _inner == null or _wrap == null or _wrap.face_count() < 1:
+		return false
+	var mn := Vector3(1e9, 1e9, 1e9)
+	var mx := Vector3(-1e9, -1e9, -1e9)
+	for md in [_inner, _wrap]:
+		for p in md.pos:
+			mn.x = minf(mn.x, p.x)
+			mn.y = minf(mn.y, p.y)
+			mn.z = minf(mn.z, p.z)
+			mx.x = maxf(mx.x, p.x)
+			mx.y = maxf(mx.y, p.y)
+			mx.z = maxf(mx.z, p.z)
+	var pad := 0.008
+	return (
+		mn.x <= _guts_min.x + pad and mx.x >= _guts_max.x - pad
+		and mn.y <= _guts_min.y + pad and mx.y >= _guts_max.y - pad
+		and mn.z <= _guts_min.z + pad and mx.z >= _guts_max.z - pad
+	)
+
+
+func wrap_face_count() -> int:
+	return _wrap.face_count() if _wrap else 0
+
+
+func flap_clear_of_bed(margin: float = 0.04) -> bool:
+	if flap_node == null or not is_instance_valid(flap_node):
+		return false
+	var top := _catch_top_y()
+	var mn := _flap_aabb_min()
+	if mn.y < -900.0:
+		return false
+	# 允许皮瓣还在下落，但不得穿过床面太多。
+	return mn.y >= top - margin
+
+
+func _flap_aabb_min() -> Vector3:
+	if flap_node == null or not is_instance_valid(flap_node):
+		return Vector3(0, -999, 0)
+	if flap_node is SoftBody3D:
+		var mi := flap_node as SoftBody3D
+		if mi.mesh:
+			var ab := mi.mesh.get_aabb()
+			return mi.global_transform * ab.position
+	if flap_node is MeshInstance3D and (flap_node as MeshInstance3D).mesh:
+		var ab2 := (flap_node as MeshInstance3D).mesh.get_aabb()
+		return flap_node.global_transform * ab2.position
+	# Verlet holder
+	for c in flap_node.get_children():
+		if c is MeshInstance3D and (c as MeshInstance3D).mesh:
+			var ab3 := (c as MeshInstance3D).mesh.get_aabb()
+			return (c as MeshInstance3D).global_transform * ab3.position
+	if flap_node is Node3D:
+		return (flap_node as Node3D).global_position
+	return Vector3(0, -999, 0)
+
+
 func verified_abdomen_on_dress() -> bool:
 	return _verified_dress
 
@@ -158,6 +239,7 @@ func exit_surgery() -> void:
 	path_points = PackedVector3Array()
 	_show_scalpel(false)
 	_clear_preview()
+	_lock_pose_for_stroke(false)
 	_dampen_breath(false)
 	if cut_open or flap_peeled:
 		persist = true
@@ -179,9 +261,10 @@ func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
 		return try_peel_at(origin, dir)
 	if tool != "scalpel":
 		return false
-	_refresh_posed()
+	_lock_pose_for_stroke(true)
 	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
 	if hit == null:
+		_lock_pose_for_stroke(false)
 		return false
 	stroke_active = true
 	path_points = PackedVector3Array()
@@ -195,12 +278,11 @@ func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
 func drag_stroke(origin: Vector3, dir: Vector3) -> void:
 	if not stroke_active or tool != "scalpel":
 		return
-	_refresh_posed()
 	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
 	if hit == null:
 		return
 	var p: Vector3 = (hit as Dictionary)["bind"]
-	if path_points.is_empty() or path_points[path_points.size() - 1].distance_to(p) >= 0.002:
+	if path_points.is_empty() or path_points[path_points.size() - 1].distance_to(p) >= STROKE_MIN_SPACING:
 		path_points.append(p)
 	_place_scalpel(hit["point"], dir)
 	_update_preview()
@@ -212,9 +294,12 @@ func end_stroke() -> void:
 	stroke_active = false
 	_show_scalpel(false)
 	if path_points.size() >= 2:
-		_commit_path(path_points)
+		var simple := Geom.simplify_path(path_points, 0.003, 48)
+		last_path_count = simple.size()
+		_commit_path(simple)
 	_clear_preview()
 	path_points = PackedVector3Array()
+	_lock_pose_for_stroke(false)
 
 
 func debug_scripted_incision(closed: bool = true, rx: float = OVAL_RX, ry: float = OVAL_RY) -> bool:
@@ -231,6 +316,10 @@ func debug_scripted_incision(closed: bool = true, rx: float = OVAL_RX, ry: float
 		for i in keep:
 			open.append(path[i])
 		path = open
+	else:
+		path = Geom.clean_closed_loop(path)
+	path = Geom.simplify_path(path, 0.0024, 56)
+	last_path_count = path.size()
 	return _commit_path(path, closed)
 
 
@@ -364,6 +453,11 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 		return false
 	var work := path.duplicate()
 	var closed := force_closed or Geom.is_path_closed(work)
+	if closed:
+		work = Geom.clean_closed_loop(work)
+	else:
+		work = Geom.simplify_path(work, 0.003, 48)
+	last_path_count = work.size()
 	if closed and work.size() >= 2 and work[0].distance_to(work[work.size() - 1]) <= Geom.PATH_CLOSE_DIST:
 		work.remove_at(work.size() - 1)
 	var ids := Geom.embed_path_paired(_outer, _inner, work)
@@ -480,6 +574,8 @@ func _bake_if_needed() -> bool:
 	_rest = extracted["rest"]
 	var organ_z := _organ_front_z()
 	_inner = Geom.make_cavity(_outer, thickness, organ_z)
+	var back_z := minf(_guts_min.z - 0.010, organ_z - 0.08)
+	_wrap = Geom.make_cavity_wrap(_inner, back_z)
 	# 用去掉腹部的 Dress 替换原网格，避免与手术网格重叠。
 	if _rest.face_count() > 0:
 		_dress.mesh = _rest.to_array_mesh()
@@ -488,7 +584,7 @@ func _bake_if_needed() -> bool:
 			_dress.skin = _skin
 		_dress.skeleton = _dress.skeleton
 	_surgical_mi = _make_skinned_mi("SurgicalAbdomen", _outer.to_array_mesh(), true)
-	_cavity_mi = _make_skinned_mi("SurgicalCavity", _inner.to_array_mesh(), false)
+	_cavity_mi = _make_skinned_mi("SurgicalCavity", _cavity_display_mesh(), false)
 	_cavity_mi.material_override = _cavity_material()
 	_wall_mi = _make_skinned_mi("SurgicalWall", ArrayMesh.new(), false)
 	_wall_mi.material_override = _wall_material()
@@ -531,7 +627,7 @@ func _rebuild_surgical_meshes(outer: Geom.MeshData, inner: Geom.MeshData, wall: 
 		if _skin:
 			_surgical_mi.skin = _skin
 	if _cavity_mi:
-		_cavity_mi.mesh = inner.to_array_mesh()
+		_cavity_mi.mesh = _cavity_display_mesh()
 		if _skin:
 			_cavity_mi.skin = _skin
 	if _wall_mi and wall:
@@ -540,6 +636,15 @@ func _rebuild_surgical_meshes(outer: Geom.MeshData, inner: Geom.MeshData, wall: 
 			_wall_mi.skin = _skin
 		_wall_mi.visible = wall.face_count() > 0
 	_posed_dirty = true
+
+
+func _cavity_display_mesh() -> ArrayMesh:
+	if _inner == null:
+		return ArrayMesh.new()
+	var d := _inner.clone()
+	if _wrap and _wrap.face_count() > 0:
+		_append_mesh(d, _wrap)
+	return d.to_array_mesh()
 
 
 func _cavity_material() -> Material:
@@ -580,12 +685,16 @@ func _xray_on() -> bool:
 
 
 func _refresh_posed() -> void:
+	if pose_locked:
+		return
 	_posed_dirty = true
 
 
 func _posed_world() -> PackedVector3Array:
 	if _outer == null:
 		return PackedVector3Array()
+	if pose_locked and _posed_frozen.size() == _outer.vert_count():
+		return _posed_frozen
 	if _posed_dirty or _posed_cache.size() != _outer.vert_count():
 		_posed_cache = Geom.world_positions(_outer, _skel, _skin)
 		_posed_dirty = false
@@ -599,11 +708,46 @@ func _dampen_breath(on: bool) -> void:
 	if sec == null:
 		return
 	if on:
-		_breath_amp_saved = float(sec.get("breath_amp"))
+		if _breath_amp_saved < 0.0:
+			_breath_amp_saved = float(sec.get("breath_amp"))
 		sec.set("breath_amp", _breath_amp_saved * 0.45)
-	elif _breath_amp_saved >= 0.0:
+	elif _breath_amp_saved >= 0.0 and not pose_locked:
 		sec.set("breath_amp", _breath_amp_saved)
 		_breath_amp_saved = -1.0
+
+
+func _lock_pose_for_stroke(on: bool) -> void:
+	if player == null or not player.has_method("get_secondary"):
+		pose_locked = on
+		return
+	var sec: RefCounted = player.call("get_secondary")
+	if on:
+		if not pose_locked:
+			if sec:
+				if _breath_enabled_saved == null:
+					_breath_enabled_saved = bool(sec.get("breath_enabled"))
+				if _breath_amp_saved < 0.0:
+					_breath_amp_saved = float(sec.get("breath_amp"))
+				sec.set("breath_enabled", false)
+				sec.set("breath_amp", 0.0)
+			_posed_dirty = true
+			_posed_cache = Geom.world_positions(_outer, _skel, _skin) if _outer else PackedVector3Array()
+			_posed_frozen = _posed_cache.duplicate()
+			_posed_dirty = false
+		pose_locked = true
+	else:
+		pose_locked = false
+		_posed_frozen = PackedVector3Array()
+		if sec:
+			if _breath_enabled_saved != null:
+				sec.set("breath_enabled", bool(_breath_enabled_saved))
+				_breath_enabled_saved = null
+			# 手术中仍保持减弱呼吸；退出时由 _dampen_breath(false) 完全恢复。
+			if active and _breath_amp_saved >= 0.0:
+				sec.set("breath_amp", _breath_amp_saved * 0.45)
+			elif _breath_amp_saved >= 0.0:
+				sec.set("breath_amp", _breath_amp_saved)
+		_posed_dirty = true
 
 
 func _make_preview() -> void:
@@ -649,6 +793,8 @@ func _approx_world_bind(bind_p: Vector3) -> Vector3:
 		if s < best_s:
 			best_s = s
 			best = i
+	if pose_locked and _posed_frozen.size() > best:
+		return _posed_frozen[best]
 	var posed := Geom.skin_vertex(bind_p, best, _outer, _skel, _skin)
 	return _skel.global_transform * posed
 
@@ -703,6 +849,66 @@ func _place_scalpel(world_p: Vector3, dir: Vector3) -> void:
 	_scalpel.global_transform = Transform3D(basis * Basis.from_euler(Vector3(-PI * 0.5, 0, 0)), world_p - d * 0.05)
 
 
+func _find_exam_bed() -> Node:
+	if player == null:
+		return null
+	var g := player.get_parent()
+	var vs: Node = g.get("vehicle_system") if g else null
+	if vs == null:
+		return null
+	var occ = vs.get("occupied")
+	if occ and str(vs.call("kind_of", occ)) == "exam_bed":
+		return occ
+	for v in vs.get("vehicles"):
+		if str(vs.call("kind_of", v)) == "exam_bed":
+			return v
+	return null
+
+
+func _ensure_flap_catch() -> StaticBody3D:
+	if _flap_catch and is_instance_valid(_flap_catch):
+		return _flap_catch
+	var bed := _find_exam_bed()
+	if bed == null:
+		return null
+	var body := StaticBody3D.new()
+	body.name = "SurgeryFlapCatch"
+	body.collision_layer = 1 << (CATCH_LAYER - 1)
+	body.collision_mask = 0
+	var seat := Vector3(0.0, 0.836, 0.35)
+	var head := Vector3(0.0, 1.622, -0.777)
+	if bed.has_method("seat_local"):
+		seat = bed.call("seat_local")
+	if bed.has_method("head_local"):
+		head = bed.call("head_local")
+	var mid := (seat + head) * 0.5
+	# 盖住髋到上背的水平托板，只用第 8 层，不顶开角色。
+	var z0 := minf(seat.z, mid.z) - 0.05
+	var z1 := maxf(seat.z, mid.z) + 0.35
+	var center := Vector3(0.0, seat.y - 0.02, (z0 + z1) * 0.5)
+	var size := Vector3(0.95, 0.14, maxf(0.7, absf(z1 - z0)))
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = size
+	cs.shape = box
+	cs.position = center
+	body.add_child(cs)
+	bed.add_child(body)
+	_flap_catch = body
+	return body
+
+
+func _catch_top_y() -> float:
+	var bed := _find_exam_bed()
+	if bed and bed.has_method("seat_global"):
+		return float((bed.call("seat_global") as Vector3).y)
+	if _flap_catch and is_instance_valid(_flap_catch):
+		return _flap_catch.global_position.y + 0.8
+	if player:
+		return player.global_position.y + 0.7
+	return 0.8
+
+
 func _spawn_flap(flap_md: Geom.MeshData, flap_outer: Geom.MeshData) -> bool:
 	# 用当前姿态把皮瓣烘到世界空间，再做成柔体落地。
 	if _skel == null:
@@ -719,9 +925,32 @@ func _spawn_flap(flap_md: Geom.MeshData, flap_outer: Geom.MeshData) -> bool:
 		var empty_w := PackedFloat32Array([0, 0, 0, 0])
 		world_md.add_vert(wp, flap_md.nrm[i], flap_md.uv[i], empty_b, empty_w)
 	world_md.idx = flap_md.idx.duplicate()
-	# 皮瓣已脱离骨骼，不要把蒙皮数组带给 SoftBody。
 	world_md.bones = PackedInt32Array()
 	world_md.weights = PackedFloat32Array()
+	_ensure_flap_catch()
+	var top := _catch_top_y()
+	# 略向外、向下推开，避免一开始嵌进腹壁；并抬到床面上方以防穿模。
+	var nsum := Vector3.ZERO
+	var c := Vector3.ZERO
+	for i2 in world_md.vert_count():
+		c += world_md.pos[i2]
+		nsum += world_md.nrm[i2]
+	if world_md.vert_count() > 0:
+		c /= float(world_md.vert_count())
+	if nsum.length_squared() > 1e-8:
+		nsum = nsum.normalized()
+	else:
+		nsum = Vector3(0, -0.2, 0.8).normalized()
+	var push := nsum * 0.05 + Vector3(0, -0.02, 0)
+	var min_y := 1e9
+	for i3 in world_md.vert_count():
+		world_md.pos[i3] = world_md.pos[i3] + push
+		if world_md.pos[i3].y < min_y:
+			min_y = world_md.pos[i3].y
+	if min_y < top + 0.02:
+		var lift := (top + 0.03) - min_y
+		for i4 in world_md.vert_count():
+			world_md.pos[i4].y += lift
 	var mesh := world_md.to_array_mesh()
 	if mesh.get_surface_count() < 1:
 		return false
@@ -731,35 +960,33 @@ func _spawn_flap(flap_md: Geom.MeshData, flap_outer: Geom.MeshData) -> bool:
 	var parent: Node = player.get_parent() if player else get_tree().current_scene
 	if parent == null:
 		parent = self
-	var ok_soft := false
 	var soft := SoftBody3D.new()
 	soft.name = "SurgeryFlap"
 	soft.mesh = mesh
 	soft.collision_layer = 1
-	soft.collision_mask = 1
-	soft.linear_stiffness = 0.35
-	soft.damping_coefficient = 0.12
+	soft.collision_mask = 1 | (1 << (CATCH_LAYER - 1))
+	soft.linear_stiffness = 0.42
+	soft.damping_coefficient = 0.22
 	if "total_mass" in soft:
-		soft.total_mass = 0.35
-	soft.simulation_precision = 5
+		soft.total_mass = 0.40
+	soft.simulation_precision = 8
+	if "parent_collision_ignore" in soft and player:
+		soft.parent_collision_ignore = soft.get_path_to(player) if soft.is_inside_tree() else NodePath()
 	soft.material_override = _wall_material()
 	parent.add_child(soft)
 	soft.global_transform = Transform3D.IDENTITY
+	if player and "parent_collision_ignore" in soft:
+		soft.parent_collision_ignore = soft.get_path_to(player)
 	if is_instance_valid(soft) and soft.mesh and soft.mesh.get_surface_count() >= 1:
 		flap_node = soft
 		flap_kind = "softbody"
-		ok_soft = true
-	else:
-		soft.queue_free()
-	if ok_soft:
 		return true
+	soft.queue_free()
 	return _spawn_flap_verlet(world_md, parent)
 
 
 func _spawn_flap_verlet(world_md: Geom.MeshData, parent: Node) -> bool:
-	var floor_y := 0.02
-	if player:
-		floor_y = player.global_position.y - 0.2
+	var floor_y := _catch_top_y()
 	var flap := load("res://scripts/surgery/surgery_flap_verlet.gd").new() as Node3D
 	flap.name = "SurgeryFlap"
 	parent.add_child(flap)
@@ -772,12 +999,33 @@ func _spawn_flap_verlet(world_md: Geom.MeshData, parent: Node) -> bool:
 	return true
 
 
+func debug_begin_stroke_at_navel() -> bool:
+	if not active:
+		if not enter_surgery():
+			return false
+	var origin := _navel_world() + Vector3(0.0, 0.02, 0.28)
+	var dir := (_navel_world() - origin)
+	if dir.length_squared() < 1e-8:
+		dir = Vector3(0, 0, -1)
+	else:
+		dir = dir.normalized()
+	return begin_stroke(origin, dir)
+
+
+func _navel_world() -> Vector3:
+	if _organs and _organs.has_method("abdomen_frame"):
+		return (_organs.call("abdomen_frame") as Transform3D).origin
+	if player:
+		return player.global_position + Vector3(0, 1.06, 0.1)
+	return _navel_rest
+
+
 func _process(_dt: float) -> void:
 	if active and not is_on_exam_bed():
 		exit_surgery()
 		return
 	if not active and not persist:
 		return
-	if active:
+	if active and not pose_locked:
 		_posed_dirty = true
 	_update_cavity_visibility()

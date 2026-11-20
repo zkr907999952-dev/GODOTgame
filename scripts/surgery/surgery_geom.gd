@@ -233,9 +233,10 @@ static func make_cavity(outer: MeshData, thickness: float, organ_front_z: float 
 		else:
 			n = n.normalized()
 		var p: Vector3 = outer.pos[i] - n * th
-		# 不要把内壁推进到已有脏器前方（脏器前缘 organ_front_z）。
-		if organ_front_z > -1e8 and p.z < organ_front_z + 0.004:
-			p.z = maxf(p.z, organ_front_z + 0.004)
+		# 1:1 前壁只做厚度内收；不再把内壁推到脏器前方（否则包不住腹腔）。
+		# organ_front_z 仅作深度下限的参考，真正的后壁/侧壁由 make_cavity_wrap 补上。
+		if organ_front_z > -1e8 and p.z < organ_front_z - 0.06:
+			p.z = organ_front_z - 0.06
 		var b := PackedInt32Array()
 		var w := PackedFloat32Array()
 		b.resize(4)
@@ -754,16 +755,41 @@ static func extract_inside(md: MeshData, loop_ids: PackedInt32Array) -> Dictiona
 			e = dest.copy_vert(md, si)
 			mp[si] = e
 		return e
+	var area_in := 0.0
+	var area_out := 0.0
+	var faces_in: Array = []
+	var faces_out: Array = []
 	for f in md.face_count():
 		var a := md.idx[f * 3]
 		var b := md.idx[f * 3 + 1]
 		var c := md.idx[f * 3 + 2]
+		var votes := 0
+		for vi in [a, b, c]:
+			if absf(winding_number(_v2(md.pos[vi]), poly)) >= 0.5:
+				votes += 1
 		var cen := _v2(md.centroid(f))
-		var inn := point_in_poly(cen, poly)
+		var cen_in := absf(winding_number(cen, poly)) >= 0.5
+		# 擦边三角：至少两顶点在内，或一顶点且重心明确在内，才算皮瓣。
+		var inn := votes >= 2 or (votes == 1 and cen_in)
+		var ar := _tri_area_xy(md.pos[a], md.pos[b], md.pos[c])
 		if inn:
-			inside.add_face(_xfer.call(inside, map_in, a), _xfer.call(inside, map_in, b), _xfer.call(inside, map_in, c))
+			faces_in.append([a, b, c])
+			area_in += ar
 		else:
-			outside.add_face(_xfer.call(outside, map_out, a), _xfer.call(outside, map_out, b), _xfer.call(outside, map_out, c))
+			faces_out.append([a, b, c])
+			area_out += ar
+	# 皮瓣应是被环围住的较小一侧，避免自交/绕向把整片腹壁判成内侧。
+	if area_in > area_out and area_out > 1e-8:
+		var tmp_f: Array = faces_in
+		faces_in = faces_out
+		faces_out = tmp_f
+		var tmp_a := area_in
+		area_in = area_out
+		area_out = tmp_a
+	for tri in faces_in:
+		inside.add_face(_xfer.call(inside, map_in, tri[0]), _xfer.call(inside, map_in, tri[1]), _xfer.call(inside, map_in, tri[2]))
+	for tri2 in faces_out:
+		outside.add_face(_xfer.call(outside, map_out, tri2[0]), _xfer.call(outside, map_out, tri2[1]), _xfer.call(outside, map_out, tri2[2]))
 	# 环上顶点在内外都要有，截面才能焊上。
 	var loop_in := PackedInt32Array()
 	var loop_out := PackedInt32Array()
@@ -778,6 +804,8 @@ static func extract_inside(md: MeshData, loop_ids: PackedInt32Array) -> Dictiona
 		"loop_src": clean,
 		"inside_faces": inside.face_count(),
 		"outside_faces": outside.face_count(),
+		"inside_area": area_in,
+		"outside_area": area_out,
 	}
 
 
@@ -1079,3 +1107,255 @@ static func open_loop_slit(md: MeshData, loop_ids: PackedInt32Array, width: floa
 	var right_c := right.duplicate()
 	right_c.append(right[0])
 	return {"ok": true, "left": left_c, "right": right_c}
+
+
+static func _tri_area_xy(a: Vector3, b: Vector3, c: Vector3) -> float:
+	return absf((_v2(b) - _v2(a)).cross(_v2(c) - _v2(a))) * 0.5
+
+
+static func winding_number(p: Vector2, poly: PackedVector2Array) -> float:
+	var w := 0.0
+	var n := poly.size()
+	if n < 3:
+		return 0.0
+	var j := n - 1
+	for i in n:
+		var a := poly[j]
+		var b := poly[i]
+		if a.y <= p.y:
+			if b.y > p.y and (b - a).cross(p - a) > 0.0:
+				w += 1.0
+		else:
+			if b.y <= p.y and (b - a).cross(p - a) < 0.0:
+				w -= 1.0
+		j = i
+	return w
+
+
+static func simplify_path(path: PackedVector3Array, tol: float = 0.003, max_pts: int = 48) -> PackedVector3Array:
+	## Ramer–Douglas–Peucker（XY）+ 点数上限，减轻密采样手绘卡顿。
+	if path.size() <= 2:
+		return path.duplicate()
+	var use_tol := maxf(tol, 0.0005)
+	var out := _rdp(path, use_tol)
+	var guard := 0
+	while out.size() > max_pts and use_tol < 0.08 and guard < 12:
+		use_tol *= 1.45
+		out = _rdp(path, use_tol)
+		guard += 1
+	if out.size() < 2:
+		out = PackedVector3Array()
+		out.append(path[0])
+		out.append(path[path.size() - 1])
+	return out
+
+
+static func _rdp(path: PackedVector3Array, tol: float) -> PackedVector3Array:
+	var n := path.size()
+	if n <= 2:
+		return path.duplicate()
+	var keep := PackedByteArray()
+	keep.resize(n)
+	keep[0] = 1
+	keep[n - 1] = 1
+	_rdp_mark(path, 0, n - 1, tol, keep)
+	var out := PackedVector3Array()
+	for i in n:
+		if keep[i] != 0:
+			out.append(path[i])
+	return out
+
+
+static func _rdp_mark(path: PackedVector3Array, i0: int, i1: int, tol: float, keep: PackedByteArray) -> void:
+	if i1 <= i0 + 1:
+		return
+	var a := _v2(path[i0])
+	var b := _v2(path[i1])
+	var ab := b - a
+	var denom := ab.length_squared()
+	var best_i := -1
+	var best_d := tol
+	for i in range(i0 + 1, i1):
+		var p := _v2(path[i])
+		var d: float
+		if denom < 1e-16:
+			d = p.distance_to(a)
+		else:
+			var t := clampf((p - a).dot(ab) / denom, 0.0, 1.0)
+			d = p.distance_to(a.lerp(b, t))
+		if d > best_d:
+			best_d = d
+			best_i = i
+	if best_i >= 0:
+		keep[best_i] = 1
+		_rdp_mark(path, i0, best_i, tol, keep)
+		_rdp_mark(path, best_i, i1, tol, keep)
+
+
+static func path_area_xy(path: PackedVector3Array) -> float:
+	var n := path.size()
+	if n < 3:
+		return 0.0
+	var acc := 0.0
+	var last := n - 1
+	if path[0].distance_to(path[last]) <= PATH_CLOSE_DIST:
+		last = n - 2
+	var j := last
+	for i in range(0, last + 1):
+		var a := _v2(path[i])
+		var b := _v2(path[j])
+		acc += (b.x + a.x) * (b.y - a.y)
+		j = i
+	return absf(acc) * 0.5
+
+
+static func clean_closed_loop(path: PackedVector3Array) -> PackedVector3Array:
+	## 去重、简化，并把自交路径收成面积最大的简单环，避免剥错皮瓣。
+	var work := PackedVector3Array()
+	for p in path:
+		if work.is_empty() or work[work.size() - 1].distance_to(p) > 0.001:
+			work.append(p)
+	if work.size() >= 2 and work[0].distance_to(work[work.size() - 1]) <= PATH_CLOSE_DIST:
+		work.remove_at(work.size() - 1)
+	work = simplify_path(work, 0.0024, 56)
+	return largest_simple_loop(work)
+
+
+static func largest_simple_loop(path: PackedVector3Array) -> PackedVector3Array:
+	var n := path.size()
+	if n < 4:
+		return path.duplicate()
+	var m := n
+	if path[0].distance_to(path[n - 1]) <= PATH_CLOSE_DIST:
+		m = n - 1
+	if m < 4:
+		return path.duplicate()
+	var best := PackedVector3Array()
+	var best_area := -1.0
+	for i in m:
+		var a0 := path[i]
+		var a1 := path[(i + 1) % m]
+		for j in range(i + 2, m):
+			if i == 0 and j == m - 1:
+				continue
+			var b0 := path[j]
+			var b1 := path[(j + 1) % m]
+			var t: Variant = _seg_intersect_2d(_v2(a0), _v2(a1), _v2(b0), _v2(b1))
+			if t == null:
+				continue
+			var hit: Vector3 = a0.lerp(a1, float(t))
+			var loop := PackedVector3Array()
+			loop.append(hit)
+			var k := (i + 1) % m
+			var guard := 0
+			while k != (j + 1) % m and guard < m + 2:
+				loop.append(path[k])
+				k = (k + 1) % m
+				guard += 1
+			if loop.size() >= 3:
+				var ar := path_area_xy(loop)
+				if ar > best_area:
+					best_area = ar
+					best = loop
+	if best.size() >= 3:
+		return best
+	return path.duplicate()
+
+
+static func mesh_boundary_loop(md: MeshData) -> PackedInt32Array:
+	var count: Dictionary = {}
+	var ends: Dictionary = {}
+	for f in md.face_count():
+		var tri := [md.idx[f * 3], md.idx[f * 3 + 1], md.idx[f * 3 + 2]]
+		for k in 3:
+			var a: int = tri[k]
+			var b: int = tri[(k + 1) % 3]
+			var key := "%d_%d" % [mini(a, b), maxi(a, b)]
+			count[key] = int(count.get(key, 0)) + 1
+			if not ends.has(key):
+				ends[key] = [a, b]
+	var nbrs: Dictionary = {}
+	for key in count.keys():
+		if int(count[key]) != 1:
+			continue
+		var e: Array = ends[key]
+		if not nbrs.has(e[0]):
+			nbrs[e[0]] = []
+		if not nbrs.has(e[1]):
+			nbrs[e[1]] = []
+		(nbrs[e[0]] as Array).append(e[1])
+		(nbrs[e[1]] as Array).append(e[0])
+	if nbrs.is_empty():
+		return PackedInt32Array()
+	var start: int = int(nbrs.keys()[0])
+	for id in nbrs.keys():
+		start = int(id)
+		break
+	var loop := PackedInt32Array()
+	var prev := -1
+	var cur := start
+	for _s in md.vert_count() + 4:
+		loop.append(cur)
+		var opts: Array = nbrs.get(cur, [])
+		var nxt := -1
+		for o in opts:
+			if int(o) != prev:
+				nxt = int(o)
+				break
+		if nxt < 0 or nxt == start:
+			if nxt == start:
+				loop.append(start)
+			break
+		prev = cur
+		cur = nxt
+	return loop
+
+
+static func make_cavity_wrap(inner: MeshData, back_z: float) -> MeshData:
+	## 从前壁边界挤到腹腔后方，再封后盖，把脏器体积包进袋状腔。
+	var wrap := MeshData.new()
+	var loop := mesh_boundary_loop(inner)
+	var ids := PackedInt32Array()
+	for i in loop.size():
+		var id: int = loop[i]
+		if ids.size() > 0 and ids[ids.size() - 1] == id:
+			continue
+		if ids.size() > 0 and i == loop.size() - 1 and id == ids[0]:
+			continue
+		ids.append(id)
+	var n := ids.size()
+	if n < 3:
+		return wrap
+	var front := PackedInt32Array()
+	var back := PackedInt32Array()
+	front.resize(n)
+	back.resize(n)
+	var acc := Vector3.ZERO
+	for i in n:
+		var src: int = ids[i]
+		front[i] = wrap.copy_vert(inner, src)
+		var p := inner.pos[src]
+		var bp := Vector3(p.x, p.y, back_z)
+		var b := PackedInt32Array()
+		var w := PackedFloat32Array()
+		b.resize(4)
+		w.resize(4)
+		for k in 4:
+			b[k] = inner.bones[src * 4 + k]
+			w[k] = inner.weights[src * 4 + k]
+		back[i] = wrap.add_vert(bp, Vector3(0, 0, -1), inner.uv[src], b, w)
+		acc += bp
+	loft_wall(wrap, front, back, true)
+	acc /= float(n)
+	var bones0 := PackedInt32Array()
+	var weights0 := PackedFloat32Array()
+	bones0.resize(4)
+	weights0.resize(4)
+	for k2 in 4:
+		bones0[k2] = wrap.bones[back[0] * 4 + k2]
+		weights0[k2] = wrap.weights[back[0] * 4 + k2]
+	var cid := wrap.add_vert(acc, Vector3(0, 0, -1), Vector2(0.5, 0.5), bones0, weights0)
+	# 后盖朝 -Z（从 +Z 看为顺时针）。
+	for i2 in n:
+		wrap.add_face(cid, back[(i2 + 1) % n], back[i2])
+	return wrap

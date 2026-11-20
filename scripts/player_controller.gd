@@ -1851,12 +1851,41 @@ func touch_crouch_tap() -> void:
 	_set_stance("stand" if (_stance == "crouch" or _stance == "prone") else "crouch")
 
 
+func _is_touch_ui_mode() -> bool:
+	if touch_active:
+		return true
+	var hud := get_parent().get_node_or_null("HUD") if get_parent() else null
+	if hud and "touch_ui" in hud:
+		return bool(hud.touch_ui)
+	return false
+
+
 func _handle_vehicle_look(event: InputEvent) -> bool:
 	var vs := _vehicle_system_node()
 	if vs == null:
 		return false
 	var third := vs.has_method("is_drive_third") and bool(vs.call("is_drive_third"))
 	var observe := vs.has_method("is_observe_orbit") and bool(vs.call("is_observe_orbit"))
+	var touch_ui := _is_touch_ui_mode()
+	# PC：按住右键即可拖拽转动载具视角，不必先切「观察」。松开后由 VehicleSystem 软回正。
+	if not touch_ui:
+		if event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_RIGHT:
+			var rb := event as InputEventMouseButton
+			if rb.pressed:
+				vs.call("begin_pc_orbit")
+			else:
+				vs.call("end_pc_orbit")
+			get_viewport().set_input_as_handled()
+			return true
+		if event is InputEventMouseMotion:
+			var mmr := event as InputEventMouseMotion
+			var pc_held := vs.has_method("is_pc_orbit_held") and bool(vs.call("is_pc_orbit_held"))
+			if pc_held and (mmr.button_mask & MOUSE_BUTTON_MASK_RIGHT):
+				vs.call("orbit_look", mmr.relative, mouse_sensitivity)
+				get_viewport().set_input_as_handled()
+				return true
+			# Without a held RMB, first-person stays locked to the vehicle basis.
+			return occupancy == "car" or occupancy == "plane"
 	if event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
 		var mb := event as InputEventMouseButton
 		if observe:

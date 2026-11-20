@@ -1329,7 +1329,8 @@ func _refresh_vehicle_touch() -> void:
 	var editing := _touch != null and bool(_touch.get("layout_edit"))
 	# 观察 sits at the TOP, immediately left of 透视.
 	if _btn_observe:
-		_btn_observe.visible = in_drive and not editing and not is_map_open()
+		# 「观察」只给手机用。电脑按住右键即可环绕，不显示此按钮。
+		_btn_observe.visible = in_drive and touch_ui and not editing and not is_map_open()
 		if in_drive and vs:
 			var orbit := str(vs.get("vehicle_look_mode")) == "orbit"
 			_btn_observe.text = "观察·开" if orbit else "观察"

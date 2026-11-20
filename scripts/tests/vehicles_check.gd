@@ -4,8 +4,8 @@ const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
 ## 0.2.31 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.3.0"
-const VERSION_CODE := 34
+const VERSION_NAME := "0.3.1"
+const VERSION_CODE := 35
 
 var fails := 0
 var main: Node
@@ -84,6 +84,7 @@ func _run() -> void:
 	await _check_0229_playtest_fixes()
 	await _check_0230_playtest_fixes()
 	await _check_0231_playtest_fixes()
+	await _check_031_pc_orbit_and_observe_button()
 	_finish()
 
 
@@ -2950,9 +2951,12 @@ func _check_0229_playtest_fixes() -> void:
 		if hud.get("_btn_observe") and hud.get("_btn_xray"):
 			var obs: Control = hud.get("_btn_observe")
 			var xr: Control = hud.get("_btn_xray")
-			var ds := obs.size - xr.size
-			_ok(absf(ds.x) <= 8.0 and absf(ds.y) <= 8.0 or (obs.custom_minimum_size - xr.custom_minimum_size).length() <= 12.0,
-				"观察 button is about the same size as 透视 (obs=%s xray=%s min=%s/%s)" % [obs.size, xr.size, obs.custom_minimum_size, xr.custom_minimum_size])
+			if obs.visible:
+				var ds := obs.size - xr.size
+				_ok(absf(ds.x) <= 8.0 and absf(ds.y) <= 8.0 or (obs.custom_minimum_size - xr.custom_minimum_size).length() <= 12.0,
+					"观察 button is about the same size as 透视 (obs=%s xray=%s min=%s/%s)" % [obs.size, xr.size, obs.custom_minimum_size, xr.custom_minimum_size])
+			else:
+				_ok(not bool(hud.touch_ui), "观察 is hidden in PC mode (no touch UI)")
 		if hud.get("_wui") and hud.get("_wui").get("ammo_box"):
 			var box: Control = hud.get("_wui").get("ammo_box")
 			var sb: StyleBox = box.get_theme_stylebox("panel")
@@ -3583,3 +3587,93 @@ func _finish() -> void:
 	else:
 		print("vehicles: FAILED ", fails)
 	quit(1 if fails else 0)
+
+
+func _check_031_pc_orbit_and_observe_button() -> void:
+	## 0.3.1：电脑按住右键即可拖拽转动载具视角，不必切「观察」；
+	## 「观察」按钮只在手机/触屏模式显示。双指载具环绕仍然取消，地图缩放手势保持。
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	var pc_src := FileAccess.get_file_as_string("res://scripts/player_controller.gd")
+	var hud_src := FileAccess.get_file_as_string("res://scripts/hud.gd")
+	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
+	_ok(vs_src.find("func begin_pc_orbit") >= 0 and vs_src.find("func end_pc_orbit") >= 0, "PC orbit hold / release API exists")
+	_ok(pc_src.find("MOUSE_BUTTON_RIGHT") >= 0 and pc_src.find("begin_pc_orbit") >= 0, "PC right mouse button starts vehicle orbit")
+	_ok(hud_src.find("touch_ui and not editing and not is_map_open()") >= 0, "观察 button is gated on touch_ui")
+	_ok(tc_src.find("载具内取消双指拖拽旋转视角") >= 0, "two-finger vehicle orbit stays cancelled")
+	_ok(vs_src.find("xf.basis.orthonormalized() * Basis.from_euler") >= 0, "vehicle first-person look stays in the vehicle basis")
+
+	var hud: Node = main.get_node_or_null("HUD") if main else null
+	if hud and hud.has_method("set_touch_ui"):
+		hud.call("set_touch_ui", false)
+		if hud.has_method("_refresh_vehicle_touch"):
+			hud.call("_refresh_vehicle_touch")
+
+	# Enter the default car.
+	if vs == null or player == null:
+		_ok(false, "vehicle system / player available for PC orbit check")
+		return
+	if vs.get("occupied"):
+		vs.call("try_toggle")
+		await _frames(6)
+		await _phys(2)
+	var car: Node = null
+	for v in vs.vehicles:
+		if str(vs.call("kind_of", v)) == "car" and bool(v.get("is_default")):
+			car = v
+			break
+	if car == null:
+		for v2 in vs.vehicles:
+			if str(vs.call("kind_of", v2)) == "car":
+				car = v2
+				break
+	if car == null:
+		_ok(false, "a car is available for PC orbit")
+		return
+	player.global_position = car.global_position + Vector3(2.0, 0.2, 0.0)
+	if vs.has_method("_update_nearest"):
+		vs.call("_update_nearest")
+	_ok(bool(vs.call("try_enter")), "can enter a car for PC orbit")
+	await _frames(6)
+	await _phys(2)
+	_ok(str(player.get("occupancy")) == "car", "occupying the car")
+	if hud:
+		var obs: Control = hud.get("_btn_observe")
+		_ok(obs != null, "观察 button node still exists")
+		_ok(obs == null or not obs.visible, "观察 button is hidden in PC mode while driving")
+	# Without toggling 观察, RMB-style API should orbit and then soft-recenter.
+	_ok(str(vs.get("vehicle_look_mode")) == "yaw", "vehicle look mode stays yaw on PC (no 观察 toggle)")
+	vs.call("begin_pc_orbit")
+	_ok(bool(vs.call("is_pc_orbit_held")), "PC right-button orbit is held")
+	var yaw0 := float(vs.get("_orbit_yaw"))
+	vs.call("orbit_look", Vector2(80.0, 0.0), 0.004)
+	var yaw1 := float(vs.get("_orbit_yaw"))
+	_ok(absf(yaw1 - yaw0) > 0.05, "holding the PC orbit look turns the view (yaw0=%.3f yaw1=%.3f)" % [yaw0, yaw1])
+	vs.call("end_pc_orbit")
+	_ok(not bool(vs.call("is_pc_orbit_held")), "releasing RMB ends the PC orbit hold")
+	for i in 30:
+		vs.call("_vehicle_camera", 0.05)
+	var yaw2 := float(vs.get("_orbit_yaw"))
+	_ok(absf(yaw2) < absf(yaw1) * 0.7 or absf(yaw2) < 0.08, "after RMB release the view soft-recenters to the car heading (yaw1=%.3f yaw2=%.3f)" % [yaw1, yaw2])
+
+	# Mobile still gets the 观察 button and toggle.
+	if hud and hud.has_method("set_touch_ui"):
+		hud.call("set_touch_ui", true)
+		if hud.has_method("_refresh_vehicle_touch"):
+			hud.call("_refresh_vehicle_touch")
+		await _frames(2)
+		var obs2: Control = hud.get("_btn_observe")
+		_ok(obs2 != null and obs2.visible, "观察 button is visible in touch / mobile mode while driving")
+		_ok(str(vs.call("toggle_observe_mode")) == "orbit", "mobile 观察 still toggles orbit mode")
+		_ok(str(vs.call("toggle_observe_mode")) == "yaw", "mobile 观察 still toggles back to yaw")
+		hud.call("set_touch_ui", false)
+		if hud.has_method("_refresh_vehicle_touch"):
+			hud.call("_refresh_vehicle_touch")
+		await _frames(1)
+		_ok(obs2 == null or not obs2.visible, "观察 hides again after leaving touch UI")
+	# Leave the car so later teardown is clean.
+	if vs.get("occupied"):
+		vs.call("try_toggle")
+		await _frames(6)
+		await _phys(2)
+
+
