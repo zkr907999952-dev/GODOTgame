@@ -207,6 +207,20 @@ func effective_xray() -> float:
 	return xray_amount if xray_enabled else 0.0
 
 
+## 手术断面 / 涂鸦等后加的 ShaderMaterial，跟上腹部柔体位移的同一套 uniform。
+func register_deform_material(mat: ShaderMaterial, as_skin: bool = false) -> void:
+	if mat == null:
+		return
+	if mat in _all_mats:
+		if as_skin and mat not in _skin_mats:
+			_skin_mats.append(mat)
+		return
+	_all_mats.append(mat)
+	if as_skin:
+		_skin_mats.append(mat)
+	_push_uniforms()
+
+
 ## 第一人称近裁球（世界坐标 + 半径，0 = 关闭）：皮肤 shader 只对隐藏头部图层的相机（第一人称主相机）丢弃。
 func set_fp_clip(eye_w: Vector3, radius: float) -> void:
 	for m in _skin_mats:
@@ -670,8 +684,18 @@ func apply_ballistic_hit(origin: Vector3, dir: Vector3, par: Dictionary = {}, pr
 	var rad := clampf(0.0045 + energy * 0.007, 0.005, 0.014)
 	var wsize := clampf(0.012 + energy * 0.018, 0.014, 0.032)
 	var n_in: Vector3 = info.get("normal_in", -d_ab)
-	tools.add_wound(entry_ab, n_in, wsize, wsize * 1.15, d_ab)
-	if bool(info.get("overpen", false)):
+	# 腹部优先打真实网格柱状弹孔（去掉圆心皮瓣）；打不成的位置仍用旧贴花。
+	var punched := {"entry": false, "exit": false}
+	var host := get_parent()
+	if host and host.has_method("get_surgery"):
+		var surg: Node = host.call("get_surgery")
+		if surg and surg.has_method("apply_bullet_hit"):
+			var r: Variant = surg.call("apply_bullet_hit", info, par)
+			if r is Dictionary:
+				punched = r
+	if not bool(punched.get("entry", false)):
+		tools.add_wound(entry_ab, n_in, wsize, wsize * 1.15, d_ab)
+	if bool(info.get("overpen", false)) and not bool(punched.get("exit", false)):
 		var n_out: Vector3 = info.get("normal_out", d_ab)
 		tools.add_wound(exit_ab, n_out, wsize * 1.15, wsize * 1.3, d_ab)
 	_ball_ch.append({"a": entry_ab, "d": d_ab, "len": thick, "rad": rad})

@@ -118,3 +118,49 @@ func _rebuild_mesh() -> void:
 	var am := ArrayMesh.new()
 	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	_mi.mesh = am
+
+
+func centroid() -> Vector3:
+	if points.is_empty():
+		return global_position
+	var c := Vector3.ZERO
+	for p in points:
+		c += p
+	return c / float(points.size())
+
+
+func velocity_of_centroid() -> Vector3:
+	if points.is_empty() or prev.size() != points.size():
+		return Vector3.ZERO
+	var v := Vector3.ZERO
+	for i in points.size():
+		v += points[i] - prev[i]
+	return v / float(points.size())
+
+
+func begin_hold(world_p: Vector3) -> void:
+	drag_hold(world_p)
+
+
+func drag_hold(world_p: Vector3) -> void:
+	if points.is_empty():
+		return
+	var c := centroid()
+	var delta: Vector3 = world_p - c
+	for i in points.size():
+		points[i] += delta
+		prev[i] += delta
+	_rebuild_mesh()
+
+
+func end_hold(throw_vel: Vector3) -> void:
+	if points.is_empty():
+		return
+	# Verlet：用 prev 写入抛出速度。
+	for i in points.size():
+		prev[i] = points[i] - throw_vel
+	_rebuild_mesh()
+
+
+func apply_impulse_all(vel: Vector3) -> void:
+	end_hold(vel)

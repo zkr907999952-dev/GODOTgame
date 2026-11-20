@@ -9,6 +9,10 @@ const WALL_THICKNESS := 0.012
 const SLIT_WIDTH := 0.0025
 const OVAL_RX := 0.035
 const OVAL_RY := 0.028
+const WALL_MAX_SEGMENTS := Geom.WALL_MAX_SEGMENTS
+const BULLET_SIDES := Geom.BULLET_SIDES
+const EVERT_ROLL := 0.0085
+const MAX_BULLET_HOLES := 6
 
 signal mode_changed(active: bool)
 signal tool_changed(tool: String)
@@ -67,6 +71,40 @@ var _dress_name: String = ""
 var _skin_name: String = ""
 var _trail_bind: PackedVector3Array = PackedVector3Array()
 var _cavity_xraying: bool = false
+var _wall_shader_mat: ShaderMaterial
+var _cavity_shader_mat: ShaderMaterial
+var _trail_mat: ShaderMaterial
+var _evert: float = 0.0
+var _evert_vel: float = 0.0
+var _evert_anim: bool = false
+var _lip_left: PackedInt32Array = PackedInt32Array()
+var _lip_right: PackedInt32Array = PackedInt32Array()
+var _lip_left_i: PackedInt32Array = PackedInt32Array()
+var _lip_right_i: PackedInt32Array = PackedInt32Array()
+var _lip_closed: bool = false
+var _hole_loops: Array = []
+var _outer_rest: Geom.MeshData
+var _inner_rest: Geom.MeshData
+var _wall_rest: Geom.MeshData
+var _outer_evert: Geom.MeshData
+var _inner_evert: Geom.MeshData
+var _wall_evert: Geom.MeshData
+var _xray_cached: int = -1
+var _grab_kind: String = ""
+var _grab_active: bool = false
+var _grab_anchor: Node3D
+var _grab_last: Vector3 = Vector3.ZERO
+var _grab_vel: Vector3 = Vector3.ZERO
+var _flap_throw_speed: float = 0.0
+var _split_drag: float = 0.0
+var _pull_p: Vector3 = Vector3.ZERO
+var _pull_off: Vector3 = Vector3.ZERO
+var _pull_r: float = 0.0
+var _pinned_points: PackedInt32Array = PackedInt32Array()
+var bullet_holes: int = 0
+var bullet_wall_tris: int = 0
+var bullet_plugs_removed: int = 0
+var last_dense_loft_tris: int = 0
 
 
 func setup(p: Node, skel: Skeleton3D, organs: Node) -> void:
@@ -123,10 +161,90 @@ func incision_trail_point_count() -> int:
 	return _trail_bind.size()
 
 
+func incision_trail_visible_without_xray() -> bool:
+	# 涂鸦不依赖透视；只要轨迹在且材质不是透视专用隐藏。
+	if _preview == null or _trail_bind.size() < 2:
+		return false
+	return _preview.visible and _preview.mesh != null
+
+
+func can_use_grab() -> bool:
+	if flap_node and is_instance_valid(flap_node):
+		return true
+	return cut_open or loop_ready or flap_peeled
+
+
+func wall_is_skinned() -> bool:
+	if _wall_mi == null or _wall_mi.mesh == null or _wall_md == null:
+		return false
+	if _wall_mi.skin == null or _wall_mi.skeleton == NodePath():
+		return false
+	return _wall_md.bones.size() >= _wall_md.vert_count() * 4
+
+
+func wall_shares_belly_deform() -> bool:
+	var mat := _wall_mi.material_override if _wall_mi else null
+	if not (mat is ShaderMaterial):
+		return false
+	var sh: Shader = (mat as ShaderMaterial).shader
+	if sh == null:
+		return false
+	var code := sh.code
+	return code.find("drag_offset") >= 0 and code.find("organ_common.gdshaderinc") >= 0
+
+
+func wall_tri_budget() -> int:
+	return Geom.wall_tri_budget()
+
+
+func last_dense_wall_tris() -> int:
+	return last_dense_loft_tris
+
+
+func evert_amount() -> float:
+	return _evert
+
+
+func cut_is_everted() -> bool:
+	return cut_open and _evert >= 0.55 and _outer_evert != null
+
+
+func lip_opening_width() -> float:
+	return _measure_lip_width(_outer_evert if _outer_evert else _outer)
+
+
+func flap_throw_speed() -> float:
+	return _flap_throw_speed
+
+
+func flap_is_held() -> bool:
+	return _grab_active and _grab_kind == "flap"
+
+
+func split_skin_drag_offset() -> float:
+	return _split_drag
+
+
+func has_bullet_hole() -> bool:
+	return bullet_holes > 0 and bullet_wall_tris > 0
+
+
+func bullet_plug_removed() -> bool:
+	return bullet_plugs_removed > 0
+
+
 func cavity_xray_is_transparent() -> bool:
-	if not _xray_on() or _cavity_mi == null:
+	if _cavity_mi == null:
+		return false
+	_update_cavity_visibility()
+	if not _xray_on():
 		return false
 	var mat := _cavity_mi.material_override
+	if mat is ShaderMaterial:
+		var xm := mat as ShaderMaterial
+		var xr := float(xm.get_shader_parameter("xray"))
+		var col: Color = xm.get_shader_parameter("albedo_color")
+		return xr > 0.0 and col.a < 0.85
 	if mat is StandardMaterial3D:
 		var sm := mat as StandardMaterial3D
 		return (
@@ -138,7 +256,13 @@ func cavity_xray_is_transparent() -> bool:
 
 
 func cavity_xray_alpha() -> float:
-	var mat := _cavity_mi.material_override if _cavity_mi else null
+	if _cavity_mi == null:
+		return 1.0
+	_update_cavity_visibility()
+	var mat := _cavity_mi.material_override
+	if mat is ShaderMaterial:
+		var col: Color = (mat as ShaderMaterial).get_shader_parameter("albedo_color")
+		return col.a
 	if mat is StandardMaterial3D:
 		return (mat as StandardMaterial3D).albedo_color.a
 	return 1.0
@@ -306,7 +430,7 @@ func set_tool(t: String) -> void:
 		_show_scalpel(false)
 		tool_changed.emit(tool)
 		return
-	if t == "grab" and not loop_ready:
+	if t == "grab" and not can_use_grab():
 		return
 	if t != "" and t != "scalpel" and t != "grab":
 		t = ""
@@ -322,7 +446,7 @@ func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
 	if not active:
 		return false
 	if tool == "grab":
-		return try_peel_at(origin, dir)
+		return _begin_grab(origin, dir)
 	if tool != "scalpel":
 		return false
 	_lock_pose_for_stroke(true)
@@ -340,6 +464,9 @@ func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
 
 
 func drag_stroke(origin: Vector3, dir: Vector3) -> void:
+	if tool == "grab" and _grab_active:
+		_drag_grab(origin, dir)
+		return
 	if not stroke_active or tool != "scalpel":
 		return
 	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
@@ -353,6 +480,8 @@ func drag_stroke(origin: Vector3, dir: Vector3) -> void:
 
 
 func cancel_stroke() -> void:
+	if _grab_active:
+		_end_grab(false)
 	if not stroke_active:
 		return
 	stroke_active = false
@@ -364,6 +493,10 @@ func cancel_stroke() -> void:
 
 
 func end_stroke() -> void:
+	if _grab_active:
+		_end_grab(true)
+		stroke_active = false
+		return
 	if not stroke_active:
 		return
 	stroke_active = false
@@ -453,10 +586,19 @@ func peel_flap() -> bool:
 	var map_i_loop := PackedInt32Array()
 	for id in loop_body_i:
 		map_i_loop.append(id + inner_off)
-	lofted_tris += Geom.loft_wall(body, loop_body_o, map_i_loop, true)
+	var peel_wall := _make_loft_mesh(body_o, body_i, loop_body_o, loop_body_i, true)
+	lofted_tris = peel_wall.face_count()
 	_outer = body_o
 	_inner = body_i
-	_rebuild_surgical_meshes(body_o, body_i, _make_loft_mesh(body_o, body_i, loop_body_o, loop_body_i, true))
+	_wall_md = peel_wall
+	_lip_left = loop_body_o
+	_lip_right = loop_body_o
+	_lip_left_i = loop_body_i
+	_lip_right_i = loop_body_i
+	_lip_closed = true
+	_hole_loops.append(loop_body_o)
+	_start_eversion()
+	_rebuild_surgical_meshes(body_o, body_i, peel_wall)
 	# 皮瓣：外补丁 + 内补丁 + 周圈壁，转到世界空间后落地。
 	var flap_md := flap_o.clone()
 	var fo := flap_md.vert_count()
@@ -498,16 +640,23 @@ func _ensure_loop_in_mesh(dest: Geom.MeshData, src: Geom.MeshData, loop: PackedI
 
 
 func _make_loft_mesh(outer: Geom.MeshData, inner: Geom.MeshData, loop_o: PackedInt32Array, loop_i: PackedInt32Array, closed: bool) -> Geom.MeshData:
+	var cap := WALL_MAX_SEGMENTS
+	var src_o := Geom.resample_index_loop(outer, loop_o, cap)
+	var src_i := Geom.resample_index_loop(inner, loop_i, cap)
+	var n := mini(src_o.size(), src_i.size())
+	if src_o.size() != src_i.size() and n >= 2:
+		src_o = Geom.resample_index_loop(outer, src_o, n)
+		src_i = Geom.resample_index_loop(inner, src_i, n)
 	var wall := Geom.MeshData.new()
 	var map_o: Dictionary = {}
 	var map_i: Dictionary = {}
 	var ids_o := PackedInt32Array()
 	var ids_i := PackedInt32Array()
-	for id in loop_o:
+	for id in src_o:
 		if not map_o.has(id):
 			map_o[id] = wall.copy_vert(outer, id)
 		ids_o.append(int(map_o[id]))
-	for id2 in loop_i:
+	for id2 in src_i:
 		if not map_i.has(id2):
 			map_i[id2] = wall.copy_vert(inner, id2)
 		ids_i.append(int(map_i[id2]))
@@ -564,11 +713,17 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 		var left_i: PackedInt32Array = slit_i.get("left", ids)
 		var right_i: PackedInt32Array = slit_i.get("right", ids)
 		# 剥离仍用嵌入后、张开前的环（ids）；左右唇只用于可见截面。
+		last_dense_loft_tris = Geom.dense_loft_tris(left.size(), true, 2)
 		wall = _make_loft_mesh(_outer, _inner, left, left_i, true)
 		var wall2 := _make_loft_mesh(_outer, _inner, right, right_i, true)
 		_append_mesh(wall, wall2)
 		_flap_loop = left
 		_body_loop = right
+		_lip_left = left
+		_lip_right = right
+		_lip_left_i = left_i
+		_lip_right_i = right_i
+		_lip_closed = true
 		lofted_tris = wall.face_count()
 	else:
 		loop_ready = false
@@ -579,14 +734,21 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 		var ro: PackedInt32Array = slit_o2.get("right", ids)
 		var li: PackedInt32Array = slit_i2.get("left", ids)
 		var ri: PackedInt32Array = slit_i2.get("right", ids)
+		last_dense_loft_tris = Geom.dense_loft_tris(lo.size(), false, 2)
 		wall = _make_loft_mesh(_outer, _inner, lo, li, false)
 		var w2 := _make_loft_mesh(_outer, _inner, ro, ri, false)
 		_append_mesh(wall, w2)
+		_lip_left = lo
+		_lip_right = ro
+		_lip_left_i = li
+		_lip_right_i = ri
+		_lip_closed = false
 		lofted_tris = wall.face_count()
 	cut_open = true
 	cavity_exposed = true
 	persist = true
 	_wall_md = wall
+	_start_eversion()
 	_rebuild_surgical_meshes(_outer, _inner, wall)
 	_posed_dirty = true
 	if path.size() >= 2:
@@ -673,6 +835,10 @@ func _bake_if_needed() -> bool:
 	_cavity_mi.material_override = _cavity_material()
 	_wall_mi = _make_skinned_mi("SurgicalWall", ArrayMesh.new(), false)
 	_wall_mi.material_override = _wall_material()
+	if _preview:
+		_parent_trail(_preview)
+	if _trail_mat:
+		_register_deform_mat(_trail_mat)
 	_baked = true
 	_posed_dirty = true
 	_update_cavity_visibility()
@@ -703,23 +869,26 @@ func _make_skinned_mi(nm: String, mesh: Mesh, use_skin_mat: bool) -> MeshInstanc
 		if mat:
 			mi.material_override = mat
 	mi.visible = true
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	return mi
 
 
 func _rebuild_surgical_meshes(outer: Geom.MeshData, inner: Geom.MeshData, wall: Geom.MeshData) -> void:
 	if _surgical_mi:
-		_surgical_mi.mesh = outer.to_array_mesh()
+		_surgical_mi.mesh = _mesh_with_evert(outer, _outer_rest, _outer_evert)
 		if _skin:
 			_surgical_mi.skin = _skin
+		_apply_evert_weight()
 	if _cavity_mi:
 		_cavity_mi.mesh = _cavity_display_mesh()
 		if _skin:
 			_cavity_mi.skin = _skin
 	if _wall_mi and wall:
-		_wall_mi.mesh = wall.to_array_mesh()
+		_wall_mi.mesh = _mesh_with_evert(wall, _wall_rest, _wall_evert)
 		if _skin:
 			_wall_mi.skin = _skin
 		_wall_mi.visible = wall.face_count() > 0
+		_apply_evert_weight()
 	_posed_dirty = true
 
 
@@ -727,31 +896,57 @@ func _cavity_display_mesh() -> ArrayMesh:
 	if _inner == null:
 		return ArrayMesh.new()
 	var d := _inner.clone()
+	var ev: Geom.MeshData = null
+	if _inner_evert and _inner_rest and _inner_evert.vert_count() == _inner.vert_count() and _inner_rest.vert_count() == _inner.vert_count():
+		ev = _inner_evert.clone()
+		if _wrap and _wrap.face_count() > 0:
+			_append_mesh(ev, _wrap)
 	if _wrap and _wrap.face_count() > 0:
 		_append_mesh(d, _wrap)
+	if ev and ev.vert_count() == d.vert_count():
+		return d.to_array_mesh_with_blend("evert", ev)
 	return d.to_array_mesh()
 
 
 func _cavity_material() -> Material:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = Color(0.55, 0.18, 0.16)
-	m.roughness = 0.62
-	m.metallic = 0.0
-	m.cull_mode = BaseMaterial3D.CULL_DISABLED
-	m.specular_mode = BaseMaterial3D.SPECULAR_SCHLICK_GGX
-	return m
+	if _cavity_shader_mat == null:
+		_cavity_shader_mat = _make_shell_material(Color(0.55, 0.18, 0.16, 1.0))
+		_register_deform_mat(_cavity_shader_mat)
+	return _cavity_shader_mat
 
 
 func _wall_material() -> Material:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = Color(0.72, 0.28, 0.26)
-	m.roughness = 0.55
-	m.metallic = 0.0
-	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if _wall_shader_mat == null:
+		_wall_shader_mat = _make_shell_material(Color(0.72, 0.28, 0.26, 1.0))
+		_register_deform_mat(_wall_shader_mat)
+	return _wall_shader_mat
+
+
+func _make_shell_material(col: Color) -> ShaderMaterial:
+	var m := ShaderMaterial.new()
+	var sh: Shader = load("res://shaders/surgery_wall.gdshader")
+	if sh:
+		m.shader = sh
+	m.set_shader_parameter("albedo_color", col)
+	m.set_shader_parameter("roughness", 0.55)
+	m.set_shader_parameter("metallic", 0.0)
+	m.set_shader_parameter("xray", 0.0)
 	return m
 
 
+func _register_deform_mat(mat: ShaderMaterial) -> void:
+	if mat == null or _organs == null:
+		return
+	if _organs.has_method("register_deform_material"):
+		_organs.call("register_deform_material", mat, false)
+
+
 func _apply_xray_shell(mat: Material, base: Color, xray: bool) -> void:
+	if mat is ShaderMaterial:
+		var xm := mat as ShaderMaterial
+		xm.set_shader_parameter("albedo_color", Color(base.r, base.g, base.b, 0.32 if xray else 1.0))
+		xm.set_shader_parameter("xray", 1.0 if xray else 0.0)
+		return
 	if not (mat is StandardMaterial3D):
 		return
 	var sm := mat as StandardMaterial3D
@@ -861,22 +1056,27 @@ func _make_trail() -> void:
 	_preview = MeshInstance3D.new()
 	_preview.name = "IncisionTrail"
 	_preview.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_preview.sorting_offset = 0.02
 	var mat := ShaderMaterial.new()
 	var sh: Shader = load("res://shaders/incision_trail.gdshader")
 	if sh:
 		mat.shader = sh
+		mat.render_priority = 1
+		_trail_mat = mat
+		_register_deform_mat(mat)
 	else:
 		var fb := StandardMaterial3D.new()
 		fb.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
 		fb.albedo_color = Color(0.86, 0.1, 0.1, 0.85)
 		fb.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		fb.cull_mode = BaseMaterial3D.CULL_DISABLED
+		fb.render_priority = 1
 		_preview.material_override = fb
-		add_child(_preview)
+		_parent_trail(_preview)
 		_preview.visible = false
 		return
 	_preview.material_override = mat
-	add_child(_preview)
+	_parent_trail(_preview)
 	_preview.visible = false
 
 
@@ -896,22 +1096,36 @@ func _update_trail() -> void:
 		_preview.visible = false
 		return
 	_preview.mesh = mesh
-	_preview.global_transform = Transform3D.IDENTITY
+	if _preview.get_parent() == _skel:
+		_preview.transform = Transform3D.IDENTITY
+		if _skin:
+			_preview.skin = _skin
+		_preview.skeleton = NodePath("..")
+	else:
+		_preview.global_transform = Transform3D.IDENTITY
+	# 非透视下也保持可见：不受 xray 开关控制。
 	_preview.visible = true
 
 
 func _build_trail_mesh(bind_pts: PackedVector3Array) -> ArrayMesh:
+	# 绑定空间条带，随 SurgicalAbdomen 一起蒙皮，不再每帧按世界坐标重建。
 	var n := bind_pts.size()
 	if n < 2:
 		return ArrayMesh.new()
 	var worlds: PackedVector3Array = PackedVector3Array()
 	var norms: PackedVector3Array = PackedVector3Array()
+	var bone_at: Array = []
+	var weight_at: Array = []
 	worlds.resize(n)
 	norms.resize(n)
+	bone_at.resize(n)
+	weight_at.resize(n)
 	for i in n:
-		var wn: Array = _approx_world_and_normal(bind_pts[i])
-		worlds[i] = wn[0]
-		norms[i] = wn[1]
+		var bn: Array = _approx_bind_and_normal(bind_pts[i])
+		worlds[i] = bn[0]
+		norms[i] = bn[1]
+		bone_at[i] = bn[2]
+		weight_at[i] = bn[3]
 	var lengths: PackedFloat32Array = PackedFloat32Array()
 	lengths.resize(n)
 	lengths[0] = 0.0
@@ -921,10 +1135,9 @@ func _build_trail_mesh(bind_pts: PackedVector3Array) -> ArrayMesh:
 		lengths[i] = total
 	if total < 1e-6:
 		total = 1.0
-	var half := 0.0058
-	var lift := 0.0016
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var half := 0.0064
+	var lift := 0.0018
+	var md := Geom.MeshData.new()
 	for i in range(n - 1):
 		var t0 := worlds[i + 1] - worlds[i]
 		if t0.length_squared() < 1e-10:
@@ -954,10 +1167,13 @@ func _build_trail_mesh(bind_pts: PackedVector3Array) -> ArrayMesh:
 		var d: Vector3 = worlds[i + 1] + n1 * lift + s1
 		var u0 := lengths[i] / total
 		var u1 := lengths[i + 1] / total
-		_trail_tri(st, a, b, d, Vector2(u0, 0.0), Vector2(u0, 1.0), Vector2(u1, 1.0), n0)
-		_trail_tri(st, a, d, c, Vector2(u0, 0.0), Vector2(u1, 1.0), Vector2(u1, 0.0), n1)
-	st.generate_normals()
-	return st.commit()
+		var ia := md.add_vert(a, n0, Vector2(u0, 0.0), bone_at[i], weight_at[i])
+		var ib := md.add_vert(b, n0, Vector2(u0, 1.0), bone_at[i], weight_at[i])
+		var idv := md.add_vert(d, n1, Vector2(u1, 1.0), bone_at[i + 1], weight_at[i + 1])
+		var ic := md.add_vert(c, n1, Vector2(u1, 0.0), bone_at[i + 1], weight_at[i + 1])
+		md.add_face(ia, ib, idv)
+		md.add_face(ia, idv, ic)
+	return md.to_array_mesh()
 
 
 func _trail_tri(st: SurfaceTool, p0: Vector3, p1: Vector3, p2: Vector3, uv0: Vector2, uv1: Vector2, uv2: Vector2, nrm: Vector3) -> void:
@@ -1272,14 +1488,796 @@ func _navel_world() -> Vector3:
 	return _navel_rest
 
 
-func _process(_dt: float) -> void:
+func _process(dt: float) -> void:
 	if active and not is_on_exam_bed():
 		exit_surgery()
 		return
 	if not active and not persist:
 		return
-	if active and not pose_locked:
+	if (active or persist) and not pose_locked:
 		_posed_dirty = true
+	var xr := 1 if _xray_on() else 0
+	if xr != _xray_cached:
+		_xray_cached = xr
+		_update_cavity_visibility()
+	if _evert_anim:
+		_step_eversion(dt)
+	if not _grab_active and _pull_off.length_squared() > 1e-8:
+		_step_pull_spring(dt)
+
+
+func _parent_trail(mi: MeshInstance3D) -> void:
+	if mi == null:
+		return
+	var want: Node = _skel if _skel else self
+	if mi.get_parent() == want:
+		return
+	if mi.get_parent():
+		mi.get_parent().remove_child(mi)
+	want.add_child(mi)
+	if want == _skel:
+		mi.skeleton = NodePath("..")
+		if _skin:
+			mi.skin = _skin
+		mi.transform = Transform3D.IDENTITY
+
+
+func _approx_bind_and_normal(bind_p: Vector3) -> Array:
+	var nrm := Vector3(0, 0, 1)
+	var bones := PackedInt32Array([0, 0, 0, 0])
+	var weights := PackedFloat32Array([1, 0, 0, 0])
+	if _outer == null or _outer.vert_count() < 1:
+		return [bind_p, nrm, bones, weights]
+	var best := 0
+	var best_s := 1e9
+	for i in _outer.vert_count():
+		var s := _outer.pos[i].distance_squared_to(bind_p)
+		if s < best_s:
+			best_s = s
+			best = i
+	if best < _outer.nrm.size():
+		nrm = _outer.nrm[best]
+		if nrm.length_squared() > 1e-10:
+			nrm = nrm.normalized()
+	if _outer.bones.size() >= (best + 1) * 4:
+		for k in 4:
+			bones[k] = _outer.bones[best * 4 + k]
+			weights[k] = _outer.weights[best * 4 + k]
+	return [bind_p, nrm, bones, weights]
+
+
+func _mesh_with_evert(md: Geom.MeshData, rest: Geom.MeshData, ev: Geom.MeshData) -> ArrayMesh:
+	if md == null:
+		return ArrayMesh.new()
+	if ev and rest and ev.vert_count() == md.vert_count() and rest.vert_count() == md.vert_count():
+		return rest.to_array_mesh_with_blend("evert", ev)
+	return md.to_array_mesh()
+
+
+func _lips_valid(md: Geom.MeshData, lips: PackedInt32Array) -> bool:
+	if md == null or lips.size() < 2:
+		return false
+	for id in lips:
+		if id < 0 or id >= md.vert_count():
+			return false
+	return true
+
+
+func _start_eversion() -> void:
+	if _outer == null:
+		return
+	_outer_rest = _outer.clone()
+	_inner_rest = _inner.clone() if _inner else null
+	_wall_rest = _wall_md.clone() if _wall_md else null
+	_outer_evert = _outer_rest.clone()
+	_inner_evert = _inner_rest.clone() if _inner_rest else null
+	_wall_evert = _wall_rest.clone() if _wall_rest else null
+	if _lips_valid(_outer_evert, _lip_left) and _lips_valid(_outer_evert, _lip_right):
+		if _lip_closed and _lip_left.size() >= 3:
+			Geom.evert_loop_lips(_outer_evert, _lip_left, _lip_right, 1.0, EVERT_ROLL)
+			if _inner_evert and _lips_valid(_inner_evert, _lip_left_i) and _lips_valid(_inner_evert, _lip_right_i):
+				Geom.evert_loop_lips(_inner_evert, _lip_left_i, _lip_right_i, 1.0, EVERT_ROLL * 0.85)
+		else:
+			Geom.evert_open_lips(_outer_evert, _lip_left, _lip_right, 1.0, EVERT_ROLL)
+			if _inner_evert and _lips_valid(_inner_evert, _lip_left_i) and _lips_valid(_inner_evert, _lip_right_i):
+				Geom.evert_open_lips(_inner_evert, _lip_left_i, _lip_right_i, 1.0, EVERT_ROLL * 0.85)
+	var valid_holes: Array = []
+	for loop in _hole_loops:
+		if loop is PackedInt32Array and _lips_valid(_outer_evert, loop as PackedInt32Array):
+			Geom.evert_hole_rim(_outer_evert, loop, 1.0, EVERT_ROLL * 0.8)
+			valid_holes.append(loop)
+	_hole_loops = valid_holes
+	_evert_wall_from_lips()
+	_evert = 0.0
+	_evert_vel = 0.0
+	_evert_anim = true
+
+
+func _evert_wall_from_lips() -> void:
+	## 保持截面拓扑不变，按腹壁/内壁对应顶点的外翻位移去推截面，这样才跟得上肚子。
+	if _wall_rest == null:
+		return
+	_wall_evert = _wall_rest.clone()
+	_apply_corresponding_evert(_wall_evert, _wall_rest, _outer_rest, _outer_evert)
+	_apply_corresponding_evert(_wall_evert, _wall_rest, _inner_rest, _inner_evert)
+
+
+func _apply_corresponding_evert(dest: Geom.MeshData, dest_rest: Geom.MeshData, src_rest: Geom.MeshData, src_evert: Geom.MeshData) -> void:
+	if dest == null or dest_rest == null or src_rest == null or src_evert == null:
+		return
+	if src_rest.vert_count() != src_evert.vert_count():
+		return
+	for i in dest.vert_count():
+		var p: Vector3 = dest_rest.pos[i]
+		var best := -1
+		var best_s := 1e-8
+		for j in src_rest.vert_count():
+			var s := src_rest.pos[j].distance_squared_to(p)
+			if s <= best_s:
+				best_s = s
+				best = j
+		if best >= 0:
+			var delta: Vector3 = src_evert.pos[best] - src_rest.pos[best]
+			if delta.length_squared() > 1e-12:
+				dest.pos[i] = dest.pos[i] + delta
+
+
+func _step_eversion(dt: float) -> void:
+	# 弹性外翻：有过冲的弹簧，看起来像切开皮肉自己翻开，而不是瞬间折角。
+	var k := 42.0
+	var c := 8.5
+	var acc := (1.0 - _evert) * k - _evert_vel * c
+	_evert_vel += acc * dt
+	_evert += _evert_vel * dt
+	if _evert > 1.12:
+		_evert = 1.12
+	if absf(_evert - 1.0) < 0.012 and absf(_evert_vel) < 0.08:
+		_evert = 1.0
+		_evert_vel = 0.0
+		_evert_anim = false
+	_apply_evert_weight()
+
+
+func debug_settle_eversion() -> void:
+	if _outer_evert == null:
+		_start_eversion()
+	_evert = 1.0
+	_evert_vel = 0.0
+	_evert_anim = false
+	_apply_evert_weight()
+
+
+func _apply_evert_weight() -> void:
+	for mi in [_surgical_mi, _wall_mi, _cavity_mi]:
+		if mi and mi.mesh and mi.mesh.get_blend_shape_count() > 0:
+			mi.set_blend_shape_value(0, clampf(_evert, 0.0, 1.15))
+
+
+func _measure_lip_width(md: Geom.MeshData) -> float:
+	if md == null:
+		return 0.0
+	var n := mini(_lip_left.size(), _lip_right.size())
+	if n < 2:
+		return 0.0
+	var acc := 0.0
+	var cnt := 0
+	var start := 1 if (not _lip_closed and n > 2) else 0
+	var stop := n - 1 if (not _lip_closed and n > 2) else n
+	for i in range(start, stop):
+		var a: int = _lip_left[i]
+		var b: int = _lip_right[i]
+		if a == b or a < 0 or b < 0 or a >= md.vert_count() or b >= md.vert_count():
+			continue
+		acc += md.pos[a].distance_to(md.pos[b])
+		cnt += 1
+	return acc / float(cnt) if cnt > 0 else 0.0
+
+
+func _resolve_bone(bind_i: int) -> int:
+	if _skin and bind_i >= 0 and bind_i < _skin.get_bind_count():
+		var bi := _skin.get_bind_bone(bind_i)
+		if bi >= 0:
+			return bi
+	if _skel and bind_i >= 0 and bind_i < _skel.get_bone_count():
+		return bind_i
+	return -1
+
+
+func _dominant_bone(md: Geom.MeshData) -> int:
+	if md == null or md.bones.is_empty():
+		return -1
+	var best_i := -1
+	var best_w := 0.0
+	var n := mini(md.vert_count(), int(md.bones.size() / 4))
+	for i in n:
+		for k in 4:
+			var w: float = md.weights[i * 4 + k]
+			if w <= best_w:
+				continue
+			var bi := _resolve_bone(md.bones[i * 4 + k])
+			if bi >= 0:
+				best_w = w
+				best_i = bi
+	return best_i
+
+
+func debug_wall_follow_delta() -> Dictionary:
+	## 轻推一根腹部相关骨骼，看断面与腹壁是否一起动，而不是留在原处。
+	var out := {"ok": false, "wall": 0.0, "belly": 0.0, "ratio": 0.0}
+	if _wall_md == null or _outer == null or _skel == null or _wall_md.vert_count() < 1:
+		return out
+	# 检查床上角色已不在绑定姿态：若断面跟着腹部蒙皮，其蒙皮质心应明显离开纯绑定位置。
+	var w_bind := _mesh_centroid_bind(_wall_md)
+	var b_bind := _mesh_centroid_bind(_outer)
+	var w_pose := _mesh_centroid_world(_wall_md)
+	var b_pose := _mesh_centroid_world(_outer)
+	var wd := w_pose.distance_to(w_bind)
+	var bd := b_pose.distance_to(b_bind)
+	out["wall"] = wd
+	out["belly"] = bd
+	out["ratio"] = (wd / bd) if bd > 1e-6 else (1.0 if wd > 1e-5 else 0.0)
+	out["ok"] = wd > 0.001 and (bd < 1e-6 or wd > bd * 0.25)
+	return out
+
+
+func _mesh_centroid_with_bone_shift(md: Geom.MeshData, bone_i: int, world_shift: Vector3) -> Vector3:
+	if md == null or md.vert_count() < 1 or _skel == null:
+		return Vector3.ZERO
+	var local_shift: Vector3 = _skel.global_transform.basis.inverse() * world_shift
+	var acc := Vector3.ZERO
+	for i in md.vert_count():
+		var p: Vector3 = Geom.skin_vertex(md.pos[i], i, md, _skel, _skin)
+		var w := 0.0
+		if _skin and md.bones.size() >= (i + 1) * 4:
+			for k in 4:
+				var bind_i: int = md.bones[i * 4 + k]
+				if bind_i < 0 or bind_i >= _skin.get_bind_count():
+					continue
+				if _skin.get_bind_bone(bind_i) == bone_i:
+					w += md.weights[i * 4 + k]
+		acc += _skel.global_transform * (p + local_shift * w)
+	return acc / float(md.vert_count())
+
+
+func _mesh_centroid_world(md: Geom.MeshData) -> Vector3:
+	if md == null or md.vert_count() < 1 or _skel == null:
+		return Vector3.ZERO
+	var pts := Geom.world_positions(md, _skel, _skin)
+	if pts.is_empty():
+		return Vector3.ZERO
+	var c := Vector3.ZERO
+	for p in pts:
+		c += p
+	return c / float(pts.size())
+
+
+func _mesh_centroid_bind(md: Geom.MeshData) -> Vector3:
+	if md == null or md.vert_count() < 1:
+		return Vector3.ZERO
+	var xf := _skel.global_transform if _skel else Transform3D.IDENTITY
+	var c := Vector3.ZERO
+	for p in md.pos:
+		c += xf * p
+	return c / float(md.vert_count())
+
+
+func _begin_grab(origin: Vector3, dir: Vector3) -> bool:
+	if not can_use_grab():
+		return false
+	# 已剥离的皮瓣：点中则拿起、拖拽，松手时抛出。
+	if flap_node and is_instance_valid(flap_node) and _ray_hits_flap(origin, dir):
+		return _begin_flap_grab(origin, dir)
+	# 未剥离的闭环：先撕下皮瓣再拿在手里。
+	if can_grab_flap():
+		if peel_flap() and flap_node and is_instance_valid(flap_node):
+			return _begin_flap_grab(origin, dir)
+		return false
+	# 开放切口或洞缘：像拉扯皮肉一样拖动被分割的皮肤。
+	if cut_open:
+		return _begin_skin_grab(origin, dir)
+	if flap_node and is_instance_valid(flap_node):
+		return _begin_flap_grab(origin, dir)
+	return false
+
+
+func _ray_hits_flap(origin: Vector3, dir: Vector3) -> bool:
+	if flap_node == null or not is_instance_valid(flap_node):
+		return false
+	var c := flap_centroid()
+	var d := dir.normalized()
+	var w := origin - c
+	var proj := -w.dot(d)
+	var closest: Vector3 = origin + d * maxf(proj, 0.0)
+	return closest.distance_to(c) <= 0.18
+
+
+func flap_centroid() -> Vector3:
+	if flap_node == null or not is_instance_valid(flap_node):
+		return Vector3.ZERO
+	if flap_node.has_method("centroid"):
+		return flap_node.call("centroid")
+	if flap_node is SoftBody3D:
+		var soft := flap_node as SoftBody3D
+		var c := Vector3.ZERO
+		var cnt := 0
+		var n := _soft_point_count(soft)
+		for i in n:
+			c += soft.get_point_transform(i)
+			cnt += 1
+		if cnt > 0:
+			return c / float(cnt)
+		if soft.mesh:
+			var ab := soft.mesh.get_aabb()
+			return soft.global_transform * ab.get_center()
+		return soft.global_position
+	if flap_node is Node3D:
+		return (flap_node as Node3D).global_position
+	return Vector3.ZERO
+
+
+func _soft_point_count(soft: SoftBody3D) -> int:
+	if soft.mesh == null or soft.mesh.get_surface_count() < 1:
+		return 0
+	var arr: Array = soft.mesh.surface_get_arrays(0)
+	var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	return verts.size()
+
+
+func _begin_flap_grab(origin: Vector3, dir: Vector3) -> bool:
+	var hit := _grab_plane_hit(origin, dir, flap_centroid())
+	_grab_kind = "flap"
+	_grab_active = true
+	stroke_active = true
+	_grab_last = hit
+	_grab_vel = Vector3.ZERO
+	_flap_throw_speed = 0.0
+	_ensure_grab_anchor(hit)
+	_pin_flap_to_anchor()
+	return true
+
+
+func _begin_skin_grab(origin: Vector3, dir: Vector3) -> bool:
+	_refresh_posed()
+	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
+	var world_p: Vector3
+	var bind_p: Vector3
+	if hit == null:
+		# 没精确点中也允许拉最近的唇边，方便测试和粗操作。
+		if _lip_left.size() < 1:
+			return false
+		bind_p = _outer.pos[_lip_left[_lip_left.size() / 2]] if _outer else Vector3.ZERO
+		world_p = _approx_world_bind(bind_p)
+	else:
+		world_p = (hit as Dictionary)["point"]
+		bind_p = (hit as Dictionary)["bind"]
+	_grab_kind = "skin"
+	_grab_active = true
+	stroke_active = true
+	_grab_last = world_p
+	_grab_vel = Vector3.ZERO
+	_split_drag = 0.0
+	_pull_p = _to_ab_local(world_p)
+	_pull_off = Vector3.ZERO
+	_pull_r = 0.055
+	_apply_pull_uniforms()
+	return true
+
+
+func _drag_grab(origin: Vector3, dir: Vector3) -> void:
+	if not _grab_active:
+		return
+	if _grab_kind == "flap":
+		var nxt := _grab_plane_hit(origin, dir, _grab_last)
+		var delta: Vector3 = nxt - _grab_last
+		_grab_vel = delta
+		_grab_last = nxt
+		_move_flap_by(delta)
+		if _grab_anchor:
+			_grab_anchor.global_position = nxt
+		return
+	if _grab_kind == "skin":
+		var nxt2 := _grab_plane_hit(origin, dir, _grab_last)
+		var off: Vector3 = nxt2 - _grab_last
+		# 限制拉扯幅度，像有弹性的皮肉，而不是把网格拽坏。
+		_pull_off += _to_ab_delta(off)
+		if _pull_off.length() > 0.06:
+			_pull_off = _pull_off.normalized() * 0.06
+		_split_drag = _pull_off.length()
+		_apply_pull_uniforms()
+
+
+func _end_grab(do_throw: bool) -> void:
+	if not _grab_active:
+		return
+	if _grab_kind == "flap":
+		var vel := _grab_vel * (18.0 if do_throw else 0.0)
+		if vel.length() > 6.0:
+			vel = vel.normalized() * 6.0
+		_unpin_flap()
+		_apply_flap_throw(vel if do_throw else Vector3.ZERO)
+		_flap_throw_speed = vel.length() if do_throw else 0.0
+	elif _grab_kind == "skin":
+		# 松手后弹簧收回，保留弹性手感。
+		_split_drag = _pull_off.length()
+	_grab_active = false
+	_grab_kind = ""
+	stroke_active = false
+
+
+func debug_grab_move_flap(delta: Vector3) -> bool:
+	if flap_node == null or not is_instance_valid(flap_node):
+		if can_grab_flap():
+			if not peel_flap():
+				return false
+		else:
+			return false
+	_grab_kind = "flap"
+	_grab_active = true
+	stroke_active = true
+	_grab_last = flap_centroid()
+	_grab_vel = delta
+	_ensure_grab_anchor(_grab_last + delta)
+	_pin_flap_to_anchor()
+	_move_flap_by(delta)
+	if _grab_anchor:
+		_grab_anchor.global_position = _grab_last + delta
+	_grab_last = _grab_last + delta
+	return true
+
+
+func debug_throw_flap(vel: Vector3) -> bool:
+	if flap_node == null or not is_instance_valid(flap_node):
+		return false
+	if not _grab_active:
+		_grab_kind = "flap"
+		_grab_active = true
+		_ensure_grab_anchor(flap_centroid())
+		_pin_flap_to_anchor()
+	_grab_vel = vel / 18.0
+	_end_grab(true)
+	return _flap_throw_speed > 0.0 or vel.length() <= 0.0
+
+
+func debug_drag_split_skin(off: Vector3) -> bool:
+	if not cut_open or _outer == null:
+		return false
+	_grab_kind = "skin"
+	_grab_active = true
+	stroke_active = true
+	var mid := _navel_rest
+	if _lip_left.size() > 0 and _lip_left[0] < _outer.vert_count():
+		mid = _outer.pos[_lip_left[_lip_left.size() / 2]]
+	_pull_p = mid
+	_pull_off = off
+	if _pull_off.length() > 0.06:
+		_pull_off = _pull_off.normalized() * 0.06
+	_pull_r = 0.055
+	_split_drag = _pull_off.length()
+	_apply_pull_uniforms()
+	return _split_drag > 0.0
+
+
+func debug_release_split_skin() -> void:
+	_grab_active = false
+	_grab_kind = ""
+	stroke_active = false
+
+
+func _grab_plane_hit(origin: Vector3, dir: Vector3, around: Vector3) -> Vector3:
+	var d := dir.normalized()
+	var n := d
+	if n.length_squared() < 1e-8:
+		n = Vector3(0, 0, 1)
+	var denom := n.dot(d)
+	if absf(denom) < 1e-8:
+		return around
+	var t := n.dot(around - origin) / denom
+	return origin + d * t
+
+
+func _ensure_grab_anchor(p: Vector3) -> void:
+	if _grab_anchor and is_instance_valid(_grab_anchor):
+		_grab_anchor.global_position = p
+		return
+	_grab_anchor = Node3D.new()
+	_grab_anchor.name = "SurgeryFlapAnchor"
+	var parent: Node = player.get_parent() if player else get_tree().current_scene
+	if parent == null:
+		parent = self
+	parent.add_child(_grab_anchor)
+	_grab_anchor.global_position = p
+
+
+func _pin_flap_to_anchor() -> void:
+	_pinned_points = PackedInt32Array()
+	if flap_node == null or _grab_anchor == null:
+		return
+	if flap_node is SoftBody3D:
+		var soft := flap_node as SoftBody3D
+		var mesh := soft.mesh
+		if mesh == null or mesh.get_surface_count() < 1:
+			return
+		var arr: Array = mesh.surface_get_arrays(0)
+		var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var path := soft.get_path_to(_grab_anchor)
+		# 钉住离锚点最近的一小簇顶点，整片皮瓣跟着走。
+		var scored: Array = []
+		var ap := _grab_anchor.global_position
+		for i in verts.size():
+			scored.append([verts[i].distance_squared_to(ap), i])
+		scored.sort_custom(func(a, b): return a[0] < b[0])
+		var n := mini(8, scored.size())
+		for k in n:
+			var idx: int = int(scored[k][1])
+			soft.set_point_pinned(idx, true, path)
+			_pinned_points.append(idx)
+	elif flap_node.has_method("begin_hold"):
+		flap_node.call("begin_hold", _grab_anchor.global_position)
+
+
+func _move_flap_by(delta: Vector3) -> void:
+	if flap_node == null or not is_instance_valid(flap_node) or delta.length_squared() < 1e-12:
+		return
+	if _grab_anchor:
+		_grab_anchor.global_position += delta
+	if flap_node is SoftBody3D:
+		var soft := flap_node as SoftBody3D
+		var rid: RID = soft.get_physics_rid()
+		var n := _soft_point_count(soft)
+		for i in n:
+			var p: Vector3 = soft.get_point_transform(i) + delta
+			PhysicsServer3D.soft_body_move_point(rid, i, p)
+	elif flap_node.has_method("drag_hold"):
+		flap_node.call("drag_hold", flap_centroid() + delta)
+	elif flap_node is Node3D:
+		(flap_node as Node3D).global_position += delta
+
+
+func _unpin_flap() -> void:
+	if flap_node is SoftBody3D:
+		var soft := flap_node as SoftBody3D
+		for i in _pinned_points:
+			if soft.has_method("set_point_pinned"):
+				soft.set_point_pinned(int(i), false)
+	_pinned_points = PackedInt32Array()
+
+
+func _apply_flap_throw(vel: Vector3) -> void:
+	if flap_node == null or not is_instance_valid(flap_node):
+		return
+	if flap_node.has_method("end_hold"):
+		flap_node.call("end_hold", vel)
+		return
+	if flap_node is SoftBody3D:
+		var soft := flap_node as SoftBody3D
+		if vel.length_squared() > 1e-8:
+			if soft.has_method("apply_central_impulse"):
+				soft.apply_central_impulse(vel * 0.40)
+			var rid: RID = soft.get_physics_rid()
+			var n := _soft_point_count(soft)
+			var imp := vel * 0.08
+			for i in n:
+				PhysicsServer3D.soft_body_apply_point_impulse(rid, i, imp)
+
+
+func _to_ab_local(world_p: Vector3) -> Vector3:
+	if _organs and _organs.has_method("abdomen_frame"):
+		var fr: Transform3D = _organs.call("abdomen_frame")
+		return fr.affine_inverse() * world_p
+	return world_p
+
+
+func _to_ab_delta(world_delta: Vector3) -> Vector3:
+	if _organs and _organs.has_method("abdomen_frame"):
+		var fr: Transform3D = _organs.call("abdomen_frame")
+		return fr.basis.inverse() * world_delta
+	return world_delta
+
+
+func _apply_pull_uniforms() -> void:
+	var mats: Array = []
+	if _wall_shader_mat:
+		mats.append(_wall_shader_mat)
+	if _cavity_shader_mat:
+		mats.append(_cavity_shader_mat)
+	if _trail_mat:
+		mats.append(_trail_mat)
+	if _surgical_mi and _surgical_mi.material_override is ShaderMaterial:
+		mats.append(_surgical_mi.material_override)
+	for m in mats:
+		var sm := m as ShaderMaterial
+		sm.set_shader_parameter("surgery_pull_p", _pull_p)
+		sm.set_shader_parameter("surgery_pull_off", _pull_off)
+		sm.set_shader_parameter("surgery_pull_r", _pull_r if _pull_off.length_squared() > 1e-8 else 0.0)
+
+
+func _step_pull_spring(dt: float) -> void:
+	var k := 28.0
+	var c := 7.0
+	# 用 _pull_off 当位移，简单弹簧回到 0。
+	var acc: Vector3 = -_pull_off * k - _grab_vel * c
+	_grab_vel += acc * dt
+	_pull_off += _grab_vel * dt
+	if _pull_off.length() < 0.0008 and _grab_vel.length() < 0.002:
+		_pull_off = Vector3.ZERO
+		_grab_vel = Vector3.ZERO
+		_split_drag = 0.0
+		_pull_r = 0.0
+	else:
+		_split_drag = _pull_off.length()
+	_apply_pull_uniforms()
+
+
+func apply_bullet_hit(info: Dictionary, par: Dictionary = {}) -> Dictionary:
+	## 由 OrganRig.apply_ballistic_hit 调用：在手术腹网上打出柱状弹孔，并去掉圆心皮瓣。
+	var out := {"entry": false, "exit": false, "tris": 0}
+	if not bool(info.get("hit", false)):
+		return out
+	if not _bake_if_needed():
+		return out
+	var dir: Vector3 = info.get("dir", Vector3.ZERO)
+	if dir is Vector3 and (dir as Vector3).length_squared() > 1e-8:
+		dir = (dir as Vector3).normalized()
+	else:
+		var a: Variant = info.get("entry")
+		var b: Variant = info.get("exit")
+		if a is Vector3 and b is Vector3:
+			dir = ((b as Vector3) - (a as Vector3))
+			if dir.length_squared() > 1e-8:
+				dir = dir.normalized()
+			else:
+				dir = Vector3(0, 0, -1)
+		else:
+			dir = Vector3(0, 0, -1)
+	var energy := float(par.get("energy", 0.5))
+	var radius := clampf(0.007 + energy * 0.007, 0.0075, 0.016)
+	if bullet_holes < MAX_BULLET_HOLES:
+		var entry: Variant = info.get("entry")
+		if entry is Vector3:
+			out["entry"] = _punch_bullet_hole_world(entry, dir, radius)
+	if bool(info.get("overpen", false)) and bullet_holes < MAX_BULLET_HOLES:
+		var ex: Variant = info.get("exit")
+		if ex is Vector3:
+			out["exit"] = _punch_bullet_hole_world(ex, dir, radius * 1.12)
+	out["tris"] = bullet_wall_tris
+	if bool(out["entry"]) or bool(out["exit"]):
+		persist = true
+		cut_open = true
+		cavity_exposed = true
+		_update_cavity_visibility()
+	return out
+
+
+func debug_apply_bullet_hole(world_origin: Vector3, world_dir: Vector3, radius: float = 0.01) -> bool:
+	if not _bake_if_needed():
+		return false
+	var d := world_dir
+	if d.length_squared() < 1e-8:
+		d = Vector3(0, 0, -1)
+	else:
+		d = d.normalized()
+	return _punch_bullet_hole_world(world_origin, d, radius)
+
+
+func _punch_bullet_hole_world(world_p: Vector3, world_dir: Vector3, radius: float) -> bool:
+	if _outer == null:
+		return false
+	_posed_dirty = true
+	var origin: Vector3 = world_p - world_dir * 0.08
+	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, world_dir)
+	if hit == null:
+		# 从另一侧再试（出口）。
+		hit = Geom.ray_hit_mesh(_outer, _posed_world(), world_p + world_dir * 0.08, -world_dir)
+	if hit == null:
+		return false
+	var bind_c: Vector3 = (hit as Dictionary)["bind"]
+	var vi: int = int((hit as Dictionary).get("i0", 0))
+	var bind_dir := Geom.world_dir_to_bind(world_dir, vi, _outer, _skel, _skin)
+	return _punch_bullet_hole_bind(bind_c, bind_dir, radius)
+
+
+func _punch_bullet_hole_bind(center: Vector3, axis: Vector3, radius: float) -> bool:
+	if _outer == null or _inner == null:
+		return false
+	var path := Geom.circle_path_on_mesh(_outer, center, axis, radius, BULLET_SIDES)
+	if path.size() < 5:
+		return false
+	var ids := Geom.embed_path_paired(_outer, _inner, path)
+	if ids.size() < 3:
+		return false
+	ids = Geom.close_path_ids(_outer, ids)
+	Geom.sync_inner(_outer, _inner)
+	if ids.size() >= 3 and ids[0] != ids[ids.size() - 1]:
+		ids.append(ids[0])
+	var ext_o: Dictionary = Geom.extract_inside(_outer, ids)
+	var ext_i: Dictionary = Geom.extract_inside(_inner, ids)
+	if int(ext_o.get("inside_faces", 0)) < 1 or int(ext_o.get("outside_faces", 0)) < 1:
+		return false
+	var body_o: Geom.MeshData = ext_o["outside"]
+	var body_i: Geom.MeshData = ext_i["outside"]
+	var loop_o: PackedInt32Array = ext_o["loop_out"]
+	var loop_i: PackedInt32Array = ext_i["loop_out"]
+	# 柱状壁沿弹道：若内环可用就用内环，否则把外环沿弹轴平移到腹腔深度。
+	var wall := _make_bullet_cylinder(body_o, body_i, loop_o, loop_i, axis)
+	if wall.face_count() < 1:
+		return false
+	_outer = body_o
+	_inner = body_i
+	if _wall_md and _wall_md.face_count() > 0:
+		_append_mesh(_wall_md, wall)
+	else:
+		_wall_md = wall
+	lofted_tris = _wall_md.face_count()
+	bullet_holes += 1
+	bullet_plugs_removed += 1
+	bullet_wall_tris += wall.face_count()
+	# 冲压后旧切口唇的顶点索引可能已失效，只对外翻新弹孔缘。
+	if not _lips_valid(body_o, _lip_left) or not _lips_valid(body_o, _lip_right):
+		_lip_left = PackedInt32Array()
+		_lip_right = PackedInt32Array()
+		_lip_left_i = PackedInt32Array()
+		_lip_right_i = PackedInt32Array()
+	var holes: Array = []
+	for loop2 in _hole_loops:
+		if loop2 is PackedInt32Array and _lips_valid(body_o, loop2 as PackedInt32Array):
+			holes.append(loop2)
+	holes.append(loop_o)
+	_hole_loops = holes
+	cut_open = true
+	cavity_exposed = true
+	persist = true
+	_start_eversion()
+	_rebuild_surgical_meshes(_outer, _inner, _wall_md)
+	_posed_dirty = true
 	_update_cavity_visibility()
-	if _trail_bind.size() >= 2 and not pose_locked:
-		_update_trail()
+	return true
+
+
+func _make_bullet_cylinder(outer: Geom.MeshData, inner: Geom.MeshData, loop_o: PackedInt32Array, loop_i: PackedInt32Array, axis: Vector3) -> Geom.MeshData:
+	var cap := BULLET_SIDES
+	var src_o := Geom.resample_index_loop(outer, loop_o, cap)
+	var src_i := Geom.resample_index_loop(inner, loop_i, cap)
+	var n := mini(src_o.size(), src_i.size())
+	if n < 3:
+		# 内环不够时，沿弹轴把外环推到腹腔厚度，做成真正的柱状断面。
+		return _loft_translated_cylinder(outer, src_o if src_o.size() >= 3 else loop_o, axis)
+	if src_o.size() != src_i.size():
+		src_o = Geom.resample_index_loop(outer, src_o, n)
+		src_i = Geom.resample_index_loop(inner, src_i, n)
+	return _make_loft_mesh(outer, inner, src_o, src_i, true)
+
+
+func _loft_translated_cylinder(outer: Geom.MeshData, loop_o: PackedInt32Array, axis: Vector3) -> Geom.MeshData:
+	var ids := Geom.resample_index_loop(outer, loop_o, BULLET_SIDES)
+	if ids.size() < 3:
+		ids = loop_o
+	var wall := Geom.MeshData.new()
+	var front := PackedInt32Array()
+	var back := PackedInt32Array()
+	var ax := axis
+	if ax.length_squared() < 1e-8:
+		ax = Vector3(0, 0, -1)
+	else:
+		ax = ax.normalized()
+	# 沿弹道走到腹腔内壁深度，形成短柱而不是一层薄片。
+	var depth := thickness
+	for id in ids:
+		if id < 0 or id >= outer.vert_count():
+			continue
+		front.append(wall.copy_vert(outer, id))
+		var b := PackedInt32Array()
+		var w := PackedFloat32Array()
+		b.resize(4)
+		w.resize(4)
+		for k in 4:
+			b[k] = outer.bones[id * 4 + k]
+			w[k] = outer.weights[id * 4 + k]
+		var ip: Vector3 = outer.pos[id] + ax * depth
+		# 若有法线，略向内收，避免柱体戳出腹壁。
+		var nrm: Vector3 = outer.nrm[id] if id < outer.nrm.size() else ax
+		if nrm.dot(ax) < 0.0:
+			ip = outer.pos[id] + ax * depth
+		back.append(wall.add_vert(ip, -nrm if nrm.length_squared() > 1e-8 else -ax, outer.uv[id] if id < outer.uv.size() else Vector2.ZERO, b, w))
+	if front.size() >= 3 and front.size() == back.size():
+		Geom.loft_wall(wall, front, back, true)
+	return wall

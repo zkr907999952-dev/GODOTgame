@@ -20,6 +20,10 @@ uniform vec3 cavity_color : source_color = vec3(0.32, 0.09, 0.07);
 // 击腹/拖拽 对皮肤的影响系数（网页 skeleton.impulse / setTissueDrag 软笼）
 uniform float skin_strike_k = 0.55;
 uniform float skin_drag_k = 1.0;
+// 手术拿取：局部拉扯已切开的皮肤（默认关闭，不影响日常互动）。
+uniform vec3 surgery_pull_p = vec3(0.0);
+uniform vec3 surgery_pull_off = vec3(0.0);
+uniform float surgery_pull_r = 0.0;
 
 varying vec3 v_ab;
 varying vec3 v_wp;
@@ -196,7 +200,13 @@ void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
 	float m = belly_mask(l);
-	vec3 off = (strike_offset(l) * skin_strike_k + drag_offset(l) * skin_drag_k + dent_offset(l)) * m + fist_offset(l) + navel_offset(l);
+	vec3 pull = vec3(0.0);
+	if (surgery_pull_r > 1e-5) {
+		float pd = length(l - surgery_pull_p);
+		float pt = clamp(1.0 - pd / max(surgery_pull_r, 1e-4), 0.0, 1.0);
+		pull = surgery_pull_off * (pt * pt * (3.0 - 2.0 * pt));
+	}
+	vec3 off = (strike_offset(l) * skin_strike_k + drag_offset(l) * skin_drag_k + dent_offset(l)) * m + fist_offset(l) + navel_offset(l) + pull;
 	l += off;
 	vec3 off_w = ab_dir_to_world(off);
 	wp += off_w;

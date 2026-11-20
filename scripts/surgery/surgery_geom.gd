@@ -7,6 +7,11 @@ class_name SurgeryGeom
 const DEFAULT_THICKNESS := 0.012
 const EPS := 1e-6
 const PATH_CLOSE_DIST := 0.008
+## 截面 / 腹腔袋分段上限：降低分面率，减轻手机负担。
+const WALL_MAX_SEGMENTS := 16
+const WRAP_MAX_SEGMENTS := 28
+const BULLET_SIDES := 8
+const DENSE_WALL_MAX_SEGMENTS := 56
 
 ## 腹部选取（绑定空间，相对肚脐）
 const BAND_Y0 := -0.22
@@ -129,6 +134,29 @@ class MeshData:
 			arrays[Mesh.ARRAY_BONES] = null
 			arrays[Mesh.ARRAY_WEIGHTS] = null
 			am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		return am
+
+	func to_array_mesh_with_blend(shape: String, blended: MeshData) -> ArrayMesh:
+		## 与 to_array_mesh 相同，并带一个同拓扑的 blend shape（用于切口外翻等）。
+		if blended == null or blended.vert_count() != pos.size() or idx.is_empty():
+			return to_array_mesh()
+		var arrays: Array = []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = pos
+		arrays[Mesh.ARRAY_NORMAL] = nrm
+		arrays[Mesh.ARRAY_TEX_UV] = uv
+		if bones.size() >= pos.size() * 4:
+			arrays[Mesh.ARRAY_BONES] = bones
+			arrays[Mesh.ARRAY_WEIGHTS] = weights
+		arrays[Mesh.ARRAY_INDEX] = idx
+		var blend: Array = []
+		blend.resize(Mesh.ARRAY_MAX)
+		blend[Mesh.ARRAY_VERTEX] = blended.pos
+		if blended.nrm.size() == pos.size():
+			blend[Mesh.ARRAY_NORMAL] = blended.nrm
+		var am := ArrayMesh.new()
+		am.add_blend_shape(shape)
+		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [blend])
 		return am
 
 	func clone() -> MeshData:
@@ -266,12 +294,19 @@ static func skin_vertex(p: Vector3, vi: int, md: MeshData, skel: Skeleton3D, ski
 		if w <= 1e-8:
 			continue
 		var bind_i: int = md.bones[vi * 4 + k]
-		if bind_i < 0 or bind_i >= skin.get_bind_count():
-			continue
-		var bone_i := skin.get_bind_bone(bind_i)
+		var bone_i := -1
+		var bind_pose := Transform3D.IDENTITY
+		if skin and bind_i >= 0 and bind_i < skin.get_bind_count():
+			bone_i = skin.get_bind_bone(bind_i)
+			bind_pose = skin.get_bind_pose(bind_i)
 		if bone_i < 0:
-			continue
-		var xform := skel.get_bone_global_pose(bone_i) * skin.get_bind_pose(bind_i)
+			# 有的 Skin 槽位 get_bind_bone 为 -1，网格里存的是骨骼索引。
+			bone_i = bind_i
+			if bone_i < 0 or bone_i >= skel.get_bone_count():
+				continue
+			if bind_pose == Transform3D.IDENTITY:
+				bind_pose = skel.get_bone_rest(bone_i).affine_inverse()
+		var xform := skel.get_bone_global_pose(bone_i) * bind_pose
 		acc += w * (xform * p)
 		wsum += w
 	if wsum <= EPS:
@@ -1323,6 +1358,7 @@ static func make_cavity_wrap(inner: MeshData, back_z: float) -> MeshData:
 		if ids.size() > 0 and i == loop.size() - 1 and id == ids[0]:
 			continue
 		ids.append(id)
+	ids = resample_index_loop(inner, ids, WRAP_MAX_SEGMENTS)
 	var n := ids.size()
 	if n < 3:
 		return wrap
@@ -1359,3 +1395,349 @@ static func make_cavity_wrap(inner: MeshData, back_z: float) -> MeshData:
 	for i2 in n:
 		wrap.add_face(cid, back[(i2 + 1) % n], back[i2])
 	return wrap
+
+
+static func dense_loft_tris(path_count: int, closed: bool, sides: int = 2) -> int:
+	## 0.3.2 及更早：左右唇各沿全部路径点 loft，每段 2 三角。
+	var segs := path_count if closed else maxi(path_count - 1, 0)
+	return maxi(segs, 0) * 2 * sides
+
+
+static func loft_tris_for_segments(segments: int, closed: bool, sides: int = 2) -> int:
+	var segs := segments if closed else maxi(segments - 1, 0)
+	return maxi(segs, 0) * 2 * sides
+
+
+static func wall_tri_budget() -> int:
+	## 切口左右唇按 WALL_MAX_SEGMENTS  loft 的三角上限。
+	return loft_tris_for_segments(WALL_MAX_SEGMENTS, true, 2)
+
+
+static func bullet_wall_tri_budget() -> int:
+	## 单侧弹孔柱状壁（8 边闭环）的三角上限。
+	return loft_tris_for_segments(BULLET_SIDES, true, 1)
+
+
+static func resample_index_loop(md: MeshData, ids: PackedInt32Array, max_seg: int) -> PackedInt32Array:
+	## 按弧长均匀抽稀闭合或开放折线，保留端点；闭合环尽量不超过 max_seg 个顶点。
+	var clean := PackedInt32Array()
+	for i in ids.size():
+		var id: int = ids[i]
+		if id < 0 or id >= md.vert_count():
+			continue
+		if clean.size() > 0 and clean[clean.size() - 1] == id:
+			continue
+		if clean.size() > 0 and i == ids.size() - 1 and id == clean[0]:
+			continue
+		clean.append(id)
+	var n := clean.size()
+	if n <= 2 or max_seg < 2 or n <= max_seg:
+		return clean
+	var closed := n >= 3 and md.pos[clean[0]].distance_to(md.pos[clean[n - 1]]) <= PATH_CLOSE_DIST * 3.0
+	# 用点到点累积长度均匀取样。
+	var dist := PackedFloat32Array()
+	dist.resize(n)
+	dist[0] = 0.0
+	for i in range(1, n):
+		dist[i] = dist[i - 1] + md.pos[clean[i]].distance_to(md.pos[clean[i - 1]])
+	var total: float = dist[n - 1]
+	if closed:
+		total += md.pos[clean[0]].distance_to(md.pos[clean[n - 1]])
+	if total < EPS:
+		return clean
+	var keep := maxi(3 if closed else 2, max_seg)
+	var out := PackedInt32Array()
+	out.append(clean[0])
+	var last := 0
+	for k in range(1, keep if closed else keep - 1):
+		var target := total * float(k) / float(keep if closed else keep - 1)
+		var j := last
+		while j + 1 < n and dist[j + 1] < target:
+			j += 1
+		last = j
+		var pick: int = clean[j]
+		if out[out.size() - 1] != pick:
+			out.append(pick)
+	if not closed:
+		if out[out.size() - 1] != clean[n - 1]:
+			out.append(clean[n - 1])
+	if closed and out.size() >= 3 and out[0] == out[out.size() - 1]:
+		out.remove_at(out.size() - 1)
+	return out if out.size() >= (3 if closed else 2) else clean
+
+
+static func resample_path(path: PackedVector3Array, max_seg: int, closed: bool = false) -> PackedVector3Array:
+	var n := path.size()
+	if n <= 2 or max_seg < 2 or n <= max_seg:
+		return path.duplicate()
+	var dist := PackedFloat32Array()
+	dist.resize(n)
+	dist[0] = 0.0
+	for i in range(1, n):
+		dist[i] = dist[i - 1] + path[i].distance_to(path[i - 1])
+	var total: float = dist[n - 1]
+	if closed and n >= 3:
+		total += path[0].distance_to(path[n - 1])
+	if total < EPS:
+		return path.duplicate()
+	var keep := maxi(3 if closed else 2, max_seg)
+	var out := PackedVector3Array()
+	out.append(path[0])
+	for k in range(1, keep if closed else keep - 1):
+		var target := total * float(k) / float(keep if closed else keep - 1)
+		var j := 0
+		while j + 1 < n and dist[j + 1] < target:
+			j += 1
+		var p: Vector3 = path[j]
+		if j + 1 < n and dist[j + 1] > dist[j]:
+			var t := clampf((target - dist[j]) / (dist[j + 1] - dist[j]), 0.0, 1.0)
+			p = path[j].lerp(path[j + 1], t)
+		out.append(p)
+	if not closed:
+		out.append(path[n - 1])
+	return out
+
+
+static func circle_path_on_mesh(md: MeshData, center: Vector3, axis: Vector3, radius: float, steps: int = BULLET_SIDES) -> PackedVector3Array:
+	## 在网格表面生成垂直于 axis 的小圆路径，供弹孔冲压。
+	var nrm := axis
+	if nrm.length_squared() < EPS:
+		nrm = Vector3(0, 0, 1)
+	else:
+		nrm = nrm.normalized()
+	var t := nrm.cross(Vector3.UP)
+	if t.length_squared() < 1e-8:
+		t = nrm.cross(Vector3.RIGHT)
+	t = t.normalized()
+	var b := nrm.cross(t).normalized()
+	var path := PackedVector3Array()
+	var sides := maxi(steps, 5)
+	for i in sides:
+		var ang := TAU * float(i) / float(sides)
+		var hint: Vector3 = center + (t * cos(ang) + b * sin(ang)) * radius
+		path.append(_project_to_mesh(md, hint, center))
+	return path
+
+
+static func _project_to_mesh(md: MeshData, hint: Vector3, fallback: Vector3) -> Vector3:
+	var p2 := _v2(hint)
+	var best := fallback
+	var best_s := 1e9
+	var found := false
+	for f in md.face_count():
+		var a := md.pos[md.idx[f * 3]]
+		var b := md.pos[md.idx[f * 3 + 1]]
+		var c := md.pos[md.idx[f * 3 + 2]]
+		var bary := _bary_2d(p2, _v2(a), _v2(b), _v2(c))
+		if bary.x >= -1e-3 and bary.y >= -1e-3 and bary.z >= -1e-3:
+			var got: Vector3 = a * bary.x + b * bary.y + c * bary.z
+			var s := got.distance_squared_to(hint)
+			if s < best_s:
+				best_s = s
+				best = got
+				found = true
+	if found:
+		return best
+	for j in md.vert_count():
+		var s2 := md.pos[j].distance_squared_to(hint)
+		if s2 < best_s:
+			best_s = s2
+			best = md.pos[j]
+	return best
+
+
+static func skin_basis(vi: int, md: MeshData, skel: Skeleton3D, skin: Skin) -> Basis:
+	if skel == null or skin == null or md.bones.is_empty() or vi < 0 or vi >= md.vert_count():
+		return Basis.IDENTITY
+	var acc := Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO)
+	var tw := 0.0
+	for k in 4:
+		var w: float = md.weights[vi * 4 + k]
+		if w <= 0.0:
+			continue
+		var bind_i: int = md.bones[vi * 4 + k]
+		var bone_i := -1
+		var bind_pose := Transform3D.IDENTITY
+		if skin and bind_i >= 0 and bind_i < skin.get_bind_count():
+			bone_i = skin.get_bind_bone(bind_i)
+			bind_pose = skin.get_bind_pose(bind_i)
+		if bone_i < 0:
+			bone_i = bind_i
+			if bone_i < 0 or bone_i >= skel.get_bone_count():
+				continue
+			if bind_pose == Transform3D.IDENTITY:
+				bind_pose = skel.get_bone_rest(bone_i).affine_inverse()
+		var xform := skel.get_bone_global_pose(bone_i) * bind_pose
+		acc.x += xform.basis.x * w
+		acc.y += xform.basis.y * w
+		acc.z += xform.basis.z * w
+		tw += w
+	if tw <= EPS:
+		return Basis.IDENTITY
+	acc.x /= tw
+	acc.y /= tw
+	acc.z /= tw
+	return acc
+
+
+static func world_dir_to_bind(world_dir: Vector3, vi: int, md: MeshData, skel: Skeleton3D, skin: Skin) -> Vector3:
+	var b := skin_basis(vi, md, skel, skin)
+	var wb: Basis = skel.global_transform.basis * b if skel else b
+	var d := wb.inverse() * world_dir
+	if d.length_squared() < EPS:
+		return Vector3(0, 0, -1)
+	return d.normalized()
+
+
+static func evert_open_lips(md: MeshData, left: PackedInt32Array, right: PackedInt32Array, amount: float, roll: float = 0.008) -> void:
+	## 把开放切口左右唇向外卷起，amount=1 为完全外翻。在副本上调用以做 blend。
+	var n := mini(left.size(), right.size())
+	if n < 2 or amount <= 0.0:
+		return
+	var R := maxf(roll, 0.003)
+	var ang := amount * 1.15
+	for i in n:
+		if i == 0 or i == n - 1:
+			continue
+		var li: int = left[i]
+		var ri: int = right[i]
+		if li < 0 or ri < 0 or li >= md.vert_count() or ri >= md.vert_count():
+			continue
+		var mid: Vector3 = (md.pos[li] + md.pos[ri]) * 0.5
+		var tang: Vector3 = md.pos[left[mini(i + 1, n - 1)]] - md.pos[left[maxi(i - 1, 0)]]
+		if tang.length_squared() < EPS:
+			tang = Vector3.RIGHT
+		else:
+			tang = tang.normalized()
+		_evert_one(md, li, mid, tang, ang, R)
+		_evert_one(md, ri, mid, tang, ang, R)
+	# 邻近顶点轻微跟随，让皮肉有弹性过渡。
+	_evert_neighborhood(md, left, right, amount, R * 2.2)
+
+
+static func evert_loop_lips(md: MeshData, left: PackedInt32Array, right: PackedInt32Array, amount: float, roll: float = 0.008) -> void:
+	var n := mini(left.size(), right.size())
+	if n < 3 or amount <= 0.0:
+		return
+	var R := maxf(roll, 0.003)
+	var ang := amount * 1.15
+	var nn := n
+	if left[0] >= 0 and left[0] < md.vert_count() and left[n - 1] >= 0 and left[n - 1] < md.vert_count():
+		if left[0] == left[n - 1] or md.pos[left[0]].distance_to(md.pos[left[n - 1]]) < PATH_CLOSE_DIST:
+			nn = n - 1 if n > 3 else n
+	for i in nn:
+		var li: int = left[i]
+		var ri: int = right[i]
+		if li < 0 or ri < 0 or li >= md.vert_count() or ri >= md.vert_count():
+			continue
+		var mid: Vector3 = (md.pos[li] + md.pos[ri]) * 0.5
+		var i0 := (i - 1 + nn) % nn
+		var i1 := (i + 1) % nn
+		if left[i0] < 0 or left[i0] >= md.vert_count() or left[i1] < 0 or left[i1] >= md.vert_count():
+			continue
+		var tang: Vector3 = md.pos[left[i1]] - md.pos[left[i0]]
+		if tang.length_squared() < EPS:
+			tang = Vector3.RIGHT
+		else:
+			tang = tang.normalized()
+		_evert_one(md, li, mid, tang, ang, R)
+		_evert_one(md, ri, mid, tang, ang, R)
+	_evert_neighborhood(md, left, right, amount, R * 2.2)
+
+
+static func evert_hole_rim(md: MeshData, loop: PackedInt32Array, amount: float, roll: float = 0.006) -> void:
+	## 弹孔边缘轻微外翻，露出柱状内壁。
+	var ids := PackedInt32Array()
+	for i in loop.size():
+		var id: int = loop[i]
+		if id < 0 or id >= md.vert_count():
+			continue
+		if ids.size() > 0 and ids[ids.size() - 1] == id:
+			continue
+		if ids.size() > 0 and i == loop.size() - 1 and id == ids[0]:
+			continue
+		ids.append(id)
+	var n := ids.size()
+	if n < 3 or amount <= 0.0:
+		return
+	var acc := Vector3.ZERO
+	for i in n:
+		acc += md.pos[ids[i]]
+	acc /= float(n)
+	var R := maxf(roll, 0.003)
+	var ang := amount * 0.95
+	for i in n:
+		var id: int = ids[i]
+		var tang: Vector3 = md.pos[ids[(i + 1) % n]] - md.pos[ids[(i - 1 + n) % n]]
+		if tang.length_squared() < EPS:
+			tang = Vector3.RIGHT
+		else:
+			tang = tang.normalized()
+		_evert_one(md, id, acc, tang, ang, R)
+
+
+static func _evert_one(md: MeshData, vi: int, mid: Vector3, tang: Vector3, ang: float, roll: float) -> void:
+	var p: Vector3 = md.pos[vi]
+	var outward: Vector3 = p - mid
+	if outward.length_squared() < 1e-10:
+		outward = Vector3.RIGHT
+	else:
+		outward = outward.normalized()
+	var nrm: Vector3 = md.nrm[vi]
+	if nrm.length_squared() < EPS:
+		nrm = tang.cross(outward)
+		if nrm.length_squared() < EPS:
+			nrm = Vector3(0, 0, 1)
+		else:
+			nrm = nrm.normalized()
+	# 绕切向向外卷：既离开裂口，又把切面内壁翻向外侧。
+	var sa := sin(ang)
+	var ca := 1.0 - cos(ang)
+	md.pos[vi] = p + outward * (roll * sa + 0.004 * ang) + nrm * (roll * ca * 0.35)
+	var nn := (nrm * cos(ang) + outward * sin(ang))
+	if nn.length_squared() > EPS:
+		md.nrm[vi] = nn.normalized()
+
+
+static func _evert_neighborhood(md: MeshData, left: PackedInt32Array, right: PackedInt32Array, amount: float, radius: float) -> void:
+	if radius < 0.001 or amount <= 0.0:
+		return
+	var used: Dictionary = {}
+	for id in left:
+		used[id] = true
+	for id2 in right:
+		used[id2] = true
+	var anchors: Array = []
+	var n := mini(left.size(), right.size())
+	for i in n:
+		var li: int = left[i]
+		var ri: int = right[i]
+		if li >= 0 and li < md.vert_count() and ri >= 0 and ri < md.vert_count():
+			var mid: Vector3 = (md.pos[li] + md.pos[ri]) * 0.5
+			var side: Vector3 = md.pos[li] - mid
+			anchors.append([mid, side])
+	var r2 := radius * radius
+	for vi in md.vert_count():
+		if used.has(vi):
+			continue
+		var p: Vector3 = md.pos[vi]
+		var best_s := r2
+		var best_mid: Vector3 = p
+		var best_side: Vector3 = Vector3.ZERO
+		for a in anchors:
+			var s: float = p.distance_squared_to(a[0])
+			if s < best_s:
+				best_s = s
+				best_mid = a[0]
+				best_side = a[1]
+		if best_s >= r2:
+			continue
+		var fall := 1.0 - sqrt(best_s) / radius
+		fall = fall * fall * amount * 0.55
+		var side: Vector3 = best_side
+		if side.length_squared() > EPS:
+			side = side.normalized()
+			# 按点在中线哪一侧决定外翻方向。
+			if (p - best_mid).dot(side) < 0.0:
+				side = -side
+			md.pos[vi] = p + side * (0.005 * fall) + md.nrm[vi] * (0.002 * fall)

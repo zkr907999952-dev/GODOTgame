@@ -1,13 +1,13 @@
 extends SceneTree
-## 0.3.2 手术模式自检：进入默认无工具可转视角、选工具锁定视角、
-## 手术刀手绘切口真正提交、皮肤红色渐变轨迹、透视下腹腔半透明可见内脏；
-## 以及既有进入/退出、层状腹壁、闭环剥瓣与退出后保留。
+## 0.3.3 手术模式自检：断面降分面并跟随腹部柔体、拿取可拖/抛皮瓣与分割皮肤、
+## 非透视下仍可见切口涂鸦、切开后唇缘弹性外翻；特写弹孔为去掉圆心皮瓣的柱状断面；
+## 以及 0.3.2 进入默认无工具、轨迹、透视半透明腹腔与既有进入/退出、闭环剥瓣、退出后保留。
 ##   LIBGL_ALWAYS_SOFTWARE=1 godot --headless --path . \
 ##     --rendering-method gl_compatibility --rendering-driver opengl3 \
 ##     -s res://scripts/tests/surgery_check.gd
 
-const VERSION_NAME := "0.3.2"
-const VERSION_CODE := 36
+const VERSION_NAME := "0.3.3"
+const VERSION_CODE := 37
 const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 
 var fails := 0
@@ -123,6 +123,13 @@ func _check_source_contracts() -> void:
 	_ok(touch.find("func _in_surgery") >= 0 and touch.find("touch_tool_begin") >= 0, "touch routes surgery look vs tool")
 	_ok(pc.find("func surgery_look_locked") >= 0, "player look is lockable while a surgery tool is selected")
 	_ok(FileAccess.file_exists("res://shaders/incision_trail.gdshader"), "incision_trail shader file exists")
+	_ok(FileAccess.file_exists("res://shaders/surgery_wall.gdshader"), "surgery wall shader file exists")
+	_ok(sys.find("func apply_bullet_hit") >= 0 and sys.find("wounds.webp") < 0, "bullet hole is a mesh punch, not wounds.webp")
+	_ok(sys.find("func _start_eversion") >= 0 and geom.find("func evert_open_lips") >= 0, "cut lips evert after a committed incision")
+	_ok(sys.find("func debug_throw_flap") >= 0 and sys.find("func debug_drag_split_skin") >= 0, "grab can drag split skin and throw a flap")
+	_ok(geom.find("func resample_index_loop") >= 0 and geom.find("WALL_MAX_SEGMENTS") >= 0, "wall tessellation is capped")
+	var org := FileAccess.get_file_as_string("res://scripts/organs/organ_rig.gd")
+	_ok(org.find("register_deform_material") >= 0 and org.find("apply_bullet_hit") >= 0, "ballistic hits hook into mesh bullet holes")
 
 
 
@@ -177,6 +184,24 @@ func _check_geom_refinements() -> void:
 	var ext2: Dictionary = Geom.extract_inside(md, rim)
 	var total := md.face_count()
 	_ok(int(ext2["inside_faces"]) < total and int(ext2["outside_faces"]) > 0, "a near-rim loop does not peel the entire patch")
+	var dense_tris := Geom.dense_loft_tris(56, true, 2)
+	var budget := Geom.wall_tri_budget()
+	_ok(budget < dense_tris, "wall tri budget %d is below the previous dense loft %d" % [budget, dense_tris])
+	_ok(budget <= 80, "incision wall budget stays modest for mobile (%d)" % budget)
+	_ok(Geom.bullet_wall_tri_budget() <= 32, "bullet cylinder budget is a small loft (%d)" % Geom.bullet_wall_tri_budget())
+	var loop_ids := PackedInt32Array()
+	for id3 in range(40):
+		loop_ids.append(id3)
+	# dummy mesh with a 40-gon at z=0
+	var ring := Geom.MeshData.new()
+	var bones := PackedInt32Array([0, 0, 0, 0])
+	var weights := PackedFloat32Array([1, 0, 0, 0])
+	for k in 40:
+		var ang := TAU * float(k) / 40.0
+		ring.add_vert(Vector3(cos(ang), sin(ang), 0), Vector3(0, 0, 1), Vector2.ZERO, bones, weights)
+	var slim := Geom.resample_index_loop(ring, loop_ids, Geom.WALL_MAX_SEGMENTS)
+	_ok(slim.size() <= Geom.WALL_MAX_SEGMENTS + 1, "resample_index_loop caps a dense ring (%d -> %d)" % [loop_ids.size(), slim.size()])
+	_ok(slim.size() >= 3, "resampled ring still has enough points")
 
 
 func _check_cannot_enter_off_bed() -> void:
@@ -340,6 +365,31 @@ func _check_cavity_and_incision() -> void:
 		var changed := int(surgery.get("_outer").face_count()) != faces_before or int(surgery.get("_outer").vert_count()) != verts_before or int(surgery.get("lofted_tris")) > 0
 		_ok(changed, "surgical mesh topology changed after the cut")
 	_ok(bool(surgery.call("has_incision_trail")), "red trail remains on the skin after the cut commits")
+	if organs and organs.has_method("set_xray_enabled"):
+		organs.call("set_xray_enabled", false)
+	_ok(bool(surgery.call("incision_trail_visible_without_xray")), "incision graffiti remains visible with 透视 off")
+	surgery.call("debug_settle_eversion")
+	_ok(bool(surgery.call("cut_is_everted")), "committed open cut everts so the inner wall is exposed")
+	var open_w := float(surgery.call("lip_opening_width"))
+	_ok(open_w > 0.003, "everted open lips are wider than the raw slit (%.4f)" % open_w)
+	var dense_open := int(surgery.call("last_dense_wall_tris"))
+	var loft_open := int(surgery.get("lofted_tris"))
+	_ok(loft_open > 0, "open cut has a lofted wall (%d tris)" % loft_open)
+	if dense_open > loft_open:
+		_ok(loft_open < dense_open, "open-cut wall tris dropped vs dense loft (%d -> %d)" % [dense_open, loft_open])
+	else:
+		_ok(loft_open <= int(surgery.call("wall_tri_budget")), "open-cut wall stays within the tri budget (%d)" % loft_open)
+	_ok(bool(surgery.call("wall_is_skinned")), "lofted wall carries bone weights / skin")
+	_ok(bool(surgery.call("wall_shares_belly_deform")), "wall shader follows the belly soft deform")
+	var fol: Dictionary = surgery.call("debug_wall_follow_delta")
+	_ok(bool(fol.get("ok", false)), "wall centroid follows a pose change (wall=%.4f belly=%.4f)" % [float(fol.get("wall", 0.0)), float(fol.get("belly", 0.0))])
+	surgery.call("set_tool", "grab")
+	_ok(str(surgery.call("current_tool")) == "grab", "拿取 can be selected on an open cut to drag split skin")
+	_ok(bool(surgery.call("debug_drag_split_skin", Vector3(0.02, 0.0, 0.01))), "split skin is draggable with 拿取")
+	_ok(float(surgery.call("split_skin_drag_offset")) > 0.004, "split-skin pull offset is applied (%.4f)" % float(surgery.call("split_skin_drag_offset")))
+	surgery.call("debug_release_split_skin")
+	surgery.call("set_tool", "grab")  # deselect
+	surgery.call("set_tool", "scalpel")
 
 	# 先做一条开放切口，确认层状壁。
 	# 为避免破坏后续闭环，这里用脚本切口的 closed=true 作为主路径；
@@ -351,6 +401,17 @@ func _check_cavity_and_incision() -> void:
 	_ok(cut, "scripted closed incision committed")
 	_ok(bool(surgery.call("has_lofted_wall")), "incision produced a lofted wall connecting skin to cavity")
 	_ok(int(surgery.get("lofted_tris")) > 0, "lofted wall has triangles (%s)" % surgery.get("lofted_tris"))
+	var dense_closed := int(surgery.call("last_dense_wall_tris"))
+	var loft_closed := int(surgery.get("lofted_tris"))
+	_ok(dense_closed > 0 and loft_closed < dense_closed, "closed-cut wall tris reduced vs previous dense loft (%d -> %d)" % [dense_closed, loft_closed])
+	_ok(loft_closed <= int(surgery.call("wall_tri_budget")), "closed-cut wall is within the mobile tri budget (%d <= %d)" % [loft_closed, int(surgery.call("wall_tri_budget"))])
+	surgery.call("debug_settle_eversion")
+	_ok(bool(surgery.call("cut_is_everted")), "closed cut everts outward so the lofted inner wall is visible")
+	var closed_w := float(surgery.call("lip_opening_width"))
+	_ok(closed_w > 0.003, "everted closed lips open wider than the raw slit (%.4f)" % closed_w)
+	if organs and organs.has_method("set_xray_enabled"):
+		organs.call("set_xray_enabled", false)
+	_ok(bool(surgery.call("incision_trail_visible_without_xray")), "graffiti stays visible in the normal shaded view")
 	_ok(bool(surgery.get("cavity_exposed")), "cavity inner wall is exposed after the cut")
 	_ok(not bool(surgery.call("cavity_hidden_until_cut")), "cavity is no longer hidden after the cut")
 	_ok(bool(surgery.call("can_grab_flap")), "closed path can isolate a flap (grab ready)")
@@ -370,6 +431,16 @@ func _check_cavity_and_incision() -> void:
 	await _phys(36)
 	await _frames(8)
 	_ok(bool(surgery.call("flap_clear_of_bed", 0.05)), "flap is not intersecting through the exam bed at rest")
+	var c0: Vector3 = surgery.call("flap_centroid")
+	_ok(bool(surgery.call("debug_grab_move_flap", Vector3(0.0, 0.08, 0.05))), "grab tool can pick up and move the enclosed flap")
+	await _phys(2)
+	await _frames(2)
+	var c1: Vector3 = surgery.call("flap_centroid")
+	_ok(c1.distance_to(c0) > 0.02, "held flap moved with the grab (%s -> %s)" % [c0, c1])
+	_ok(bool(surgery.call("flap_is_held")), "flap is held while 拿取 is dragging it")
+	_ok(bool(surgery.call("debug_throw_flap", Vector3(0.6, 0.4, 0.2))), "releasing the flap throws it with residual velocity")
+	_ok(float(surgery.call("flap_throw_speed")) > 0.05, "throw speed is recorded (%.3f)" % float(surgery.call("flap_throw_speed")))
+	await _phys(8)
 
 	# 退出后躯体改变仍在。
 	surgery.call("exit_surgery")
@@ -384,3 +455,28 @@ func _check_cavity_and_incision() -> void:
 	_ok(bool(surgery.get("cut_open")), "re-enter keeps the cut body")
 	surgery.call("exit_surgery")
 	_ok(str(player.get("occupancy")) == "exam_bed", "occupancy unchanged after exit")
+
+	# 特写弹孔：真实命中打出柱状断面并去掉圆心皮瓣（不走 wounds.webp）。
+	var organs2: Node = player.call("get_organs") if player.has_method("get_organs") else organs
+	var navel: Vector3 = Vector3(0, 1.06, 0.11)
+	if organs2 and organs2.has_method("navel_world"):
+		navel = organs2.call("navel_world")
+	var b_origin := navel + Vector3(0.05, 0.05, 0.30)
+	var b_dir := (navel + Vector3(0.05, 0.05, 0.0) - b_origin)
+	if b_dir.length_squared() < 1e-8:
+		b_dir = Vector3(0, 0, -1)
+	else:
+		b_dir = b_dir.normalized()
+	var punched := false
+	if organs2 and organs2.has_method("apply_ballistic_hit"):
+		organs2.call("apply_ballistic_hit", b_origin, b_dir, {"energy": 0.85, "impulse": 0.5, "overpen": 0.15, "category": "pistol"})
+		punched = bool(surgery.call("has_bullet_hole"))
+	if not punched:
+		punched = bool(surgery.call("debug_apply_bullet_hole", navel + Vector3(0.05, 0.05, 0.0), b_dir, 0.01))
+	_ok(punched and bool(surgery.call("has_bullet_hole")), "a simulated bullet hit creates a real mesh hole with a cylindrical wall")
+	_ok(bool(surgery.call("bullet_plug_removed")), "the circular plug in the middle of the hole is removed")
+	var btris := int(surgery.get("bullet_wall_tris"))
+	_ok(btris > 0 and btris <= Geom.bullet_wall_tri_budget() * 3, "bullet cylinder uses a small tri budget (%d)" % btris)
+	var fol2: Dictionary = surgery.call("debug_wall_follow_delta")
+	_ok(bool(fol2.get("ok", false)), "bullet-hole / incision wall still follows a pose or deform change")
+	_ok(bool(surgery.call("has_persistent_state")), "bullet hole persists on the body after being punched outside a new surgery session")
