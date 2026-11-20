@@ -6,6 +6,6 @@
 [node name="City" type="Node3D"]
 script = ExtResource("2_col")
 skip_foliage = true
-build_on_ready = false
+build_on_ready = true
 
 [node name="Model" parent="." instance=ExtResource("1_city")]

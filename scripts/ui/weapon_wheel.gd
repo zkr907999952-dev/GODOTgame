@@ -161,8 +161,9 @@ func _draw() -> void:
 	draw_rect(Rect2(Vector2.ZERO, size), Color(0, 0, 0, 0.18))
 	var c := center()
 	var r := radius()
-	# No gray disc behind the wheel; a thin ring is enough to read the slots.
-	draw_arc(c, r + 54.0, 0.0, TAU, 96, Color(1, 1, 1, 0.16), 1.5, true)
+	# 0.2.31: keep the smaller 0.2.29 wheel size, but restore the gray disc.
+	draw_circle(c, r + 54.0, Color(0.08, 0.09, 0.11, 0.55))
+	draw_arc(c, r + 54.0, 0.0, TAU, 96, Color(1, 1, 1, 0.18), 1.5, true)
 	var accent := Color(0.93, 0.55, 0.42)
 	var it := _page_items()
 	var n := it.size()
@@ -192,7 +193,7 @@ func _draw() -> void:
 		_text(at, rc.end - Vector2(aw + 8, 8), 13, accent if a.x == 0 else Color(1, 1, 1))
 	# 中心：收枪 / 翻页
 	var hc := hover == HOLSTER
-	draw_circle(c, DEAD + 6.0, Color(0.93, 0.55, 0.42, 0.35) if hc else Color(0, 0, 0, 0.0))
+	draw_circle(c, DEAD + 6.0, Color(0.93, 0.55, 0.42, 0.35) if hc else Color(0.08, 0.09, 0.11, 0.70))
 	draw_arc(c, DEAD + 6.0, 0.0, TAU, 48, Color(1, 1, 1, 0.3), 1.5, true)
 	_text_c("收枪", c + Vector2(0, -4), 14, Color(1, 1, 1))
 	if pages() > 1:

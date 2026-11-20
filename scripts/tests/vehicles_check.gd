@@ -1,11 +1,11 @@
 extends SceneTree
 
 const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
-## 0.2.30 载具 / 检查床 / 地图传送 / RoomCollision 自检。
+## 0.2.31 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.2.30"
-const VERSION_CODE := 32
+const VERSION_NAME := "0.2.31"
+const VERSION_CODE := 33
 
 var fails := 0
 var main: Node
@@ -83,6 +83,7 @@ func _run() -> void:
 	await _check_0228_playtest_fixes()
 	await _check_0229_playtest_fixes()
 	await _check_0230_playtest_fixes()
+	await _check_0231_playtest_fixes()
 	_finish()
 
 
@@ -529,6 +530,16 @@ func _check_map_open() -> void:
 		return
 	_ok(str(main.call("action_for_key", KEY_M, "display")) == "map_menu", "M is map_menu in display mode")
 	_ok(str(main.get("current_map")) == "room", "still on the room map before opening overhead")
+	# 0.2.31: city collisions + default vehicles load during game init, not
+	# when the map is first opened. Wait briefly if the deferred warmup is
+	# still finishing, then require _city_ready BEFORE open_overhead.
+	var ginit := 0
+	while vs and not bool(vs.get("_city_ready")) and ginit < 50:
+		await _phys(1)
+		ginit += 1
+	_ok(bool(vs.get("_city_ready")), "city map + default vehicles are loaded during init, before first map open (waited %d frames)" % ginit)
+	var city_n: Node = main.get_node_or_null("City")
+	_ok(city_n != null and bool(city_n.get("_built")), "city collisions were built during init, not on first map open")
 	var beds_before := int(vs.call("default_bed_count"))
 	if main.has_method("open_overhead"):
 		main.call("open_overhead")
@@ -1847,7 +1858,7 @@ func _check_0223_playtest_fixes() -> void:
 			_ok(mid_ok, "elevator hinge sits near mid-chord (z mid of ~5.5..9.3)")
 		if pvis.vapor:
 			_ok(pvis.vapor.has_method("cloud_intensity"), "vapor exposes intensity for tests")
-			pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 6.5, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
+			pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 9.0, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
 			_ok(float(pvis.vapor.call("cloud_intensity")) > 0.0, "high-G pull-up produces vapor")
 			pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 1.1, "ctrl_pitch": 0.0, "aoa": 0.0}, 0.5)
 			# intensity eases out; after a long step it should drop
@@ -2128,7 +2139,7 @@ func _check_0225_playtest_fixes() -> void:
 	if pvis and pvis.vapor:
 		var h := float(pvis.vapor.call("cloud_min_height")) if pvis.vapor.has_method("cloud_min_height") else 0.0
 		_ok(h > 0.0, "vapor clouds still expose a scale/height (min Y scale=%.2f)" % h)
-		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 6.5, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
+		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 9.0, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
 		_ok(float(pvis.vapor.call("cloud_intensity")) > 0.0, "high-G pull-up still produces volumetric vapor")
 		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 1.1, "ctrl_pitch": 0.0, "aoa": 0.0}, 0.5)
 		_ok(float(pvis.vapor.call("cloud_intensity")) < 0.25, "low-G hides the vapor volume")
@@ -2341,7 +2352,7 @@ func _check_0226_playtest_fixes() -> void:
 	if pvis and pvis.vapor:
 		_ok(not bool(pvis.vapor.call("cloud_uses_spheres")), "high-G vapor is not a set of spheres")
 		_ok(int(pvis.vapor.call("cloud_sheet_count")) >= 6, "vapor uses several polygonal sheets (%d)" % int(pvis.vapor.call("cloud_sheet_count")))
-		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 6.5, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
+		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 9.0, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
 		_ok(float(pvis.vapor.call("cloud_intensity")) > 0.0, "high-G pull-up still produces sheet vapor")
 		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 1.1, "ctrl_pitch": 0.0, "aoa": 0.0}, 0.5)
 		_ok(float(pvis.vapor.call("cloud_intensity")) < 0.25, "low-G still hides the vapor sheets")
@@ -2776,7 +2787,7 @@ func _check_0228_playtest_fixes() -> void:
 		jet.force_update_transform()
 		if pvis.wrap:
 			pvis.wrap.force_update_transform()
-		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 6.5, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
+		pvis.vapor.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 9.0, "ctrl_pitch": 0.8, "aoa": 0.22}, 0.05)
 		var ang: float = float(pvis.vapor.call("cloud_max_normal_angle_to_airframe"))
 		_ok(ang < 0.35, "banked vapor sheets stay flush with the airframe (max normal err=%.3f rad)" % ang)
 		# And they must NOT all be aligned to world-up while the jet is banked.
@@ -2832,8 +2843,8 @@ func _check_0229_playtest_fixes() -> void:
 	## handbrake drift, nitro only from 加速/Shift, map from vehicle TP,
 	## observe ≈ 透视, smaller weapon UI without a gray plate.
 	var vap_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_vapor.gd")
-	_ok(vap_src.find("const VAPOR_G_ON := 4.8") >= 0, "vapor onset is raised to 4.8 G")
-	_ok(vap_src.find("const VAPOR_G_FULL := 7.5") >= 0, "vapor is densest near 7.5 G")
+	_ok(vap_src.find("const VAPOR_G_ON := 6.8") >= 0, "vapor onset is raised to 6.8 G")
+	_ok(vap_src.find("const VAPOR_G_FULL := 8.8") >= 0, "vapor is densest near 8.8 G")
 	_ok(vap_src.find("pitch_c > 0.18") < 0, "vapor is not keyed off pitch-up input alone")
 	_ok(vap_src.find("func cloud_covers_engines") >= 0, "vapor exposes an engine-coverage test")
 	var pl_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_controller.gd")
@@ -2854,7 +2865,7 @@ func _check_0229_playtest_fixes() -> void:
 	_ok(tc_src.find("载具内取消双指拖拽旋转视角") >= 0, "two-finger vehicle orbit stays cancelled")
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
 	_ok(pose_src.find("func _aim_head_world") >= 0 and pose_src.find("func head_forward") >= 0, "exam head aims at the camera forward")
-	_ok(pose_src.find("C_Spine_a\": Vector3(-0.10") >= 0 or pose_src.find("Soft waist flex") >= 0, "exam pose has a soft waist flex")
+	_ok(pose_src.find("C_Spine_a") >= 0 and pose_src.find("C_Hip_a") >= 0, "exam pose still sets waist / hip bones")
 	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
 	_ok(vs_src.find("func _map_view_open") >= 0, "vehicle cameras yield to the overhead map")
 	_ok(vs_src.find("arm_skin := 0.044") >= 0, "forearms are raised to sit flush with the armrests")
@@ -2892,7 +2903,7 @@ func _check_0229_playtest_fixes() -> void:
 	var pvis = jet.get("visuals")
 	if pvis and pvis.vapor:
 		var vap = pvis.vapor
-		_ok(is_equal_approx(float(vap.VAPOR_G_ON), 4.8), "live VAPOR_G_ON is 4.8")
+		_ok(is_equal_approx(float(vap.VAPOR_G_ON), 6.8), "live VAPOR_G_ON is 6.8")
 		# Fade to zero first.
 		for i in 8:
 			vap.call("update", {"airborne": true, "speed": 120.0, "agl": 40.0, "g_load": 1.0, "ctrl_pitch": 0.0, "aoa": 0.0}, 0.08)
@@ -2901,8 +2912,9 @@ func _check_0229_playtest_fixes() -> void:
 			vap.call("update", {"airborne": true, "speed": 140.0, "agl": 40.0, "g_load": 2.8, "ctrl_pitch": 0.95, "aoa": 0.18}, 0.05)
 		_ok(float(vap.call("cloud_intensity")) < 0.08, "a mild pull-up at 2.8 G produces no vapor (i=%.3f)" % float(vap.call("cloud_intensity")))
 		# High G does, even without a huge pitch input (loaded turn).
+		# 0.2.31 onset is 6.8 G, so this probe is at 9.0 (past VAPOR_G_FULL).
 		for i in 10:
-			vap.call("update", {"airborne": true, "speed": 140.0, "agl": 40.0, "g_load": 6.8, "ctrl_pitch": 0.2, "aoa": 0.12}, 0.05)
+			vap.call("update", {"airborne": true, "speed": 140.0, "agl": 40.0, "g_load": 9.0, "ctrl_pitch": 0.2, "aoa": 0.12}, 0.05)
 		_ok(float(vap.call("cloud_intensity")) > 0.25, "high G produces vapor (i=%.3f)" % float(vap.call("cloud_intensity")))
 		_ok(bool(vap.call("cloud_covers_dorsal_lex")), "vapor still covers the dorsal / LEX / wing-body area")
 		_ok(bool(vap.call("cloud_covers_wing_lex")), "vapor still covers the wing-root / LEX junction")
@@ -2912,7 +2924,7 @@ func _check_0229_playtest_fixes() -> void:
 		jet.force_update_transform()
 		if pvis.wrap:
 			pvis.wrap.force_update_transform()
-		vap.call("update", {"airborne": true, "speed": 140.0, "agl": 40.0, "g_load": 6.8, "ctrl_pitch": 0.4, "aoa": 0.12}, 0.05)
+		vap.call("update", {"airborne": true, "speed": 140.0, "agl": 40.0, "g_load": 9.0, "ctrl_pitch": 0.4, "aoa": 0.12}, 0.05)
 		var ang: float = float(vap.call("cloud_max_normal_angle_to_airframe"))
 		_ok(ang < 0.35, "vapor sheets stay locked to the airframe (err=%.3f rad)" % ang)
 		jet.rotation = Vector3.ZERO
@@ -3063,7 +3075,7 @@ func _check_0229_playtest_fixes() -> void:
 					var rest_q := skel.get_bone_rest(sa).basis.get_rotation_quaternion()
 					var pose_q := skel.get_bone_pose_rotation(sa)
 					var e := (rest_q.inverse() * pose_q).get_euler()
-					_ok(e.x < -0.02, "waist has a soft flexion (spine_a x=%.3f)" % e.x)
+					_ok(absf(e.x) > 0.02, "waist has a posed spine_a offset (x=%.3f)" % e.x)
 				# Breath: spine scale / breath_in changes over time on the bed.
 				var sec = player.call("get_secondary") if player.has_method("get_secondary") else null
 				if sec:
@@ -3177,7 +3189,7 @@ func _check_0230_playtest_fixes() -> void:
 	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
 	_ok(pose_src.find("C_Neck_a\": Vector3(-0.18") >= 0, "exam neck has a slight forward bow (-0.18)")
 	_ok(pose_src.find("C_Head_a\": Vector3(-0.12") >= 0, "exam head has a slight forward bow (-0.12)")
-	_ok(pose_src.find("C_Spine_a\": Vector3(-0.10") >= 0, "soft waist flex from 0.2.29 is kept")
+	_ok(pose_src.find("C_Spine_a") >= 0, "exam pose still sets C_Spine_a (arch retuned in 0.2.31)")
 	_ok(pose_src.find("func eye_world") >= 0, "ExamPose exposes eye_world for the first-person eye")
 	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
 	_ok(vs_src.find("ExamPose.eye_world") >= 0, "exam camera uses the true eye, not a torso-biased offset")
@@ -3281,8 +3293,8 @@ func _check_0230_playtest_fixes() -> void:
 				var to_head := cam_o - head_o
 				var along_spine := to_head.dot(-lie.y)
 				var along_face := to_head.dot(lie.z)
-				_ok(cam_o.distance_to(head_o) < 0.35, "exam FP eye stays at the head (d=%.3f)" % cam_o.distance_to(head_o))
-				_ok(along_spine < 0.12, "exam FP eye is not lowered into the torso (along_spine=%.3f)" % along_spine)
+				_ok(cam_o.distance_to(head_o) < 0.42, "exam FP eye stays at the head (d=%.3f)" % cam_o.distance_to(head_o))
+				_ok(along_spine < 0.22, "exam FP eye is not lowered into the torso (along_spine=%.3f)" % along_spine)
 				_ok(along_face > 0.04 or to_head.dot(lie.z) > 0.02, "exam FP eye sits in front of the face (face=%.3f)" % along_face)
 				_ok(cam_o.distance_to(captured) < 0.04, "camera uses the pre-look eye origin (d=%.3f)" % cam_o.distance_to(captured))
 				var ni := skel.find_bone("C_Neck_a")
@@ -3337,6 +3349,207 @@ func _check_0230_playtest_fixes() -> void:
 	else:
 		_ok(false, "HUD / vehicle system available for thrust-bar checks")
 
+
+
+
+func _check_0231_playtest_fixes() -> void:
+	## Exam-bed backward waist/hip arch (green curve), FP eye moved toward
+	## the legs, hands still on the armrests, map+vehicles loaded at init,
+	## thinner thrust bar without a gray panel, weapon wheel gray disc kept,
+	## higher vapor G onset, flaps only at low speed/decel with a wing-TE hinge.
+	var pose_src := FileAccess.get_file_as_string("res://scripts/vehicles/exam_pose.gd")
+	_ok(pose_src.find("EYE_TOWARD_LEGS := 0.16") >= 0, "exam FP eye has a 0.16 m toward-legs offset (was 0 in 0.2.30)")
+	_ok(pose_src.find("C_Hip_a\": Vector3(0.12") >= 0, "hips arch backward (C_Hip_a +0.12, was -0.05)")
+	_ok(pose_src.find("C_Spine_a\": Vector3(0.20") >= 0, "lumbar arches backward (C_Spine_a +0.20, was -0.10)")
+	_ok(pose_src.find("C_Spine_b\": Vector3(0.14") >= 0, "C_Spine_b +0.14 (was -0.07)")
+	_ok(pose_src.find("C_Spine_c\": Vector3(0.06") >= 0, "C_Spine_c +0.06 (was -0.04)")
+	_ok(pose_src.find("C_Spine_d\": Vector3(0.02") >= 0, "C_Spine_d +0.02 opens the upper chest toward the sternum")
+	_ok(pose_src.find("C_Spine_a\": Vector3(-0.10") < 0, "0.2.29/0.2.30 forward waist crunch is gone")
+	_ok(pose_src.find("C_Neck_a\": Vector3(-0.18") >= 0, "neck still has a slight forward nod")
+	_ok(pose_src.find("exam-bed-pose-guide.jpg") >= 0, "pose comments record that the red/green guide was used")
+
+	var vap_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_vapor.gd")
+	_ok(vap_src.find("const VAPOR_G_ON := 6.8") >= 0, "vapor onset is 6.8 G (was 4.8)")
+	_ok(vap_src.find("const VAPOR_G_FULL := 8.8") >= 0, "vapor full is 8.8 G (was 7.5)")
+	_ok(vap_src.find("pitch_c > 0.18") < 0, "vapor is still G-only, not keyed off pitch-up")
+
+	var vis_src := FileAccess.get_file_as_string("res://scripts/vehicles/plane_visuals.gd")
+	_ok(vis_src.find("const FLAP_EXTEND_SPEED := 72.0") >= 0, "flaps extend at or below 72 m/s")
+	_ok(vis_src.find("const FLAP_RETRACT_SPEED := 95.0") >= 0, "flaps retract at or above 95 m/s")
+	_ok(vis_src.find("func flap_want") >= 0, "flap_want encodes the speed / decel rule")
+	_ok(vis_src.find("func _flap_hinge_line") >= 0, "flap hinge follows the wing trailing edge")
+	_ok(is_equal_approx(PlaneVisuals.flap_want(50.0, false), PlaneVisuals.FLAP_DEPLOY), "flaps extend at low speed even when not decelerating")
+	_ok(is_equal_approx(PlaneVisuals.flap_want(80.0, true), PlaneVisuals.FLAP_DEPLOY), "flaps extend while decelerating between 72 and 95 m/s")
+	_ok(is_equal_approx(PlaneVisuals.flap_want(80.0, false), 0.0), "flaps stay up at mid speed when not decelerating")
+	_ok(is_equal_approx(PlaneVisuals.flap_want(160.0, true), 0.0), "flaps retract at high speed even while decelerating / at idle thrust")
+
+	var wh_src := FileAccess.get_file_as_string("res://scripts/ui/weapon_wheel.gd")
+	_ok(wh_src.find("draw_circle(c, r + 54.0, Color(0.08, 0.09, 0.11, 0.55))") >= 0, "weapon wheel keeps a gray disc background")
+	_ok(wh_src.find("r + 70.0") < 0, "weapon wheel stays at the smaller 0.2.29 size (not r+70)")
+	var wui_src := FileAccess.get_file_as_string("res://scripts/ui/weapon_ui.gd")
+	_ok(wui_src.find("sb.bg_color = Color(0, 0, 0, 0)") >= 0 or wui_src.find("draw_center = false") >= 0, "weapon ammo HUD still has no gray panel")
+
+	var hud_src := FileAccess.get_file_as_string("res://scripts/hud.gd")
+	_ok(hud_src.find("custom_minimum_size = Vector2(28, 150)") >= 0, "thrust bar default size is thinner (28x150, was 48x150)")
+	_ok(hud_src.find("bar_w := 8.0") >= 0, "thrust fill itself is a thin 8 px bar")
+	_ok(hud_src.find("bar_bg.color = Color(0, 0, 0, 0)") >= 0, "thrust bar Track / panel is transparent (no gray background)")
+
+	var gr_src := FileAccess.get_file_as_string("res://scripts/game_root.gd")
+	_ok(gr_src.find("func _warmup_city_at_startup") >= 0, "game_root warms the city during init")
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	_ok(vs_src.find('call_deferred("_ensure_city_defaults")') >= 0, "vehicle system starts city defaults at setup, not only on notify_map")
+
+	# Live: vapor mild 3 G is zero; violent G produces vapor.
+	var jet: Node = load("res://scenes/vehicles/plane.tscn").instantiate()
+	root.add_child(jet)
+	await _frames(2)
+	var pvis = jet.get("visuals")
+	if pvis and pvis.vapor:
+		var vap = pvis.vapor
+		_ok(is_equal_approx(float(vap.VAPOR_G_ON), 6.8), "live VAPOR_G_ON is 6.8")
+		_ok(is_equal_approx(float(vap.VAPOR_G_FULL), 8.8), "live VAPOR_G_FULL is 8.8")
+		for i in 8:
+			vap.call("update", {"airborne": true, "speed": 140.0, "agl": 40.0, "g_load": 1.0, "ctrl_pitch": 0.0, "aoa": 0.0}, 0.08)
+		for i in 10:
+			vap.call("update", {"airborne": true, "speed": 140.0, "agl": 40.0, "g_load": 3.0, "ctrl_pitch": 0.95, "aoa": 0.18}, 0.05)
+		_ok(float(vap.call("cloud_intensity")) <= 0.0 + 1e-4, "a mild ~3 G pull-up produces no vapor (i=%.3f)" % float(vap.call("cloud_intensity")))
+		# Live flaps + hinge.
+		if pvis.has_method("apply_pose"):
+			for i in 30:
+				pvis.call("apply_pose", {"speed": 180.0, "decelerating": true, "thrust": 0.2, "speed_brake": 0.0, "airborne": true, "gear": 0.0}, 0.05, 0.0, 100.0)
+			_ok(float(pvis.flap_t) < 0.10, "flaps retract at 180 m/s even when decelerating / idle thrust (t=%.3f)" % float(pvis.flap_t))
+			var retracted := float(pvis.flap_t)
+			var hinges: Array = pvis.call("flap_hinge_info") if pvis.has_method("flap_hinge_info") else []
+			_ok(hinges.size() >= 2, "both wing flaps have a hinge (n=%d)" % hinges.size())
+			var hinge_ok := hinges.size() >= 2
+			var offs := PackedStringArray()
+			for h in hinges:
+				var off := float(h.get("axis_offset", 99.0))
+				offs.append("%.3f" % off)
+				if off > 0.06:
+					hinge_ok = false
+			_ok(hinge_ok, "flap hinge axis coincides with the wing TE / flap leading edge (offsets=%s)" % ", ".join(offs))
+			for i in 30:
+				pvis.call("apply_pose", {"speed": 50.0, "decelerating": false, "thrust": 0.6, "speed_brake": 0.0, "airborne": true, "gear": 1.0}, 0.05, 0.0, 20.0)
+			_ok(float(pvis.flap_t) > 0.70, "flaps extend at 50 m/s even when not decelerating (t=%.3f)" % float(pvis.flap_t))
+			_ok(float(pvis.flap_t) > retracted + 0.50, "flap travel is a smooth deploy, not a missing animation (retracted=%.3f deployed=%.3f)" % [retracted, float(pvis.flap_t)])
+		else:
+			_ok(false, "plane visuals expose apply_pose for flap checks")
+	else:
+		_ok(false, "plane vapor / visuals available for 0.2.31 G and flap checks")
+	jet.queue_free()
+	await _frames(1)
+
+	# Live thrust bar: thinner, no gray fill, percentage / 加力 still update.
+	var hud: Node = main.get_node_or_null("HUD") if main else null
+	var touch = hud.get("_touch") if hud else null
+	if touch and touch.has_method("_default_item"):
+		var bar_it: Dictionary = touch.call("_default_item", "thrust_bar")
+		_ok(bar_it.get("size").x <= 32.0, "default thrust bar slot is thinner (w=%.1f, was 48)" % bar_it.get("size").x)
+	else:
+		_ok(false, "touch controls expose the thrust_bar default size")
+	if hud and hud.get("_thrust_bar"):
+		var bar: Control = hud.get("_thrust_bar")
+		var track: ColorRect = bar.get_node_or_null("Track")
+		var track_clear := track == null or track.color.a < 0.05
+		_ok(track_clear, "live thrust bar has no gray Track fill (a=%.3f)" % (track.color.a if track else 0.0))
+		if hud.has_method("_update_thrust_bar"):
+			hud.call("_update_thrust_bar", 1.0)
+		var fill: ColorRect = hud.get("_thrust_bar_fill")
+		_ok(fill != null and fill.size.x <= 12.0, "live thrust fill is thin (w=%.1f)" % (fill.size.x if fill else -1.0))
+	else:
+		_ok(false, "HUD thrust bar present for thin / no-gray checks")
+
+	# Live exam: eye moved toward the legs; waist/hip euler is extension; arms on armrests.
+	var bed: Node = null
+	if vs:
+		for v in vs.vehicles:
+			if str(vs.call("kind_of", v)) == "exam_bed" and bool(v.get("is_default")):
+				bed = v
+				break
+	if vs and player and bed:
+		if vs.get("occupied") != bed:
+			player.global_position = bed.global_position + Vector3(1.2, 0.1, 0.0)
+			vs.set("nearest", bed)
+			if player.has_method("set_play_mode"):
+				player.call("set_play_mode", 1)
+			_ok(bool(vs.call("try_enter")), "can board the exam bed for 0.2.31 pose / eye")
+			await _frames(3)
+		if vs.get("occupied") == bed:
+			if player.has_method("set_play_mode"):
+				player.call("set_play_mode", 1)
+			player.set("first_person", true)
+			player.set("_yaw", 0.0)
+			player.set("_pitch", 0.0)
+			if vs.has_method("_apply_exam_pose"):
+				vs.call("_apply_exam_pose", 0.016)
+			var captured: Vector3 = vs.get("_exam_eye_origin") if vs else Vector3.ZERO
+			if vs.has_method("_exam_camera"):
+				vs.call("_exam_camera", 0.016)
+			var skel: Skeleton3D = player.call("get_skeleton") if player.has_method("get_skeleton") else null
+			var cam: Camera3D = player.get_node_or_null("CameraPivot/Camera3D")
+			if skel and cam:
+				var lie: Basis = bed.patient_basis()
+				var head_o: Vector3 = ExamPose.head_world(skel).origin
+				var cam_o: Vector3 = cam.global_position
+				var to_head := cam_o - head_o
+				var along_spine := to_head.dot(-lie.y)
+				var along_face := to_head.dot(lie.z)
+				_ok(along_spine > 0.04, "exam FP eye is moved forward toward the legs vs 0.2.30 (along_spine=%.3f)" % along_spine)
+				_ok(along_face > 0.02, "exam FP eye stays at head height / in front of the face (face=%.3f)" % along_face)
+				_ok(cam_o.distance_to(head_o) < 0.42, "exam FP eye is still at the head, not inside the torso (d=%.3f)" % cam_o.distance_to(head_o))
+				_ok(cam_o.distance_to(captured) < 0.04, "camera still uses the pre-look eye origin (d=%.3f)" % cam_o.distance_to(captured))
+				var hip_i := skel.find_bone("C_Hip_a")
+				var sa := skel.find_bone("C_Spine_a")
+				var sb := skel.find_bone("C_Spine_b")
+				var ext_ok := hip_i >= 0 and sa >= 0 and sb >= 0
+				var hx := 0.0
+				var ax := 0.0
+				var bx := 0.0
+				if ext_ok:
+					hx = (skel.get_bone_rest(hip_i).basis.get_rotation_quaternion().inverse() * skel.get_bone_pose_rotation(hip_i)).get_euler().x
+					ax = (skel.get_bone_rest(sa).basis.get_rotation_quaternion().inverse() * skel.get_bone_pose_rotation(sa)).get_euler().x
+					bx = (skel.get_bone_rest(sb).basis.get_rotation_quaternion().inverse() * skel.get_bone_pose_rotation(sb)).get_euler().x
+					ext_ok = hx > 0.04 and ax > 0.08 and bx > 0.05
+				_ok(ext_ok, "waist/hip arch is backward / lordosis, opposite of the 0.2.29 flex (hip=%.3f spine_a=%.3f spine_b=%.3f)" % [hx, ax, bx])
+				var par_ok := true
+				var on_ok := true
+				var worst_ang := 0.0
+				for side in [true, false]:
+					var fa := skel.find_bone("L_Forearm_a" if side else "R_Forearm_a")
+					var ha := skel.find_bone("L_Hand_a" if side else "R_Hand_a")
+					if fa < 0 or ha < 0:
+						par_ok = false
+						on_ok = false
+						continue
+					var pf: Vector3 = (skel.global_transform * skel.get_bone_global_pose(fa)).origin
+					var ph: Vector3 = (skel.global_transform * skel.get_bone_global_pose(ha)).origin
+					var rail: Vector3 = -lie.y
+					var fd := ph - pf
+					if fd.length_squared() < 1e-6:
+						par_ok = false
+						continue
+					var ang := fd.normalized().angle_to(rail)
+					ang = minf(ang, PI - ang)
+					worst_ang = maxf(worst_ang, ang)
+					if ang > 0.42:
+						par_ok = false
+					var pad_top: Vector3 = bed.armrest_l_global() if side else bed.armrest_r_global()
+					var mid := (pf + ph) * 0.5
+					var above := (mid - pad_top).dot(bed.global_transform.basis.y.normalized())
+					if above < -0.02:
+						on_ok = false
+				_ok(par_ok, "after the new arch, forearms stay parallel to the armrests (worst=%.3f)" % worst_ang)
+				_ok(on_ok, "after the new arch, forearms sit flush on the armrests")
+			else:
+				_ok(false, "skeleton / camera present for 0.2.31 exam eye / arch")
+			if vs.has_method("try_exit"):
+				vs.call("try_exit")
+			await _frames(1)
+		else:
+			_ok(false, "occupied the exam bed for 0.2.31 pose / eye checks")
+	else:
+		_ok(false, "exam bed / player available for 0.2.31 pose / eye checks")
 
 
 func _door_rear_y(hub: Node3D, wrap: Node3D) -> float:

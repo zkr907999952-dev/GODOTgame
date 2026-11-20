@@ -447,7 +447,7 @@ func _default_item(id: String) -> Dictionary:
 			return {"center": slc, "size": sl, "label": "偏航"}
 		"thrust_bar":
 			# Current thrust percentage, immediately left of the right-side cluster.
-			var bs := Vector2(48, 150)
+			var bs := Vector2(28, 150)
 			var bc := _thrust_bar_default_center(right, by, bs)
 			return {"center": bc, "size": bs, "label": "推力"}
 		"accel":

@@ -94,7 +94,10 @@ func setup(g: Node, p: CharacterBody3D) -> void:
 	name = "VehicleSystem"
 	preload_vehicle_resources()
 	# Room exam bed is available immediately (room is the default map).
+	# City map collisions + default vehicles also start during init so the
+	# first map open does not hitch on that load.
 	call_deferred("_ensure_room_defaults")
+	call_deferred("_ensure_city_defaults")
 
 
 func _ensure_room_defaults() -> void:
@@ -160,10 +163,19 @@ func _ensure_city_defaults() -> void:
 
 
 func warmup_city() -> void:
-	## Instantiate default city vehicles up front (map preload / first preview)
+	## Instantiate default city vehicles up front (game init / map preload)
 	## without changing current_map. Safe to call while the player is still in
 	## the room: city colliders are only enabled briefly for ground rays.
-	if _city_ready or _city_warming:
+	if _city_ready:
+		return
+	if _city_warming:
+		# Another caller already started init warmup; wait it out so a
+		# later await warmup_city() does not return early.
+		while _city_warming and not _city_ready:
+			if get_tree():
+				await get_tree().physics_frame
+			else:
+				return
 		return
 	_city_warming = true
 	preload_vehicle_resources()
@@ -1449,7 +1461,7 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 		var fp_now := bool(player.get("first_person")) and not (player.has_method("is_display_mode") and bool(player.call("is_display_mode")))
 		if fp_now:
 			var yp := _clamp_exam_look()
-			var look_dir := -lie.y * 0.86 - lie.z * 0.38
+			var look_dir := -lie.y * 0.80 - lie.z * 0.48
 			if look_dir.length_squared() < 1e-6:
 				look_dir = Vector3(0, 0, 1)
 			look_dir = look_dir.normalized()
@@ -1497,7 +1509,7 @@ func _exam_camera(_delta: float) -> void:
 	var lie := bed.patient_basis()
 	# Default: from the head, look toward the feet / abdomen so the belly
 	# sits in the lower field of view (soft, not staring straight down).
-	var look_dir := -lie.y * 0.86 - lie.z * 0.38
+	var look_dir := -lie.y * 0.80 - lie.z * 0.48
 	if look_dir.length_squared() < 1e-6:
 		look_dir = bed.global_transform.basis.z
 	look_dir = look_dir.normalized()
@@ -1538,7 +1550,7 @@ func _clamp_exam_look() -> Vector2:
 func _exam_look_forward(yaw: float, pitch: float, lie: Basis) -> Vector3:
 	## Same composition as _exam_camera: default look toward the feet / abdomen,
 	## then the player's yaw/pitch extras, world-up, no roll.
-	var look_dir := -lie.y * 0.86 - lie.z * 0.38
+	var look_dir := -lie.y * 0.80 - lie.z * 0.48
 	if look_dir.length_squared() < 1e-6:
 		look_dir = Vector3(0, 0, 1)
 	look_dir = look_dir.normalized()

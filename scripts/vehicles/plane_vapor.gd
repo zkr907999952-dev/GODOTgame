@@ -12,8 +12,8 @@ const TIP_WIDTH := 0.22
 const TIP_FADE := 0.38
 ## 高过载云：只在较大过载下出现。轻抬头 / 小过载转弯不产生涡流；
 ## 大约从 4.8 G 开始显现，7.5 G 附近接近最浓。不单独按抬头输入触发。
-const VAPOR_G_ON := 4.8
-const VAPOR_G_FULL := 7.5
+const VAPOR_G_ON := 6.8
+const VAPOR_G_FULL := 8.8
 const VAPOR_MIN_SPEED := 55.0
 
 var _shader: Shader

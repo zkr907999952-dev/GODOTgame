@@ -1122,18 +1122,20 @@ func _build_vehicle_touch(root: Control) -> void:
 
 	_thrust_bar = Control.new()
 	_thrust_bar.name = "ThrustBar"
-	_thrust_bar.custom_minimum_size = Vector2(48, 150)
+	# 0.2.31: thinner bar, no gray panel (same treatment as the weapon HUD cards).
+	_thrust_bar.custom_minimum_size = Vector2(28, 150)
 	_thrust_bar.visible = false
 	_thrust_bar.mouse_filter = Control.MOUSE_FILTER_STOP
+	# No gray Track / panel: the fill itself is the only bar.
 	var bar_bg := ColorRect.new()
 	bar_bg.name = "Track"
-	bar_bg.color = Color(0.12, 0.13, 0.16, 0.88)
+	bar_bg.color = Color(0, 0, 0, 0)
 	bar_bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_thrust_bar.add_child(bar_bg)
 	var bar_mil := ColorRect.new()
 	bar_mil.name = "MilitaryMark"
-	bar_mil.color = Color(1, 1, 1, 0.28)
+	bar_mil.color = Color(1, 1, 1, 0.45)
 	bar_mil.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_thrust_bar.add_child(bar_mil)
 	_thrust_bar_fill = ColorRect.new()
@@ -1145,7 +1147,7 @@ func _build_vehicle_touch(root: Control) -> void:
 	_thrust_bar_pct.name = "Percent"
 	_thrust_bar_pct.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_thrust_bar_pct.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_thrust_bar_pct.add_theme_font_size_override("font_size", 14)
+	_thrust_bar_pct.add_theme_font_size_override("font_size", 12)
 	_thrust_bar_pct.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98, 0.95))
 	_thrust_bar_pct.text = "0%"
 	_thrust_bar_pct.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1246,9 +1248,11 @@ func _update_thrust_bar(thrust: float) -> void:
 	var u := clampf(thrust, 0.0, 1.0)
 	var pct := int(round(u * 100.0))
 	var ab := u >= 0.8
-	var pad := 6.0
-	var inner := Vector2(maxf(_thrust_bar.size.x - pad * 2.0, 8.0), maxf(_thrust_bar.size.y - pad * 2.0 - 28.0, 8.0))
-	var track_pos := Vector2(pad, pad + 16.0)
+	var pad := 4.0
+	# Keep the colored fill itself thin (~8 px) inside the control.
+	var bar_w := 8.0
+	var inner := Vector2(bar_w, maxf(_thrust_bar.size.y - pad * 2.0 - 28.0, 8.0))
+	var track_pos := Vector2(maxf((_thrust_bar.size.x - bar_w) * 0.5, 0.0), pad + 16.0)
 	var fill_h := inner.y * u
 	_thrust_bar_fill.size = Vector2(inner.x, fill_h)
 	_thrust_bar_fill.position = Vector2(track_pos.x, track_pos.y + inner.y - fill_h)
@@ -1257,7 +1261,7 @@ func _update_thrust_bar(thrust: float) -> void:
 	if mil:
 		# Tick at 80% (military) so afterburner is visually past that line.
 		var mil_y := track_pos.y + inner.y * (1.0 - 0.8)
-		mil.position = Vector2(pad - 1.0, mil_y)
+		mil.position = Vector2(track_pos.x - 1.0, mil_y)
 		mil.size = Vector2(inner.x + 2.0, 2.0)
 	if _thrust_bar_pct:
 		_thrust_bar_pct.text = "%d%%" % pct

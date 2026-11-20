@@ -107,6 +107,11 @@ func _ready() -> void:
 	vehicle_system.call("setup", self, _player)
 	if _hud and _hud.has_method("setup_vehicles"):
 		_hud.call("setup_vehicles", vehicle_system)
+	# City mesh collisions + default vehicles load during init, not on the
+	# first map open (that hitch is what 0.2.31 is fixing).
+	if _city and _city.has_method("ensure_collisions"):
+		_city.call("ensure_collisions")
+	call_deferred("_warmup_city_at_startup")
 	call_deferred("_bind_ballistics")
 	print("game_root: ready — Tab 模式 · WASD/Shift/空格 · Ctrl/C 蹲 · Z 匍匐 · E 拖尸体 · M 地图 · H 界面 · X 透视")
 
@@ -299,6 +304,17 @@ func _apply_map_visibility(id: String, notify_vehicles: bool = true) -> void:
 func _warmup_city_defaults() -> void:
 	if vehicle_system and vehicle_system.has_method("warmup_city"):
 		vehicle_system.call("warmup_city")
+
+
+func _warmup_city_at_startup() -> void:
+	## Game-open path: city collisions (if not already built) and default
+	## vehicles (airport car, runway fighters, etc.) so opening the map the
+	## first time does not hitch on this load. Does not change current_map
+	## or hide the home exam bed. Map preview still uses notify_vehicles=false.
+	if _city and _city.has_method("ensure_collisions"):
+		_city.call("ensure_collisions")
+	if vehicle_system and vehicle_system.has_method("warmup_city"):
+		await vehicle_system.warmup_city()
 
 
 func set_city_colliders_enabled(enabled: bool) -> void:

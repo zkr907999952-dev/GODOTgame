@@ -10,15 +10,22 @@ class_name ExamPose
 ## stirrup cups, spine slightly extended along the already-aligned backrest,
 ## arms relaxed on the belly / along the torso.
 const FK := {
-	# Soft waist flex (negative X = crunch toward the belly) so first-person
-	# can see the stomach. Keep it gentle — CharacterBody stays upright.
-	"C_Hip_a": Vector3(-0.05, 0.0, 0.0),
-	"C_Spine_a": Vector3(-0.10, 0.0, 0.0),
-	"C_Spine_b": Vector3(-0.07, 0.0, 0.0),
-	"C_Spine_c": Vector3(-0.04, 0.0, 0.0),
-	"C_Spine_d": Vector3(-0.02, 0.0, 0.0),
-	# Slight forward neck / head bow so first-person at the true eye can
-	# look down the body more naturally. CharacterBody stays upright.
+	# Backward waist / hip arch (positive X = extension / lordosis),
+	# matched to the user's red/green pose guide (playtest-0231/
+	# exam-bed-pose-guide.jpg). The red curve is the 0.2.30 forward
+	# crunch: a short rounded belly bulge from the lower abdomen up to
+	# under the bust. The green curve is the target: a longer, smoother
+	# line whose midsection sits lower (stretched abdominal plane, not a
+	# compact C) and then rises more steeply to the sternum, between the
+	# breasts. Lumbar/hips extend; the upper chest opens slightly so that
+	# rise reaches the sternum. CharacterBody stays upright.
+	"C_Hip_a": Vector3(0.12, 0.0, 0.0),
+	"C_Spine_a": Vector3(0.20, 0.0, 0.0),
+	"C_Spine_b": Vector3(0.14, 0.0, 0.0),
+	"C_Spine_c": Vector3(0.06, 0.0, 0.0),
+	"C_Spine_d": Vector3(0.02, 0.0, 0.0),
+	# Slight forward neck / head nod so first-person at the true eye can
+	# look down the body more naturally. Do not flex the waist forward.
 	"C_Neck_a": Vector3(-0.18, 0.0, 0.0),
 	"C_Head_a": Vector3(-0.12, 0.0, 0.0),
 	# Legs: x = flex, y = twist, z = abduct. 0.2.26: slightly less hip flex
@@ -426,13 +433,18 @@ const EYE_FORWARD := 0.10
 ## Fallback from C_Head_a (skull base) toward the crown / face when eye bones are missing.
 const EYE_CROWN := 0.08
 const EYE_FACE := 0.04
+## Extra shift toward the legs (body "forward" on the exam bed). 0.2.30 only
+## pushed along face +Z, so the view still sat biased toward the pillow.
+## Height stays at the eyes — this offset has the face-normal removed.
+const EYE_TOWARD_LEGS := 0.16
 
 
 static func eye_world(skel: Skeleton3D) -> Transform3D:
 	## First-person eye: midpoint of L_Eye / R_Eye (or an estimate from the
-	## head bone), then pushed forward along the face (+Z). Call this after
-	## the static pose / breath and before apply_look, so looking around
-	## cannot hitch the camera origin.
+	## head bone), pushed forward along the face (+Z) so the near plane is
+	## not inside the mesh, then shifted toward the legs / abdomen. Call
+	## this after the static pose / breath and before apply_look, so looking
+	## around cannot hitch the camera origin.
 	var hw := head_world(skel)
 	var b := hw.basis.orthonormalized()
 	var origin := hw.origin + b.y * EYE_CROWN + b.z * EYE_FACE
@@ -444,4 +456,17 @@ static func eye_world(skel: Skeleton3D) -> Transform3D:
 			var re: Vector3 = skel.global_transform * skel.get_bone_global_pose(ir).origin
 			origin = (le + re) * 0.5
 	origin += b.z * EYE_FORWARD
+	# Toward the legs: hip − eye, with the face-normal component removed
+	# so the camera does not drop into the torso.
+	var toward := -b.y
+	if skel:
+		var hi := skel.find_bone("C_Hip_a")
+		if hi >= 0:
+			var hip: Vector3 = skel.global_transform * skel.get_bone_global_pose(hi).origin
+			var d := hip - origin
+			if d.length_squared() > 1e-6:
+				toward = d.normalized()
+	toward = toward - b.z * toward.dot(b.z)
+	if toward.length_squared() > 1e-6:
+		origin += toward.normalized() * EYE_TOWARD_LEGS
 	return Transform3D(b, origin)

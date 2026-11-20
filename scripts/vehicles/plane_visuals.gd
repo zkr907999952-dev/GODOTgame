@@ -333,7 +333,16 @@ func _bind_surfaces_and_nozzles() -> void:
 	for obj in VehicleCommon.find_named(wrap, "^wingflap_"):
 		if obj is Node3D:
 			var a := VehicleCommon.aabb_in(wrap, obj as Node3D)
-			surfaces.append(VehicleHinge.mount(wrap, obj as Node3D, Vector3(a["cx"], a["cy"], a["minZ"] + 0.05), "x", 1.0, 0.36, "flap"))
+			var line := _flap_hinge_line(wrap, obj as Node3D, a)
+			var axis_dir: Vector3 = line[1] - line[0]
+			if axis_dir.length_squared() < 1e-8:
+				axis_dir = Vector3.RIGHT
+			else:
+				axis_dir = axis_dir.normalized()
+			# Align hub +X with the wing-TE / flap leading-edge hinge so
+			# rotation coincides with the wing instead of an AABB axis.
+			var pre := Quaternion(Vector3.RIGHT, axis_dir)
+			surfaces.append(VehicleHinge.mount(wrap, obj as Node3D, line[0], "x", 1.0, 0.36, "flap", [], wrap, pre))
 
 
 func _bind_canopy() -> void:
@@ -554,8 +563,11 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 			"rudderR":
 				tv = yaw_c - brake * 0.72
 			"flap":
-				# Decelerate: flaps deploy. Accelerate / high thrust: retract.
-				var want := 0.88 if decelerating else 0.0
+				# Deploy only at low speed or while decelerating; always
+				# retract once above climb-out speed (even at idle thrust).
+				var speed := float(st.get("speed", 0.0))
+				var slowing := bool(st.get("decelerating", false)) or brake > 0.15
+				var want := flap_want(speed, slowing)
 				flap_t += (want - flap_t) * (1.0 - exp(-3.4 * delta))
 				tv = flap_t
 			_:
@@ -586,6 +598,107 @@ func apply_pose(st: Dictionary, delta: float, time: float, altitude: float = 0.0
 		(fx as JetExhaust).apply(thrust, time, altitude, delta)
 	if vapor:
 		vapor.update(st, delta)
+
+
+## Auto-flap speeds (m/s). 72 ≈ 140 kt (fighter flap speed); 95 ≈ 185 kt
+## modest climb-out, well below cruise. Always retract at/above retract speed.
+const FLAP_EXTEND_SPEED := 72.0
+const FLAP_RETRACT_SPEED := 95.0
+const FLAP_DEPLOY := 0.88
+
+
+static func flap_want(speed: float, decelerating: bool) -> float:
+	## 1. High speed: always retract.
+	## 2. Low speed: extend.
+	## 3. Between: extend only while decelerating.
+	if speed >= FLAP_RETRACT_SPEED:
+		return 0.0
+	if speed <= FLAP_EXTEND_SPEED or decelerating:
+		return FLAP_DEPLOY
+	return 0.0
+
+
+func flap_hinge_info() -> Array:
+	## For tests: wrap-space hinge origin, axis (hub +X), and the flap
+	## leading-edge midline so we can check coincidence with the wing TE.
+	var out: Array = []
+	if wrap == null:
+		return out
+	for h in surfaces:
+		if h == null or h.kind != "flap" or h.obj == null:
+			continue
+		var hub: Node3D = h.obj
+		var origin := wrap.to_local(hub.global_position)
+		var axis := (wrap.global_transform.basis.inverse() * hub.global_transform.basis.x).normalized()
+		var pts: Array[Vector3] = _mesh_points_in(wrap, hub)
+		var le := Vector3.ZERO
+		var le_n := 0
+		if pts.size() > 0:
+			pts.sort_custom(func(p, q): return p.z < q.z)
+			var take := maxi(1, mini(24, pts.size() / 8))
+			for i in take:
+				le += pts[i]
+				le_n += 1
+		if le_n > 0:
+			le /= float(le_n)
+		# Perpendicular distance from the leading-edge sample to the hinge axis.
+		var rel := le - origin
+		var axis_off := (rel - axis * rel.dot(axis)).length() if axis.length_squared() > 1e-8 else rel.length()
+		out.append({
+			"hub": hub,
+			"origin": origin,
+			"axis": axis,
+			"leading": le,
+			"axis_offset": axis_off,
+			"t": flap_t,
+		})
+	return out
+
+
+func _flap_hinge_line(wrap_n: Node3D, obj: Node3D, a: Dictionary) -> Array:
+	## Hinge follows the flap leading edge (the wing trailing edge), including
+	## sweep, instead of a constant-Z AABB pivot that left a gap / intersection.
+	var pts: Array[Vector3] = _mesh_points_in(wrap_n, obj)
+	var p0 := Vector3.ZERO
+	var p1 := Vector3.ZERO
+	if pts.size() >= 8:
+		pts.sort_custom(func(p, q): return p.x < q.x)
+		var lo_x: float = pts[0].x
+		var hi_x: float = pts[pts.size() - 1].x
+		var span := maxf(hi_x - lo_x, 0.05)
+		var lo := _flap_leading_in_x_band(pts, lo_x, lo_x + span * 0.18)
+		var hi := _flap_leading_in_x_band(pts, hi_x - span * 0.18, hi_x)
+		var chord: float = float(a.get("maxZ", lo.z + 1.0)) - float(a.get("minZ", lo.z))
+		# Small aft inset (+Z) from the sharp LE so the pivot sits on the
+		# wing-TE attachment without opening a gap. Keep it tight (2–4 cm).
+		var inset := Vector3(0.0, 0.0, clampf(chord * 0.03, 0.02, 0.04))
+		p0 = lo + inset
+		p1 = hi + inset
+	else:
+		var z := float(a["minZ"]) + 0.03
+		p0 = Vector3(float(a["minX"]) + 0.04, float(a["cy"]), z)
+		p1 = Vector3(float(a["maxX"]) - 0.04, float(a["cy"]), z)
+	# Axis points toward +X so both wings keep sign 1.0 (trailing edge down).
+	if p1.x < p0.x:
+		var tmp := p0
+		p0 = p1
+		p1 = tmp
+	return [p0, p1]
+
+
+func _flap_leading_in_x_band(pts: Array[Vector3], x0: float, x1: float) -> Vector3:
+	var band: Array[Vector3] = []
+	for p in pts:
+		if p.x >= x0 and p.x <= x1:
+			band.append(p)
+	if band.is_empty():
+		return pts[0]
+	band.sort_custom(func(p, q): return p.z < q.z)
+	var n := mini(10, band.size())
+	var acc := Vector3.ZERO
+	for i in n:
+		acc += band[i]
+	return acc / float(n)
 
 
 func _fin_hinge_line(wrap_n: Node3D, obj: Node3D, a: Dictionary) -> Array:
