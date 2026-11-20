@@ -323,6 +323,71 @@ func preview_commit_deviation() -> float:
 	return _path_max_deviation(a, b)
 
 
+func preview_geometry_ok(max_extent: float = 0.55) -> bool:
+	var st: Dictionary = preview_geometry_stats()
+	if not bool(st.get("ok", false)):
+		return false
+	for key in ["path", "dash", "handles", "trail"]:
+		var item: Dictionary = st.get(key, {})
+		if item.is_empty() or not bool(item.get("present", false)):
+			continue
+		if float(item.get("bind_extent", 0.0)) > max_extent:
+			return false
+		if float(item.get("world_extent", 0.0)) > max_extent:
+			return false
+	return true
+
+
+func surgery_visuals_on_abdomen_scale(max_extent: float = 0.85) -> bool:
+	## 预览虚线/手柄、涂鸦、腹网、截面、皮瓣的尺寸都应停在腹部量级，不能被拉到天上。
+	return surgery_visuals_scale_report(max_extent).get("ok", false)
+
+
+func surgery_visuals_scale_report(max_extent: float = 0.85) -> Dictionary:
+	var out := {"ok": true, "reason": "", "parts": {}}
+	if has_cut_preview() and not preview_geometry_ok(0.55):
+		out["ok"] = false
+		out["reason"] = "preview"
+		out["parts"] = preview_geometry_stats()
+		return out
+	var names := ["abdomen", "cavity", "wall", "trail", "dash", "handles"]
+	var meshes: Array = [_surgical_mi, _cavity_mi, _wall_mi, _preview, _dash, _handles]
+	for i in names.size():
+		var st: Dictionary = _visual_mesh_stats(meshes[i] as MeshInstance3D)
+		out["parts"][names[i]] = st
+		if st.is_empty() or not bool(st.get("present", false)):
+			continue
+		# 腹腔袋/腹网本身大约 0.5；天空级伸展是数米，不是稍超 0.8。
+		if float(st.get("bind_extent", 0.0)) > max_extent or float(st.get("world_extent", 0.0)) > max_extent:
+			out["ok"] = false
+			out["reason"] = "%s bind=%.3f world=%.3f maxmag=%.3f" % [names[i], float(st.get("bind_extent", 0.0)), float(st.get("world_extent", 0.0)), float(st.get("maxmag", 0.0))]
+			return out
+	if flap_node and is_instance_valid(flap_node):
+		var fa := _flap_aabb()
+		out["parts"]["flap"] = {"present": true, "world_extent": fa.size.length()}
+		if fa.size.length() > max_extent:
+			out["ok"] = false
+			out["reason"] = "flap extent=%.3f" % fa.size.length()
+	return out
+
+
+func preview_geometry_stats() -> Dictionary:
+	var out := {
+		"ok": true,
+		"path": _path_extent_stats(path_points if not path_points.is_empty() else _preview_path_bind()),
+		"dash": _visual_mesh_stats(_dash),
+		"handles": _visual_mesh_stats(_handles),
+		"trail": _visual_mesh_stats(_preview),
+	}
+	for key in ["path", "dash", "handles", "trail"]:
+		var item: Dictionary = out[key]
+		if item.is_empty():
+			continue
+		if bool(item.get("present", false)) and (float(item.get("bind_extent", 0.0)) > 0.55 or float(item.get("world_extent", 0.0)) > 0.55):
+			out["ok"] = false
+	return out
+
+
 func trail_half_width() -> float:
 	return TRAIL_HALF_WIDTH
 
@@ -353,6 +418,103 @@ func flap_stretch_ratio() -> float:
 	var sy := aabb.size.y / maxf(_flap_rest_size.y, 1e-5)
 	var sz := aabb.size.z / maxf(_flap_rest_size.z, 1e-5)
 	return maxf(sx, maxf(sy, sz))
+
+
+func _abdomen_bind_aabb() -> AABB:
+	if _outer == null or _outer.vert_count() < 1:
+		return AABB()
+	var ab := AABB(_outer.pos[0], Vector3.ZERO)
+	for i in range(1, _outer.vert_count()):
+		ab = ab.expand(_outer.pos[i])
+	return ab
+
+
+func _path_extent_stats(pts: PackedVector3Array) -> Dictionary:
+	if pts.size() < 1:
+		return {"present": false, "bind_extent": 0.0, "world_extent": 0.0, "maxmag": 0.0}
+	var ab := AABB(pts[0], Vector3.ZERO)
+	var maxmag := 0.0
+	for p in pts:
+		ab = ab.expand(p)
+		maxmag = maxf(maxmag, p.length())
+	var wab := AABB()
+	var have_w := false
+	for p2 in pts:
+		var wp: Vector3 = _approx_world_bind(p2)
+		if not have_w:
+			wab = AABB(wp, Vector3.ZERO)
+			have_w = true
+		else:
+			wab = wab.expand(wp)
+	return {
+		"present": pts.size() >= 1,
+		"bind_extent": ab.size.length(),
+		"world_extent": wab.size.length() if have_w else 0.0,
+		"maxmag": maxmag,
+	}
+
+
+func _visual_mesh_stats(mi: MeshInstance3D) -> Dictionary:
+	if mi == null or mi.mesh == null or mi.mesh.get_surface_count() < 1:
+		return {"present": false, "bind_extent": 0.0, "world_extent": 0.0, "maxmag": 0.0}
+	var arr: Array = mi.mesh.surface_get_arrays(0)
+	var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	if verts.is_empty():
+		return {"present": false, "bind_extent": 0.0, "world_extent": 0.0, "maxmag": 0.0}
+	var ab := mi.mesh.get_aabb()
+	var maxmag := 0.0
+	for p in verts:
+		maxmag = maxf(maxmag, p.length())
+	var wab := AABB()
+	var have_w := false
+	var bones: PackedInt32Array = PackedInt32Array()
+	var weights: PackedFloat32Array = PackedFloat32Array()
+	if arr[Mesh.ARRAY_BONES] != null:
+		bones = arr[Mesh.ARRAY_BONES]
+	if arr[Mesh.ARRAY_WEIGHTS] != null:
+		weights = arr[Mesh.ARRAY_WEIGHTS]
+	var can_skin: bool = mi.skin != null and _skel != null and bones.size() >= verts.size() * 4 and weights.size() >= verts.size() * 4
+	for i in verts.size():
+		var wp: Vector3
+		if can_skin:
+			wp = _skel.global_transform * _skin_array_vertex(verts[i], i, bones, weights, mi.skin)
+		elif mi.get_parent() == _skel:
+			wp = _approx_world_bind(verts[i])
+		else:
+			wp = mi.global_transform * verts[i]
+		if not have_w:
+			wab = AABB(wp, Vector3.ZERO)
+			have_w = true
+		else:
+			wab = wab.expand(wp)
+	return {
+		"present": true,
+		"bind_extent": ab.size.length(),
+		"world_extent": wab.size.length() if have_w else 0.0,
+		"maxmag": maxmag,
+	}
+
+
+func _skin_array_vertex(p: Vector3, vi: int, bones: PackedInt32Array, weights: PackedFloat32Array, skin: Skin) -> Vector3:
+	if _skel == null or skin == null:
+		return p
+	var acc := Vector3.ZERO
+	var wsum := 0.0
+	for k in 4:
+		var w: float = float(weights[vi * 4 + k])
+		if w <= 1e-8:
+			continue
+		var bind_i: int = int(bones[vi * 4 + k])
+		var rec: Dictionary = Geom.resolve_skin_bind(skin, _skel, bind_i)
+		var bone_i: int = int(rec["bone"])
+		if bone_i < 0 or bone_i >= _skel.get_bone_count():
+			continue
+		var xform := _skel.get_bone_global_pose(bone_i) * (rec["pose"] as Transform3D)
+		acc += w * (xform * p)
+		wsum += w
+	if wsum <= Geom.EPS:
+		return p
+	return acc / wsum
 
 
 func _path_max_deviation(a: PackedVector3Array, b: PackedVector3Array) -> float:
@@ -664,6 +826,7 @@ func enter_surgery() -> bool:
 	tool = ""
 	path_points = PackedVector3Array()
 	stroke_active = false
+	_clear_cut_preview()
 	_dampen_breath(true)
 	_update_cavity_visibility()
 	_show_scalpel(false)
@@ -678,6 +841,7 @@ func exit_surgery() -> void:
 	active = false
 	stroke_active = false
 	path_points = PackedVector3Array()
+	_clear_cut_preview()
 	_show_scalpel(false)
 	if not cut_open:
 		_clear_trail()

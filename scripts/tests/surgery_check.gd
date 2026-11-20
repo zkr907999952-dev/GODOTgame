@@ -1,4 +1,5 @@
 extends SceneTree
+## 0.3.7 手术模式自检：修复切割预览拉不出与被拉到天上的异常网格；预览仍与切口对齐。
 ## 0.3.6 手术模式自检：预览与切口对齐、更浅更窄红线、独立刚体皮瓣、分身可上检查床并进入手术。
 ## 0.3.5 手术模式自检：弹孔贯穿设置默认关且仅特写可穿孔；腹腔不穿后腰；
 ## 直线/环状预览切割（松手不提交，按「切割」才切开并播手术刀动画）；
@@ -7,8 +8,8 @@ extends SceneTree
 ##     --rendering-method gl_compatibility --rendering-driver opengl3 \
 ##     -s res://scripts/tests/surgery_check.gd
 
-const VERSION_NAME := "0.3.6"
-const VERSION_CODE := 40
+const VERSION_NAME := "0.3.7"
+const VERSION_CODE := 41
 const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 
 var fails := 0
@@ -153,6 +154,12 @@ func _check_source_contracts() -> void:
 	_ok(sys.find("flap_kind = \"rigid\"") >= 0 or sys.find('flap_kind = "rigid"') >= 0, "extracted flaps spawn as independent rigid bodies")
 	_ok(hud_src.find("放置分身") >= 0, "HUD has 放置分身 aim / proximity option")
 	_ok(root_src.find("func place_clone_on_bed") >= 0 and root_src.find("func can_toggle_surgery") >= 0, "clone can be placed on the exam bed and surgery can start on that clone")
+	_ok(pc.find("func _drag_active_surgery") >= 0 and pc.find("_drag_active_surgery_from_screen") >= 0, "pointer drag uses a shared active_surgery helper")
+	_ok(pc.find("_drag_active_surgery_from_screen(screen)") >= 0, "cutting preview drag is routed through active_surgery, not only the player's SurgerySystem")
+	_ok(pc.find("_surgery.call(\"drag_stroke\"") < 0, "player_controller no longer sends drag_stroke only to the player's _surgery")
+	_ok(sys.find("func preview_geometry_ok") >= 0 and sys.find("func surgery_visuals_on_abdomen_scale") >= 0, "preview / surgery visual scale APIs exist")
+	_ok(geom.find("世界坐标误当绑定坐标") >= 0, "insert_point refuses a far-off (world-space) hint that would stretch the abdomen")
+	_ok(geom.find("acc = acc_back / float(n)") >= 0, "cavity wrap back cap uses the mean of back verts, not their sum")
 
 
 
@@ -267,6 +274,25 @@ func _assert_pose_stable(before: Dictionary, after: Dictionary, label: String, t
 		_ok(absf(b.y - a.y) <= tol, "%s %s Y stays put (%.4f -> %.4f, dy=%.4f)" % [label, key, a.y, b.y, b.y - a.y])
 
 
+func _assert_preview_scale(s: Node, label: String, max_extent: float = 0.55) -> void:
+	if s == null:
+		_ok(false, "%s surgery available for preview scale" % label)
+		return
+	if s.has_method("preview_geometry_ok"):
+		_ok(bool(s.call("preview_geometry_ok", max_extent)), "%s preview path / handles / trail stay on abdomen scale" % label)
+	if s.has_method("surgery_visuals_on_abdomen_scale"):
+		var ok_vis := bool(s.call("surgery_visuals_on_abdomen_scale", 0.85))
+		var why := ""
+		if not ok_vis and s.has_method("surgery_visuals_scale_report"):
+			why = " (%s)" % str((s.call("surgery_visuals_scale_report", 0.85) as Dictionary).get("reason", ""))
+		_ok(ok_vis, "%s surgery visuals are not stretched to the sky%s" % [label, why])
+	if s.has_method("preview_geometry_stats"):
+		var st: Dictionary = s.call("preview_geometry_stats")
+		var path: Dictionary = st.get("path", {})
+		if bool(path.get("present", false)):
+			_ok(float(path.get("bind_extent", 99.0)) <= max_extent and float(path.get("world_extent", 99.0)) <= max_extent, "%s preview path extents bind=%.3f world=%.3f" % [label, float(path.get("bind_extent", 0.0)), float(path.get("world_extent", 0.0))])
+
+
 func _find_exam_bed() -> Node:
 	if vs == null:
 		return null
@@ -376,8 +402,10 @@ func _check_enter_exit_and_t_key() -> void:
 		var dir: Vector3 = (tgt - origin).normalized()
 		surgery.call("drag_stroke", origin, dir)
 	_ok(bool(surgery.call("has_cut_preview")), "straight-cut preview is created while dragging")
+	_assert_preview_scale(surgery, "dragged straight-cut")
 	surgery.call("end_stroke")
 	_ok(bool(surgery.call("has_cut_preview")), "preview remains after releasing the drag")
+	_assert_preview_scale(surgery, "released straight-cut")
 	_ok(not bool(surgery.get("cut_open")), "releasing a preview drag does not commit the cut")
 	if surgery.has_method("cancel_stroke"):
 		surgery.call("cancel_stroke")
@@ -413,6 +441,15 @@ func _check_cavity_and_incision() -> void:
 
 	_ok(bool(surgery.call("cavity_clears_lower_back")), "cavity bag stays in front of the lumbar / lower-back exterior")
 	_ok(bool(surgery.call("cavity_wraps_organs")), "tapered cavity still wraps the gut volume")
+	var wrap = surgery.get("_wrap")
+	if wrap and wrap.vert_count() > 0:
+		var wmin: Vector3 = wrap.pos[0]
+		var wmax: Vector3 = wrap.pos[0]
+		for p in wrap.pos:
+			wmin = Vector3(minf(wmin.x, p.x), minf(wmin.y, p.y), minf(wmin.z, p.z))
+			wmax = Vector3(maxf(wmax.x, p.x), maxf(wmax.y, p.y), maxf(wmax.z, p.z))
+		var wext := (wmax - wmin).length()
+		_ok(wext <= 0.85 and wmax.y < 2.0, "cavity wrap back cap is on the abdomen, not stretched to the sky (extent=%.3f ymax=%.3f)" % [wext, wmax.y])
 
 	# 直线预览：拖出、调整端点，松手不切开；按「切割」才提交，并触发手术刀沿轨迹动画。
 	if str(surgery.call("current_tool")) != "scalpel":
@@ -432,6 +469,7 @@ func _check_cavity_and_incision() -> void:
 	_ok(preview_only, "dragging a straight path creates a preview and does not cut")
 	_ok(not bool(surgery.get("cut_open")), "end_stroke / freehand release does not commit an incision")
 	_ok(bool(surgery.call("has_cut_preview")), "straight preview remains until 切割 is pressed")
+	_assert_preview_scale(surgery, "freehand straight")
 	# 调整起止点。
 	var ends: Array = surgery.call("straight_preview_ends") if surgery.has_method("straight_preview_ends") else []
 	if ends.size() >= 2 and surgery.has_method("debug_drag_preview_end"):
@@ -451,6 +489,7 @@ func _check_cavity_and_incision() -> void:
 		var rp1: Dictionary = surgery.call("ring_preview_params")
 		_ok(float(rp1.get("rx", 0.0)) > float(rp0.get("rx", 0.0)) - 0.0001 and (rp1["center"] as Vector3).distance_to(rp0["center"]) > 0.004, "ring preview move / reshape took effect")
 		_ok(not bool(surgery.get("cut_open")), "creating a ring preview does not cut")
+		_assert_preview_scale(surgery, "ring / ellipse")
 		# 切回直线预览再提交。
 		var a: Vector3 = (surgery.get("_navel_rest") if surgery.get("_navel_rest") != null else Vector3(0, 1.06, 0.11)) + Vector3(-0.03, 0.01, 0.0)
 		var b: Vector3 = a + Vector3(0.06, -0.012, 0.0)
@@ -484,6 +523,11 @@ func _check_cavity_and_incision() -> void:
 	surgery.call("debug_settle_eversion")
 	_ok(bool(surgery.call("cut_is_everted")), "committed open cut everts so the inner wall is exposed")
 	_assert_pose_stable(pose_before_evert, _pose_snapshot(), "after eversion settles")
+	if surgery.has_method("surgery_visuals_on_abdomen_scale"):
+		var why := ""
+		if surgery.has_method("surgery_visuals_scale_report"):
+			why = " (%s)" % str((surgery.call("surgery_visuals_scale_report", 0.85) as Dictionary).get("reason", ""))
+		_ok(bool(surgery.call("surgery_visuals_on_abdomen_scale", 0.85)), "after cut, abdomen / trail / wall stay on abdomen scale (no sky-stretch)%s" % why)
 	if not _bed_pose.is_empty():
 		_assert_pose_stable(_bed_pose, _pose_snapshot(), "after cut vs pre-surgery bed pose", 0.04)
 	var open_w := float(surgery.call("lip_opening_width"))
@@ -742,6 +786,15 @@ func _check_preview_embed_align(md) -> void:
 		_ok(ids2.size() >= 2 and worst2 <= 0.006, "straight preview segment and embedded cut coincide (dev=%.4f)" % worst2)
 	else:
 		_ok(false, "straight preview path could be built on the abdomen mesh")
+	# 世界坐标提示不得被当成绑定顶点写进腹网，否则会出现拉到天上的三角形。
+	var md3 = md.clone() if md.has_method("clone") else null
+	if md3:
+		var sky := Vector3(navel_r.x, navel_r.y + 8.0, navel_r.z)
+		var vid: int = Geom.insert_point_in_mesh(md3, Vector2(navel_r.x, navel_r.y), sky)
+		_ok(vid >= 0, "insert_point still succeeds with a far-off 3D hint")
+		if vid >= 0 and vid < md3.vert_count():
+			_ok(md3.pos[vid].distance_to(sky) > 1.0, "far-off world hint is not written into the abdomen mesh")
+			_ok(md3.pos[vid].distance_to(navel_r) <= 0.20, "inserted vertex stays on the abdomen (dist=%.3f)" % md3.pos[vid].distance_to(navel_r))
 
 
 func _check_036_clone_bed_and_ring_align() -> void:
@@ -777,6 +830,39 @@ func _check_036_clone_bed_and_ring_align() -> void:
 	await _frames(4)
 	var cs = main.call("surgery_system_of") if main.has_method("surgery_system_of") else null
 	_ok(cs != null and bool(cs.call("is_active")), "surgery mode is active on the bedded clone")
+	if cs:
+		_ok(player.call("get_surgery") != cs, "clone surgery is distinct from the player's SurgerySystem")
+		_ok(player.call("active_surgery") == cs, "active_surgery resolves to the clone on the exam bed")
+		cs.call("set_tool", "scalpel")
+		if cs.has_method("set_cut_mode"):
+			cs.call("set_cut_mode", "straight")
+		await _frames(6)
+		var began_clone := bool(cs.call("debug_begin_stroke_at_navel"))
+		if not began_clone and cs.has_method("debug_set_straight_preview"):
+			var na: Vector3 = cs.get("_navel_rest") if cs.get("_navel_rest") != null else Vector3(0, 1.06, 0.11)
+			began_clone = bool(cs.call("debug_set_straight_preview", na + Vector3(-0.02, 0.0, 0.0), na + Vector3(0.04, 0.01, 0.0)))
+			# 仍要用控制器拖一次，证明 drag 路由到达分身手术系统。
+			if player.has_method("debug_drag_active_surgery"):
+				var cn0: Vector3 = cs.call("_navel_world")
+				player.call("debug_drag_active_surgery", cn0 + Vector3(0.0, 0.02, 0.28), Vector3(0, -0.02, -0.28).normalized())
+		_ok(began_clone, "clone scalpel stroke begins at the navel")
+		var cn: Vector3 = cs.call("_navel_world")
+		for i in range(1, 6):
+			var tgt: Vector3 = cn + Vector3(0.010 * float(i), 0.003 * float(i), 0.0)
+			var origin: Vector3 = tgt + Vector3(0.0, 0.02, 0.28)
+			var dir: Vector3 = (tgt - origin).normalized()
+			# 必须走玩家控制器的 active_surgery 路由：0.3.6 曾把 drag_stroke 发给未激活的本体手术系统，预览拉不出来。
+			if player.has_method("debug_drag_active_surgery"):
+				_ok(bool(player.call("debug_drag_active_surgery", origin, dir)) or i > 1, "player controller drag reaches the active (clone) surgery")
+			else:
+				cs.call("drag_stroke", origin, dir)
+		cs.call("end_stroke")
+		_ok(bool(cs.call("has_cut_preview")), "straight preview can be pulled out on the clone via the player controller")
+		_assert_preview_scale(cs, "clone controller drag")
+		# 环状预览同样可创建且不出现天空级网格。
+		if cs.has_method("debug_set_ring_preview"):
+			_ok(bool(cs.call("debug_set_ring_preview", cs.get("_navel_rest"), 0.030, 0.022)), "ring preview can be created on the clone")
+			_assert_preview_scale(cs, "clone ring")
 	if cs and cs.has_method("exit_surgery"):
 		cs.call("exit_surgery")
 	if clone and clone.has_method("leave_exam_bed"):

@@ -988,10 +988,28 @@ func _try_begin_interact_near(screen: Vector2, variants: Array[Vector2]) -> bool
 	return true
 
 
+func _drag_active_surgery_from_screen(screen: Vector2) -> bool:
+	var ray: Array = _screen_ray(screen)
+	return _drag_active_surgery(ray[0], ray[1])
+
+
+func _drag_active_surgery(origin: Vector3, dir: Vector3) -> bool:
+	var surg := active_surgery()
+	if surg == null or not bool(surg.call("is_active")):
+		return false
+	surg.call("drag_stroke", origin, dir)
+	return true
+
+
+func debug_drag_active_surgery(origin: Vector3, dir: Vector3) -> bool:
+	## 测试用：与屏幕拖拽同一条 active_surgery 路由，便于在世界射线下回归。
+	return _drag_active_surgery(origin, dir)
+
+
 func _update_interact_drag(screen: Vector2) -> void:
-	if _surgery and bool(_surgery.call("is_active")):
-		var ray: Array = _screen_ray(screen)
-		_surgery.call("drag_stroke", ray[0], ray[1])
+	# 必须走 active_surgery：分身在检查床上手术时，本体的 _surgery 并未激活，
+	# 若把拖拽发给本体，切割预览会停在起点拉不出来。
+	if _drag_active_surgery_from_screen(screen):
 		return
 	var rig := _interact_target if is_instance_valid(_interact_target) else _organs
 	var ray := _screen_ray(screen)

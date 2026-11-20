@@ -451,8 +451,9 @@ static func insert_point_in_mesh(md: MeshData, p2: Vector2, p3_hint: Vector3 = V
 	if found < 0:
 		return -1
 	# 用三维重心插值，保证点落在原来的曲面上。
+	# 路径提示只在已经贴面时采用，避免世界坐标误当绑定坐标插入后把腹网拉到天上。
 	var p := md.pos[fa] * bary.x + md.pos[fb] * bary.y + md.pos[fc] * bary.z
-	if p3_hint.x < 1e8:
+	if has_hint and p3_hint.distance_squared_to(p) <= 0.012 * 0.012:
 		p = p3_hint
 	var n := (md.nrm[fa] * bary.x + md.nrm[fb] * bary.y + md.nrm[fc] * bary.z)
 	if n.length_squared() > EPS:
@@ -1464,7 +1465,9 @@ static func make_cavity_wrap(inner: MeshData, back_z: float, guts_min: Vector3 =
 		back[i] = wrap.add_vert(bp, Vector3(0, 0, -1), inner.uv[src], b, w)
 		acc_back += bp
 	loft_wall(wrap, front, back, true)
-	acc = acc_back
+	# 后盖中心必须是均值。0.3.5 改写后盖时丢掉了「acc /= n」，
+	# 中心变成所有后盖顶点之和（约 28 倍），腹腔袋被拉到天上。
+	acc = acc_back / float(n)
 	var bones0 := PackedInt32Array()
 	var weights0 := PackedFloat32Array()
 	bones0.resize(4)
