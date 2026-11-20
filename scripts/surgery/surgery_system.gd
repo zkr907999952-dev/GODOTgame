@@ -15,7 +15,7 @@ signal tool_changed(tool: String)
 
 var player: Node = null
 var active: bool = false
-var tool: String = "scalpel"  # "scalpel" | "grab"
+var tool: String = ""  # "" | "scalpel" | "grab"  — 进入时无工具，可转视角
 var thickness: float = WALL_THICKNESS
 var cut_open: bool = false
 var loop_ready: bool = false
@@ -65,6 +65,8 @@ var _baked: bool = false
 var _verified_dress: bool = false
 var _dress_name: String = ""
 var _skin_name: String = ""
+var _trail_bind: PackedVector3Array = PackedVector3Array()
+var _cavity_xraying: bool = false
 
 
 func setup(p: Node, skel: Skeleton3D, organs: Node) -> void:
@@ -85,7 +87,7 @@ func setup(p: Node, skel: Skeleton3D, organs: Node) -> void:
 					_guts_min = Vector3(mn[0], mn[1], mn[2])
 					_guts_max = Vector3(mx[0], mx[1], mx[2])
 	_find_meshes()
-	_make_preview()
+	_make_trail()
 	_make_scalpel()
 
 
@@ -95,6 +97,51 @@ func is_active() -> bool:
 
 func current_tool() -> String:
 	return tool
+
+
+func has_tool() -> bool:
+	return tool == "scalpel" or tool == "grab"
+
+
+func look_locked() -> bool:
+	return active and has_tool()
+
+
+func look_enabled() -> bool:
+	return active and not has_tool()
+
+
+func tool_interaction_enabled() -> bool:
+	return active and has_tool()
+
+
+func has_incision_trail() -> bool:
+	return _preview != null and _preview.visible and _trail_bind.size() >= 2
+
+
+func incision_trail_point_count() -> int:
+	return _trail_bind.size()
+
+
+func cavity_xray_is_transparent() -> bool:
+	if not _xray_on() or _cavity_mi == null:
+		return false
+	var mat := _cavity_mi.material_override
+	if mat is StandardMaterial3D:
+		var sm := mat as StandardMaterial3D
+		return (
+			sm.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED
+			and sm.albedo_color.a < 0.85
+			and sm.depth_draw_mode == BaseMaterial3D.DEPTH_DRAW_DISABLED
+		)
+	return _cavity_xraying
+
+
+func cavity_xray_alpha() -> float:
+	var mat := _cavity_mi.material_override if _cavity_mi else null
+	if mat is StandardMaterial3D:
+		return (mat as StandardMaterial3D).albedo_color.a
+	return 1.0
 
 
 func is_on_exam_bed() -> bool:
@@ -220,7 +267,7 @@ func enter_surgery() -> bool:
 		push_warning("surgery: bake failed")
 		return false
 	active = true
-	tool = "scalpel"
+	tool = ""
 	path_points = PackedVector3Array()
 	stroke_active = false
 	_dampen_breath(true)
@@ -238,7 +285,10 @@ func exit_surgery() -> void:
 	stroke_active = false
 	path_points = PackedVector3Array()
 	_show_scalpel(false)
-	_clear_preview()
+	if not cut_open:
+		_clear_trail()
+	elif _trail_bind.size() >= 2:
+		_update_trail()
 	_lock_pose_for_stroke(false)
 	_dampen_breath(false)
 	if cut_open or flap_peeled:
@@ -248,9 +298,23 @@ func exit_surgery() -> void:
 
 
 func set_tool(t: String) -> void:
+	# 再点已选工具则取消选择，恢复视角控制。
+	if t == tool:
+		if stroke_active:
+			cancel_stroke()
+		tool = ""
+		_show_scalpel(false)
+		tool_changed.emit(tool)
+		return
 	if t == "grab" and not loop_ready:
 		return
+	if t != "" and t != "scalpel" and t != "grab":
+		t = ""
+	if stroke_active:
+		cancel_stroke()
 	tool = t
+	if tool != "scalpel":
+		_show_scalpel(false)
 	tool_changed.emit(tool)
 
 
@@ -288,16 +352,34 @@ func drag_stroke(origin: Vector3, dir: Vector3) -> void:
 	_update_preview()
 
 
+func cancel_stroke() -> void:
+	if not stroke_active:
+		return
+	stroke_active = false
+	_show_scalpel(false)
+	path_points = PackedVector3Array()
+	if not cut_open:
+		_clear_trail()
+	_lock_pose_for_stroke(false)
+
+
 func end_stroke() -> void:
 	if not stroke_active:
 		return
 	stroke_active = false
 	_show_scalpel(false)
+	var kept := false
 	if path_points.size() >= 2:
 		var simple := Geom.simplify_path(path_points, 0.003, 48)
 		last_path_count = simple.size()
-		_commit_path(simple)
-	_clear_preview()
+		if _commit_path(simple):
+			_trail_bind = simple
+			_update_trail()
+			kept = true
+	if not kept and not cut_open:
+		_clear_trail()
+	elif not kept and _trail_bind.size() >= 2:
+		_update_trail()
 	path_points = PackedVector3Array()
 	_lock_pose_for_stroke(false)
 
@@ -507,6 +589,9 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 	_wall_md = wall
 	_rebuild_surgical_meshes(_outer, _inner, wall)
 	_posed_dirty = true
+	if path.size() >= 2:
+		_trail_bind = path.duplicate()
+		_update_trail()
 	_update_cavity_visibility()
 	return lofted_tris > 0
 
@@ -666,6 +751,23 @@ func _wall_material() -> Material:
 	return m
 
 
+func _apply_xray_shell(mat: Material, base: Color, xray: bool) -> void:
+	if not (mat is StandardMaterial3D):
+		return
+	var sm := mat as StandardMaterial3D
+	if xray:
+		# 透视时腹腔袋改为半透明且不写深度，否则会把袋里的内脏完全挡住。
+		sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		sm.albedo_color = Color(base.r, base.g, base.b, 0.32)
+		sm.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+		sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	else:
+		sm.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+		sm.albedo_color = Color(base.r, base.g, base.b, 1.0)
+		sm.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_OPAQUE_ONLY
+		sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+
 func _update_cavity_visibility() -> void:
 	if _cavity_mi == null:
 		return
@@ -674,6 +776,11 @@ func _update_cavity_visibility() -> void:
 	_cavity_mi.visible = true
 	if _wall_mi:
 		_wall_mi.visible = cut_open and lofted_tris > 0
+	var xray := _xray_on()
+	_cavity_xraying = xray
+	_apply_xray_shell(_cavity_mi.material_override, Color(0.55, 0.18, 0.16), xray)
+	if _wall_mi:
+		_apply_xray_shell(_wall_mi.material_override, Color(0.72, 0.28, 0.26), xray)
 
 
 func _xray_on() -> bool:
@@ -750,37 +857,119 @@ func _lock_pose_for_stroke(on: bool) -> void:
 		_posed_dirty = true
 
 
-func _make_preview() -> void:
+func _make_trail() -> void:
 	_preview = MeshInstance3D.new()
-	_preview.name = "SurgeryPathPreview"
+	_preview.name = "IncisionTrail"
 	_preview.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = Color(0.95, 0.2, 0.2)
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	var mat := ShaderMaterial.new()
+	var sh: Shader = load("res://shaders/incision_trail.gdshader")
+	if sh:
+		mat.shader = sh
+	else:
+		var fb := StandardMaterial3D.new()
+		fb.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+		fb.albedo_color = Color(0.86, 0.1, 0.1, 0.85)
+		fb.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		fb.cull_mode = BaseMaterial3D.CULL_DISABLED
+		_preview.material_override = fb
+		add_child(_preview)
+		_preview.visible = false
+		return
 	_preview.material_override = mat
 	add_child(_preview)
 	_preview.visible = false
 
 
 func _update_preview() -> void:
+	_trail_bind = path_points.duplicate()
+	_update_trail()
+
+
+func _update_trail() -> void:
 	if _preview == null:
 		return
-	if path_points.size() < 2 or _skel == null:
+	if _trail_bind.size() < 2 or _skel == null:
 		_preview.visible = false
 		return
-	var im := ImmediateMesh.new()
-	im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, _preview.material_override)
-	# 预览点是绑定空间，显示时用当前骨骼变形。
-	var tmp := Geom.MeshData.new()
-	# 粗糙：把绑定点用最近外皮顶点的骨骼来蒙皮。
-	for p in path_points:
-		var w := _approx_world_bind(p)
-		im.surface_add_vertex(w)
-	im.surface_end()
-	_preview.mesh = im
+	var mesh := _build_trail_mesh(_trail_bind)
+	if mesh == null or mesh.get_surface_count() == 0:
+		_preview.visible = false
+		return
+	_preview.mesh = mesh
 	_preview.global_transform = Transform3D.IDENTITY
 	_preview.visible = true
+
+
+func _build_trail_mesh(bind_pts: PackedVector3Array) -> ArrayMesh:
+	var n := bind_pts.size()
+	if n < 2:
+		return ArrayMesh.new()
+	var worlds: PackedVector3Array = PackedVector3Array()
+	var norms: PackedVector3Array = PackedVector3Array()
+	worlds.resize(n)
+	norms.resize(n)
+	for i in n:
+		var wn: Array = _approx_world_and_normal(bind_pts[i])
+		worlds[i] = wn[0]
+		norms[i] = wn[1]
+	var lengths: PackedFloat32Array = PackedFloat32Array()
+	lengths.resize(n)
+	lengths[0] = 0.0
+	var total := 0.0
+	for i in range(1, n):
+		total += worlds[i].distance_to(worlds[i - 1])
+		lengths[i] = total
+	if total < 1e-6:
+		total = 1.0
+	var half := 0.0058
+	var lift := 0.0016
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in range(n - 1):
+		var t0 := worlds[i + 1] - worlds[i]
+		if t0.length_squared() < 1e-10:
+			continue
+		t0 = t0.normalized()
+		var t1 := t0
+		if i + 2 < n:
+			var nxt := worlds[i + 2] - worlds[i + 1]
+			if nxt.length_squared() > 1e-10:
+				t1 = nxt.normalized()
+		var n0: Vector3 = norms[i]
+		var n1: Vector3 = norms[i + 1]
+		var s0 := n0.cross(t0)
+		if s0.length_squared() < 1e-10:
+			s0 = t0.cross(Vector3.UP)
+		if s0.length_squared() < 1e-10:
+			s0 = t0.cross(Vector3.RIGHT)
+		s0 = s0.normalized() * half
+		var s1 := n1.cross(t1)
+		if s1.length_squared() < 1e-10:
+			s1 = s0
+		else:
+			s1 = s1.normalized() * half
+		var a: Vector3 = worlds[i] + n0 * lift - s0
+		var b: Vector3 = worlds[i] + n0 * lift + s0
+		var c: Vector3 = worlds[i + 1] + n1 * lift - s1
+		var d: Vector3 = worlds[i + 1] + n1 * lift + s1
+		var u0 := lengths[i] / total
+		var u1 := lengths[i + 1] / total
+		_trail_tri(st, a, b, d, Vector2(u0, 0.0), Vector2(u0, 1.0), Vector2(u1, 1.0), n0)
+		_trail_tri(st, a, d, c, Vector2(u0, 0.0), Vector2(u1, 1.0), Vector2(u1, 0.0), n1)
+	st.generate_normals()
+	return st.commit()
+
+
+func _trail_tri(st: SurfaceTool, p0: Vector3, p1: Vector3, p2: Vector3, uv0: Vector2, uv1: Vector2, uv2: Vector2, nrm: Vector3) -> void:
+	st.set_normal(nrm)
+	st.set_uv(uv0)
+	st.add_vertex(p0)
+	st.set_normal(nrm)
+	st.set_uv(uv1)
+	st.add_vertex(p1)
+	st.set_normal(nrm)
+	st.set_uv(uv2)
+	st.add_vertex(p2)
 
 
 func _approx_world_bind(bind_p: Vector3) -> Vector3:
@@ -799,7 +988,47 @@ func _approx_world_bind(bind_p: Vector3) -> Vector3:
 	return _skel.global_transform * posed
 
 
+func _approx_world_and_normal(bind_p: Vector3) -> Array:
+	var w := _approx_world_bind(bind_p)
+	var nrm := Vector3(0, 0, 1)
+	if _outer == null:
+		return [w, nrm]
+	var posed := _posed_world()
+	if posed.size() != _outer.vert_count():
+		return [w, nrm]
+	var best := 0
+	var best_s := 1e9
+	for i in _outer.vert_count():
+		var s := _outer.pos[i].distance_squared_to(bind_p)
+		if s < best_s:
+			best_s = s
+			best = i
+	# 用含该顶点的一个三角估计外向法线。
+	for f in _outer.face_count():
+		var ia := _outer.idx[f * 3]
+		var ib := _outer.idx[f * 3 + 1]
+		var ic := _outer.idx[f * 3 + 2]
+		if ia != best and ib != best and ic != best:
+			continue
+		if ia >= posed.size() or ib >= posed.size() or ic >= posed.size():
+			continue
+		var nn := (posed[ib] - posed[ia]).cross(posed[ic] - posed[ia])
+		if nn.length_squared() > 1e-10:
+			nrm = nn.normalized()
+			# 朝外：绑定空间大致朝 +Z（腹前）。
+			var bind_n := (_outer.pos[ib] - _outer.pos[ia]).cross(_outer.pos[ic] - _outer.pos[ia])
+			if bind_n.z < 0.0:
+				nrm = -nrm
+			break
+	return [w, nrm]
+
+
 func _clear_preview() -> void:
+	_clear_trail()
+
+
+func _clear_trail() -> void:
+	_trail_bind = PackedVector3Array()
 	if _preview:
 		_preview.visible = false
 		_preview.mesh = null
@@ -1012,6 +1241,29 @@ func debug_begin_stroke_at_navel() -> bool:
 	return begin_stroke(origin, dir)
 
 
+func debug_freehand_cut_from_navel() -> bool:
+	## 模拟一次真实手绘落刀：选手术刀、从肚脐附近拖出一段路径并提交。
+	if not active:
+		if not enter_surgery():
+			return false
+	if tool != "scalpel":
+		set_tool("scalpel")
+	if not debug_begin_stroke_at_navel():
+		return false
+	var n := _navel_world()
+	for i in range(1, 10):
+		var tgt := n + Vector3(0.0075 * float(i), 0.0035 * sin(float(i) * 0.9), 0.0)
+		var origin := tgt + Vector3(0.0, 0.02, 0.28)
+		var dir := (tgt - origin)
+		if dir.length_squared() < 1e-8:
+			dir = Vector3(0, 0, -1)
+		else:
+			dir = dir.normalized()
+		drag_stroke(origin, dir)
+	end_stroke()
+	return cut_open
+
+
 func _navel_world() -> Vector3:
 	if _organs and _organs.has_method("abdomen_frame"):
 		return (_organs.call("abdomen_frame") as Transform3D).origin
@@ -1029,3 +1281,5 @@ func _process(_dt: float) -> void:
 	if active and not pose_locked:
 		_posed_dirty = true
 	_update_cavity_visibility()
+	if _trail_bind.size() >= 2 and not pose_locked:
+		_update_trail()

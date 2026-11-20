@@ -3633,7 +3633,12 @@ func _refresh_surgery_ui() -> void:
 	if _status:
 		_status.visible = show_chrome
 	if _touch:
-		_touch.visible = show_chrome
+		# 手术中仍要处理划屏（无工具转视角、选工具后切割），只是不画摇杆等无关触控铬。
+		# 整层隐藏会导致 TouchControls._input 直接返回，手机上手术刀完全无法交互。
+		if active and touch_ui:
+			_touch.visible = true
+		else:
+			_touch.visible = show_chrome
 	if active and _btn_enter_exit:
 		_btn_enter_exit.visible = false
 	if _btn_surgery_enter:
@@ -3657,7 +3662,7 @@ func _refresh_surgery_ui() -> void:
 		_surgery_bar.visible = active
 		_surgery_bar.position = Vector2(sl, st + 48.0)
 	if active:
-		var tool := str(s.call("current_tool")) if s else "scalpel"
+		var tool := str(s.call("current_tool")) if s else ""
 		if _btn_tool_scalpel:
 			_btn_tool_scalpel.set_pressed_no_signal(tool == "scalpel")
 			_style_button(_btn_tool_scalpel, tool == "scalpel")

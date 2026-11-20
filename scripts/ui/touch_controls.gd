@@ -164,6 +164,21 @@ func _in_vehicle() -> bool:
 	return player != null and str(player.get("occupancy")) != ""
 
 
+func _in_surgery() -> bool:
+	if player and player.has_method("get_surgery"):
+		var s: Node = player.call("get_surgery")
+		return s != null and bool(s.call("is_active"))
+	return hud != null and hud.has_method("is_surgery_active") and bool(hud.call("is_surgery_active"))
+
+
+func _surgery_tool() -> String:
+	if player and player.has_method("get_surgery"):
+		var s: Node = player.call("get_surgery")
+		if s:
+			return str(s.call("current_tool"))
+	return ""
+
+
 func _map_open() -> bool:
 	return hud != null and hud.has_method("is_map_open") and bool(hud.call("is_map_open"))
 
@@ -171,7 +186,7 @@ func _map_open() -> bool:
 func _show_stick() -> bool:
 	if layout_edit:
 		return true
-	if _map_open():
+	if _map_open() or _in_surgery():
 		return false
 	return _fp() or _in_drive()
 
@@ -482,6 +497,9 @@ func _default_item(id: String) -> Dictionary:
 ## 按钮布局：id -> [Rect2, 文字]
 func buttons() -> Dictionary:
 	var out := {}
+	if _in_surgery() and not layout_edit:
+		# 手术中摇杆和无关触控按钮隐藏，划屏手势仍由本控件处理。
+		return out
 	if _map_open() and not layout_edit:
 		# 打开地图时不显示角色交互按键，地图 UI 自己可用。
 		return out
@@ -666,6 +684,18 @@ func _on_down(idx: int, p: Vector2) -> void:
 	if _show_flight_yaw_slider() and flight_yaw_slider_rect().grow(8.0).has_point(p) and not _has_role("flight_yaw_slider"):
 		f["role"] = "flight_yaw_slider"
 		_flight_yaw_slider_to(p)
+		get_viewport().set_input_as_handled()
+		queue_redraw()
+		return
+	if _in_surgery():
+		# 未选工具：划屏控制检查床视角。选了工具：落在身上则走手术刀/拿取，视角锁定。
+		var stool := _surgery_tool()
+		if stool == "" or stool == "none":
+			f["role"] = "look" if _fp() else "orbit"
+		elif bool(player.call("touch_tool_begin", p)):
+			f["role"] = "tool"
+		else:
+			f["role"] = "none"
 		get_viewport().set_input_as_handled()
 		queue_redraw()
 		return

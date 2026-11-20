@@ -297,6 +297,18 @@ func get_surgery() -> Node:
 	return _surgery
 
 
+func surgery_look_locked() -> bool:
+	if _surgery == null or not _surgery.has_method("look_locked"):
+		return false
+	return bool(_surgery.call("look_locked"))
+
+
+func surgery_look_enabled() -> bool:
+	if _surgery == null or not _surgery.has_method("look_enabled"):
+		return false
+	return bool(_surgery.call("look_enabled"))
+
+
 func get_organs() -> Node:
 	return _organs
 
@@ -800,6 +812,8 @@ func pick_interact_rig(origin: Vector3, dir: Vector3) -> Node:
 func _try_begin_interact(screen: Vector2) -> bool:
 	_last_interact_via_navel = false
 	if _surgery and bool(_surgery.call("is_active")):
+		if not bool(_surgery.call("has_tool")):
+			return false
 		var ray: Array = _screen_ray(screen)
 		if bool(_surgery.call("begin_stroke", ray[0], ray[1])):
 			_interact_held = true
@@ -1729,6 +1743,8 @@ const FP_TOUCH_SENS_LEGACY := 0.00305 * 0.9
 
 
 func touch_look(rel: Vector2) -> void:
+	if surgery_look_locked():
+		return
 	var vs := _vehicle_system_node()
 	if vs and vs.has_method("is_observe_orbit") and bool(vs.call("is_observe_orbit")):
 		vs.call("orbit_look", rel, touch_look_sensitivity)
@@ -1746,6 +1762,8 @@ func touch_look(rel: Vector2) -> void:
 
 
 func touch_orbit(rel: Vector2) -> void:
+	if surgery_look_locked():
+		return
 	var vs := _vehicle_system_node()
 	if vs and vs.has_method("is_observe_orbit") and bool(vs.call("is_observe_orbit")):
 		vs.call("orbit_look", rel, touch_look_sensitivity)
@@ -2033,6 +2051,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		if not first_person and weapon_drawn() and (mm.button_mask & MOUSE_BUTTON_MASK_LEFT) and _observe_fire_from.x > -900.0:
 			if mm.position.distance_to(_observe_fire_from) > 14.0:
 				_observe_fire_moved = true
+		# 手术选了工具后锁定视角，指针只留给切割 / 拿取。
+		if surgery_look_locked():
+			get_viewport().set_input_as_handled()
+			return
 		if first_person:
 			if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 				_yaw -= mm.relative.x * mouse_sensitivity
@@ -2049,6 +2071,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 	elif event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
+		if surgery_look_locked() and (mb.button_index == MOUSE_BUTTON_RIGHT or mb.button_index == MOUSE_BUTTON_MIDDLE):
+			_rmb_down = false
+			_mmb_down = false
+			_pan_drag = false
+			get_viewport().set_input_as_handled()
+			return
 		# 电脑第一人称收枪后：按住右键拖尸体，松开放下（与 E 切换共存）。
 		if first_person and mb.button_index == MOUSE_BUTTON_RIGHT and not weapon_drawn():
 			set_rmb_corpse_drag(mb.pressed)

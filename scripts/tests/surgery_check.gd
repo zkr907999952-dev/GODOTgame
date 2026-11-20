@@ -1,12 +1,13 @@
 extends SceneTree
-## 0.3.0 手术模式第一片自检：检查床进入/退出、T 不再循环互动、
-## 腹腔切开前后可见性、手绘切口层状腹壁、闭环剥离皮瓣、退出后躯体状态保留。
+## 0.3.2 手术模式自检：进入默认无工具可转视角、选工具锁定视角、
+## 手术刀手绘切口真正提交、皮肤红色渐变轨迹、透视下腹腔半透明可见内脏；
+## 以及既有进入/退出、层状腹壁、闭环剥瓣与退出后保留。
 ##   LIBGL_ALWAYS_SOFTWARE=1 godot --headless --path . \
 ##     --rendering-method gl_compatibility --rendering-driver opengl3 \
 ##     -s res://scripts/tests/surgery_check.gd
 
-const VERSION_NAME := "0.3.1"
-const VERSION_CODE := 35
+const VERSION_NAME := "0.3.2"
+const VERSION_CODE := 36
 const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 
 var fails := 0
@@ -112,6 +113,16 @@ func _check_source_contracts() -> void:
 	var hud := FileAccess.get_file_as_string("res://scripts/hud.gd")
 	_ok(pc.find("begin_pc_orbit") >= 0 and vs_src.find("func begin_pc_orbit") >= 0, "PC right-mouse vehicle orbit API exists")
 	_ok(hud.find("电脑按住右键即可环绕") >= 0 or hud.find("touch_ui and not editing") >= 0, "观察 button is hidden in PC mode")
+	_ok(sys.find("tool = \"\"") >= 0 or sys.find("var tool: String = \"\"") >= 0, "surgery starts with no tool selected")
+	_ok(sys.find("func look_locked") >= 0 and sys.find("func look_enabled") >= 0, "look_locked / look_enabled API exists")
+	_ok(sys.find("func has_incision_trail") >= 0, "incision trail API exists")
+	_ok(sys.find("incision_trail.gdshader") >= 0, "red gradient trail uses incision_trail shader, not wounds.webp")
+	_ok(sys.find("DEPTH_DRAW_DISABLED") >= 0 and sys.find("_apply_xray_shell") >= 0, "cavity becomes transparent in x-ray (no depth write)")
+	_ok(hud.find("手术中仍要处理划屏") >= 0, "HUD keeps TouchControls active during surgery")
+	var touch := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
+	_ok(touch.find("func _in_surgery") >= 0 and touch.find("touch_tool_begin") >= 0, "touch routes surgery look vs tool")
+	_ok(pc.find("func surgery_look_locked") >= 0, "player look is lockable while a surgery tool is selected")
+	_ok(FileAccess.file_exists("res://shaders/incision_trail.gdshader"), "incision_trail shader file exists")
 
 
 
@@ -234,8 +245,33 @@ func _check_enter_exit_and_t_key() -> void:
 	_ok(bool(surgery.call("is_active")), "surgery is active after enter_surgery")
 	if hud and hud.has_method("is_surgery_active"):
 		_ok(bool(hud.call("is_surgery_active")), "HUD reports surgery active")
-	# 工具栏默认手术刀。
-	_ok(str(surgery.call("current_tool")) == "scalpel", "default tool is scalpel")
+	# 0.3.2：进入手术默认不选工具，可控制视角；选工具后锁定视角。
+	_ok(str(surgery.call("current_tool")) == "", "default tool is none so the player can look")
+	_ok(bool(surgery.call("look_enabled")), "look is enabled when no tool is selected")
+	_ok(not bool(surgery.call("look_locked")), "look is not locked when no tool is selected")
+	_ok(not bool(surgery.call("tool_interaction_enabled")), "tool interaction is off when no tool is selected")
+	if player.has_method("surgery_look_enabled"):
+		_ok(bool(player.call("surgery_look_enabled")), "player reports surgery look enabled with no tool")
+		_ok(not bool(player.call("surgery_look_locked")), "player reports surgery look unlocked with no tool")
+	_ok(not bool(surgery.call("debug_begin_stroke_at_navel")), "scalpel stroke does not begin when no tool is selected")
+	_ok(not bool(surgery.call("is_pose_locked")), "pose stays unlocked if the stroke was rejected")
+
+	surgery.call("set_tool", "scalpel")
+	_ok(str(surgery.call("current_tool")) == "scalpel", "selecting 手术刀 arms the scalpel")
+	_ok(bool(surgery.call("look_locked")), "selecting a tool locks the view")
+	_ok(not bool(surgery.call("look_enabled")), "look is disabled while a tool is selected")
+	_ok(bool(surgery.call("tool_interaction_enabled")), "tool interaction is on after selecting the scalpel")
+	if player.has_method("surgery_look_locked"):
+		_ok(bool(player.call("surgery_look_locked")), "player reports look locked after selecting a tool")
+
+	# 再点一次已选工具：取消选择，恢复视角。
+	surgery.call("set_tool", "scalpel")
+	_ok(str(surgery.call("current_tool")) == "", "tapping the selected tool deselects it")
+	_ok(bool(surgery.call("look_enabled")), "deselecting the tool restores look")
+	_ok(not bool(surgery.call("look_locked")), "look is unlocked after deselect")
+
+	# 重新选刀，供落刀锁定与手绘切割测试。
+	surgery.call("set_tool", "scalpel")
 	_ok(int(surgery.call("wrap_face_count")) > 0, "cavity wrap has side/back faces")
 	_ok(bool(surgery.call("cavity_wraps_organs")), "procedural cavity bag wraps the gut volume")
 	# 落刀期间锁定腹部形变，预览与绑定空间提交一致。
@@ -246,10 +282,23 @@ func _check_enter_exit_and_t_key() -> void:
 	if sec:
 		_ok(float(sec.get("breath_amp")) <= 0.0001, "breath amp is zero while the stroke is locked")
 		_ok(not bool(sec.get("breath_enabled")), "breathing is disabled during the stroke")
-	surgery.call("end_stroke")
+	# 拖一段路径，确认皮肤上出现红色轨迹。
+	var navel: Vector3 = surgery.call("_navel_world") if surgery.has_method("_navel_world") else player.global_position
+	for i in range(1, 5):
+		var tgt: Vector3 = navel + Vector3(0.008 * float(i), 0.002 * float(i), 0.0)
+		var origin: Vector3 = tgt + Vector3(0.0, 0.02, 0.28)
+		var dir: Vector3 = (tgt - origin).normalized()
+		surgery.call("drag_stroke", origin, dir)
+	_ok(bool(surgery.call("has_incision_trail")), "red gradient trail is created on the skin during a stroke")
+	_ok(int(surgery.call("incision_trail_point_count")) >= 2, "trail has at least two path points while dragging")
+	# 取消这次预览落刀，留给后面的「切开前腹腔隐藏」检查，以及专门的手绘提交回归。
+	if surgery.has_method("cancel_stroke"):
+		surgery.call("cancel_stroke")
+	else:
+		surgery.call("end_stroke")
 	await _frames(2)
-	_ok(not bool(surgery.call("is_pose_locked")), "pose lock released after the stroke ends")
-	_ok(not bool(surgery.get("cut_open")), "a one-point / cancelled stroke does not cut")
+	_ok(not bool(surgery.call("is_pose_locked")), "pose lock released after the stroke is cancelled")
+	_ok(not bool(surgery.get("cut_open")), "a cancelled preview stroke does not cut")
 
 
 func _check_cavity_and_incision() -> void:
@@ -264,12 +313,33 @@ func _check_cavity_and_incision() -> void:
 		organs.call("set_xray_enabled", true)
 	await _frames(2)
 	_ok(bool(surgery.call("cavity_visible_in_xray")), "cavity is visible in x-ray before / without relying on a cut")
+	_ok(bool(surgery.call("cavity_xray_is_transparent")), "cavity material is transparent in x-ray so organs are not fully occluded")
+	_ok(float(surgery.call("cavity_xray_alpha")) < 0.85, "cavity x-ray alpha is below 0.85 (organs can show through)")
 	if organs and organs.has_method("set_xray_enabled"):
 		organs.call("set_xray_enabled", false)
 	await _frames(2)
 	_ok(not bool(surgery.call("cavity_visible_in_xray")), "cavity is not counted visible in x-ray when x-ray is off")
+	_ok(not bool(surgery.call("cavity_xray_is_transparent")), "cavity returns to an opaque wall when x-ray is off")
+	_ok(float(surgery.call("cavity_xray_alpha")) >= 0.99, "cavity alpha is 1 when x-ray is off")
 	if organs and organs.has_method("set_xray_enabled"):
 		organs.call("set_xray_enabled", true)
+
+	# 「切割没有生效」回归：用与玩家相同的 begin/drag/end 射线路径提交切口。
+	if str(surgery.call("current_tool")) != "scalpel":
+		surgery.call("set_tool", "scalpel")
+	var verts_before := 0
+	var faces_before := 0
+	if surgery.get("_outer"):
+		verts_before = int(surgery.get("_outer").vert_count())
+		faces_before = int(surgery.get("_outer").face_count())
+	var cut_ok := bool(surgery.call("debug_freehand_cut_from_navel"))
+	await _frames(3)
+	_ok(cut_ok, "freehand scalpel stroke commits and changes the surgical mesh")
+	_ok(bool(surgery.get("cut_open")), "cut_open is set after a real pointer stroke")
+	if surgery.get("_outer"):
+		var changed := int(surgery.get("_outer").face_count()) != faces_before or int(surgery.get("_outer").vert_count()) != verts_before or int(surgery.get("lofted_tris")) > 0
+		_ok(changed, "surgical mesh topology changed after the cut")
+	_ok(bool(surgery.call("has_incision_trail")), "red trail remains on the skin after the cut commits")
 
 	# 先做一条开放切口，确认层状壁。
 	# 为避免破坏后续闭环，这里用脚本切口的 closed=true 作为主路径；
