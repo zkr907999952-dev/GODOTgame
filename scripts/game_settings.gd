@@ -26,6 +26,8 @@ var hit_force: float = HIT_FORCE_DEFAULT
 ## 尸体拖拽拉扯力度（0.35..2.5）。1.0 = 加强后的默认拉力，可在设置里再调。
 const PULL_FORCE_DEFAULT := 1.0
 var pull_force: float = PULL_FORCE_DEFAULT
+## 弹孔贯穿：仅在触发弹道特写时冲压柱状网格通道。默认关闭；关闭时特写也只留旧贴花。
+var bullet_hole_penetrate: bool = false
 ## 手机飞机控制： "slider"（滑块，默认）、"stick"（摇杆）或 "buttons"（按键）。仅影响触屏布局。
 const FLIGHT_MODE_SLIDER := "slider"
 const FLIGHT_MODE_STICK := "stick"
@@ -57,6 +59,7 @@ func load_cfg() -> void:
 		render_scale = clampf(float(c.get_value("graphics", "render_scale", 0.0)), 0.0, 1.0)
 	hit_force = clampf(float(c.get_value("combat", "hit_force", HIT_FORCE_DEFAULT)), 0.35, 2.0)
 	pull_force = clampf(float(c.get_value("combat", "pull_force", PULL_FORCE_DEFAULT)), 0.35, 2.5)
+	bullet_hole_penetrate = bool(c.get_value("combat", "bullet_hole_penetrate", false))
 	var fm := str(c.get_value("controls", "flight_mode", FLIGHT_MODE_SLIDER))
 	# Keep a previously saved 摇杆 / 按键 / 滑块 choice. Missing or unknown → 滑块.
 	if fm == FLIGHT_MODE_BUTTONS or fm == FLIGHT_MODE_STICK or fm == FLIGHT_MODE_SLIDER:
@@ -78,6 +81,7 @@ func save_cfg() -> void:
 	c.set_value("graphics", "render_scale", render_scale)
 	c.set_value("combat", "hit_force", hit_force)
 	c.set_value("combat", "pull_force", pull_force)
+	c.set_value("combat", "bullet_hole_penetrate", bullet_hole_penetrate)
 	c.set_value("controls", "flight_mode", flight_control_mode)
 	c.save(PATH)
 	changed.emit()
@@ -148,6 +152,13 @@ func set_pull_force(v: float) -> void:
 	if is_equal_approx(pull_force, v):
 		return
 	pull_force = v
+	save_cfg()
+
+
+func set_bullet_hole_penetrate(on: bool) -> void:
+	if bullet_hole_penetrate == on:
+		return
+	bullet_hole_penetrate = on
 	save_cfg()
 
 

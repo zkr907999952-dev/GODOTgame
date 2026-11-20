@@ -166,6 +166,9 @@ func action_for_key(key: int, mode: String = "") -> String:
 	var in_veh := vehicle_system != null and vehicle_system.get("occupied") != null
 	if in_veh and key == KEY_V:
 		return "vehicle_cam"
+	# 载具内电脑 Tab 切换第一/第三人称，不切换行走/观察模式，也不影响上下车或聊天。
+	if in_veh and key == KEY_TAB:
+		return "vehicle_cam"
 	# Occupied G toggles landing gear in the fighter; it must not holster.
 	if in_veh and key == KEY_G and vehicle_system and str(vehicle_system.call("kind_of", vehicle_system.get("occupied"))) == "plane":
 		return "vehicle_gear"

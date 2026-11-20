@@ -1,12 +1,13 @@
 extends SceneTree
-## 0.3.4 手术模式自检：切开/外翻后躯体不得上移；拿取可从无工具或手术刀直接切换；
-## 真实弹道特写命中路径会打出去掉圆心皮瓣的柱状弹孔通道。保留 0.3.0–0.3.3 既有约定。
+## 0.3.5 手术模式自检：弹孔贯穿设置默认关且仅特写可穿孔；腹腔不穿后腰；
+## 直线/环状预览切割（松手不提交，按「切割」才切开并播手术刀动画）；
+## 直线切口中重端轻外翻、两侧可拉开；环状切口可抓取独立皮瓣。保留 0.3.0–0.3.4 约定。
 ##   LIBGL_ALWAYS_SOFTWARE=1 godot --headless --path . \
 ##     --rendering-method gl_compatibility --rendering-driver opengl3 \
 ##     -s res://scripts/tests/surgery_check.gd
 
-const VERSION_NAME := "0.3.4"
-const VERSION_CODE := 38
+const VERSION_NAME := "0.3.5"
+const VERSION_CODE := 39
 const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 
 var fails := 0
@@ -135,6 +136,16 @@ func _check_source_contracts() -> void:
 	_ok(hud_src.find("_btn_tool_grab.disabled = not can_grab") < 0, "HUD does not disable 拿取 until a flap exists")
 	var clone_src := FileAccess.get_file_as_string("res://scripts/clone_doll.gd")
 	_ok(clone_src.find("func get_surgery") >= 0 and clone_src.find("SurgerySystem") >= 0, "clones also host SurgerySystem so 特写 holes can be punched")
+	var settings_src := FileAccess.get_file_as_string("res://scripts/game_settings.gd")
+	_ok(settings_src.find("bullet_hole_penetrate") >= 0 and settings_src.find("var bullet_hole_penetrate: bool = false") >= 0, "弹孔贯穿 setting exists and defaults off")
+	_ok(hud_src.find("弹孔贯穿") >= 0, "settings UI labels 弹孔贯穿 in zh-CN")
+	_ok(hud_src.find("直线切割") >= 0 and hud_src.find("环状切割") >= 0 and hud_src.find("_btn_cut_confirm") >= 0, "HUD has 直线切割 / 环状切割 / 切割")
+	_ok(sys.find("func confirm_cut") >= 0 and sys.find("func set_cut_mode") >= 0, "scalpel uses preview primitives plus an explicit 切割 confirm")
+	_ok(sys.find("func _build_dashed_trail") >= 0, "cut preview is a dashed trajectory, not a freehand commit")
+	_ok(sys.find("不再在松手时提交切口") >= 0, "end_stroke no longer commits a freehand cut")
+	_ok(sys.find("func _place_scalpel_on_path") >= 0, "confirm plays a scalpel animation along the preview path")
+	_ok(sys.find("func _bullet_holes_allowed") >= 0 and sys.find("cinematic") >= 0, "mesh perforation is gated on the setting and a 特写 shot")
+	_ok(geom.find("func lumbar_exterior_z") >= 0 and sys.find("func cavity_clears_lower_back") >= 0, "cavity lumbar clearance API exists")
 
 
 
@@ -341,6 +352,8 @@ func _check_enter_exit_and_t_key() -> void:
 	_ok(int(surgery.call("wrap_face_count")) > 0, "cavity wrap has side/back faces")
 	_ok(bool(surgery.call("cavity_wraps_organs")), "procedural cavity bag wraps the gut volume")
 	# 落刀期间锁定腹部形变，预览与绑定空间提交一致。
+	if surgery.has_method("set_cut_mode"):
+		surgery.call("set_cut_mode", "straight")
 	var sec: RefCounted = player.call("get_secondary") if player.has_method("get_secondary") else null
 	var began := bool(surgery.call("debug_begin_stroke_at_navel"))
 	_ok(began, "debug stroke at navel begins")
@@ -348,22 +361,23 @@ func _check_enter_exit_and_t_key() -> void:
 	if sec:
 		_ok(float(sec.get("breath_amp")) <= 0.0001, "breath amp is zero while the stroke is locked")
 		_ok(not bool(sec.get("breath_enabled")), "breathing is disabled during the stroke")
-	# 拖一段路径，确认皮肤上出现红色轨迹。
+	# 拖出直线预览：皮肤上出现虚线，但松手或取消都不会切开。
 	var navel: Vector3 = surgery.call("_navel_world") if surgery.has_method("_navel_world") else player.global_position
 	for i in range(1, 5):
 		var tgt: Vector3 = navel + Vector3(0.008 * float(i), 0.002 * float(i), 0.0)
 		var origin: Vector3 = tgt + Vector3(0.0, 0.02, 0.28)
 		var dir: Vector3 = (tgt - origin).normalized()
 		surgery.call("drag_stroke", origin, dir)
-	_ok(bool(surgery.call("has_incision_trail")), "red gradient trail is created on the skin during a stroke")
-	_ok(int(surgery.call("incision_trail_point_count")) >= 2, "trail has at least two path points while dragging")
-	# 取消这次预览落刀，留给后面的「切开前腹腔隐藏」检查，以及专门的手绘提交回归。
+	_ok(bool(surgery.call("has_cut_preview")), "straight-cut preview is created while dragging")
+	surgery.call("end_stroke")
+	_ok(bool(surgery.call("has_cut_preview")), "preview remains after releasing the drag")
+	_ok(not bool(surgery.get("cut_open")), "releasing a preview drag does not commit the cut")
 	if surgery.has_method("cancel_stroke"):
 		surgery.call("cancel_stroke")
-	else:
-		surgery.call("end_stroke")
+	if surgery.has_method("_clear_cut_preview"):
+		surgery.call("_clear_cut_preview")
 	await _frames(2)
-	_ok(not bool(surgery.call("is_pose_locked")), "pose lock released after the stroke is cancelled")
+	_ok(not bool(surgery.call("is_pose_locked")), "pose lock released after the preview is cancelled")
 	_ok(not bool(surgery.get("cut_open")), "a cancelled preview stroke does not cut")
 
 
@@ -390,22 +404,61 @@ func _check_cavity_and_incision() -> void:
 	if organs and organs.has_method("set_xray_enabled"):
 		organs.call("set_xray_enabled", true)
 
-	# 「切割没有生效」回归：用与玩家相同的 begin/drag/end 射线路径提交切口。
+	_ok(bool(surgery.call("cavity_clears_lower_back")), "cavity bag stays in front of the lumbar / lower-back exterior")
+	_ok(bool(surgery.call("cavity_wraps_organs")), "tapered cavity still wraps the gut volume")
+
+	# 直线预览：拖出、调整端点，松手不切开；按「切割」才提交，并触发手术刀沿轨迹动画。
 	if str(surgery.call("current_tool")) != "scalpel":
 		surgery.call("set_tool", "scalpel")
+	if surgery.has_method("set_cut_mode"):
+		surgery.call("set_cut_mode", "straight")
 	var verts_before := 0
 	var faces_before := 0
 	if surgery.get("_outer"):
 		verts_before = int(surgery.get("_outer").vert_count())
 		faces_before = int(surgery.get("_outer").face_count())
-	var cut_ok := bool(surgery.call("debug_freehand_cut_from_navel"))
+	var navel_b: Vector3 = surgery.call("_navel_world") if surgery.has_method("_navel_world") else player.global_position
+	# 旧手绘松手提交已取消：debug_freehand 现在只拉预览。
+	var preview_only := bool(surgery.call("debug_freehand_cut_from_navel"))
+	_ok(preview_only, "dragging a straight path creates a preview and does not cut")
+	_ok(not bool(surgery.get("cut_open")), "end_stroke / freehand release does not commit an incision")
+	_ok(bool(surgery.call("has_cut_preview")), "straight preview remains until 切割 is pressed")
+	# 调整起止点。
+	var ends: Array = surgery.call("straight_preview_ends") if surgery.has_method("straight_preview_ends") else []
+	if ends.size() >= 2 and surgery.has_method("debug_drag_preview_end"):
+		var b1: Vector3 = ends[1] + Vector3(0.012, 0.006, 0.0)
+		_ok(bool(surgery.call("debug_drag_preview_end", "end", b1)), "straight preview end point can be dragged")
+		var ends2: Array = surgery.call("straight_preview_ends")
+		_ok(ends2.size() >= 2 and (ends2[1] as Vector3).distance_to(ends[1]) > 0.004, "adjusted end point moved")
+	# 环状预览也可拉出、移动、变形，且此时仍不切开。
+	if surgery.has_method("debug_set_ring_preview"):
+		var ring_ok := bool(surgery.call("debug_set_ring_preview", surgery.get("_navel_rest") if surgery.get("_navel_rest") != null else Vector3(0, 1.06, 0.11), 0.032, 0.024))
+		_ok(ring_ok, "ring / ellipse preview can be created")
+		var rp0: Dictionary = surgery.call("ring_preview_params")
+		if surgery.has_method("debug_move_ring_preview"):
+			_ok(bool(surgery.call("debug_move_ring_preview", Vector3(0.01, -0.006, 0.0))), "ellipse preview can be moved")
+		if surgery.has_method("debug_reshape_ring_preview"):
+			_ok(bool(surgery.call("debug_reshape_ring_preview", 0.040, 0.028)), "ellipse preview can be reshaped")
+		var rp1: Dictionary = surgery.call("ring_preview_params")
+		_ok(float(rp1.get("rx", 0.0)) > float(rp0.get("rx", 0.0)) - 0.0001 and (rp1["center"] as Vector3).distance_to(rp0["center"]) > 0.004, "ring preview move / reshape took effect")
+		_ok(not bool(surgery.get("cut_open")), "creating a ring preview does not cut")
+		# 切回直线预览再提交。
+		var a: Vector3 = (surgery.get("_navel_rest") if surgery.get("_navel_rest") != null else Vector3(0, 1.06, 0.11)) + Vector3(-0.03, 0.01, 0.0)
+		var b: Vector3 = a + Vector3(0.06, -0.012, 0.0)
+		_ok(bool(surgery.call("debug_set_straight_preview", a, b)), "straight preview restored for confirm")
+	# 确认切割：先走动画契约，再立即完成。
+	_ok(bool(surgery.call("confirm_cut", true)), "切割 starts the scalpel animation along the path")
+	_ok(bool(surgery.call("is_cut_animating")) or bool(surgery.get("last_cut_animated")), "scalpel cutting animation is triggered on confirm")
+	if surgery.has_method("debug_finish_cut_anim"):
+		surgery.call("debug_finish_cut_anim")
 	await _frames(3)
-	_ok(cut_ok, "freehand scalpel stroke commits and changes the surgical mesh")
-	_ok(bool(surgery.get("cut_open")), "cut_open is set after a real pointer stroke")
+	var cut_ok := bool(surgery.get("cut_open"))
+	_ok(cut_ok, "pressing 切割 commits the straight incision")
+	_ok(not bool(surgery.call("can_grab_flap")), "a straight cut is an open knife wound, not a closed flap")
 	if surgery.get("_outer"):
 		var changed := int(surgery.get("_outer").face_count()) != faces_before or int(surgery.get("_outer").vert_count()) != verts_before or int(surgery.get("lofted_tris")) > 0
 		_ok(changed, "surgical mesh topology changed after the cut")
-	_ok(bool(surgery.call("has_incision_trail")), "red trail remains on the skin after the cut commits")
+	_ok(bool(surgery.call("has_incision_trail")), "red graffiti remains on the skin after the cut commits")
 	if organs and organs.has_method("set_xray_enabled"):
 		organs.call("set_xray_enabled", false)
 	_ok(bool(surgery.call("incision_trail_visible_without_xray")), "incision graffiti remains visible with 透视 off")
@@ -417,6 +470,10 @@ func _check_cavity_and_incision() -> void:
 		_assert_pose_stable(_bed_pose, _pose_snapshot(), "after cut vs pre-surgery bed pose", 0.04)
 	var open_w := float(surgery.call("lip_opening_width"))
 	_ok(open_w > 0.003, "everted open lips are wider than the raw slit (%.4f)" % open_w)
+	if surgery.has_method("evert_mid_width"):
+		var mid_w := float(surgery.call("evert_mid_width"))
+		var end_w := float(surgery.call("evert_end_width"))
+		_ok(mid_w > 0.0 and mid_w >= end_w * 0.95, "straight-cut eversion is mid-heavy and lighter at the ends (mid=%.4f ends=%.4f)" % [mid_w, end_w])
 	var dense_open := int(surgery.call("last_dense_wall_tris"))
 	var loft_open := int(surgery.get("lofted_tris"))
 	_ok(loft_open > 0, "open cut has a lofted wall (%d tris)" % loft_open)
@@ -501,7 +558,17 @@ func _check_cavity_and_incision() -> void:
 	surgery.call("exit_surgery")
 	_ok(str(player.get("occupancy")) == "exam_bed", "occupancy unchanged after exit")
 
-	# 特写弹孔：真实命中打出柱状断面并去掉圆心皮瓣（不走 wounds.webp）。
+	# 弹孔贯穿：默认关闭；非特写不穿孔；开启后只有带 cinematic 标记的特写命中才冲压通道。
+	var settings_hole: Node = main.get_node_or_null("GameSettings")
+	_ok(settings_hole != null, "GameSettings exists for 弹孔贯穿")
+	if settings_hole:
+		_ok(bool(settings_hole.get("bullet_hole_penetrate")) == false, "弹孔贯穿 defaults to off")
+		settings_hole.call("set_bullet_hole_penetrate", true)
+		_ok(bool(settings_hole.get("bullet_hole_penetrate")), "弹孔贯穿 can be turned on")
+		settings_hole.call("load_cfg")
+		_ok(bool(settings_hole.get("bullet_hole_penetrate")), "弹孔贯穿 persists after reload")
+		settings_hole.call("set_bullet_hole_penetrate", false)
+		_ok(not bool(settings_hole.get("bullet_hole_penetrate")), "弹孔贯穿 can be turned back off")
 	var organs2: Node = player.call("get_organs") if player.has_method("get_organs") else organs
 	var navel: Vector3 = Vector3(0, 1.06, 0.11)
 	if organs2 and organs2.has_method("navel_world"):
@@ -512,13 +579,29 @@ func _check_cavity_and_incision() -> void:
 		b_dir = Vector3(0, 0, -1)
 	else:
 		b_dir = b_dir.normalized()
-	var punched := false
+	var holes_before := int(surgery.get("bullet_holes")) if surgery.get("bullet_holes") != null else 0
 	if organs2 and organs2.has_method("apply_ballistic_hit"):
 		organs2.call("apply_ballistic_hit", b_origin, b_dir, {"energy": 0.85, "impulse": 0.5, "overpen": 0.15, "category": "pistol"})
+	_ok(int(surgery.get("bullet_holes")) == holes_before, "a non-特写 hit does not punch a mesh hole while the setting is off")
+	if settings_hole:
+		settings_hole.call("set_bullet_hole_penetrate", true)
+	if organs2 and organs2.has_method("apply_ballistic_hit"):
+		organs2.call("apply_ballistic_hit", b_origin, b_dir, {"energy": 0.85, "impulse": 0.5, "overpen": 0.15, "category": "pistol"})
+	_ok(int(surgery.get("bullet_holes")) == holes_before, "a non-特写 hit still does not punch a mesh hole when the setting is on")
+	# 带 cinematic 标记的命中（特写推迟路径）在设置开启时应穿孔。
+	var punched := false
+	if organs2 and organs2.has_method("apply_ballistic_hit"):
+		organs2.call("apply_ballistic_hit", b_origin, b_dir, {"energy": 0.85, "impulse": 0.5, "overpen": 0.15, "category": "pistol", "cinematic": true, "bullet_cam": true})
 		punched = bool(surgery.call("has_bullet_hole"))
-	if not punched:
-		punched = bool(surgery.call("debug_apply_bullet_hole", navel + Vector3(0.05, 0.05, 0.0), b_dir, 0.01))
-	_ok(punched and bool(surgery.call("has_bullet_hole")), "a simulated bullet hit creates a real mesh hole with a cylindrical wall")
+	_ok(punched and bool(surgery.call("has_bullet_hole")), "a 特写 hit punches a cylindrical mesh hole when 弹孔贯穿 is on")
+	var holes_after := int(surgery.get("bullet_holes"))
+	if settings_hole:
+		settings_hole.call("set_bullet_hole_penetrate", false)
+	if organs2 and organs2.has_method("apply_ballistic_hit"):
+		organs2.call("apply_ballistic_hit", b_origin + Vector3(0.02, 0.0, 0.0), b_dir, {"energy": 0.85, "impulse": 0.5, "overpen": 0.15, "category": "pistol", "cinematic": true, "bullet_cam": true})
+	_ok(int(surgery.get("bullet_holes")) == holes_after, "even a 特写 hit does not punch a mesh hole when 弹孔贯穿 is off")
+	if settings_hole:
+		settings_hole.call("set_bullet_hole_penetrate", true)
 	_ok(bool(surgery.call("bullet_plug_removed")), "the circular plug in the middle of the hole is removed")
 	var btris := int(surgery.get("bullet_wall_tris"))
 	_ok(btris > 0 and btris <= Geom.bullet_wall_tri_budget() * 3, "bullet cylinder uses a small tri budget (%d)" % btris)
@@ -549,6 +632,8 @@ func _check_cavity_and_incision() -> void:
 			var cd: Vector3 = (cn - co).normalized()
 			settings.call("set_bullet_cam_enabled", true)
 			settings.call("set_bullet_cam_chance", 1.0)
+			if settings.has_method("set_bullet_hole_penetrate"):
+				settings.call("set_bullet_hole_penetrate", true)
 			bcam.set("debug_roll", 0.0)
 			var def = ws.call("get_def", "rifle") if ws.has_method("get_def") else null
 			bal.call("fire_projectile", co, cd, "rifle", def)
@@ -569,4 +654,6 @@ func _check_cavity_and_incision() -> void:
 			if bool(bcam.get("playing")) and bcam.has_method("skip"):
 				bcam.call("skip")
 			settings.call("set_bullet_cam_chance", 0.20)
+			if settings.has_method("set_bullet_hole_penetrate"):
+				settings.call("set_bullet_hole_penetrate", false)
 			bcam.set("debug_roll", -1.0)

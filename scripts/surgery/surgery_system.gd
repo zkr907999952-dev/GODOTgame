@@ -1,5 +1,5 @@
 extends Node
-## 手术模式：检查床上进入 / 退出，腹腔、手绘切口、层状腹壁、可剥离皮瓣。
+## 手术模式：检查床上进入 / 退出，直线/环状预览切口、层状腹壁、可剥离皮瓣。
 ## 伤口来自真实网格切割，不用旧贴图 / Decal。
 class_name SurgerySystem
 
@@ -16,10 +16,13 @@ const MAX_BULLET_HOLES := 6
 
 signal mode_changed(active: bool)
 signal tool_changed(tool: String)
+signal cut_mode_changed(mode: String)
+signal preview_changed()
 
 var player: Node = null
 var active: bool = false
 var tool: String = ""  # "" | "scalpel" | "grab"  — 进入时无工具，可转视角
+var cut_mode: String = "straight"  # "straight" | "ring"
 var thickness: float = WALL_THICKNESS
 var cut_open: bool = false
 var loop_ready: bool = false
@@ -105,6 +108,28 @@ var bullet_holes: int = 0
 var bullet_wall_tris: int = 0
 var bullet_plugs_removed: int = 0
 var last_dense_loft_tris: int = 0
+var _cut_preview: bool = false
+var _preview_a: Vector3 = Vector3.ZERO
+var _preview_b: Vector3 = Vector3.ZERO
+var _preview_center: Vector3 = Vector3.ZERO
+var _preview_rx: float = 0.0
+var _preview_ry: float = 0.0
+var _preview_handle: String = ""
+var _preview_drag_start: Vector3 = Vector3.ZERO
+var _preview_center0: Vector3 = Vector3.ZERO
+var _preview_rx0: float = 0.0
+var _preview_ry0: float = 0.0
+var _cut_anim: bool = false
+var _cut_anim_t: float = 0.0
+var _cut_anim_dur: float = 0.7
+var _cut_anim_path: PackedVector3Array = PackedVector3Array()
+var _cut_anim_closed: bool = false
+var _dash: MeshInstance3D
+var _handles: MeshInstance3D
+var _lumbar_z: float = -1e9
+var _pull_peak: float = 0.0
+var _pull_rest: Vector3 = Vector3.ZERO
+var last_cut_animated: bool = false
 
 
 func setup(p: Node, skel: Skeleton3D, organs: Node) -> void:
@@ -126,6 +151,7 @@ func setup(p: Node, skel: Skeleton3D, organs: Node) -> void:
 					_guts_max = Vector3(mx[0], mx[1], mx[2])
 	_find_meshes()
 	_make_trail()
+	_make_dash()
 	_make_scalpel()
 
 
@@ -151,6 +177,91 @@ func look_enabled() -> bool:
 
 func tool_interaction_enabled() -> bool:
 	return active and has_tool()
+
+
+func current_cut_mode() -> String:
+	return cut_mode
+
+
+func set_cut_mode(m: String) -> void:
+	var mode := "straight"
+	if m == "ring" or m == "ellipse" or m == "loop":
+		mode = "ring"
+	elif m == "straight" or m == "line":
+		mode = "straight"
+	if _cut_anim:
+		return
+	if cut_mode == mode:
+		return
+	if stroke_active and tool == "scalpel":
+		cancel_stroke()
+	cut_mode = mode
+	_clear_cut_preview()
+	cut_mode_changed.emit(cut_mode)
+	preview_changed.emit()
+
+
+func has_cut_preview() -> bool:
+	if not _cut_preview:
+		return false
+	if cut_mode == "ring":
+		return _preview_rx >= 0.008 and _preview_ry >= 0.008
+	return _preview_a.distance_to(_preview_b) >= 0.012
+
+
+func preview_kind() -> String:
+	if not _cut_preview:
+		return ""
+	return "ring" if cut_mode == "ring" else "straight"
+
+
+func can_confirm_cut() -> bool:
+	return active and tool == "scalpel" and has_cut_preview() and not _cut_anim
+
+
+func is_cut_animating() -> bool:
+	return _cut_anim
+
+
+func straight_preview_ends() -> Array:
+	return [_preview_a, _preview_b]
+
+
+func ring_preview_params() -> Dictionary:
+	return {"center": _preview_center, "rx": _preview_rx, "ry": _preview_ry}
+
+
+func evert_profile() -> Dictionary:
+	return _measure_evert_profile(_outer if _outer_evert == null else _mesh_evert_blend())
+
+
+func evert_mid_width() -> float:
+	return float(evert_profile().get("mid", 0.0))
+
+
+func evert_end_width() -> float:
+	return float(evert_profile().get("ends", 0.0))
+
+
+func cavity_clears_lower_back(margin: float = 0.002) -> bool:
+	if _wrap == null or _wrap.vert_count() < 1:
+		return false
+	var zmin := 1e9
+	var lumbar_lo := _navel_rest.y - 0.16
+	var lumbar_hi := _navel_rest.y - 0.02
+	for p in _wrap.pos:
+		zmin = minf(zmin, p.z)
+		if p.y >= lumbar_lo and p.y <= lumbar_hi:
+			if _lumbar_z > -1e8 and p.z < _lumbar_z + margin:
+				return false
+	if _lumbar_z > -1e8 and zmin < _lumbar_z + margin:
+		return false
+	# Documented bound: the bag stays in front of the sampled lumbar exterior.
+	return true
+
+
+func lumbar_safe_z() -> float:
+	return _lumbar_z
 
 
 func has_incision_trail() -> bool:
@@ -480,17 +591,51 @@ func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
 		return _begin_grab(origin, dir)
 	if tool != "scalpel":
 		return false
+	if _cut_anim:
+		return false
 	_lock_pose_for_stroke(true)
 	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
+	var bind_p := Vector3.ZERO
+	var world_p := Vector3.ZERO
+	if hit != null:
+		bind_p = (hit as Dictionary)["bind"]
+		world_p = (hit as Dictionary)["point"]
+	# 已有预览：优先拖动起止点 / 椭圆控制点。未点中腹部时也允许靠近手柄。
+	if has_cut_preview():
+		var h := _pick_preview_handle(origin, dir, bind_p if hit != null else Vector3.INF)
+		if h != "":
+			_preview_handle = h
+			stroke_active = true
+			_preview_drag_start = bind_p if hit != null else _handle_bind(h)
+			_preview_center0 = _preview_center
+			_preview_rx0 = _preview_rx
+			_preview_ry0 = _preview_ry
+			if hit != null:
+				_place_scalpel(world_p, dir)
+			_show_scalpel(true)
+			_update_cut_preview()
+			return true
 	if hit == null:
 		_lock_pose_for_stroke(false)
 		return false
+	# 新预览：按下并拖出直线或椭圆，松手后仍只是预览，必须按「切割」才提交。
 	stroke_active = true
-	path_points = PackedVector3Array()
-	path_points.append((hit as Dictionary)["bind"])
-	_place_scalpel(hit["point"], dir)
+	_preview_handle = "new"
+	_cut_preview = true
+	if cut_mode == "ring":
+		_preview_center = bind_p
+		_preview_rx = 0.01
+		_preview_ry = 0.01
+		_preview_drag_start = bind_p
+	else:
+		cut_mode = "straight"
+		_preview_a = bind_p
+		_preview_b = bind_p
+		_preview_drag_start = bind_p
+	_place_scalpel(world_p, dir)
 	_show_scalpel(true)
-	_update_preview()
+	_update_cut_preview()
+	preview_changed.emit()
 	return true
 
 
@@ -498,16 +643,17 @@ func drag_stroke(origin: Vector3, dir: Vector3) -> void:
 	if tool == "grab" and _grab_active:
 		_drag_grab(origin, dir)
 		return
-	if not stroke_active or tool != "scalpel":
+	if not stroke_active or tool != "scalpel" or _cut_anim:
 		return
 	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
-	if hit == null:
-		return
-	var p: Vector3 = (hit as Dictionary)["bind"]
-	if path_points.is_empty() or path_points[path_points.size() - 1].distance_to(p) >= STROKE_MIN_SPACING:
-		path_points.append(p)
-	_place_scalpel(hit["point"], dir)
-	_update_preview()
+	var bind_p: Vector3
+	if hit != null:
+		bind_p = (hit as Dictionary)["bind"]
+		_place_scalpel((hit as Dictionary)["point"], dir)
+	else:
+		bind_p = _ray_to_preview_plane(origin, dir)
+	_apply_preview_drag(bind_p)
+	_update_cut_preview()
 
 
 func cancel_stroke() -> void:
@@ -516,11 +662,14 @@ func cancel_stroke() -> void:
 	if not stroke_active:
 		return
 	stroke_active = false
+	var was_new := _preview_handle == "new"
+	_preview_handle = ""
 	_show_scalpel(false)
 	path_points = PackedVector3Array()
-	if not cut_open:
-		_clear_trail()
+	if was_new and not has_cut_preview():
+		_clear_cut_preview()
 	_lock_pose_for_stroke(false)
+	preview_changed.emit()
 
 
 func end_stroke() -> void:
@@ -531,21 +680,15 @@ func end_stroke() -> void:
 	if not stroke_active:
 		return
 	stroke_active = false
+	_preview_handle = ""
 	_show_scalpel(false)
-	var kept := false
-	if path_points.size() >= 2:
-		var simple := Geom.simplify_path(path_points, 0.003, 48)
-		last_path_count = simple.size()
-		if _commit_path(simple):
-			_trail_bind = simple
-			_update_trail()
-			kept = true
-	if not kept and not cut_open:
-		_clear_trail()
-	elif not kept and _trail_bind.size() >= 2:
-		_update_trail()
-	path_points = PackedVector3Array()
+	# 不再在松手时提交切口：预览必须等「切割」按钮。
+	if has_cut_preview():
+		_update_cut_preview()
+	else:
+		_clear_cut_preview()
 	_lock_pose_for_stroke(false)
+	preview_changed.emit()
 
 
 func debug_scripted_incision(closed: bool = true, rx: float = OVAL_RX, ry: float = OVAL_RY) -> bool:
@@ -567,6 +710,108 @@ func debug_scripted_incision(closed: bool = true, rx: float = OVAL_RX, ry: float
 	path = Geom.simplify_path(path, 0.0024, 56)
 	last_path_count = path.size()
 	return _commit_path(path, closed)
+
+
+func debug_set_straight_preview(a: Vector3, b: Vector3) -> bool:
+	if not active or not _bake_if_needed():
+		return false
+	if tool != "scalpel":
+		set_tool("scalpel")
+	cut_mode = "straight"
+	_preview_a = a
+	_preview_b = b
+	_cut_preview = true
+	_update_cut_preview()
+	preview_changed.emit()
+	return has_cut_preview()
+
+
+func debug_set_ring_preview(center: Vector3, rx: float, ry: float) -> bool:
+	if not active or not _bake_if_needed():
+		return false
+	if tool != "scalpel":
+		set_tool("scalpel")
+	cut_mode = "ring"
+	_preview_center = center
+	_preview_rx = maxf(rx, 0.008)
+	_preview_ry = maxf(ry, 0.008)
+	_cut_preview = true
+	_update_cut_preview()
+	preview_changed.emit()
+	return has_cut_preview()
+
+
+func debug_move_ring_preview(delta: Vector3) -> bool:
+	if not has_cut_preview() or cut_mode != "ring":
+		return false
+	_preview_center += delta
+	_update_cut_preview()
+	preview_changed.emit()
+	return true
+
+
+func debug_reshape_ring_preview(rx: float, ry: float) -> bool:
+	if not has_cut_preview() or cut_mode != "ring":
+		return false
+	_preview_rx = maxf(rx, 0.008)
+	_preview_ry = maxf(ry, 0.008)
+	_update_cut_preview()
+	preview_changed.emit()
+	return true
+
+
+func debug_drag_preview_end(which: String, bind_p: Vector3) -> bool:
+	if not has_cut_preview() or cut_mode != "straight":
+		return false
+	if which == "start" or which == "a":
+		_preview_a = bind_p
+	else:
+		_preview_b = bind_p
+	_update_cut_preview()
+	preview_changed.emit()
+	return has_cut_preview()
+
+
+func confirm_cut(animate: bool = true) -> bool:
+	## 按下「切割」后执行：手术刀沿预览轨迹走一圈/一段，再提交切口。
+	if not can_confirm_cut():
+		return false
+	var path := _preview_path_bind()
+	if path.size() < 2:
+		return false
+	_lock_pose_for_stroke(true)
+	last_cut_animated = false
+	if animate:
+		_cut_anim = true
+		_cut_anim_t = 0.0
+		_cut_anim_dur = 1.0 if cut_mode == "ring" else 0.65
+		_cut_anim_path = path
+		_cut_anim_closed = cut_mode == "ring"
+		last_cut_animated = true
+		_show_scalpel(true)
+		_place_scalpel_on_path(0.0)
+		return true
+	return _finish_confirmed_cut(path, cut_mode == "ring")
+
+
+func debug_confirm_cut(animate: bool = false) -> bool:
+	return confirm_cut(animate)
+
+
+func debug_advance_cut_anim(sec: float) -> void:
+	if not _cut_anim:
+		return
+	_cut_anim_t += maxf(sec, 0.0)
+	var u := clampf(_cut_anim_t / maxf(_cut_anim_dur, 0.001), 0.0, 1.0)
+	_place_scalpel_on_path(u)
+	if u >= 1.0:
+		_finish_confirmed_cut(_cut_anim_path, _cut_anim_closed)
+
+
+func debug_finish_cut_anim() -> bool:
+	if not _cut_anim:
+		return cut_open
+	return _finish_confirmed_cut(_cut_anim_path, _cut_anim_closed)
 
 
 func try_peel_at(origin: Vector3, dir: Vector3) -> bool:
@@ -852,8 +1097,9 @@ func _bake_if_needed() -> bool:
 	_rest = extracted["rest"]
 	var organ_z := _organ_front_z()
 	_inner = Geom.make_cavity(_outer, thickness, organ_z)
-	var back_z := minf(_guts_min.z - 0.010, organ_z - 0.08)
-	_wrap = Geom.make_cavity_wrap(_inner, back_z)
+	_lumbar_z = Geom.lumbar_exterior_z(_rest, _navel_rest)
+	var back_z := minf(_guts_min.z - 0.006, organ_z - 0.055)
+	_wrap = Geom.make_cavity_wrap(_inner, back_z, _guts_min, _guts_max, _lumbar_z)
 	# 用去掉腹部的 Dress 替换原网格，避免与手术网格重叠。
 	if _rest.face_count() > 0:
 		_dress.mesh = _rest.to_array_mesh()
@@ -1489,12 +1735,13 @@ func debug_begin_stroke_at_navel() -> bool:
 
 
 func debug_freehand_cut_from_navel() -> bool:
-	## 模拟一次真实手绘落刀：选手术刀、从肚脐附近拖出一段路径并提交。
+	## 兼容旧测试名：现在只拉出直线预览，松手不提交。真正切开请用 confirm_cut。
 	if not active:
 		if not enter_surgery():
 			return false
 	if tool != "scalpel":
 		set_tool("scalpel")
+	set_cut_mode("straight")
 	if not debug_begin_stroke_at_navel():
 		return false
 	var n := _navel_world()
@@ -1508,7 +1755,7 @@ func debug_freehand_cut_from_navel() -> bool:
 			dir = dir.normalized()
 		drag_stroke(origin, dir)
 	end_stroke()
-	return cut_open
+	return has_cut_preview() and not cut_open
 
 
 func _navel_world() -> Vector3:
@@ -1531,6 +1778,8 @@ func _process(dt: float) -> void:
 	if xr != _xray_cached:
 		_xray_cached = xr
 		_update_cavity_visibility()
+	if _cut_anim:
+		debug_advance_cut_anim(dt)
 	if _evert_anim:
 		_step_eversion(dt)
 	if not _grab_active and _pull_off.length_squared() > 1e-8:
@@ -1884,7 +2133,9 @@ func _begin_skin_grab(origin: Vector3, dir: Vector3) -> bool:
 	_split_drag = 0.0
 	_pull_p = _to_ab_local(world_p)
 	_pull_off = Vector3.ZERO
-	_pull_r = 0.055
+	_pull_r = 0.08
+	_pull_peak = 0.0
+	_pull_rest = Vector3.ZERO
 	_apply_pull_uniforms()
 	return true
 
@@ -1906,9 +2157,12 @@ func _drag_grab(origin: Vector3, dir: Vector3) -> void:
 		var off: Vector3 = nxt2 - _grab_last
 		# 限制拉扯幅度，像有弹性的皮肉，而不是把网格拽坏。
 		_pull_off += _to_ab_delta(off)
-		if _pull_off.length() > 0.06:
-			_pull_off = _pull_off.normalized() * 0.06
+		if _pull_off.length() > 0.11:
+			_pull_off = _pull_off.normalized() * 0.11
 		_split_drag = _pull_off.length()
+		if _split_drag > _pull_peak:
+			_pull_peak = _split_drag
+			_pull_rest = _pull_off * 0.38
 		_apply_pull_uniforms()
 
 
@@ -1975,10 +2229,12 @@ func debug_drag_split_skin(off: Vector3) -> bool:
 		mid = _outer.pos[_lip_left[_lip_left.size() / 2]]
 	_pull_p = mid
 	_pull_off = off
-	if _pull_off.length() > 0.06:
-		_pull_off = _pull_off.normalized() * 0.06
-	_pull_r = 0.055
+	if _pull_off.length() > 0.11:
+		_pull_off = _pull_off.normalized() * 0.11
+	_pull_r = 0.08
 	_split_drag = _pull_off.length()
+	_pull_peak = _split_drag
+	_pull_rest = _pull_off * 0.38
 	_apply_pull_uniforms()
 	return _split_drag > 0.0
 
@@ -2120,15 +2376,17 @@ func _apply_pull_uniforms() -> void:
 func _step_pull_spring(dt: float) -> void:
 	var k := 28.0
 	var c := 7.0
-	# 用 _pull_off 当位移，简单弹簧回到 0。
-	var acc: Vector3 = -_pull_off * k - _grab_vel * c
+	# 松手回弹，但停在一次拉扯峰值的一小部分，切口可以保持张开看到腹腔。
+	var target: Vector3 = _pull_rest
+	var acc: Vector3 = (target - _pull_off) * k - _grab_vel * c
 	_grab_vel += acc * dt
 	_pull_off += _grab_vel * dt
-	if _pull_off.length() < 0.0008 and _grab_vel.length() < 0.002:
-		_pull_off = Vector3.ZERO
+	if (_pull_off - target).length() < 0.0008 and _grab_vel.length() < 0.002:
+		_pull_off = target
 		_grab_vel = Vector3.ZERO
-		_split_drag = 0.0
-		_pull_r = 0.0
+		_split_drag = _pull_off.length()
+		if _pull_off.length_squared() < 1e-8:
+			_pull_r = 0.0
 	else:
 		_split_drag = _pull_off.length()
 	_apply_pull_uniforms()
@@ -2138,6 +2396,9 @@ func apply_bullet_hit(info: Dictionary, par: Dictionary = {}) -> Dictionary:
 	## 由 OrganRig.apply_ballistic_hit 调用：在手术腹网上打出柱状弹孔，并去掉圆心皮瓣。
 	var out := {"entry": false, "exit": false, "tris": 0}
 	if not bool(info.get("hit", false)):
+		return out
+	# 仅当设置开启，且这一发确实触发了弹道特写时才冲压网格通道。
+	if not _bullet_holes_allowed(par, info):
 		return out
 	if not _bake_if_needed():
 		return out
@@ -2330,3 +2591,438 @@ func _loft_translated_cylinder(outer: Geom.MeshData, loop_o: PackedInt32Array, a
 	if front.size() >= 3 and front.size() == back.size():
 		Geom.loft_wall(wall, front, back, true)
 	return wall
+
+
+func _game_settings() -> Node:
+	var n: Node = player
+	while n:
+		var s := n.get_node_or_null("GameSettings")
+		if s:
+			return s
+		n = n.get_parent()
+	var tree := get_tree()
+	if tree:
+		return tree.root.find_child("GameSettings", true, false)
+	return null
+
+
+func _bullet_holes_allowed(par: Dictionary, info: Dictionary) -> bool:
+	var s := _game_settings()
+	if s == null or not bool(s.get("bullet_hole_penetrate")):
+		return false
+	if bool(par.get("cinematic", false)) or bool(par.get("bullet_cam", false)):
+		return true
+	if bool(info.get("cinematic", false)) or bool(info.get("bullet_cam", false)):
+		return true
+	return false
+
+
+func _preview_path_bind() -> PackedVector3Array:
+	if not _cut_preview or _outer == null:
+		return PackedVector3Array()
+	if cut_mode == "ring":
+		var path := Geom.oval_path_on_mesh(_outer, _preview_center, _preview_rx, _preview_ry, 24)
+		if path.size() >= 3:
+			if path[0].distance_to(path[path.size() - 1]) > Geom.PATH_CLOSE_DIST:
+				path.append(path[0])
+		return path
+	return Geom.line_path_on_mesh(_outer, _preview_a, _preview_b, 12)
+
+
+func _clear_cut_preview() -> void:
+	_cut_preview = false
+	_preview_handle = ""
+	_preview_rx = 0.0
+	_preview_ry = 0.0
+	if _dash:
+		_dash.visible = false
+		_dash.mesh = null
+	if _handles:
+		_handles.visible = false
+		_handles.mesh = null
+
+
+func _cancel_cut_anim() -> void:
+	_cut_anim = false
+	_cut_anim_path = PackedVector3Array()
+	_show_scalpel(false)
+	_lock_pose_for_stroke(false)
+
+
+func _finish_confirmed_cut(path: PackedVector3Array, closed: bool) -> bool:
+	_cut_anim = false
+	_show_scalpel(false)
+	var ok := _commit_path(path, closed)
+	_clear_cut_preview()
+	_lock_pose_for_stroke(false)
+	preview_changed.emit()
+	return ok
+
+
+func _place_scalpel_on_path(u: float) -> void:
+	if _cut_anim_path.size() < 2:
+		return
+	var t := clampf(u, 0.0, 1.0)
+	if _cut_anim_closed and t >= 0.999:
+		t = 1.0
+	var acc := PackedFloat32Array()
+	acc.resize(_cut_anim_path.size())
+	acc[0] = 0.0
+	var total := 0.0
+	for i in range(1, _cut_anim_path.size()):
+		total += _approx_world_bind(_cut_anim_path[i]).distance_to(_approx_world_bind(_cut_anim_path[i - 1]))
+		acc[i] = total
+	if total < 1e-6:
+		total = 1.0
+	var want := t * total
+	var p := _cut_anim_path[0]
+	var tan := Vector3(0, 0, -1)
+	for i in range(1, _cut_anim_path.size()):
+		if acc[i] >= want or i == _cut_anim_path.size() - 1:
+			var span := maxf(acc[i] - acc[i - 1], 1e-6)
+			var f := clampf((want - acc[i - 1]) / span, 0.0, 1.0)
+			p = _cut_anim_path[i - 1].lerp(_cut_anim_path[i], f)
+			tan = _approx_world_bind(_cut_anim_path[i]) - _approx_world_bind(_cut_anim_path[i - 1])
+			break
+	var world := _approx_world_bind(p)
+	if tan.length_squared() < 1e-8:
+		tan = Vector3(0, 0, -1)
+	_place_scalpel(world, tan.normalized())
+	_show_scalpel(true)
+
+
+func _handle_bind(h: String) -> Vector3:
+	match h:
+		"start":
+			return _preview_a
+		"end":
+			return _preview_b
+		"center", "move":
+			return _preview_center
+		"rx":
+			return _preview_center + Vector3(_preview_rx, 0, 0)
+		"ry":
+			return _preview_center + Vector3(0, _preview_ry, 0)
+		"rxn":
+			return _preview_center + Vector3(-_preview_rx, 0, 0)
+		"ryn":
+			return _preview_center + Vector3(0, -_preview_ry, 0)
+	return _preview_center
+
+
+func _pick_preview_handle(origin: Vector3, dir: Vector3, bind_hint: Vector3) -> String:
+	var names: PackedStringArray = PackedStringArray()
+	if cut_mode == "ring":
+		names = PackedStringArray(["center", "rx", "ry", "rxn", "ryn"])
+	else:
+		names = PackedStringArray(["start", "end"])
+	var best := ""
+	var best_s := 0.014 * 0.014
+	for h in names:
+		var hb: Vector3 = _handle_bind(h)
+		var hw: Vector3 = _approx_world_bind(hb)
+		# 射线到点的距离。
+		var d := dir.normalized()
+		var w := origin - hw
+		var closest: Vector3 = origin + d * maxf(-w.dot(d), 0.0)
+		var s := closest.distance_squared_to(hw)
+		if bind_hint.x < 1e8:
+			s = minf(s, bind_hint.distance_squared_to(hb))
+		if s < best_s:
+			best_s = s
+			best = "move" if h == "center" else h
+	# 点在椭圆内部则移动整个预览。
+	if best == "" and cut_mode == "ring" and bind_hint.x < 1e8:
+		var q: Vector3 = bind_hint - _preview_center
+		var nx := q.x / maxf(_preview_rx, 0.004)
+		var ny := q.y / maxf(_preview_ry, 0.004)
+		if nx * nx + ny * ny <= 1.0:
+			best = "move"
+	return best
+
+
+func _ray_to_preview_plane(origin: Vector3, dir: Vector3) -> Vector3:
+	var d := dir.normalized()
+	var c: Vector3 = _navel_world()
+	var n := Vector3(0, 0, 1)
+	if _organs and _organs.has_method("abdomen_frame"):
+		n = (_organs.call("abdomen_frame") as Transform3D).basis.z.normalized()
+	var denom := n.dot(d)
+	var world: Vector3
+	if absf(denom) < 1e-6:
+		world = c
+	else:
+		var t := n.dot(c - origin) / denom
+		world = origin + d * t
+	# 反投到绑定空间：用最近点。
+	if _outer == null:
+		return _navel_rest
+	_posed_dirty = true
+	var posed := _posed_world()
+	var best := 0
+	var best_s := 1e9
+	for i in posed.size():
+		var s := posed[i].distance_squared_to(world)
+		if s < best_s:
+			best_s = s
+			best = i
+	return _outer.pos[best] if best < _outer.vert_count() else _navel_rest
+
+
+func _apply_preview_drag(bind_p: Vector3) -> void:
+	if _preview_handle == "new":
+		if cut_mode == "ring":
+			var d: Vector3 = bind_p - _preview_drag_start
+			_preview_center = (_preview_drag_start + bind_p) * 0.5
+			_preview_rx = maxf(absf(d.x) * 0.5, 0.008)
+			_preview_ry = maxf(absf(d.y) * 0.5, 0.008)
+		else:
+			_preview_b = bind_p
+		_cut_preview = true
+		return
+	if cut_mode == "ring":
+		if _preview_handle == "move" or _preview_handle == "center":
+			_preview_center = _preview_center0 + (bind_p - _preview_drag_start)
+		elif _preview_handle == "rx" or _preview_handle == "rxn":
+			_preview_rx = maxf(absf(bind_p.x - _preview_center.x), 0.008)
+		elif _preview_handle == "ry" or _preview_handle == "ryn":
+			_preview_ry = maxf(absf(bind_p.y - _preview_center.y), 0.008)
+	else:
+		if _preview_handle == "start":
+			_preview_a = bind_p
+		else:
+			_preview_b = bind_p
+
+
+func _update_cut_preview() -> void:
+	if _dash == null:
+		_make_dash()
+	var path := _preview_path_bind()
+	path_points = path
+	if path.size() < 2:
+		if _dash:
+			_dash.visible = false
+		if _handles:
+			_handles.visible = false
+		return
+	var mesh := _build_dashed_trail(path)
+	if _dash:
+		_dash.mesh = mesh
+		_parent_trail(_dash)
+		if _dash.get_parent() == _skel:
+			_dash.transform = Transform3D.IDENTITY
+			if _skin:
+				_dash.skin = _skin
+			_dash.skeleton = NodePath("..")
+		_dash.visible = mesh != null and mesh.get_surface_count() > 0
+	_update_preview_handles()
+	preview_changed.emit()
+
+
+func _make_dash() -> void:
+	if _dash:
+		return
+	_dash = MeshInstance3D.new()
+	_dash.name = "IncisionPreviewDash"
+	_dash.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_dash.sorting_offset = 0.025
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(0.95, 0.15, 0.12, 0.92)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.no_depth_test = false
+	mat.render_priority = 2
+	_dash.material_override = mat
+	_parent_trail(_dash)
+	_dash.visible = false
+	_handles = MeshInstance3D.new()
+	_handles.name = "IncisionPreviewHandles"
+	_handles.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_handles.sorting_offset = 0.03
+	var hm := StandardMaterial3D.new()
+	hm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	hm.albedo_color = Color(1.0, 0.92, 0.2, 0.95)
+	hm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	hm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	hm.render_priority = 3
+	_handles.material_override = hm
+	_parent_trail(_handles)
+	_handles.visible = false
+
+
+func _build_dashed_trail(bind_pts: PackedVector3Array) -> ArrayMesh:
+	# 把路径拆成短段虚线，避免被当成已经切开的红色涂鸦。
+	if bind_pts.size() < 2:
+		return ArrayMesh.new()
+	var worlds: PackedVector3Array = PackedVector3Array()
+	var norms: PackedVector3Array = PackedVector3Array()
+	var bones: Array = []
+	var weights: Array = []
+	worlds.resize(bind_pts.size())
+	norms.resize(bind_pts.size())
+	bones.resize(bind_pts.size())
+	weights.resize(bind_pts.size())
+	for i in bind_pts.size():
+		var bn: Array = _approx_bind_and_normal(bind_pts[i])
+		worlds[i] = bn[0]
+		norms[i] = bn[1]
+		bones[i] = bn[2]
+		weights[i] = bn[3]
+	var samples: Array = []  # [world, nrm, bone, weight, arclen]
+	var total := 0.0
+	samples.append([worlds[0], norms[0], bones[0], weights[0], 0.0])
+	for i in range(1, worlds.size()):
+		var a: Vector3 = worlds[i - 1]
+		var b: Vector3 = worlds[i]
+		var seg := a.distance_to(b)
+		if seg < 1e-6:
+			continue
+		total += seg
+		samples.append([b, norms[i], bones[i], weights[i], total])
+	if samples.size() < 2 or total < 1e-5:
+		return ArrayMesh.new()
+	var dash := 0.0075
+	var gap := 0.0045
+	var period := dash + gap
+	var md := Geom.MeshData.new()
+	var half := 0.0048
+	var lift := 0.0020
+	var on := true
+	var walked := 0.0
+	while walked < total - 0.0005:
+		var span := dash if on else gap
+		var a_s := walked
+		var b_s := minf(walked + span, total)
+		if on and b_s - a_s > 0.001:
+			var pa: Array = _sample_poly(samples, a_s)
+			var pb: Array = _sample_poly(samples, b_s)
+			var ta: Vector3 = pb[0] - pa[0]
+			if ta.length_squared() < 1e-10:
+				walked = b_s
+				on = not on
+				continue
+			ta = ta.normalized()
+			var n0: Vector3 = pa[1]
+			var n1: Vector3 = pb[1]
+			var s0 := n0.cross(ta)
+			if s0.length_squared() < 1e-10:
+				s0 = ta.cross(Vector3.UP)
+			if s0.length_squared() < 1e-10:
+				s0 = ta.cross(Vector3.RIGHT)
+			s0 = s0.normalized() * half
+			var s1 := n1.cross(ta)
+			if s1.length_squared() < 1e-10:
+				s1 = s0
+			else:
+				s1 = s1.normalized() * half
+			var va: Vector3 = pa[0] + n0 * lift - s0
+			var vb: Vector3 = pa[0] + n0 * lift + s0
+			var vc: Vector3 = pb[0] + n1 * lift - s1
+			var vd: Vector3 = pb[0] + n1 * lift + s1
+			var ia := md.add_vert(va, n0, Vector2(0, 0), pa[2], pa[3])
+			var ib := md.add_vert(vb, n0, Vector2(0, 1), pa[2], pa[3])
+			var idv := md.add_vert(vd, n1, Vector2(1, 1), pb[2], pb[3])
+			var ic := md.add_vert(vc, n1, Vector2(1, 0), pb[2], pb[3])
+			md.add_face(ia, ib, idv)
+			md.add_face(ia, idv, ic)
+		walked = b_s
+		on = not on
+	return md.to_array_mesh()
+
+
+func _sample_poly(samples: Array, arclen: float) -> Array:
+	for i in range(1, samples.size()):
+		if float(samples[i][4]) >= arclen or i == samples.size() - 1:
+			var a: Array = samples[i - 1]
+			var b: Array = samples[i]
+			var span := maxf(float(b[4]) - float(a[4]), 1e-6)
+			var f := clampf((arclen - float(a[4])) / span, 0.0, 1.0)
+			var n0: Vector3 = a[1]
+			var n1: Vector3 = b[1]
+			var n := (n0 * (1.0 - f) + n1 * f)
+			if n.length_squared() < 1e-8:
+				n = n0
+			else:
+				n = n.normalized()
+			return [a[0].lerp(b[0], f), n, a[2], a[3]]
+	return samples[0]
+
+
+func _update_preview_handles() -> void:
+	if _handles == null:
+		return
+	var pts: Array = []
+	if cut_mode == "ring" and has_cut_preview():
+		pts = ["center", "rx", "ry", "rxn", "ryn"]
+	elif cut_mode != "ring" and has_cut_preview():
+		pts = ["start", "end"]
+	if pts.is_empty():
+		_handles.visible = false
+		return
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var r := 0.0045
+	for h in pts:
+		var w: Vector3 = _approx_world_bind(_handle_bind(str(h)))
+		# 简易八面体手柄。
+		var px := w + Vector3(r, 0, 0)
+		var nx := w + Vector3(-r, 0, 0)
+		var py := w + Vector3(0, r, 0)
+		var ny := w + Vector3(0, -r, 0)
+		var pz := w + Vector3(0, 0, r)
+		var nz := w + Vector3(0, 0, -r)
+		for tri in [[px, py, pz], [py, nx, pz], [nx, ny, pz], [ny, px, pz], [py, px, nz], [nx, py, nz], [ny, nx, nz], [px, ny, nz]]:
+			var n: Vector3 = (tri[1] - tri[0]).cross(tri[2] - tri[0])
+			if n.length_squared() < 1e-10:
+				n = Vector3.UP
+			else:
+				n = n.normalized()
+			st.set_normal(n)
+			st.add_vertex(tri[0])
+			st.set_normal(n)
+			st.add_vertex(tri[1])
+			st.set_normal(n)
+			st.add_vertex(tri[2])
+	_handles.mesh = st.commit()
+	_parent_trail(_handles)
+	if _handles.get_parent() == _skel:
+		_handles.transform = Transform3D.IDENTITY
+	_handles.visible = true
+
+
+func _measure_evert_profile(md = null) -> Dictionary:
+	var use: Geom.MeshData = md
+	if use == null:
+		use = _outer_evert if _outer_evert else _outer
+	if use == null:
+		return {"mid": 0.0, "ends": 0.0}
+	var n := mini(_lip_left.size(), _lip_right.size())
+	if n < 3:
+		return {"mid": 0.0, "ends": 0.0}
+	var mid_i := int(n / 2)
+	var mid_w := 0.0
+	var mid_c := 0
+	var end_w := 0.0
+	var end_c := 0
+	for i in n:
+		var a: int = _lip_left[i]
+		var b: int = _lip_right[i]
+		if a < 0 or b < 0 or a >= use.vert_count() or b >= use.vert_count():
+			continue
+		var d := use.pos[a].distance_to(use.pos[b])
+		var u := float(i) / float(maxi(n - 1, 1))
+		if absf(u - 0.5) <= 0.18:
+			mid_w += d
+			mid_c += 1
+		elif u <= 0.18 or u >= 0.82:
+			end_w += d
+			end_c += 1
+	return {
+		"mid": mid_w / float(mid_c) if mid_c > 0 else 0.0,
+		"ends": end_w / float(end_c) if end_c > 0 else 0.0,
+	}
+
+
+func _mesh_evert_blend() -> Geom.MeshData:
+	return _outer_evert if _outer_evert else _outer

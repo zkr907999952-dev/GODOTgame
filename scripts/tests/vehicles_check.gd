@@ -4,8 +4,8 @@ const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
 ## 0.2.31 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.3.4"
-const VERSION_CODE := 38
+const VERSION_NAME := "0.3.5"
+const VERSION_CODE := 39
 
 var fails := 0
 var main: Node
@@ -85,6 +85,7 @@ func _run() -> void:
 	await _check_0230_playtest_fixes()
 	await _check_0231_playtest_fixes()
 	await _check_031_pc_orbit_and_observe_button()
+	await _check_035_pan_and_tab()
 	_finish()
 
 
@@ -3554,6 +3555,96 @@ func _check_0231_playtest_fixes() -> void:
 			_ok(false, "occupied the exam bed for 0.2.31 pose / eye checks")
 	else:
 		_ok(false, "exam bed / player available for 0.2.31 pose / eye checks")
+
+
+
+func _check_035_pan_and_tab() -> void:
+	## 0.3.5：观察视角手机双指平移、电脑中键平移；载具内电脑 Tab 切换第一/第三人称。
+	## 保留 0.3.1 右键环绕、「观察」仅手机、取消双指载具环绕、地图捏合缩放。
+	var vs_src := FileAccess.get_file_as_string("res://scripts/vehicles/vehicle_system.gd")
+	var pc_src := FileAccess.get_file_as_string("res://scripts/player_controller.gd")
+	var tc_src := FileAccess.get_file_as_string("res://scripts/ui/touch_controls.gd")
+	var root_src := FileAccess.get_file_as_string("res://scripts/game_root.gd")
+	_ok(pc_src.find("func look_pan_enabled") >= 0 and pc_src.find("func _look_pan_pixels") >= 0, "look pan API exists")
+	_ok(pc_src.find("MOUSE_BUTTON_MIDDLE") >= 0 and pc_src.find("_look_pan_pixels") >= 0, "PC middle-mouse pan is wired")
+	_ok(tc_src.find("观察视角下双指拖拽只平移摄像机") >= 0 or tc_src.find("双指拖拽只平移") >= 0, "mobile observe two-finger pan exists")
+	_ok(tc_src.find("载具内取消双指拖拽旋转视角") >= 0, "two-finger vehicle orbit stays cancelled")
+	_ok(tc_src.find('fingers[k]["role"] = "orbit"') < 0 or tc_src.find("第二根手指：载具里按住滑动旋转视角") < 0, "drive two-finger path still does not assign orbit")
+	_ok(vs_src.find("func pan_look") >= 0, "vehicle camera pan_look API exists")
+	_ok(root_src.find("if in_veh and key == KEY_TAB") >= 0, "game_root maps Tab to vehicle_cam while occupied")
+	_ok(root_src.find("KEY_TAB: \"toggle_mode\"") >= 0 or root_src.find("KEY_TAB: \"toggle_mode\"") >= 0, "Tab still toggles play mode when not in a vehicle")
+
+	# Not in a vehicle: Tab stays toggle_mode.
+	if vs and vs.get("occupied"):
+		vs.call("try_toggle")
+		await _frames(4)
+		await _phys(2)
+	_ok(str(main.call("action_for_key", KEY_TAB, "control")) == "toggle_mode", "Tab toggles play mode when on foot")
+	_ok(str(main.call("action_for_key", KEY_TAB, "display")) == "toggle_mode", "Tab toggles play mode in observation when on foot")
+
+	# Character observation pan (third person).
+	if player and player.has_method("set_first_person"):
+		if bool(player.get("first_person")):
+			player.call("set_first_person", false)
+			await _frames(2)
+	if player and player.has_method("look_pan_enabled"):
+		_ok(bool(player.call("look_pan_enabled")), "observation / third-person look allows pan")
+	var cam: Camera3D = player.get_node_or_null("CameraPivot/Camera3D") if player else null
+	var p0 := cam.global_position if cam else Vector3.ZERO
+	if player and player.has_method("touch_pan"):
+		player.call("touch_pan", Vector2(80.0, 0.0))
+		await _frames(1)
+	var p1 := cam.global_position if cam else Vector3.ZERO
+	_ok(p0 == Vector3.ZERO or p1.distance_to(p0) > 0.001, "two-finger / touch pan translates the observe camera (d=%.4f)" % p0.distance_to(p1))
+
+	# Enter a car: Tab and V both toggle 1st/3rd; pan API moves the chase cam.
+	if vs == null or player == null:
+		_ok(false, "vehicle system available for Tab / pan check")
+		return
+	var car: Node = null
+	for v in vs.vehicles:
+		if str(vs.call("kind_of", v)) == "car" and bool(v.get("is_default")):
+			car = v
+			break
+	if car == null:
+		for v2 in vs.vehicles:
+			if str(vs.call("kind_of", v2)) == "car":
+				car = v2
+				break
+	if car == null:
+		_ok(false, "a car is available for Tab / pan")
+		return
+	player.global_position = car.global_position + Vector3(2.0, 0.2, 0.0)
+	if vs.has_method("_update_nearest"):
+		vs.call("_update_nearest")
+	_ok(bool(vs.call("try_enter")), "can enter a car for Tab / pan")
+	await _frames(6)
+	await _phys(2)
+	_ok(str(player.get("occupancy")) == "car", "occupying the car for Tab")
+	_ok(str(main.call("action_for_key", KEY_V, "control")) == "vehicle_cam", "V still toggles vehicle 1st/3rd")
+	_ok(str(main.call("action_for_key", KEY_TAB, "control")) == "vehicle_cam", "PC Tab toggles vehicle 1st/3rd while occupied")
+	_ok(str(main.call("action_for_key", KEY_TAB, "display")) == "vehicle_cam", "Tab is vehicle_cam in display mode while occupied")
+	var cam0 := str(vs.get("vehicle_cam"))
+	if vs.has_method("toggle_vehicle_cam"):
+		var nxt := str(vs.call("toggle_vehicle_cam"))
+		_ok(nxt != cam0 and (nxt == "first" or nxt == "third"), "vehicle cam toggles from %s to %s" % [cam0, nxt])
+		vs.call("toggle_vehicle_cam")
+	if vs.has_method("pan_look"):
+		if vs.has_method("_reset_vehicle_cam"):
+			vs.call("_reset_vehicle_cam")
+		if vs.has_method("_vehicle_camera"):
+			vs.call("_vehicle_camera", 0.016)
+		var eye0: Vector3 = cam.global_position if cam else Vector3.ZERO
+		vs.call("pan_look", Vector2(90.0, 0.0), 0.004)
+		if vs.has_method("_vehicle_camera"):
+			vs.call("_vehicle_camera", 0.016)
+		var eye1: Vector3 = cam.global_position if cam else Vector3.ZERO
+		_ok(eye1.distance_to(eye0) > 0.01, "vehicle middle-mouse / two-finger pan translates the camera (d=%.4f)" % eye0.distance_to(eye1))
+	if vs.get("occupied"):
+		vs.call("try_toggle")
+		await _frames(6)
+		await _phys(2)
+	_ok(str(main.call("action_for_key", KEY_TAB, "control")) == "toggle_mode", "Tab returns to play-mode toggle after leaving the vehicle")
 
 
 func _door_rear_y(hub: Node3D, wrap: Node3D) -> float:

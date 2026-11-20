@@ -48,6 +48,8 @@ var _chase_dist: float = 9.0
 var _player_col_layer: int = 2
 var _player_col_mask: int = 3
 var vehicle_cam: String = "third"  # "first" | "third" — default third on car/plane
+var _cam_pan: Vector3 = Vector3.ZERO  # 观察/中键平移，沿相机右/上
+var _cam_pan_held: bool = false
 var vehicle_look_mode: String = "yaw"  # "yaw" | "orbit" — mobile observe button
 # Car scissor-door boarding: 1 = just entered (open then close), -1 = exiting
 # (open, then step out and close). Plane / exam bed skip this.
@@ -1229,6 +1231,25 @@ func is_pc_orbit_held() -> bool:
 	return is_drive_occupied() and _pc_orbit_held
 
 
+func pan_look(rel: Vector2, sensitivity: float = 0.002) -> void:
+	## 观察视角下双指或中键平移摄像机（只平移，不环绕）。
+	var k := maxf(sensitivity, 0.0002)
+	_cam_pan.x -= rel.x * k
+	_cam_pan.y += rel.y * k
+	var lim := 2.8 if vehicle_cam != "first" else 0.55
+	_cam_pan.x = clampf(_cam_pan.x, -lim, lim)
+	_cam_pan.y = clampf(_cam_pan.y, -lim * 0.7, lim * 0.7)
+
+
+func reset_cam_pan() -> void:
+	_cam_pan = Vector3.ZERO
+	_cam_pan_held = false
+
+
+func cam_pan_offset() -> Vector3:
+	return _cam_pan
+
+
 func begin_pc_orbit() -> void:
 	## PC：按住右键即可环绕观察，不必先切到「观察」模式。
 	if not is_drive_occupied():
@@ -1291,6 +1312,7 @@ func orbit_look(rel: Vector2, sens: float = 0.004) -> void:
 
 
 func _reset_vehicle_cam() -> void:
+	_cam_pan = Vector3.ZERO
 	_cam_ready = false
 	_orbit_held = false
 	_touch_orbit = false
@@ -1859,6 +1881,8 @@ func _vehicle_camera(delta: float) -> void:
 
 
 func _apply_vehicle_cam_xform(pivot: Node3D, cam: Camera3D, xf: Transform3D, snap: bool = true) -> void:
+	if _cam_pan.length_squared() > 1e-8:
+		xf.origin += xf.basis.x * _cam_pan.x + xf.basis.y * _cam_pan.y
 	if pivot:
 		pivot.global_transform = xf
 		if snap and pivot.has_method("reset_physics_interpolation"):

@@ -1359,8 +1359,41 @@ static func mesh_boundary_loop(md: MeshData) -> PackedInt32Array:
 	return loop
 
 
-static func make_cavity_wrap(inner: MeshData, back_z: float) -> MeshData:
+static func lumbar_exterior_z(md: MeshData, navel: Vector3, y0: float = -0.16, y1: float = -0.02) -> float:
+	## 后腰外皮在绑定空间的最靠后 Z（越小越靠后）。没有采样点时返回一个保守下限。
+	if md == null or md.vert_count() < 1:
+		return navel.z - 0.10
+	var found := false
+	var zmin := 1e9
+	for i in md.vert_count():
+		var p: Vector3 = md.pos[i]
+		var rel := p - navel
+		if rel.y < y0 or rel.y > y1 or absf(rel.x) > 0.14:
+			continue
+		# 朝后的顶点（或已经在肚脐后方）才算后腰外皮。
+		var nrm: Vector3 = md.nrm[i] if i < md.nrm.size() else Vector3.ZERO
+		if nrm.z > 0.15 and rel.z > -0.02:
+			continue
+		zmin = minf(zmin, p.z)
+		found = true
+	if not found:
+		return -1e9
+	return zmin
+
+
+static func line_path_on_mesh(md: MeshData, a: Vector3, b: Vector3, steps: int = 12) -> PackedVector3Array:
+	var path := PackedVector3Array()
+	var n := maxi(steps, 2)
+	for i in n + 1:
+		var t := float(i) / float(n)
+		var p: Vector3 = a.lerp(b, t)
+		path.append(_project_to_mesh(md, p, p))
+	return path
+
+
+static func make_cavity_wrap(inner: MeshData, back_z: float, guts_min: Vector3 = Vector3.INF, guts_max: Vector3 = Vector3.INF, lumbar_z: float = -1e9) -> MeshData:
 	## 从前壁边界挤到腹腔后方，再封后盖，把脏器体积包进袋状腔。
+	## 后盖向中心收窄、后腰方向抬高，避免整圈前壁剪影直推到腰椎外皮之外。
 	var wrap := MeshData.new()
 	var loop := mesh_boundary_loop(inner)
 	var ids := PackedInt32Array()
@@ -1380,11 +1413,41 @@ static func make_cavity_wrap(inner: MeshData, back_z: float) -> MeshData:
 	front.resize(n)
 	back.resize(n)
 	var acc := Vector3.ZERO
+	var acc_n := 0
+	for i in n:
+		var src: int = ids[i]
+		acc += inner.pos[src]
+		acc_n += 1
+	var mid := acc / float(maxi(acc_n, 1))
+	var safe_z := back_z
+	if lumbar_z > -1e8:
+		safe_z = maxf(safe_z, lumbar_z + 0.008)
+	var have_guts := guts_min.x < 1e8 and guts_max.x > -1e8
+	if have_guts:
+		# 后壁要包住脏器，但不能比后腰外皮更靠后。
+		safe_z = minf(safe_z, guts_min.z - 0.003)
+		if lumbar_z > -1e8:
+			safe_z = maxf(safe_z, minf(guts_min.z - 0.002, lumbar_z + 0.008))
+	var acc_back := Vector3.ZERO
 	for i in n:
 		var src: int = ids[i]
 		front[i] = wrap.copy_vert(inner, src)
 		var p := inner.pos[src]
-		var bp := Vector3(p.x, p.y, back_z)
+		# 后盖向腹中心收，下缘额外收得更紧，减轻后腰穿模。
+		var shrink := 0.38
+		if have_guts and p.y < mid.y:
+			var tlow := clampf((mid.y - p.y) / maxf(mid.y - (guts_min.y - 0.02), 0.04), 0.0, 1.0)
+			shrink += 0.22 * tlow
+		var bp := Vector3(
+			lerpf(p.x, mid.x, shrink),
+			lerpf(p.y, mid.y, shrink * 0.85),
+			safe_z
+		)
+		if have_guts:
+			bp.x = clampf(bp.x, guts_min.x - 0.010, guts_max.x + 0.010)
+			# 允许略低于脏器底，但不落到腰椎外皮那么低。
+			var y_floor := guts_min.y - 0.010
+			bp.y = clampf(bp.y, y_floor, guts_max.y + 0.012)
 		var b := PackedInt32Array()
 		var w := PackedFloat32Array()
 		b.resize(4)
@@ -1393,9 +1456,9 @@ static func make_cavity_wrap(inner: MeshData, back_z: float) -> MeshData:
 			b[k] = inner.bones[src * 4 + k]
 			w[k] = inner.weights[src * 4 + k]
 		back[i] = wrap.add_vert(bp, Vector3(0, 0, -1), inner.uv[src], b, w)
-		acc += bp
+		acc_back += bp
 	loft_wall(wrap, front, back, true)
-	acc /= float(n)
+	acc = acc_back
 	var bones0 := PackedInt32Array()
 	var weights0 := PackedFloat32Array()
 	bones0.resize(4)
@@ -1600,8 +1663,7 @@ static func evert_open_lips(md: MeshData, left: PackedInt32Array, right: PackedI
 	var n := mini(left.size(), right.size())
 	if n < 2 or amount <= 0.0:
 		return
-	var R := maxf(roll, 0.003)
-	var ang := amount * 1.15
+	var R0 := maxf(roll, 0.003)
 	for i in n:
 		if i == 0 or i == n - 1:
 			continue
@@ -1609,16 +1671,22 @@ static func evert_open_lips(md: MeshData, left: PackedInt32Array, right: PackedI
 		var ri: int = right[i]
 		if li < 0 or ri < 0 or li >= md.vert_count() or ri >= md.vert_count():
 			continue
+		# 直线切口：中间外翻更明显，靠近两端更轻。
+		var u := float(i) / float(maxi(n - 1, 1))
+		var falloff := sin(PI * u)
+		falloff = 0.16 + 0.84 * falloff
 		var mid: Vector3 = (md.pos[li] + md.pos[ri]) * 0.5
 		var tang: Vector3 = md.pos[left[mini(i + 1, n - 1)]] - md.pos[left[maxi(i - 1, 0)]]
 		if tang.length_squared() < EPS:
 			tang = Vector3.RIGHT
 		else:
 			tang = tang.normalized()
+		var ang := amount * 1.15 * falloff
+		var R := R0 * (0.35 + 0.65 * falloff)
 		_evert_one(md, li, mid, tang, ang, R)
 		_evert_one(md, ri, mid, tang, ang, R)
 	# 邻近顶点轻微跟随，让皮肉有弹性过渡。
-	_evert_neighborhood(md, left, right, amount, R * 2.2)
+	_evert_neighborhood(md, left, right, amount, R0 * 2.2)
 
 
 static func evert_loop_lips(md: MeshData, left: PackedInt32Array, right: PackedInt32Array, amount: float, roll: float = 0.008) -> void:

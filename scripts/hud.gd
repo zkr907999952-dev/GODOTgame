@@ -28,7 +28,11 @@ var _btn_surgery_exit: Button
 var _btn_surgery_view: Button
 var _btn_tool_scalpel: Button
 var _btn_tool_grab: Button
+var _btn_cut_straight: Button
+var _btn_cut_ring: Button
+var _btn_cut_confirm: Button
 var _surgery_bar: HBoxContainer
+var _surgery_cut_bar: HBoxContainer
 var _panel_settings: PanelContainer
 var _panel_interact: PanelContainer
 var _panel_camera: PanelContainer
@@ -125,6 +129,7 @@ var _chk_touch: CheckButton
 var _flight_mode_row: Control
 var _flight_mode_option: OptionButton
 var _chk_bullet_cam: CheckButton
+var _chk_bullet_hole: CheckButton
 var _cam_chance_slider: HSlider
 var _cam_chance_value: Label
 var _hit_force_slider: HSlider
@@ -1634,6 +1639,12 @@ func _build_settings_panel() -> PanelContainer:
 	_chk_bullet_cam.toggled.connect(_on_bullet_cam_toggled)
 	v.add_child(_chk_bullet_cam)
 
+	_chk_bullet_hole = CheckButton.new()
+	_chk_bullet_hole.text = "弹孔贯穿"
+	_chk_bullet_hole.button_pressed = false
+	_chk_bullet_hole.toggled.connect(_on_bullet_hole_toggled)
+	v.add_child(_chk_bullet_hole)
+
 	var ch_row := HBoxContainer.new()
 	var ch_l := Label.new()
 	ch_l.text = "特写概率"
@@ -1709,7 +1720,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。受击力度调节子弹对布娃娃的撞击强弱。拉扯力度调节拖拽尸体时的拉力。「武器无需换弹」开启后开火不必换弹，与「无限备弹」独立。电脑瞄准为按住，手机为切换。手机可在设置里把飞机控制切成滑块（默认：右侧加速键、长条偏航滑块、减速键）、摇杆（一个摇杆管偏航和加减速）或按键。飞行时右侧显示当前推力百分比（0% 怠速，80% 军用推力，100% 加力）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。「弹孔贯穿」默认关闭：只有开启且这发确实触发了特写时，才会在腹网上冲压去掉圆心皮瓣的柱状弹孔通道；关闭时即使特写也只保留原来的伤口贴花。受击力度调节子弹对布娃娃的撞击强弱。拉扯力度调节拖拽尸体时的拉力。「武器无需换弹」开启后开火不必换弹，与「无限备弹」独立。电脑瞄准为按住，手机为切换。手机可在设置里把飞机控制切成滑块（默认：右侧加速键、长条偏航滑块、减速键）、摇杆（一个摇杆管偏航和加减速）或按键。飞行时右侧显示当前推力百分比（0% 怠速，80% 军用推力，100% 加力）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)
@@ -3179,6 +3190,8 @@ func _sync_bullet_cam_ui() -> void:
 		_cam_chance_slider.set_value_no_signal(float(s.get("bullet_cam_chance")) * 100.0)
 	if _cam_chance_value:
 		_cam_chance_value.text = "%d%%" % int(round(float(s.get("bullet_cam_chance")) * 100.0))
+	if _chk_bullet_hole:
+		_chk_bullet_hole.set_pressed_no_signal(bool(s.get("bullet_hole_penetrate")))
 
 
 func _on_bullet_cam_toggled(on: bool) -> void:
@@ -3193,6 +3206,12 @@ func _on_bullet_cam_chance(v: float) -> void:
 	var s := _settings()
 	if s:
 		s.call("set_bullet_cam_chance", v / 100.0)
+
+
+func _on_bullet_hole_toggled(on: bool) -> void:
+	var s := _settings()
+	if s and s.has_method("set_bullet_hole_penetrate"):
+		s.call("set_bullet_hole_penetrate", on)
 
 
 func _on_map_catcher_gui(event: InputEvent) -> void:
@@ -3511,6 +3530,10 @@ func _bind_surgery() -> void:
 		s.connect("mode_changed", _on_surgery_mode)
 	if s.has_signal("tool_changed") and not s.is_connected("tool_changed", _on_surgery_tool):
 		s.connect("tool_changed", _on_surgery_tool)
+	if s.has_signal("cut_mode_changed") and not s.is_connected("cut_mode_changed", _on_surgery_cut_mode_changed):
+		s.connect("cut_mode_changed", _on_surgery_cut_mode_changed)
+	if s.has_signal("preview_changed") and not s.is_connected("preview_changed", _on_surgery_preview_changed):
+		s.connect("preview_changed", _on_surgery_preview_changed)
 	_refresh_surgery_ui()
 
 
@@ -3564,6 +3587,49 @@ func _build_surgery_ui(root: Control) -> void:
 		slot.disabled = true
 		slot.modulate = Color(1, 1, 1, 0.45)
 		_surgery_bar.add_child(slot)
+
+	_surgery_cut_bar = HBoxContainer.new()
+	_surgery_cut_bar.name = "SurgeryCutToolbar"
+	_surgery_cut_bar.add_theme_constant_override("separation", 8)
+	_surgery_cut_bar.visible = false
+	_surgery_cut_bar.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.add_child(_surgery_cut_bar)
+
+	_btn_cut_straight = _make_chrome_button("直线切割")
+	_btn_cut_straight.toggle_mode = true
+	_btn_cut_straight.pressed.connect(func(): _on_surgery_cut_mode("straight"))
+	_surgery_cut_bar.add_child(_btn_cut_straight)
+
+	_btn_cut_ring = _make_chrome_button("环状切割")
+	_btn_cut_ring.toggle_mode = true
+	_btn_cut_ring.pressed.connect(func(): _on_surgery_cut_mode("ring"))
+	_surgery_cut_bar.add_child(_btn_cut_ring)
+
+	_btn_cut_confirm = _make_chrome_button("切割")
+	_btn_cut_confirm.pressed.connect(_on_surgery_confirm_cut)
+	_surgery_cut_bar.add_child(_btn_cut_confirm)
+
+
+func _on_surgery_cut_mode(mode: String) -> void:
+	var s := _surgery()
+	if s and s.has_method("set_cut_mode"):
+		s.call("set_cut_mode", mode)
+	_refresh_surgery_ui()
+
+
+func _on_surgery_confirm_cut() -> void:
+	var s := _surgery()
+	if s and s.has_method("confirm_cut"):
+		s.call("confirm_cut", true)
+	_refresh_surgery_ui()
+
+
+func _on_surgery_cut_mode_changed(_mode: String) -> void:
+	_refresh_surgery_ui()
+
+
+func _on_surgery_preview_changed() -> void:
+	_refresh_surgery_ui()
 
 
 func _on_surgery_enter() -> void:
@@ -3671,3 +3737,20 @@ func _refresh_surgery_ui() -> void:
 			_btn_tool_grab.disabled = false
 			_btn_tool_grab.set_pressed_no_signal(tool == "grab")
 			_style_button(_btn_tool_grab, tool == "grab")
+		if _surgery_cut_bar:
+			_surgery_cut_bar.visible = tool == "scalpel"
+			_surgery_cut_bar.position = Vector2(sl, st + 92.0)
+		var cmode := str(s.call("current_cut_mode")) if s and s.has_method("current_cut_mode") else "straight"
+		if _btn_cut_straight:
+			_btn_cut_straight.set_pressed_no_signal(cmode == "straight")
+			_style_button(_btn_cut_straight, cmode == "straight")
+		if _btn_cut_ring:
+			_btn_cut_ring.set_pressed_no_signal(cmode == "ring")
+			_style_button(_btn_cut_ring, cmode == "ring")
+		if _btn_cut_confirm:
+			var can := s and s.has_method("can_confirm_cut") and bool(s.call("can_confirm_cut"))
+			_btn_cut_confirm.disabled = not can
+			_style_button(_btn_cut_confirm, can)
+	else:
+		if _surgery_cut_bar:
+			_surgery_cut_bar.visible = false

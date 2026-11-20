@@ -89,6 +89,7 @@ var _tp_presets: Array = [null, null, null, null]
 var _rmb_down: bool = false
 var _mmb_down: bool = false
 var _pan_drag: bool = false
+var _fp_pan: Vector3 = Vector3.ZERO
 ## 房间墙内包围盒（由 game_root 设置；城市里为空 → 只做物理碰撞）
 var camera_bounds: AABB = AABB()
 var _cam_shape: SphereShape3D
@@ -1787,8 +1788,49 @@ func _vehicle_system_node() -> Node:
 	return null
 
 
-func touch_pan(rel: Vector2) -> void:
+func look_pan_enabled() -> bool:
+	# 观察视角、检查床上看、手术未选工具时，允许平移摄像机。
+	if surgery_look_enabled():
+		return true
+	if occupancy == "exam_bed" and not surgery_look_locked():
+		return true
+	if occupancy == "car" or occupancy == "plane":
+		var vs := _vehicle_system_node()
+		if vs and vs.has_method("is_observe_orbit") and bool(vs.call("is_observe_orbit")):
+			return true
+		# 电脑载具：中键平移随时可用（与右键环绕分开）。
+		if not _is_touch_ui_mode():
+			return true
+		return false
+	if not first_person:
+		return true
+	return false
+
+
+func _fp_pan_pixels(rel: Vector2) -> void:
+	var vh := maxf(1.0, get_viewport().get_visible_rect().size.y)
+	var per_px := 0.0018 * (tp_fov / 50.0) if not first_person else (0.0011)
+	_fp_pan.x -= rel.x * per_px
+	_fp_pan.y += rel.y * per_px
+	_fp_pan.x = clampf(_fp_pan.x, -0.55, 0.55)
+	_fp_pan.y = clampf(_fp_pan.y, -0.40, 0.40)
+	_apply_camera()
+
+
+func _look_pan_pixels(rel: Vector2) -> void:
+	var vs := _vehicle_system_node()
+	if occupancy == "car" or occupancy == "plane":
+		if vs and vs.has_method("pan_look"):
+			vs.call("pan_look", rel, 0.0025)
+		return
+	if first_person:
+		_fp_pan_pixels(rel)
+		return
 	_tp_pan_pixels(rel)
+
+
+func touch_pan(rel: Vector2) -> void:
+	_look_pan_pixels(rel)
 
 
 ## 双指捏合：scale = 旧间距 / 新间距（网页 dollyCam）
@@ -1886,7 +1928,17 @@ func _handle_vehicle_look(event: InputEvent) -> bool:
 	var observe := vs.has_method("is_observe_orbit") and bool(vs.call("is_observe_orbit"))
 	var touch_ui := _is_touch_ui_mode()
 	# PC：按住右键即可拖拽转动载具视角，不必先切「观察」。松开后由 VehicleSystem 软回正。
+	# 中键拖拽平移载具摄像机，不环绕。
 	if not touch_ui:
+		if event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_MIDDLE:
+			var mbm := event as InputEventMouseButton
+			_mmb_down = mbm.pressed
+			get_viewport().set_input_as_handled()
+			return true
+		if event is InputEventMouseMotion and _mmb_down and ((event as InputEventMouseMotion).button_mask & MOUSE_BUTTON_MASK_MIDDLE):
+			_look_pan_pixels((event as InputEventMouseMotion).relative)
+			get_viewport().set_input_as_handled()
+			return true
 		if event is InputEventMouseButton and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_RIGHT:
 			var rb := event as InputEventMouseButton
 			if rb.pressed:
@@ -2055,7 +2107,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		if surgery_look_locked():
 			get_viewport().set_input_as_handled()
 			return
-		if first_person:
+		if _mmb_down and look_pan_enabled():
+			# 观察 / 检查床 / 手术未选工具：中键平移视角。
+			_look_pan_pixels(mm.relative)
+			get_viewport().set_input_as_handled()
+		elif first_person:
 			if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 				_yaw -= mm.relative.x * mouse_sensitivity
 				_pitch -= mm.relative.y * mouse_sensitivity
@@ -2063,7 +2119,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				_apply_camera()
 		else:
 			# 观察视角（网页 OrbitControls）：右键环绕，中键 / Shift·Ctrl+右键 平移。
-			if _mmb_down or (_rmb_down and _pan_drag):
+			if _rmb_down and _pan_drag:
 				_tp_pan_pixels(mm.relative)
 				get_viewport().set_input_as_handled()
 			elif _rmb_down:
@@ -2084,8 +2140,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		if _try_handle_observe_wheel(mb):
 			return
-		if not first_person:
-			if mb.button_index == MOUSE_BUTTON_RIGHT:
+		if not first_person or look_pan_enabled():
+			if mb.button_index == MOUSE_BUTTON_RIGHT and not first_person:
 				_rmb_down = mb.pressed
 				_pan_drag = mb.pressed and (mb.shift_pressed or mb.ctrl_pressed or mb.meta_pressed)
 				get_viewport().set_input_as_handled()
@@ -2108,6 +2164,7 @@ func escape_mouse() -> void:
 
 ## R：复位视角 + 腹部形变（网页 R）。
 func reset_view_and_belly() -> void:
+	_fp_pan = Vector3.ZERO
 	reset_camera()
 	# 本体 + 所有分身的腹部形变 / 工具 / 伤口一起复位
 	for r in get_tree().get_nodes_in_group("organ_rigs"):
@@ -2252,7 +2309,7 @@ func _apply_camera() -> void:
 	if first_person:
 		_pivot_off = _fp_eye_pivot_pos() - Vector3(0.0, _step_smooth, 0.0)
 		_sync_pivot()
-		_camera.position = Vector3.ZERO
+		_camera.position = Vector3(_fp_pan.x, _fp_pan.y, 0.0)
 		# 网页 syncFpProjection：身体视角 near 0.04（城市 0.12，远景精度）；头/发/眼由图层隐藏，
 		# 颈部近处由皮肤 shader 的第一人称近裁球处理（只对主相机生效，镜子里完整）。
 		_camera.near = 0.1 if camera_bounds.size == Vector3.ZERO else 0.04

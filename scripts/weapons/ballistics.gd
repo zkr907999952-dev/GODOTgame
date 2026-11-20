@@ -630,6 +630,11 @@ func apply_deferred_impact(p: Dictionary) -> void:
 	var par: Dictionary = rec.get("par", {})
 	if not (par is Dictionary):
 		par = {}
+	else:
+		par = par.duplicate()
+	# 推迟命中来自弹道特写：只有这类命中才允许冲压网格弹孔。
+	par["cinematic"] = true
+	par["bullet_cam"] = true
 	var col = rec.get("col")
 	var organs = rec.get("organs")
 	if organs == null and body != null and is_instance_valid(body) and body.has_method("get_organs"):

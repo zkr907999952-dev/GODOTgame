@@ -689,7 +689,18 @@ func _on_down(idx: int, p: Vector2) -> void:
 		return
 	if _in_surgery():
 		# 未选工具：划屏控制检查床视角。选了工具：落在身上则走手术刀/拿取，视角锁定。
+		# 观察视角下双指拖拽只平移摄像机，不环绕。
 		var stool := _surgery_tool()
+		var scene_fingers := _scene_fingers()
+		if (stool == "" or stool == "none") and scene_fingers.size() >= 2:
+			player.call("touch_tool_end")
+			f["role"] = "two"
+			for k in scene_fingers:
+				fingers[k]["role"] = "two"
+			_two_reset()
+			get_viewport().set_input_as_handled()
+			queue_redraw()
+			return
 		if stool == "" or stool == "none":
 			f["role"] = "look" if _fp() else "orbit"
 		elif bool(player.call("touch_tool_begin", p)):
@@ -710,16 +721,22 @@ func _on_down(idx: int, p: Vector2) -> void:
 		return
 	if _in_drive():
 		# 载具内取消双指拖拽旋转视角，避免和右侧划屏偏航冲突。
-		# 观察键打开时，只用单指拖动旋转，松手回正。摇杆仍不得环绕。
-		var scene_fingers := _scene_fingers()
-		if scene_fingers.size() >= 2:
-			# Second finger must not convert an existing yaw/look into orbit.
-			f["role"] = "none"
-			get_viewport().set_input_as_handled()
-			return
+		# 观察键打开时，单指拖动旋转、松手回正；双指拖拽只平移摄像机，绝不环绕。
 		var orbit_mode := false
 		if hud and hud.get("_vehicle_system") and hud.get("_vehicle_system").has_method("is_observe_orbit"):
 			orbit_mode = bool(hud.get("_vehicle_system").call("is_observe_orbit"))
+		var scene_fingers := _scene_fingers()
+		if scene_fingers.size() >= 2:
+			# Second finger must not convert an existing yaw/look into orbit.
+			if orbit_mode:
+				f["role"] = "two"
+				for k in scene_fingers:
+					fingers[k]["role"] = "two"
+				_two_reset()
+			else:
+				f["role"] = "none"
+			get_viewport().set_input_as_handled()
+			return
 		if orbit_mode:
 			# 观察键打开：单指拖动旋转视角，松手回正（第一/第三人称都如此）。
 			f["role"] = "orbit"
@@ -921,9 +938,12 @@ func _two_move() -> void:
 		return
 	var m: Vector2 = tp[0]
 	var d: float = tp[1]
+	# 观察视角双指拖拽只平移。手术无工具、载具「观察」不捏合缩放，以免和地图捏合或载具环绕混淆。
 	player.call("touch_pan", m - _two_mid)
-	if absf(d - _two_dist) > 10.0 and _two_dist > 8.0 and d > 8.0:
-		player.call("touch_dolly", _two_dist / d)
+	var observe_pan_only := _in_surgery() or _in_drive()
+	if not observe_pan_only and absf(d - _two_dist) > 10.0 and _two_dist > 8.0 and d > 8.0:
+		if player and player.has_method("touch_dolly"):
+			player.call("touch_dolly", _two_dist / d)
 		_two_dist = d
 	_two_mid = m
 
