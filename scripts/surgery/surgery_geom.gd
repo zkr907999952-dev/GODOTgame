@@ -303,6 +303,472 @@ static func extract_abdomen(mi: MeshInstance3D, navel: Vector3, include_front_on
 	return out
 
 
+## 0.4.04：把手术腹网（外皮 → 内壁由它 1:1 生成）里肚脐凹窝压平成与周围腹壁一致的光滑曲面。
+## 凹窝是 6~7mm 深的陡壁小坑，XY 投影里坑壁三角互相重叠，切线嵌入 / 拆分在这里会出错面、粘连。
+## 做法：按位置焊接顶点组；r < r_in 的组在 XY 上做 Tutte 松弛（边界环固定，保证不翻面），
+## Z 取周围 r_fit0..r_fit1 环带拟合的二次曲面；r_in..r_out 过渡带只混合 Z。最后重算这些顶点的法线。
+## 返回被移动的顶点数。肚脐贴图保留（只是不再有凹陷）。
+static func flatten_navel(md: MeshData, navel: Vector3, r_in: float = 0.018, r_out: float = 0.024, r_fit0: float = 0.024, r_fit1: float = 0.04) -> int:
+	var nv := md.vert_count()
+	if nv == 0 or navel.x > 1e8:
+		return 0
+	var key_of: Dictionary = {}
+	var grp := PackedInt32Array()
+	grp.resize(nv)
+	var gpos: Array[Vector3] = []
+	for i in nv:
+		var p: Vector3 = md.pos[i]
+		var k := Vector3i(roundi(p.x * 1e6), roundi(p.y * 1e6), roundi(p.z * 1e6))
+		if key_of.has(k):
+			grp[i] = int(key_of[k])
+		else:
+			key_of[k] = gpos.size()
+			grp[i] = gpos.size()
+			gpos.append(p)
+	var ng := gpos.size()
+	var nb: Array = []
+	nb.resize(ng)
+	for g in ng:
+		nb[g] = {}
+	for f in md.face_count():
+		var a := grp[md.idx[f * 3]]
+		var b := grp[md.idx[f * 3 + 1]]
+		var c := grp[md.idx[f * 3 + 2]]
+		(nb[a] as Dictionary)[b] = true
+		(nb[a] as Dictionary)[c] = true
+		(nb[b] as Dictionary)[a] = true
+		(nb[b] as Dictionary)[c] = true
+		(nb[c] as Dictionary)[a] = true
+		(nb[c] as Dictionary)[b] = true
+	var rr := PackedFloat32Array()
+	rr.resize(ng)
+	for g2 in ng:
+		rr[g2] = Vector2(gpos[g2].x - navel.x, gpos[g2].y - navel.y).length()
+	# 二次曲面拟合 z = c0 + c1 x + c2 y + c3 x² + c4 xy + c5 y²（相对肚脐）
+	var ata: Array = []
+	for r0 in 6:
+		var row := PackedFloat64Array()
+		row.resize(7)
+		ata.append(row)
+	var cnt := 0
+	for g3 in ng:
+		if rr[g3] < r_fit0 or rr[g3] > r_fit1:
+			continue
+		var x := gpos[g3].x - navel.x
+		var y := gpos[g3].y - navel.y
+		var phi := [1.0, x, y, x * x, x * y, y * y]
+		for r1 in 6:
+			var row1: PackedFloat64Array = ata[r1]
+			for c1 in 6:
+				row1[c1] += phi[r1] * phi[c1]
+			row1[6] += phi[r1] * (gpos[g3].z - navel.z)
+			ata[r1] = row1
+		cnt += 1
+	if cnt < 8:
+		return 0
+	# 高斯消元（带一点正则，避免二次项病态）
+	for d in 6:
+		var rowd: PackedFloat64Array = ata[d]
+		rowd[d] += 1e-9
+		ata[d] = rowd
+	for col in 6:
+		var piv := col
+		for r2 in range(col + 1, 6):
+			if absf((ata[r2] as PackedFloat64Array)[col]) > absf((ata[piv] as PackedFloat64Array)[col]):
+				piv = r2
+		var tmp = ata[col]
+		ata[col] = ata[piv]
+		ata[piv] = tmp
+		var pr: PackedFloat64Array = ata[col]
+		if absf(pr[col]) < 1e-18:
+			return 0
+		for r3 in 6:
+			if r3 == col:
+				continue
+			var rw: PackedFloat64Array = ata[r3]
+			var fct := rw[col] / pr[col]
+			if fct == 0.0:
+				continue
+			for c2 in range(col, 7):
+				rw[c2] -= fct * pr[c2]
+			ata[r3] = rw
+	var co := PackedFloat64Array()
+	co.resize(6)
+	for r4 in 6:
+		var rw2: PackedFloat64Array = ata[r4]
+		co[r4] = rw2[6] / rw2[r4]
+	var fit := func(x: float, y: float) -> float:
+		return navel.z + co[0] + co[1] * x + co[2] * y + co[3] * x * x + co[4] * x * y + co[5] * y * y
+	# Tutte 松弛（XY）
+	var inside := PackedByteArray()
+	inside.resize(ng)
+	var ins: PackedInt32Array = PackedInt32Array()
+	for g4 in ng:
+		if rr[g4] < r_in:
+			inside[g4] = 1
+			ins.append(g4)
+	var xy: Array[Vector2] = []
+	xy.resize(ng)
+	for g5 in ng:
+		xy[g5] = Vector2(gpos[g5].x, gpos[g5].y)
+	navel_flips = 0
+	navel_retri = 0
+	for _it in 400:
+		for g6 in ins:
+			var acc := Vector2.ZERO
+			var m := 0
+			for h in (nb[g6] as Dictionary):
+				acc += xy[int(h)]
+				m += 1
+			if m > 0:
+				xy[g6] = acc / float(m)
+	for i5 in nv:
+		var gg := grp[i5]
+		if inside[gg] == 1:
+			md.pos[i5] = Vector3(xy[gg].x, xy[gg].y, float(fit.call(xy[gg].x - navel.x, xy[gg].y - navel.y)))
+	var touched := {}
+	for g7 in ng:
+		if inside[g7] == 1:
+			gpos[g7] = Vector3(xy[g7].x, xy[g7].y, float(fit.call(xy[g7].x - navel.x, xy[g7].y - navel.y)))
+			touched[g7] = true
+		elif rr[g7] < r_out:
+			var t := smoothstep(r_in, r_out, rr[g7])
+			var zf := float(fit.call(gpos[g7].x - navel.x, gpos[g7].y - navel.y))
+			# 过渡带只允许往外抬（填坑），不往里压
+			var zn := lerpf(maxf(zf, gpos[g7].z), gpos[g7].z, t)
+			if absf(zn - gpos[g7].z) > 1e-7:
+				gpos[g7] = Vector3(gpos[g7].x, gpos[g7].y, zn)
+				touched[g7] = true
+	var moved := 0
+	for i2 in nv:
+		if touched.has(grp[i2]):
+			md.pos[i2] = gpos[grp[i2]]
+			moved += 1
+	# 重算法线（只算受影响的组及其一圈邻居）
+	var gn: Array[Vector3] = []
+	gn.resize(ng)
+	for g8 in ng:
+		gn[g8] = Vector3.ZERO
+	for f2 in md.face_count():
+		var ia := md.idx[f2 * 3]
+		var ib := md.idx[f2 * 3 + 1]
+		var ic := md.idx[f2 * 3 + 2]
+		var ga := grp[ia]
+		var gb := grp[ib]
+		var gc := grp[ic]
+		if not (touched.has(ga) or touched.has(gb) or touched.has(gc)):
+			continue
+		var fnv := (md.pos[ib] - md.pos[ia]).cross(md.pos[ic] - md.pos[ia])
+		gn[ga] += fnv
+		gn[gb] += fnv
+		gn[gc] += fnv
+	for i3 in nv:
+		var g9 := grp[i3]
+		if gn[g9].length_squared() > 1e-20 and (touched.has(g9) or rr[g9] < r_out + 0.004):
+			var nn := gn[g9].normalized()
+			if nn.dot(md.nrm[i3]) < 0.0 and rr[g9] >= r_out:
+				nn = -nn
+			if nn.z < 0.0:
+				nn = -nn
+			md.nrm[i3] = nn
+	# 松弛后的连接仍是原来坑里一圈圈的细长三角：把压平区域按周围腹壁的网格密度重新三角化（规则六边形点阵 + Delaunay）。
+	navel_retri = _retriangulate_disk(md, navel, r_in, fit)
+	if navel_retri == 0:
+		navel_flips = _delaunay_flip_xy(md, navel, r_in)
+	return moved
+
+
+static var navel_flips: int = 0
+static var navel_retri: int = 0
+
+
+## 压平区域重新三角化：取 r < r_in 的面，边界环保持不动（与外圈共享），内部换成间距 h 的六边形点阵，
+## Godot 的 Delaunay 三角化后只保留环内三角。新顶点的 UV / 骨骼权重按松弛后旧三角的重心插值。
+## 返回新三角数，失败返回 0（不改动网格）。
+static func _retriangulate_disk(md: MeshData, c: Vector3, r_in: float, fit: Callable) -> int:
+	var inside_f := PackedInt32Array()
+	var keep := PackedInt32Array()
+	for f in md.face_count():
+		var all_in := true
+		for k in 3:
+			var p := md.pos[md.idx[f * 3 + k]]
+			if Vector2(p.x - c.x, p.y - c.y).length() >= r_in:
+				all_in = false
+		if all_in:
+			inside_f.append(f)
+		else:
+			keep.append(f)
+	if inside_f.size() < 8:
+		return 0
+	# 边界有向边（只出现一次）
+	var ecount: Dictionary = {}
+	for f2 in inside_f:
+		for k2 in 3:
+			var a := md.idx[f2 * 3 + k2]
+			var b := md.idx[f2 * 3 + (k2 + 1) % 3]
+			ecount[Vector2i(a, b)] = true
+	var nxt: Dictionary = {}
+	for e in ecount:
+		var ev := e as Vector2i
+		if not ecount.has(Vector2i(ev.y, ev.x)):
+			if nxt.has(ev.x):
+				return 0
+			nxt[ev.x] = ev.y
+	if nxt.size() < 6:
+		return 0
+	var loop := PackedInt32Array()
+	var start: int = nxt.keys()[0]
+	var cur := start
+	for _g in nxt.size() + 1:
+		loop.append(cur)
+		cur = int(nxt.get(cur, -1))
+		if cur < 0:
+			return 0
+		if cur == start:
+			break
+	if loop.size() != nxt.size():
+		return 0  # 多个环（中间有 UV 缝等），放弃
+	var poly := PackedVector2Array()
+	var per := 0.0
+	for li in loop.size():
+		var p2 := md.pos[loop[li]]
+		poly.append(Vector2(p2.x, p2.y))
+		per += p2.distance_to(md.pos[loop[(li + 1) % loop.size()]])
+	var h := clampf(per / float(loop.size()), 0.0018, 0.0035)
+	# 点阵
+	var pts := poly.duplicate()
+	var lo := poly[0]
+	var hi := poly[0]
+	for q in poly:
+		lo = lo.min(q)
+		hi = hi.max(q)
+	var row := 0
+	var y := lo.y
+	while y <= hi.y:
+		var x := lo.x + (h * 0.5 if row % 2 == 1 else 0.0)
+		while x <= hi.x:
+			var q2 := Vector2(x, y)
+			if Geometry2D.is_point_in_polygon(q2, poly):
+				var dmin := 1e9
+				for li2 in poly.size():
+					var sa := poly[li2]
+					var sb := poly[(li2 + 1) % poly.size()]
+					dmin = minf(dmin, q2.distance_to(Geometry2D.get_closest_point_to_segment(q2, sa, sb)))
+				if dmin > h * 0.55:
+					pts.append(q2)
+			x += h
+		y += h * 0.8660254
+		row += 1
+	var tri := Geometry2D.triangulate_delaunay(pts)
+	if tri.is_empty():
+		return 0
+	var nl := loop.size()
+	# 原来的绕向（XY 叉积符号）
+	var f0 := inside_f[0]
+	var s0 := signf(_xy_cross(md.pos[md.idx[f0 * 3]], md.pos[md.idx[f0 * 3 + 1]], md.pos[md.idx[f0 * 3 + 2]]))
+	var new_tris: Array = []
+	var have_e: Dictionary = {}
+	for t in range(0, tri.size(), 3):
+		var ia := tri[t]
+		var ib := tri[t + 1]
+		var ic := tri[t + 2]
+		var cen := (pts[ia] + pts[ib] + pts[ic]) / 3.0
+		if not Geometry2D.is_point_in_polygon(cen, poly):
+			continue
+		var cr := (pts[ib].x - pts[ia].x) * (pts[ic].y - pts[ia].y) - (pts[ib].y - pts[ia].y) * (pts[ic].x - pts[ia].x)
+		if absf(cr) < 1e-12:
+			continue
+		if signf(cr) != s0:
+			var tmp := ib
+			ib = ic
+			ic = tmp
+		new_tris.append([ia, ib, ic])
+		have_e[Vector2i(ia, ib)] = true
+		have_e[Vector2i(ib, ic)] = true
+		have_e[Vector2i(ic, ia)] = true
+	# 每条边界边都必须出现（方向与原环一致），否则会裂缝
+	for li3 in nl:
+		if not have_e.has(Vector2i(li3, (li3 + 1) % nl)):
+			return 0
+	# 新顶点属性：在松弛后的旧三角里找重心坐标插值
+	var map := PackedInt32Array()
+	map.resize(pts.size())
+	for li4 in nl:
+		map[li4] = loop[li4]
+	for pi in range(nl, pts.size()):
+		var q3 := pts[pi]
+		var best_f := -1
+		var best_b := Vector3.ZERO
+		var best_err := 1e9
+		for f3 in inside_f:
+			var A := md.pos[md.idx[f3 * 3]]
+			var B := md.pos[md.idx[f3 * 3 + 1]]
+			var C := md.pos[md.idx[f3 * 3 + 2]]
+			var bc := _bary_2d(q3, Vector2(A.x, A.y), Vector2(B.x, B.y), Vector2(C.x, C.y))
+			var err := maxf(maxf(-bc.x, -bc.y), -bc.z)
+			if err < best_err:
+				best_err = err
+				best_f = f3
+				best_b = bc
+			if err <= 0.0:
+				break
+		var bb := best_b.clamp(Vector3.ZERO, Vector3.ONE)
+		var sm := bb.x + bb.y + bb.z
+		bb = bb / sm if sm > 1e-9 else Vector3(1, 0, 0)
+		var va := md.idx[best_f * 3]
+		var vb := md.idx[best_f * 3 + 1]
+		var vc := md.idx[best_f * 3 + 2]
+		var dom := va
+		if bb.y > bb.x and bb.y >= bb.z:
+			dom = vb
+		elif bb.z > bb.x and bb.z > bb.y:
+			dom = vc
+		var uvn := md.uv[va] * bb.x + md.uv[vb] * bb.y + md.uv[vc] * bb.z
+		var bo := PackedInt32Array()
+		var we := PackedFloat32Array()
+		bo.resize(4)
+		we.resize(4)
+		for k3 in 4:
+			bo[k3] = md.bones[dom * 4 + k3]
+			we[k3] = md.weights[dom * 4 + k3]
+		var zz := float(fit.call(q3.x - c.x, q3.y - c.y))
+		map[pi] = md.add_vert(Vector3(q3.x, q3.y, zz), md.nrm[dom], uvn, bo, we)
+	var idx2 := PackedInt32Array()
+	for f4 in keep:
+		idx2.append(md.idx[f4 * 3])
+		idx2.append(md.idx[f4 * 3 + 1])
+		idx2.append(md.idx[f4 * 3 + 2])
+	for t2 in new_tris:
+		idx2.append(map[t2[0]])
+		idx2.append(map[t2[1]])
+		idx2.append(map[t2[2]])
+	md.idx = idx2
+	_compact_unused(md)
+	# 法线：新区域及边界一圈按面法线重算（朝 +Z 外侧）
+	var acc_n: Dictionary = {}
+	for f5 in md.face_count():
+		var a5 := md.idx[f5 * 3]
+		var b5 := md.idx[f5 * 3 + 1]
+		var c5 := md.idx[f5 * 3 + 2]
+		var pa5 := md.pos[a5]
+		if Vector2(pa5.x - c.x, pa5.y - c.y).length() > r_in + 0.004:
+			continue
+		var fn := (md.pos[b5] - pa5).cross(md.pos[c5] - pa5)
+		for v5 in [a5, b5, c5]:
+			acc_n[v5] = (acc_n.get(v5, Vector3.ZERO) as Vector3) + fn
+	for v6 in acc_n:
+		var nn: Vector3 = (acc_n[v6] as Vector3)
+		if nn.length_squared() > 1e-20:
+			nn = nn.normalized()
+			if nn.z < 0.0:
+				nn = -nn
+			var pv := md.pos[int(v6)]
+			if Vector2(pv.x - c.x, pv.y - c.y).length() < r_in - 1e-5:
+				md.nrm[int(v6)] = nn
+	return new_tris.size()
+
+
+## 删除没有被任何三角引用的顶点（重排索引）。只在烘焙时、还没有 twin / dsp 内容时调用。
+static func _compact_unused(md: MeshData) -> void:
+	var used := PackedByteArray()
+	used.resize(md.vert_count())
+	for i in md.idx:
+		used[i] = 1
+	var remap := PackedInt32Array()
+	remap.resize(md.vert_count())
+	var m := MeshData.new()
+	for v in md.vert_count():
+		if used[v] == 1:
+			remap[v] = m.copy_vert(md, v)
+		else:
+			remap[v] = -1
+	for k in md.idx.size():
+		m.idx.append(remap[md.idx[k]])
+	md.pos = m.pos
+	md.nrm = m.nrm
+	md.uv = m.uv
+	md.bones = m.bones
+	md.weights = m.weights
+	md.dsp = m.dsp
+	md.idx = m.idx
+
+
+static func _xy_angle(p: Vector3, a: Vector3, b: Vector3) -> float:
+	var u := Vector2(a.x - p.x, a.y - p.y)
+	var v := Vector2(b.x - p.x, b.y - p.y)
+	return absf(u.angle_to(v))
+
+
+static func _xy_cross(a: Vector3, b: Vector3, c: Vector3) -> float:
+	return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+
+
+static func _delaunay_flip_xy(md: MeshData, c: Vector3, r: float) -> int:
+	var flips := 0
+	var in_r := func(f: int) -> bool:
+		for k in 3:
+			var p := md.pos[md.idx[f * 3 + k]]
+			if Vector2(p.x - c.x, p.y - c.y).length() > r:
+				return false
+		return true
+	var faces := PackedInt32Array()
+	for f in md.face_count():
+		if in_r.call(f):
+			faces.append(f)
+	for _sweep in 30:
+		var emap: Dictionary = {}
+		for f2 in faces:
+			for k2 in 3:
+				emap[Vector2i(md.idx[f2 * 3 + k2], md.idx[f2 * 3 + (k2 + 1) % 3])] = f2
+		var changed := 0
+		var done: Dictionary = {}
+		for f3 in faces:
+			if done.has(f3):
+				continue
+			for k3 in 3:
+				var a := md.idx[f3 * 3 + k3]
+				var b := md.idx[f3 * 3 + (k3 + 1) % 3]
+				var cc := md.idx[f3 * 3 + (k3 + 2) % 3]
+				var key := Vector2i(b, a)
+				if not emap.has(key):
+					continue
+				var g: int = emap[key]
+				if done.has(g) or g == f3:
+					continue
+				var d := -1
+				for k4 in 3:
+					var v := md.idx[g * 3 + k4]
+					if v != a and v != b:
+						d = v
+				if d < 0 or d == cc:
+					continue
+				var pa := md.pos[a]
+				var pb := md.pos[b]
+				var pc := md.pos[cc]
+				var pd := md.pos[d]
+				if _xy_angle(pc, pa, pb) + _xy_angle(pd, pa, pb) <= PI + 1e-4:
+					continue
+				var s0 := signf(_xy_cross(pa, pb, pc))
+				if signf(_xy_cross(pc, pa, pd)) != s0 or signf(_xy_cross(pd, pb, pc)) != s0:
+					continue
+				if emap.has(Vector2i(cc, d)) or emap.has(Vector2i(d, cc)):
+					continue
+				md.idx[f3 * 3] = cc
+				md.idx[f3 * 3 + 1] = a
+				md.idx[f3 * 3 + 2] = d
+				md.idx[g * 3] = d
+				md.idx[g * 3 + 1] = b
+				md.idx[g * 3 + 2] = cc
+				done[f3] = true
+				done[g] = true
+				changed += 1
+				break
+		flips += changed
+		if changed == 0:
+			break
+	return flips
+
+
 static func make_cavity(outer: MeshData, thickness: float, organ_front_z: float = -1e9, navel: Vector3 = Vector3.INF) -> MeshData:
 	var inner := MeshData.new()
 	var th := maxf(thickness, 0.004)
@@ -2430,6 +2896,36 @@ static func component_faces(md: MeshData, seeds: PackedInt32Array) -> Dictionary
 	return seen_f
 
 
+## 0.4.04：所有经共享顶点连通的三角块（按三角数从大到小）。每项 = {face: true} 字典。
+static func all_components(md: MeshData) -> Array:
+	var v2f: Dictionary = {}
+	for f in md.face_count():
+		for k in 3:
+			var v: int = md.idx[f * 3 + k]
+			if not v2f.has(v):
+				v2f[v] = []
+			(v2f[v] as Array).append(f)
+	var seen: Dictionary = {}
+	var out: Array = []
+	for f0 in md.face_count():
+		if seen.has(f0):
+			continue
+		var comp: Dictionary = {}
+		var stack: Array = [f0]
+		seen[f0] = true
+		while not stack.is_empty():
+			var f: int = stack.pop_back()
+			comp[f] = true
+			for k in 3:
+				for g in v2f.get(md.idx[f * 3 + k], []):
+					if not seen.has(g):
+						seen[g] = true
+						stack.append(g)
+		out.append(comp)
+	out.sort_custom(func(x: Dictionary, y: Dictionary) -> bool: return x.size() > y.size())
+	return out
+
+
 static func extract_faces(md: MeshData, inside_faces: Dictionary, loop_in_src: PackedInt32Array, loop_out_src: PackedInt32Array) -> Dictionary:
 	## 按给定三角集合拆成 inside/outside（twin 同步），返回与 extract_inside 相同格式。
 	var inside := MeshData.new()
@@ -2472,6 +2968,7 @@ static func extract_faces(md: MeshData, inside_faces: Dictionary, loop_in_src: P
 		"loop_out": loop_out,
 		"inside_faces": inside.face_count(),
 		"outside_faces": outside.face_count(),
+		"map_out": map_out,
 	}
 
 

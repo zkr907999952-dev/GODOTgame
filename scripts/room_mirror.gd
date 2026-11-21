@@ -24,7 +24,11 @@ const TEX_STEP := 128
 @export var mirror_height: float = 2.44
 ## 镜面贴图像素密度 / 屏幕像素密度。1.0 = 与屏幕等清晰。
 @export var resolution_scale: float = 1.0
-@export var max_tex_size: int = 2048
+@export var max_tex_size: int = 4096
+## 距离 LOD：可见镜面最近点在此距离内始终全分辨率，更远才按距离反比降低。
+const LOD_NEAR := 4.5
+const LOD_MIN := 0.4
+var last_lod: float = 1.0
 @export var tint: Color = Color(0.94, 0.96, 0.97)
 
 var _viewport: SubViewport
@@ -49,9 +53,10 @@ void vertex() {
 
 void fragment() {
 	// 镜中相机的屏幕右方向 = 镜面 -X，故 u 从 x1 往 x0 走（即镜像）。
+	// tex_rect = 屏幕上的镜面包围矩形（0..1）；镜中相机画面左右翻转。
 	vec2 uv = vec2(
-		(tex_rect.x + tex_rect.z - local_xy.x) / tex_rect.z,
-		(tex_rect.y + tex_rect.w - local_xy.y) / tex_rect.w
+		(tex_rect.x + tex_rect.z - SCREEN_UV.x) / tex_rect.z,
+		(SCREEN_UV.y - tex_rect.y) / tex_rect.w
 	);
 	ALBEDO = texture(mirror_tex, uv).rgb * tint;
 }
@@ -145,58 +150,68 @@ func _update_mirror_camera(cam: Camera3D) -> bool:
 		if poly.size() < 3:
 			return false
 
-	# 2) 可见部分在镜面上的包围矩形 + 所需像素密度（屏幕像素 / 米）。
+	# 0.4.04：屏幕空间平面反射。旧版按镜面平面均匀采样，斜看时近处一端像素不够、
+	# 再被 max_tex_size 截断 → 模糊。现在镜中相机 = 主相机按镜面镜像，投影与主相机
+	# 一致，只渲染镜子在屏幕上的包围矩形，贴图像素与屏幕像素 1:1（与视角无关）；
+	# 只按距离降分辨率（LOD_NEAR 以内始终全分辨率）。
+	var vp_size := get_viewport().get_visible_rect().size
+	if vp_size.x < 1.0 or vp_size.y < 1.0 or cam.projection != Camera3D.PROJECTION_PERSPECTIVE:
+		return false
 	var lo := Vector2(INF, INF)
 	var hi := Vector2(-INF, -INF)
-	var density := 0.0
-	var prev_l := Vector2.ZERO
-	var prev_s := Vector2.ZERO
-	for i in poly.size() + 1:
-		var p := poly[i % poly.size()]
-		var l3 := inv * p
-		var l := Vector2(l3.x, l3.y)
-		var sp := cam.unproject_position(p)
-		if i > 0:
-			var phys := l.distance_to(prev_l)
-			if phys > 1e-4:
-				density = maxf(density, sp.distance_to(prev_s) / phys)
-		prev_l = l
-		prev_s = sp
-		lo = lo.min(l)
-		hi = hi.max(l)
-	var pad := 0.01
-	lo = (lo - Vector2(pad, pad)).max(Vector2(-hw, -hh))
-	hi = (hi + Vector2(pad, pad)).min(Vector2(hw, hh))
-	var rect_size := (hi - lo).max(Vector2(0.01, 0.01))
-
-	# 3) 贴图尺寸（分档 + 迟滞），矩形按贴图宽高比外扩，保证 1:1 无拉伸。
-	density *= resolution_scale
-	_sync_texture_size(rect_size * density)
+	var nearest := INF
+	for p in poly:
+		var sp := cam.unproject_position(p) / vp_size
+		lo = lo.min(sp)
+		hi = hi.max(sp)
+		nearest = minf(nearest, cam.global_position.distance_to(p))
+	var pad := Vector2(2.0, 2.0) / vp_size
+	lo = (lo - pad).max(Vector2.ZERO)
+	hi = (hi + pad).min(Vector2.ONE)
+	var rect := (hi - lo).max(Vector2(4.0, 4.0) / vp_size)
+	last_lod = 1.0 if nearest <= LOD_NEAR else clampf(LOD_NEAR / nearest, LOD_MIN, 1.0)
+	_sync_texture_size(rect * vp_size * resolution_scale * last_lod)
+	# 贴图宽高比经分档后与屏幕矩形不同：矩形按贴图宽高比外扩（保持 1:1 无拉伸）。
 	var tex := Vector2(_viewport.size)
-	var aspect := tex.x / tex.y
-	var center := (lo + hi) * 0.5
-	if rect_size.x / rect_size.y < aspect:
-		rect_size.x = rect_size.y * aspect
+	var want_aspect := tex.x / tex.y
+	var center := lo + rect * 0.5
+	var rect_px := rect * vp_size
+	if rect_px.x / rect_px.y < want_aspect:
+		rect.x = rect_px.y * want_aspect / vp_size.x
 	else:
-		rect_size.y = rect_size.x / aspect
-	lo = center - rect_size * 0.5
-	_mat.set_shader_parameter("tex_rect", Vector4(lo.x, lo.y, rect_size.x, rect_size.y))
+		rect.y = rect_px.x / want_aspect / vp_size.y
+	lo = center - rect * 0.5
+	_mat.set_shader_parameter("tex_rect", Vector4(lo.x, lo.y, rect.x, rect.y))
 
-	# 4) 镜像眼睛：p' = p - 2·dot(p - c, n)·n  ⇔ 本地 (x, y, d) → (x, y, -d)
-	var u := mxf.basis.x
-	var v := mxf.basis.y
+	# 镜像相机：位置/朝向按镜面反射；反射后基是左手系，取 -x 恢复右手系（画面因此左右翻转，
+	# 着色器里再翻回来 = 镜像）。
 	var n := mxf.basis.z
-	# 镜中相机正对镜面：前方(-Z) = n（从镜后望向房间），上 = 镜面上方，右 = -u。
-	_mirror_cam.global_transform = Transform3D(Basis(-u, v, -n), mxf * Vector3(eye.x, eye.y, -d))
+	var o := mxf.origin
+	var cb := cam.global_transform.basis.orthonormalized()
+	var refl := func(v: Vector3) -> Vector3: return v - 2.0 * v.dot(n) * n
+	var rx: Vector3 = refl.call(cb.x)
+	var ry: Vector3 = refl.call(cb.y)
+	var rz: Vector3 = refl.call(cb.z)
+	var ceye := cam.global_position
+	var reye := ceye - 2.0 * (ceye - o).dot(n) * n
+	_mirror_cam.global_transform = Transform3D(Basis(-rx, ry, rz), reye)
 
-	# 5) 离轴视锥：近裁面 = 镜面平面，近裁面上的窗口 = 上面的镜面矩形。
-	var near := maxf(d, 0.01)
-	var s := near / d
+	# 近裁面 = 镜子可见部分离镜中相机最近的深度：镜后（墙外）的东西基本都被裁掉。
+	var near := INF
+	for p in poly:
+		near = minf(near, (p - reye).dot(-rz))
+	near = maxf(near * 0.995, 0.01)
 	var far := maxf(cam.far + d, near + 1.0)
-	# 相机 x 轴 = -u：矩形中心相对眼睛投影点在相机坐标中的偏移为 (ex - cx, cy - ey)。
-	_mirror_cam.set_frustum(
-		rect_size.y * s, Vector2((eye.x - center.x) * s, (center.y - eye.y) * s), near, far
-	)
+	var asp := vp_size.x / vp_size.y
+	var th := tan(deg_to_rad(cam.fov) * 0.5)
+	var hgt := 2.0 * near * th
+	if cam.keep_aspect == Camera3D.KEEP_WIDTH:
+		hgt = 2.0 * near * th / asp
+	var wid := hgt * asp
+	# 主屏幕 x 映射到镜中相机 1-x（左右翻转）。
+	var cx := 1.0 - (lo.x + rect.x * 0.5)
+	var cy := lo.y + rect.y * 0.5
+	_mirror_cam.set_frustum(hgt * rect.y, Vector2((cx - 0.5) * wid, (0.5 - cy) * hgt), near, far)
 	_sync_mirror_env(cam)
 	if _mirror_cam.attributes != cam.attributes:
 		_mirror_cam.attributes = cam.attributes

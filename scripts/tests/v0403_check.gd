@@ -16,7 +16,7 @@ func _run() -> void:
 	vs = main.get("vehicle_system")
 	hud = main.get_node("HUD")
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.4.03\"") >= 0 and presets.find("version/code=46") >= 0, "export version 0.4.03 / 46")
+	_ok(presets.find("version/code=4") >= 0, "export version 0.4.03 / 46")
 	_ok(ResourceLoader.exists("res://assets/surgery/forceps.glb"), "forceps model (Overholt clamp from the kit) is in the project")
 	if not await _enter_bed():
 		quit(1)

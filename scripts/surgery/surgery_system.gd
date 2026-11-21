@@ -34,6 +34,10 @@ var cut_mode: String = "straight"  # "straight" | "ring"
 var thickness: float = WALL_THICKNESS
 var cut_open: bool = false
 var loop_ready: bool = false
+## 0.4.04：直线切口围出的独立皮瓣（如三刀交成的三角形），可像环切皮瓣一样抓取取走。
+var free_flap_ready: bool = false
+var free_flap_faces: int = 0
+var free_flaps_removed: int = 0
 var flap_peeled: bool = false
 var lofted_tris: int = 0
 ## 0.4.02：镜头碰撞忽略的分组（皮瓣、外露肠子、拉钩）。
@@ -45,6 +49,7 @@ var flap_node: Node3D = null
 var flap_kind: String = ""  # "rigid" | "softbody" | "verlet" | ""
 var cavity_exposed: bool = false
 var pose_locked: bool = false
+var navel_flattened: int = 0
 var last_path_count: int = 0
 const CATCH_LAYER := 8
 const STROKE_MIN_SPACING := 0.0045
@@ -751,7 +756,7 @@ func has_lofted_wall() -> bool:
 
 
 func can_grab_flap() -> bool:
-	return loop_ready and not flap_peeled
+	return (loop_ready and not flap_peeled) or free_flap_ready
 
 
 func has_persistent_state() -> bool:
@@ -938,6 +943,8 @@ func restore_body() -> void:
 	_baked = false
 	cut_open = false
 	loop_ready = false
+	free_flap_ready = false
+	free_flap_faces = 0
 	flap_peeled = false
 	cavity_exposed = false
 	persist = false
@@ -1010,6 +1017,8 @@ func set_tool(t: String) -> void:
 		_show_scalpel(false)
 	if tool != "retractor":
 		_hide_retractor_ghost()
+		if _retr_selected >= 0:
+			select_retractor(-1)
 	tool_changed.emit(tool)
 
 
@@ -1314,6 +1323,8 @@ func try_peel_at(origin: Vector3, dir: Vector3) -> bool:
 
 func peel_flap() -> bool:
 	_bake_pull()
+	if free_flap_ready and not (loop_ready and not flap_peeled):
+		return _peel_free_flap()
 	if not can_grab_flap() or _outer == null or _inner == null:
 		return false
 	# 0.3.9：环形切口已真正切开，皮瓣是独立连通块；按连通性取出（不再按 2D 环重新分类，也不会内外拓扑不一致）。
@@ -1396,6 +1407,171 @@ func peel_flap() -> bool:
 	persist = true
 	_update_cavity_visibility()
 	return true
+
+
+## ---- 0.4.04：直线切口围出的独立皮瓣 ----
+const FREE_FLAP_MIN_FACES := 6
+const FREE_FLAP_MAX_FRAC := 0.35
+
+
+## 外皮里除了身体主块以外的最大连通块（三角集合）；没有则空。
+func _free_flap_component() -> Dictionary:
+	if _outer == null:
+		return {}
+	var comps: Array = Geom.all_components(_outer)
+	if comps.size() < 2:
+		return {}
+	var total := _outer.face_count()
+	for k in range(1, comps.size()):
+		var c: Dictionary = comps[k]
+		if c.size() >= FREE_FLAP_MIN_FACES and c.size() < int(total * FREE_FLAP_MAX_FRAC):
+			return c
+	return {}
+
+
+func _ray_hits_free_flap(origin: Vector3, dir: Vector3) -> bool:
+	var comp := _free_flap_component()
+	if comp.is_empty():
+		return false
+	_refresh_posed()
+	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
+	return hit != null and comp.has(int((hit as Dictionary)["tri"]))
+
+
+func _detect_free_flap() -> void:
+	var c := _free_flap_component()
+	free_flap_faces = c.size()
+	free_flap_ready = c.size() > 0
+
+
+func _remap_ids(ids: PackedInt32Array, mp: Dictionary) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for id in ids:
+		var e := int(mp.get(id, -1))
+		if e >= 0:
+			out.append(e)
+	return out
+
+
+func _peel_free_flap() -> bool:
+	_finish_retr_release()
+	_bake_evert()
+	_ensure_twin()
+	var comp := _free_flap_component()
+	if comp.is_empty():
+		free_flap_ready = false
+		return false
+	# 只把身体那一侧的顶点映射过去（皮瓣独占的顶点不进身体网格）。
+	var flap_v: Dictionary = {}
+	for f in comp.keys():
+		for k in 3:
+			flap_v[_outer.idx[int(f) * 3 + k]] = true
+	var keep_src := PackedInt32Array()
+	for arr in [_lip_left, _lip_right, _flap_loop, _body_loop]:
+		for id in arr:
+			if not flap_v.has(id):
+				keep_src.append(id)
+	for r in _retractors:
+		var rv := int((r as Dictionary)["vid"])
+		if not flap_v.has(rv):
+			keep_src.append(rv)
+	var ext: Dictionary = Geom.extract_faces(_outer, comp, PackedInt32Array(), keep_src)
+	if int(ext.get("inside_faces", 0)) < 1 or int(ext.get("outside_faces", 0)) < 1:
+		return false
+	var mp: Dictionary = ext["map_out"]
+	var body_o: Geom.MeshData = ext["outside"]
+	var flap_o: Geom.MeshData = ext["inside"]
+	if body_o.twin == null:
+		body_o.twin = Geom.make_cavity(body_o, thickness, _organ_z, _navel_rest)
+	if flap_o.twin == null:
+		flap_o.twin = Geom.make_cavity(flap_o, thickness, _organ_z, _navel_rest)
+	var lf := _closed_ids(Geom.mesh_boundary_loop(flap_o))
+	if lf.size() < 4:
+		return false
+	# 截面：皮瓣那一侧的直切截面随皮瓣带走（身体那一侧的截面保留，正好封住洞缘）。
+	var poly := PackedVector2Array()
+	for vi in lf:
+		poly.append(Vector2(flap_o.pos[vi].x, flap_o.pos[vi].y))
+	var dropped := 0
+	for part in _wall_parts:
+		var pmd: Geom.MeshData = (part as Dictionary).get("md")
+		if pmd == null:
+			continue
+		var before := pmd.face_count()
+		(part as Dictionary)["md"] = _drop_faces_in_or_near(pmd, poly, SLIT_WIDTH * 0.4)
+		dropped += before - ((part as Dictionary)["md"] as Geom.MeshData).face_count()
+	free_flap_wall_dropped = dropped
+	_rebuild_wall_md()
+	lofted_tris = _wall_md.face_count()
+	# 身体网格换成去掉皮瓣后的那块；切口唇缘 / 拉钩顶点按新索引重映射。
+	_outer = body_o
+	_inner = body_o.twin
+	_lip_left = _remap_ids(_lip_left, mp)
+	_lip_right = _remap_ids(_lip_right, mp)
+	_lip_left_i = _lip_left
+	_lip_right_i = _lip_right
+	_flap_loop = _remap_ids(_flap_loop, mp)
+	_body_loop = _remap_ids(_body_loop, mp)
+	for ri in range(_retractors.size() - 1, -1, -1):
+		var rec: Dictionary = _retractors[ri]
+		var nv := int(mp.get(int(rec["vid"]), -1))
+		if nv < 0:
+			var nd: Node = rec.get("node")
+			if nd and is_instance_valid(nd):
+				nd.queue_free()
+			_retractors.remove_at(ri)
+		else:
+			rec["vid"] = nv
+	_retr_selected = -1
+	_start_eversion()
+	_rebuild_surgical_meshes(_outer, _inner, _wall_md)
+	_posed_dirty = true
+	# 皮瓣：外补丁 + 内补丁 + 周圈壁（与环切皮瓣同一做法）。
+	var flap_md := flap_o.clone()
+	var fo := flap_md.vert_count()
+	_append_mesh(flap_md, flap_o.twin)
+	var fil := PackedInt32Array()
+	for id2 in lf:
+		fil.append(id2 + fo)
+	Geom.loft_wall(flap_md, lf, fil, false)
+	_flap_outer_faces = flap_o.face_count()
+	if not _spawn_flap(flap_md, flap_o):
+		return false
+	free_flaps_removed += 1
+	cut_open = true
+	cavity_exposed = true
+	persist = true
+	_detect_free_flap()
+	_update_cavity_visibility()
+	return true
+
+
+var free_flap_wall_dropped: int = 0
+
+
+func _drop_faces_in_or_near(md: Geom.MeshData, poly: PackedVector2Array, tol: float) -> Geom.MeshData:
+	var keep := PackedInt32Array()
+	var dropped := 0
+	var n := poly.size()
+	for f in md.face_count():
+		var c3 := md.centroid(f)
+		var c := Vector2(c3.x, c3.y)
+		var hit := Geometry2D.is_point_in_polygon(c, poly)
+		if not hit:
+			for k in n:
+				var q := Geometry2D.get_closest_point_to_segment(c, poly[k], poly[(k + 1) % n])
+				if q.distance_to(c) < tol:
+					hit = true
+					break
+		if hit:
+			dropped += 1
+			continue
+		keep.append(md.idx[f * 3])
+		keep.append(md.idx[f * 3 + 1])
+		keep.append(md.idx[f * 3 + 2])
+	if dropped > 0:
+		md.idx = keep
+	return md
 
 
 ## 0.3.9：闭环索引首尾相接（loft 用 closed=false 走一整圈，避免重复首点产生零面积三角）。
@@ -1529,6 +1705,7 @@ func _append_mesh(dest: Geom.MeshData, src: Geom.MeshData) -> int:
 
 
 func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
+	_finish_retr_release()
 	_bake_pull()
 	if _outer == null or _inner == null or path.size() < 2:
 		return false
@@ -1622,6 +1799,8 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 	_start_eversion()
 	_rebuild_surgical_meshes(_outer, _inner, _wall_md)
 	_posed_dirty = true
+	if not closed:
+		_detect_free_flap()
 	# 0.4.0：切开后不再在皮肤上留粉红涂鸦线；改由切口边缘的红色渐变（_with_wound_color）表现。
 	_clear_trail()
 	_update_cavity_visibility()
@@ -1690,6 +1869,8 @@ func _bake_if_needed() -> bool:
 		return false
 	_outer = extracted["abdomen"]
 	_rest = extracted["rest"]
+	# 0.4.04：切割用的腹网（以及由它生成的内壁）去掉肚脐凹陷，彻底避免肚脐处切线嵌入 / 拆分出错面、粘连。
+	navel_flattened = Geom.flatten_navel(_outer, _navel_rest)
 	_band_edge = _boundary_vert_keys(_outer)
 	var organ_z := _organ_front_z()
 	_organ_z = organ_z
@@ -2874,6 +3055,7 @@ func _process(dt: float) -> void:
 	if xr != _xray_cached:
 		_xray_cached = xr
 		_update_cavity_visibility()
+	_step_retr_release(dt)
 	var _tg0 := Time.get_ticks_usec()
 	_update_guts(dt)
 	gut_update_usec = Time.get_ticks_usec() - _tg0
@@ -3115,6 +3297,15 @@ func _begin_grab(origin: Vector3, dir: Vector3) -> bool:
 	# 已剥离的皮瓣：点中则拿起、拖拽，松手时抛出。
 	if flap_node and is_instance_valid(flap_node) and _ray_hits_flap(origin, dir):
 		return _begin_flap_grab(origin, dir)
+	# 0.4.04：直线切口围出的独立皮瓣——点中它才撕下（点别处仍是拉扯切口皮肉）。
+	if free_flap_ready and not (loop_ready and not flap_peeled):
+		if _ray_hits_free_flap(origin, dir):
+			if peel_flap() and flap_node and is_instance_valid(flap_node):
+				return _begin_flap_grab(origin, dir)
+			return false
+		if cut_open:
+			return _begin_skin_grab(origin, dir)
+		return false
 	# 未剥离的闭环：先撕下皮瓣再拿在手里。
 	if can_grab_flap():
 		if peel_flap() and flap_node and is_instance_valid(flap_node):
@@ -3233,6 +3424,8 @@ func _begin_skin_grab(origin: Vector3, dir: Vector3) -> bool:
 ## （与 surgery_pull.gdshaderinc 同一公式）换算回绑定空间写进网格，再清零 shader 拉扯。
 ## 这样拉开 A 侧后再拉 B 侧（或另一条切口），A 侧保持张开；只有「复原身体」会清掉。
 func _bake_pull() -> bool:
+	if not _retr_release.is_empty():
+		_finish_retr_release()
 	if _pull_r < 1e-5 or _pull_off.length_squared() < 1e-10 or _outer == null or _skel == null:
 		return false
 	if _organs == null or not _organs.has_method("abdomen_frame"):
@@ -3457,11 +3650,30 @@ func _update_guts(dt: float) -> void:
 		fy = host.global_position.y
 	if is_on_exam_bed():
 		fy = maxf(fy, _catch_top_y())
+	# 0.4.04：系膜锚点 = 创缘一圈往创口中心收 20%、再往腹腔内 1cm（肠袢挂在创口周围）。
+	var na0 := Vector3.ZERO
+	for gp0 in _gut_pulls:
+		na0 += fr.basis * ((gp0 as Dictionary)["in_ab"] as Vector3)
+	na0 = na0.normalized() if na0.length_squared() > 1e-9 else Vector3.ZERO
+	var mes_anc := PackedVector3Array()
+	for q2 in rim:
+		mes_anc.append(q2.lerp(hole_c, 0.2) + na0 * 0.01)
+	var all_ropes: Array = []
+	for gp3 in _gut_pulls:
+		var r3: Node = (gp3 as Dictionary)["rope"]
+		if r3 != null and is_instance_valid(r3):
+			all_ropes.append(r3)
 	for gp2 in _gut_pulls:
 		var g: Dictionary = gp2
 		var rope: Node = g["rope"]
 		if rope == null or not is_instance_valid(rope):
 			continue
+		var oth: Array = []
+		for r4 in all_ropes:
+			if r4 != rope and int(r4.call("point_count")) > 0:
+				oth.append([(r4.call("points") as PackedVector3Array).duplicate(), (r4.call("radii") as PackedFloat32Array).duplicate()])
+		rope.set("others", oth)
+		rope.set("mes_anchors", mes_anc)
 		var c := _gut_pull_anchor(g, fr)
 		var spread: Vector3 = fr.basis * (g["spread_ab"] as Vector3)
 		var na: Vector3 = fr.basis * (g["in_ab"] as Vector3)
@@ -4171,6 +4383,10 @@ func _retractor_xf(vid: int, out_bind: Vector3, extra_off: Vector3 = Vector3.ZER
 	var z := -o                      # +z 指向切口（钩头那端）
 	var y := -n                      # 钩子朝 +y 弯进体内
 	var x := y.cross(z).normalized()
+	# 0.4.04：整把拉钩绕钩头往外翘 RETR_TILT_DEG：外端（手柄）离开皮肤，不再穿进身体。
+	var ta := deg_to_rad(RETR_TILT_DEG)
+	z = (z * cos(ta) - n * sin(ta)).normalized()
+	y = z.cross(x).normalized()
 	var b := Basis(x, y, z).orthonormalized()
 	var origin := p - z * RETR_HOOK_Z - y * (RETR_UNDER_Y - 0.0015)
 	return Transform3D(b, origin)
@@ -4225,7 +4441,9 @@ func _begin_retractor(origin: Vector3, dir: Vector3) -> bool:
 	# 点中已放好的拉钩柄：拿起并拖动（拖动 = 拉动它钩住的唇缘）。
 	var ri := _ray_hits_retractor(origin, dir)
 	if ri >= 0:
+		select_retractor(ri)
 		return _begin_retractor_drag(ri)
+	select_retractor(-1)
 	hover_tool(origin, dir)
 	if _retr_ghost_vid < 0:
 		return false
@@ -4256,7 +4474,7 @@ func place_retractor(vid: int, out_b: Vector3 = Vector3.ZERO) -> bool:
 	if _start_retractor_pull(_retractors.size() - 1):
 		_pull_off = _pull_axis * RETR_OPEN if _pull_axis.length_squared() > 1e-8 else _pull_off
 		_apply_pull_uniforms()
-		_bake_pull()
+		_bake_pull_tracked(_retractors.size() - 1)
 	_grab_active = false
 	_grab_kind = ""
 	_update_retractors()
@@ -4359,6 +4577,189 @@ func _update_retractors() -> void:
 		n.visible = true
 
 
+## ---- 0.4.04 拉钩选中 / 移除 ----
+const RETR_TILT_DEG := 14.0
+const RETR_RELEASE_T := 0.6
+var _retr_selected: int = -1
+var _retr_release: Array = []   # [{deltas: Array[[md, ids, d]], t}]
+var retractor_removed: int = 0
+signal retractor_selection_changed
+
+
+func selected_retractor() -> int:
+	return _retr_selected
+
+
+func select_retractor(ri: int) -> void:
+	if ri >= _retractors.size():
+		ri = -1
+	_retr_selected = ri
+	for i in _retractors.size():
+		var n: Node3D = (_retractors[i] as Dictionary)["node"]
+		if n and is_instance_valid(n):
+			_set_retractor_highlight(n, i == ri)
+	retractor_selection_changed.emit()
+
+
+func _set_retractor_highlight(n: Node3D, on: bool) -> void:
+	var ov: StandardMaterial3D = null
+	if on:
+		ov = StandardMaterial3D.new()
+		ov.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		ov.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		ov.albedo_color = Color(0.35, 0.85, 1.0, 0.35)
+		ov.no_depth_test = true
+	for mi in n.find_children("*", "MeshInstance3D", true, false):
+		(mi as MeshInstance3D).material_overlay = ov
+	if n is MeshInstance3D:
+		(n as MeshInstance3D).material_overlay = ov
+
+
+## 把当前拉扯写进网格，并把这次写入的位移记到第 ri 把拉钩名下。
+func _bake_pull_tracked(ri: int) -> bool:
+	_finish_retr_release()
+	_bake_evert()
+	var mds: Array = [_outer]
+	if _inner:
+		mds.append(_inner)
+	for part in _wall_parts:
+		var wmd: Geom.MeshData = (part as Dictionary).get("md")
+		if wmd:
+			mds.append(wmd)
+	if _wrap:
+		mds.append(_wrap)
+	var before: Array = []
+	for md in mds:
+		before.append((md as Geom.MeshData).pos.duplicate())
+	var ok := _bake_pull()
+	if ri < 0 or ri >= _retractors.size():
+		return ok
+	var rec: Dictionary = _retractors[ri]
+	var dl: Array = rec.get("deltas", [])
+	for k in mds.size():
+		var md2: Geom.MeshData = mds[k]
+		var b0: PackedVector3Array = before[k]
+		var ids := PackedInt32Array()
+		var dd := PackedVector3Array()
+		for v in mini(b0.size(), md2.vert_count()):
+			var d := md2.pos[v] - b0[v]
+			if d.length_squared() > 1e-14:
+				ids.append(v)
+				dd.append(d)
+		if not ids.is_empty():
+			dl.append([md2, ids, dd])
+	rec["deltas"] = dl
+	return ok
+
+
+## 移除第 ri 把拉钩：拉钩消失，它写进网格的拉开位移按弹簧曲线撤回（皮瓣像松手一样回弹）。
+func remove_retractor(ri: int) -> bool:
+	if ri < 0 or ri >= _retractors.size():
+		return false
+	if _grab_active and _grab_kind == "retractor":
+		_end_grab(false)
+	_finish_retr_release()
+	var rec: Dictionary = _retractors[ri]
+	var n: Node = rec.get("node")
+	if n and is_instance_valid(n):
+		n.queue_free()
+	_retractors.remove_at(ri)
+	_retr_selected = -1
+	_retr_drag = -1
+	var dl: Array = rec.get("deltas", [])
+	if not dl.is_empty():
+		_retr_release.append({"deltas": dl, "t": 0.0, "w": 0.0})
+	retractor_removed += 1
+	select_retractor(-1)
+	return true
+
+
+func remove_selected_retractor() -> bool:
+	return remove_retractor(_retr_selected)
+
+
+## 撤回曲线：欠阻尼弹簧，0 → 1，略过冲后停在 1。
+func _retr_release_w(t: float) -> float:
+	if t >= RETR_RELEASE_T:
+		return 1.0
+	return 1.0 - exp(-t * 9.0) * cos(t * 13.0)
+
+
+func _step_retr_release(dt: float) -> void:
+	if _retr_release.is_empty():
+		return
+	var any := false
+	for rel in _retr_release:
+		var r: Dictionary = rel
+		r["t"] = float(r["t"]) + dt
+		var w1 := _retr_release_w(float(r["t"]))
+		var dw := w1 - float(r["w"])
+		r["w"] = w1
+		if absf(dw) > 1e-6:
+			_apply_retr_deltas(r["deltas"], -dw)
+			any = true
+	var keep: Array = []
+	for rel2 in _retr_release:
+		if float((rel2 as Dictionary)["t"]) < RETR_RELEASE_T:
+			keep.append(rel2)
+	_retr_release = keep
+	if any:
+		_after_retr_delta()
+
+
+func _apply_retr_deltas(dl: Array, k: float) -> void:
+	for e in dl:
+		var md: Geom.MeshData = e[0]
+		var ids: PackedInt32Array = e[1]
+		var dd: PackedVector3Array = e[2]
+		for i in ids.size():
+			if ids[i] < md.vert_count():
+				md.pos[ids[i]] += dd[i] * k
+
+
+func _after_retr_delta() -> void:
+	_rebuild_wall_md()
+	_rebuild_surgical_meshes(_outer, _inner, _wall_md)
+	_posed_dirty = true
+	_update_retractors()
+
+
+## 有新的拉扯 / 切割要写网格前，把还没撤完的位移一次撤完。
+func _finish_retr_release() -> void:
+	if _retr_release.is_empty():
+		return
+	for rel in _retr_release:
+		var r: Dictionary = rel
+		var dw := 1.0 - float(r["w"])
+		if absf(dw) > 1e-6:
+			_apply_retr_deltas(r["deltas"], -dw)
+	_retr_release.clear()
+	_after_retr_delta()
+
+
+func retractor_releasing() -> bool:
+	return not _retr_release.is_empty()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if not active or _retractors.is_empty():
+		return
+	if event is InputEventKey and (event as InputEventKey).pressed and not (event as InputEventKey).echo:
+		var kc := (event as InputEventKey).keycode
+		if (kc == KEY_DELETE or kc == KEY_BACKSPACE) and _retr_selected >= 0:
+			remove_selected_retractor()
+			get_viewport().set_input_as_handled()
+	elif event is InputEventMouseButton and (event as InputEventMouseButton).pressed and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_RIGHT:
+		var cam := get_viewport().get_camera_3d()
+		if cam == null:
+			return
+		var mp := (event as InputEventMouseButton).position
+		var ri := _ray_hits_retractor(cam.project_ray_origin(mp), cam.project_ray_normal(mp))
+		if ri >= 0:
+			remove_retractor(ri)
+			get_viewport().set_input_as_handled()
+
+
 func _clear_retractors() -> void:
 	for r in _retractors:
 		var n: Node = (r as Dictionary)["node"]
@@ -4367,6 +4768,8 @@ func _clear_retractors() -> void:
 	_retractors = []
 	_retr_drag = -1
 	_retr_placing = false
+	_retr_selected = -1
+	_retr_release.clear()
 	if _retr_ghost and is_instance_valid(_retr_ghost):
 		_retr_ghost.queue_free()
 	_retr_ghost = null
@@ -4814,8 +5217,8 @@ func _end_grab(do_throw: bool) -> void:
 		# 松手后弹簧收回，保留弹性手感。
 		_split_drag = _pull_off.length()
 	elif _grab_kind == "retractor":
-		# 拉钩固定：松手立即把位移写进网格，不回弹。
-		_bake_pull()
+		# 拉钩固定：松手立即把位移写进网格，不回弹（记下这把拉钩造成的位移，移除时可撤销）。
+		_bake_pull_tracked(_retr_drag)
 		_retr_drag = -1
 	_grab_active = false
 	_grab_kind = ""
