@@ -31,6 +31,7 @@ var _btn_tool_scalpel: Button
 var _btn_tool_grab: Button
 var _btn_tool_retractor: Button
 var _btn_tool_forceps: Button
+var _btn_retr_remove: Button
 var _btn_cut_straight: Button
 var _btn_cut_ring: Button
 var _btn_cut_confirm: Button
@@ -3610,6 +3611,8 @@ func _bind_surgery() -> void:
 		s.connect("cut_mode_changed", _on_surgery_cut_mode_changed)
 	if s.has_signal("preview_changed") and not s.is_connected("preview_changed", _on_surgery_preview_changed):
 		s.connect("preview_changed", _on_surgery_preview_changed)
+	if s.has_signal("retractor_selection_changed") and not s.is_connected("retractor_selection_changed", _refresh_surgery_ui):
+		s.connect("retractor_selection_changed", _refresh_surgery_ui)
 	_refresh_surgery_ui()
 
 
@@ -3682,6 +3685,13 @@ func _build_surgery_ui(root: Control) -> void:
 	_btn_tool_forceps.toggle_mode = true
 	_btn_tool_forceps.pressed.connect(func(): _on_surgery_tool_picked("forceps"))
 	_surgery_bar.add_child(_btn_tool_forceps)
+
+	# 0.4.04：选中的拉钩可移除（手机上没有 Delete / 右键）。
+	_btn_retr_remove = _make_chrome_button("移除拉钩")
+	_btn_retr_remove.name = "SurgeryRemoveRetractorButton"
+	_btn_retr_remove.visible = false
+	_btn_retr_remove.pressed.connect(_on_remove_retractor_pressed)
+	_surgery_bar.add_child(_btn_retr_remove)
 
 	# 预留后续器械空位（缝合），本版不启用。
 	for label in ["缝合"]:
@@ -3867,6 +3877,8 @@ func _refresh_surgery_ui() -> void:
 		if _btn_tool_forceps:
 			_btn_tool_forceps.set_pressed_no_signal(tool == "forceps")
 			_style_button(_btn_tool_forceps, tool == "forceps")
+		if _btn_retr_remove:
+			_btn_retr_remove.visible = s != null and s.has_method("selected_retractor") and int(s.call("selected_retractor")) >= 0
 		if _surgery_cut_bar:
 			_surgery_cut_bar.visible = tool == "scalpel"
 			_surgery_cut_bar.position = Vector2(sl, st + 92.0)
@@ -3884,3 +3896,10 @@ func _refresh_surgery_ui() -> void:
 	else:
 		if _surgery_cut_bar:
 			_surgery_cut_bar.visible = false
+
+
+func _on_remove_retractor_pressed() -> void:
+	var s := _surgery()
+	if s and s.has_method("remove_selected_retractor"):
+		s.call("remove_selected_retractor")
+	_refresh_surgery_ui()

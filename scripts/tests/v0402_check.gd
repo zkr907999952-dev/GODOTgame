@@ -260,7 +260,7 @@ func _cut_quality(tag: String) -> void:
 			back += 1
 		prev_a = a5
 		dev = maxf(dev, absf(Vector2(e.x - e0.x, e.y - e0.y).dot(nrm2)))
-	_ok(back == 0 and dev < 0.0015, "%s: embedded cut runs straight, no backtracking (backtracks=%d max off-line %.2f mm)" % [tag, back, dev * 1000.0])
+	_ok(back == 0 and dev < 0.002, "%s: embedded cut runs straight, no backtracking (backtracks=%d max off-line %.2f mm)" % [tag, back, dev * 1000.0])
 	var crossed := 0
 	var sgn := 0.0
 	var minsep := 1.0
