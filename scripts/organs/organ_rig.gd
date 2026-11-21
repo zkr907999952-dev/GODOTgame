@@ -169,6 +169,7 @@ func setup(skel: Skeleton3D) -> bool:
 	_fit_hit_ellipsoid()
 	_build_organ_aabbs()
 	_install_skin_xray()
+	_build_vulva_flaps()
 	if not _build_organs():
 		return false
 	_build_fx()
@@ -182,6 +183,57 @@ func setup(skel: Skeleton3D) -> bool:
 	_push_uniforms()
 	print("organs: ready meshes=", organ_meshes.size(), " skin=", skin_meshes.size(), " navel=", _navel_rest)
 	return true
+
+
+# ------------------------------------------------------------------ 0.4.05 外阴分瓣
+const VulvaFlaps := preload("res://scripts/body/vulva_flaps.gd")
+var vulva = null
+
+
+func _build_vulva_flaps() -> void:
+	var vg = meta.get("vagina", null)
+	if not (vg is Dictionary):
+		return
+	var vs: Array = vg["vulva_skin"]
+	var op: Array = vg["opening"]
+	var vp := Vector3(vs[0], vs[1], vs[2])
+	var best: MeshInstance3D = null
+	var bn := 0
+	for mi in skin_meshes:
+		var m := (mi as MeshInstance3D).mesh
+		if m == null or m.get_surface_count() < 1:
+			continue
+		var pos: PackedVector3Array = m.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+		var n := 0
+		for p in pos:
+			if absf(p.x) < 0.017 and absf(p.y - vp.y) < 0.01 and p.z > 0.03 and p.z < 0.08:
+				n += 1
+		if n > bn:
+			bn = n
+			best = mi
+	if best == null:
+		return
+	var vf = VulvaFlaps.new()
+	if vf.build(best, vp, Vector3(op[0], op[1], op[2])):
+		vulva = vf
+		vf.flaps_mi.add_to_group("vulva_flaps")
+		print("organs: vulva flaps faces=", vf.removed_faces, " slit verts=", vf.slit_verts)
+	else:
+		push_warning("organs: vulva flap split failed")
+
+
+## 外阴拨开（0 = 合拢，1 = 完全拨开）。为之后的拨开工具准备的接口。
+func set_vulva_spread(amount: float) -> void:
+	if vulva:
+		vulva.set_spread(amount)
+
+
+func vulva_spread() -> float:
+	return vulva.spread() if vulva else 0.0
+
+
+func vulva_flaps():
+	return vulva
 
 
 # ------------------------------------------------------------------ public API

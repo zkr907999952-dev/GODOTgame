@@ -12,12 +12,14 @@ const SIDES := 10
 const RADIUS := 0.0105
 const ITER := 6
 const GRAVITY := Vector3(0, -9.8, 0)
-const DAMP := 0.985
+const DAMP := 0.96             # 0.4.05：加阻尼（原 0.985），防抖动
+const MAX_SPEED := 1.2         # 质点最大速度（m/s），防甩动时惯性过冲
+const MAX_STRETCH := 1.05      # 0.4.05：每节最长 1.05 倍静止长度（防惯性拉长）
 const SEG := 0.022            # 一节的长度
 const MIN_PTS := 7
 const MAX_PTS := 64
 const K_IN := 2               # 每端钉在创口通道里的质点数
-const MES_EVERY := 3          # 每 3 节一根系膜
+const MES_EVERY := 6          # 0.4.05：每 6 节一根系膜（间距加大，不那么密）
 const MES_K := 0.05           # 系膜弹簧每次迭代校正比例（越小越软）
 const ALONG_UNIT := 0.5
 const SKIN_CELL := 0.02
@@ -61,6 +63,12 @@ var gut_pushes: int = 0
 var _rad: PackedFloat32Array = PackedFloat32Array()
 var _kk: PackedFloat32Array = PackedFloat32Array()
 var _mes_ai: Dictionary = {}
+## 0.4.05：放回——一节一节缩回腹腔
+var retracting := false
+var _retract_rate := 0.0
+var _shrink_side := 0
+var last_max_stretch := 1.0
+const RETRACT_END_LEN := 0.05
 
 
 func _ready() -> void:
@@ -147,6 +155,10 @@ func step(dt: float) -> void:
 	if not _inited:
 		_init_chain()
 	fed_len = minf(fed_len, max_len)
+	if retracting:
+		hold_index = -1
+		fed_len = maxf(RETRACT_END_LEN, fed_len - _retract_rate * dt)
+		_shrink()
 	_grow()
 	var n := _p.size()
 	var rest := fed_len / float(n - 1)
@@ -154,6 +166,9 @@ func step(dt: float) -> void:
 	for i in range(1, n - 1):
 		var cur := _p[i]
 		var v := (cur - _q[i]) * DAMP
+		var vmax := MAX_SPEED * dt
+		if v.length_squared() > vmax * vmax:
+			v = v.normalized() * vmax
 		_q[i] = cur
 		_p[i] = cur + v + GRAVITY * dt * dt
 	var mes_len := mesentery_length()
@@ -197,7 +212,74 @@ func step(dt: float) -> void:
 	_pin_channel()
 	if hold_index > 0 and hold_index < n - 1:
 		_p[hold_index] = hold_pos
+	_limit_stretch(rest)
 	_build_mesh()
+
+
+## 0.4.05：硬性限制每节长度 ≤ MAX_STRETCH × rest（来回多遍直到满足），并记录最大拉伸比。
+func _limit_stretch(rest: float) -> void:
+	var n := _p.size()
+	var lim := rest * MAX_STRETCH
+	# 前 12 遍钳夹点固定（最多 60 遍）；仍不满足（钳尖拉得比肠管还远）就让钳夹点也被肠管拽回来
+	for _pass in 60:
+		var worst := 0.0
+		var free_hold := _pass >= 12
+		for k in n - 1:
+			var i := k if _pass % 2 == 0 else n - 2 - k
+			var a := _p[i]
+			var b := _p[i + 1]
+			var d := b - a
+			var l := d.length()
+			if l <= lim or l < 1e-7:
+				continue
+			var fa := _fixed(i) and not (free_hold and i == hold_index)
+			var fb := _fixed(i + 1) and not (free_hold and i + 1 == hold_index)
+			if fa and fb:
+				continue
+			worst = maxf(worst, l / lim)
+			var corr := d * ((l - lim) / l)
+			if fa:
+				_p[i + 1] = b - corr
+			elif fb:
+				_p[i] = a + corr
+			else:
+				_p[i] = a + corr * 0.5
+				_p[i + 1] = b - corr * 0.5
+		if worst <= 1.0005:
+			break
+	if hold_index > 0 and hold_index < n - 1:
+		hold_pos = _p[hold_index]
+	var mx := 0.0
+	for i2 in n - 1:
+		if _fixed(i2) and _fixed(i2 + 1):
+			continue
+		var r2 := _p[i2].distance_to(_p[i2 + 1]) / maxf(rest, 1e-6)
+		mx = maxf(mx, r2)
+	last_max_stretch = mx
+
+
+## 开始放回：约 t 秒内一节节缩回腹腔。
+func start_retract(t: float = 1.0) -> void:
+	retracting = true
+	hold_index = -1
+	_retract_rate = maxf(fed_len - RETRACT_END_LEN, 0.0) / maxf(t, 0.05)
+
+
+func retract_done() -> bool:
+	return retracting and fed_len <= RETRACT_END_LEN + 1e-4 and _p.size() <= _want_pts()
+
+
+## 缩回：从两侧出口处交替去掉一节（与 _grow 相反）。
+func _shrink() -> void:
+	var want := _want_pts()
+	while _p.size() > want and _p.size() > MIN_PTS:
+		var n := _p.size()
+		var at := K_IN + 1 if _shrink_side == 0 else n - 2 - K_IN
+		at = clampi(at, 1, n - 2)
+		_p.remove_at(at)
+		_q.remove_at(at)
+		_mes_ai.clear()
+		_shrink_side = 1 - _shrink_side
 
 
 ## 系膜松弛长度：随扯出长度增加，但封顶——肠袢挂在创口周围。

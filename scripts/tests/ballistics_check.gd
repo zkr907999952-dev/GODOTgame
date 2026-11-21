@@ -176,9 +176,9 @@ func _run() -> void:
 	var q: Dictionary = organs.call("ballistic_query", origin, dir, {"overpen": 0.85, "category": "rifle", "energy": 1.0, "impulse": 0.82})
 	_ok(bool(q.get("hit", false)), "query hits abdomen")
 	_ok(bool(q.get("gut", false)), "intestine intersection flagged (gut=%s)" % q.get("gut"))
-	# 子宫在肚脐下方，略向下瞄准再查一次
-	var u_origin: Vector3 = navel + Vector3(0, -0.12, 0) + fwd * 0.55
-	var u_dir: Vector3 = ((navel + Vector3(0, -0.14, 0)) - u_origin).normalized()
+	# 子宫在肚脐下方（0.4.05 上移后约 −7..−13 cm），略向下瞄准再查一次
+	var u_origin: Vector3 = navel + Vector3(0, -0.09, 0) + fwd * 0.55
+	var u_dir: Vector3 = ((navel + Vector3(0, -0.10, 0)) - u_origin).normalized()
 	var uq: Dictionary = organs.call("ballistic_query", u_origin, u_dir, {"overpen": 0.85, "category": "rifle"})
 	_ok(bool(uq.get("uterus", false)) or bool(q.get("uterus", false)),
 		"uterus intersection flagged (q=%s uq=%s)" % [q.get("uterus"), uq.get("uterus")])

@@ -688,7 +688,7 @@ func _run() -> void:
 		"validate: organs centroid=", cen, " navel_y=", navy, " small-int top=", snappedf(gut_top, 0.001),
 		" uterus_top=", snappedf(ut_top, 0.001), " out_skin=", out_skin, "/", cnt, " out_xray=", out_win
 	)
-	if cen.y > navy - 0.01 or gut_top > navy + 0.13 or ut_top > navy - 0.08 or out_skin > 0 or out_win > 0:
+	if cen.y > navy - 0.01 or gut_top > navy + 0.13 or ut_top > navy - 0.055 or out_skin > 0 or out_win > 0:
 		push_error("validate: organ layout off (centroid must be below navel, inside skin and x-ray window)")
 		quit(1)
 		return
@@ -731,9 +731,11 @@ func _run() -> void:
 		return
 	print("validate: breast jiggle OK")
 
+	# 0.4.05：子宫上移后移（用户蓝线），肠子不再整体在子宫之上；改查肠子底部不低于膀胱顶以下 1cm。
 	var gmin: Array = (mt["guts"] as Dictionary)["min"]
-	if float(gmin[1]) < ut_top - 0.03:
-		push_error("validate: guts should sit above the uterus (user red box)")
+	var pmin: Array = (mt["pelvis"] as Dictionary)["min"]
+	if float(gmin[1]) < float(pmin[1]) + 0.03:
+		push_error("validate: guts should stay above the pelvic floor")
 		quit(1)
 		return
 

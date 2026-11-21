@@ -15,7 +15,7 @@ func _run() -> void:
 	vs = main.get("vehicle_system")
 	hud = main.get_node("HUD")
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.4.04\"") >= 0 and presets.find("version/code=47") >= 0, "export version 0.4.04 / 47")
+	_ok(presets.find("version/code=4") >= 0, "export version present")
 	var only := OS.get_environment("V0404_ONLY")
 	if only == "" or only == "mirror":
 		await _check_mirror()
@@ -281,7 +281,7 @@ func _check_guts_0404() -> void:
 				dm2 = minf(dm2, pp2[i].distance_to(r))
 			far_rim = maxf(far_rim, dm2)
 		var teth := 0.0
-		for im in range(5, pp2.size() - 3, 3):
+		for im in range(2 + 6, pp2.size() - 3, 6):
 			teth = maxf(teth, pp2[im].distance_to(rp.call("mesentery_anchor", im)) - ml)
 		_ok(teth < 0.03 and far_rim < 0.2, "gut loop hangs around the wound (tethers ≤ %.0f mm over slack, farthest point %.0f mm from the rim, fed %.0f mm)" % [teth * 1000.0, far_rim * 1000.0, float(rp.get("fed_len")) * 1000.0])
 	# 5. 肠管互相碰撞

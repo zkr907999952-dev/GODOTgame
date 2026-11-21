@@ -946,6 +946,8 @@ func restore_body() -> void:
 	free_flap_ready = false
 	free_flap_faces = 0
 	flap_peeled = false
+	_cuts.clear()
+	_cuts_src = null
 	cavity_exposed = false
 	persist = false
 	lofted_tris = 0
@@ -1376,6 +1378,8 @@ func peel_flap() -> bool:
 	_wall_parts.append({"md": peel_wall, "ring": -1})
 	_rebuild_wall_md()
 	lofted_tris = _wall_md.face_count()
+	_remap_wall_src(ext_o.get("map_out", null))
+	_remap_cuts(ext_o.get("map_out", null), body_o)
 	_outer = body_o
 	_inner = body_i
 	_lip_left = loop_body_o
@@ -1492,20 +1496,31 @@ func _peel_free_flap() -> bool:
 	var poly := PackedVector2Array()
 	for vi in lf:
 		poly.append(Vector2(flap_o.pos[vi].x, flap_o.pos[vi].y))
+	# 0.4.05：按截面顶点的来源顶点判断——来源顶点属于皮瓣的截面三角随皮瓣带走（不再按距离猜，
+	# 外翻后截面离切线 2~5mm，按距离会漏掉皮瓣内侧的一整条截面）。
 	var dropped := 0
 	for part in _wall_parts:
 		var pmd: Geom.MeshData = (part as Dictionary).get("md")
 		if pmd == null:
 			continue
 		var before := pmd.face_count()
-		(part as Dictionary)["md"] = _drop_faces_in_or_near(pmd, poly, SLIT_WIDTH * 0.4)
+		var src: PackedInt32Array = (part as Dictionary).get("src", PackedInt32Array())
+		if src.size() == pmd.vert_count():
+			_drop_wall_faces_by_src(pmd, src, flap_v)
+		else:
+			(part as Dictionary)["md"] = _drop_faces_in_or_near(pmd, poly, SLIT_WIDTH * 0.4)
 		dropped += before - ((part as Dictionary)["md"] as Geom.MeshData).face_count()
+	_remap_wall_src(mp)
+	_remap_cuts(mp, body_o)
 	free_flap_wall_dropped = dropped
 	_rebuild_wall_md()
 	lofted_tris = _wall_md.face_count()
 	# 身体网格换成去掉皮瓣后的那块；切口唇缘 / 拉钩顶点按新索引重映射。
 	_outer = body_o
 	_inner = body_o.twin
+	free_flap_wall_dropped += _drop_bridging_wall_faces()
+	_rebuild_wall_md()
+	lofted_tris = _wall_md.face_count()
 	_lip_left = _remap_ids(_lip_left, mp)
 	_lip_right = _remap_ids(_lip_right, mp)
 	_lip_left_i = _lip_left
@@ -1547,6 +1562,175 @@ func _peel_free_flap() -> bool:
 
 
 var free_flap_wall_dropped: int = 0
+var bridging_faces_cleared: int = 0
+var _loft_src: PackedInt32Array = PackedInt32Array()
+## 0.4.05：所有切口的唇缘（外皮索引）：[{left, right, closed}]；_cuts_src = 这些索引所属的外皮网格。
+var _cuts: Array = []
+var _cuts_src: Object = null
+
+
+func cut_count() -> int:
+	return _cuts.size() if _cuts_src == _outer else 0
+
+
+func cut_lips(i: int) -> Array:
+	if i < 0 or i >= cut_count():
+		return []
+	return [(_cuts[i] as Dictionary)["left"], (_cuts[i] as Dictionary)["right"]]
+
+
+func _drop_wall_faces_by_src(md: Geom.MeshData, src: PackedInt32Array, flap_v: Dictionary) -> void:
+	var keep := PackedInt32Array()
+	for f in md.face_count():
+		var hit := 0
+		for k in 3:
+			if flap_v.has(src[md.idx[f * 3 + k]]):
+				hit += 1
+		if hit >= 2:
+			continue
+		for k2 in 3:
+			keep.append(md.idx[f * 3 + k2])
+	md.idx = keep
+
+
+func _remap_wall_src(mp) -> void:
+	for part in _wall_parts:
+		var d := part as Dictionary
+		var src: PackedInt32Array = d.get("src", PackedInt32Array())
+		if src.is_empty():
+			continue
+		if not (mp is Dictionary):
+			d["src"] = PackedInt32Array()
+			continue
+		var out := PackedInt32Array()
+		out.resize(src.size())
+		for i in src.size():
+			out[i] = int((mp as Dictionary).get(src[i], -1))
+		d["src"] = out
+
+
+func _remap_cuts(mp, new_outer: Object) -> void:
+	if _cuts_src != _outer or not (mp is Dictionary):
+		_cuts.clear()
+		_cuts_src = new_outer
+		return
+	var keep: Array = []
+	for c in _cuts:
+		var l := _remap_ids((c as Dictionary)["left"], mp)
+		var r := _remap_ids((c as Dictionary)["right"], mp)
+		if l.size() >= 2 and r.size() >= 2:
+			keep.append({"left": l, "right": r, "closed": (c as Dictionary)["closed"]})
+	_cuts = keep
+	_cuts_src = new_outer
+
+
+## 截面三角的来源顶点沿外皮边界链必须彼此靠近（≤ BRIDGE_HOPS 条边界边）：跨过另一条切口缝隙的截面三角
+## （交叉处一侧唇连到另一侧唇）是无效截面，删掉。来源顶点已不在外皮边界上的（-1 / 被缝回）也删掉。
+const BRIDGE_HOPS := 6
+
+
+func _drop_bridging_wall_faces() -> int:
+	if _outer == null:
+		return 0
+	var adj: Dictionary = {}
+	for e in _boundary_edges(_outer):
+		var ev := e as Vector2i
+		if not adj.has(ev.x):
+			adj[ev.x] = []
+		if not adj.has(ev.y):
+			adj[ev.y] = []
+		(adj[ev.x] as Array).append(ev.y)
+		(adj[ev.y] as Array).append(ev.x)
+	var cache: Dictionary = {}
+	var near := func(a: int, b: int) -> bool:
+		if a == b:
+			return true
+		var key := Vector2i(mini(a, b), maxi(a, b))
+		if cache.has(key):
+			return cache[key]
+		var frontier: Array = [a]
+		var seen: Dictionary = {a: true}
+		var found := false
+		for _h in BRIDGE_HOPS:
+			var nxt: Array = []
+			for v in frontier:
+				for w in adj.get(v, []):
+					if w == b:
+						found = true
+						break
+					if not seen.has(w):
+						seen[w] = true
+						nxt.append(w)
+				if found:
+					break
+			if found or nxt.is_empty():
+				break
+			frontier = nxt
+		cache[key] = found
+		return found
+	var total := 0
+	for part in _wall_parts:
+		var d := part as Dictionary
+		var md: Geom.MeshData = d.get("md")
+		var src: PackedInt32Array = d.get("src", PackedInt32Array())
+		if md == null or src.size() != md.vert_count():
+			continue
+		var keep := PackedInt32Array()
+		var dropped := 0
+		for f in md.face_count():
+			var s0 := src[md.idx[f * 3]]
+			var s1 := src[md.idx[f * 3 + 1]]
+			var s2 := src[md.idx[f * 3 + 2]]
+			var ok := s0 >= 0 and s1 >= 0 and s2 >= 0 and adj.has(s0) and adj.has(s1) and adj.has(s2)
+			ok = ok and bool(near.call(s0, s1)) and bool(near.call(s1, s2)) and bool(near.call(s0, s2))
+			if not ok:
+				dropped += 1
+				continue
+			keep.append(md.idx[f * 3])
+			keep.append(md.idx[f * 3 + 1])
+			keep.append(md.idx[f * 3 + 2])
+		if dropped > 0:
+			md.idx = keep
+			total += dropped
+	return total
+
+
+## 0.4.05：把 vid 所在的那一刀设为当前切口（拿取 / 拉钩的单侧唇拉开按它算）。
+func _activate_cut_for(vid: int) -> bool:
+	if vid < 0 or cut_count() == 0:
+		return false
+	for c in _cuts:
+		var d := c as Dictionary
+		var l: PackedInt32Array = d["left"]
+		var r: PackedInt32Array = d["right"]
+		if l.has(vid) or r.has(vid):
+			if l == _lip_left and r == _lip_right:
+				return true
+			_lip_left = l
+			_lip_right = r
+			_lip_left_i = l
+			_lip_right_i = r
+			_lip_closed = bool(d["closed"])
+			return true
+	return false
+
+
+## 离绑定点最近的唇缘顶点所在的切口设为当前切口。
+func _activate_cut_near(bind_p: Vector3) -> void:
+	if cut_count() == 0:
+		return
+	var best := -1
+	var bd := 1e9
+	for c in _cuts:
+		for arr in [(c as Dictionary)["left"], (c as Dictionary)["right"]]:
+			for v in arr:
+				if v >= 0 and v < _outer.vert_count():
+					var dd := _outer.pos[v].distance_squared_to(bind_p)
+					if dd < bd:
+						bd = dd
+						best = v
+	if best >= 0 and bd < 0.02 * 0.02:
+		_activate_cut_for(best)
 
 
 func _drop_faces_in_or_near(md: Geom.MeshData, poly: PackedVector2Array, tol: float) -> Geom.MeshData:
@@ -1666,6 +1850,13 @@ func _make_loft_mesh(outer: Geom.MeshData, inner: Geom.MeshData, loop_o: PackedI
 			map_i[id2] = wall.copy_vert(inner, id2)
 		ids_i.append(int(map_i[id2]))
 	Geom.loft_wall(wall, ids_o, ids_i, closed)
+	# 0.4.05：记下每个截面顶点来自外皮的哪个顶点（内壁 twin 同索引），用于按拓扑清理无效截面。
+	_loft_src = PackedInt32Array()
+	_loft_src.resize(wall.vert_count())
+	for id3 in map_o.keys():
+		_loft_src[int(map_o[id3])] = int(id3)
+	for id4 in map_i.keys():
+		_loft_src[int(map_i[id4])] = int(id4)
 	return wall
 
 
@@ -1763,8 +1954,15 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 		if pmd_c:
 			cross_faces_cleared += _drop_faces_near_path(pmd_c, cross_poly, CROSS_CLEAR)
 	var wall := _make_loft_mesh(_outer, _inner, left, left, false, true)
+	var wsrc := _loft_src.duplicate()
 	var w2 := _make_loft_mesh(_outer, _inner, right, right, false, true)
+	wsrc.append_array(_loft_src)
 	_append_mesh(wall, w2)
+	# 0.4.05：每一刀的左右唇都记下来，之后点哪一刀的唇就拉哪一刀（不只是最近一刀）。
+	if _cuts_src != _outer:
+		_cuts.clear()
+	_cuts_src = _outer
+	_cuts.append({"left": left.duplicate(), "right": right.duplicate(), "closed": closed})
 	last_dense_loft_tris = Geom.dense_loft_tris(left.size(), closed, 2)
 	_lip_left = left
 	_lip_right = right
@@ -1787,10 +1985,11 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 		_body_loop = right if inside_left else left
 		_ring_serial += 1
 		_ring_open_id = _ring_serial
-		_wall_parts.append({"md": wall, "ring": _ring_open_id})
+		_wall_parts.append({"md": wall, "ring": _ring_open_id, "src": wsrc})
 	else:
 		loop_ready = _ring_open_id >= 0 and not flap_peeled
-		_wall_parts.append({"md": wall, "ring": -1})
+		_wall_parts.append({"md": wall, "ring": -1, "src": wsrc})
+	bridging_faces_cleared += _drop_bridging_wall_faces()
 	_rebuild_wall_md()
 	lofted_tris = wall.face_count()
 	cut_open = true
@@ -3389,6 +3588,10 @@ func _begin_skin_grab(origin: Vector3, dir: Vector3) -> bool:
 	var want_lip := 0
 	var pv := _pick_lip_vertex(origin, dir)
 	if pv >= 0:
+		_activate_cut_for(pv)
+	elif hit != null:
+		_activate_cut_near((hit as Dictionary)["bind"])
+	if pv >= 0:
 		want_lip = 1 if _lip_left.has(pv) else (-1 if _lip_right.has(pv) else 0)
 	if pv >= 0 and (hit == null or want_lip != 0):
 		bind_p = _outer.pos[pv]
@@ -3689,6 +3892,12 @@ func _update_guts(dt: float) -> void:
 		rope.set("capsules", caps)
 		rope.set("floor_y", fy)
 		rope.call("step", dt)
+	# 0.4.05：放回完成的肠袢删掉
+	for i in range(_gut_pulls.size() - 1, -1, -1):
+		var rr: Node = (_gut_pulls[i] as Dictionary)["rope"]
+		if rr != null and is_instance_valid(rr) and bool(rr.call("retract_done")):
+			_remove_gut_pull(i)
+			gut_putbacks_done += 1
 
 
 func _gut_inner_world(i: int, j: int, fr: Transform3D) -> Vector3:
@@ -3808,6 +4017,49 @@ const GUT_ANCHOR_SPREAD := 0.011  # 肠袢两端锚点相距 2.2cm
 const GUT_PULL_MAX := 0.9         # 一次最多扯出 0.9m
 const GUT_PICK_DIST := 0.014
 const GUT_MAX_PULLS := 4
+## 0.4.05：手术钳子选项「扯出」/「放回」。放回：把肠袢拖到它的创口锚点附近松手，约 1 秒内一节节缩回体内。
+const PUTBACK_RADIUS := 0.045
+const PUTBACK_TIME := 1.0
+signal forceps_mode_changed(mode: String)
+var forceps_mode: String = "pull"
+var gut_putbacks: int = 0
+var gut_putbacks_done: int = 0
+
+
+func set_forceps_mode(m: String) -> void:
+	m = "putback" if m == "putback" else "pull"
+	if m == forceps_mode:
+		return
+	forceps_mode = m
+	forceps_mode_changed.emit(m)
+
+
+func get_forceps_mode() -> String:
+	return forceps_mode
+
+
+## 肠袢的创口锚点（两个出口的中点）。
+func gut_wound_anchor(rope: Node) -> Vector3:
+	return ((rope.get("exit_a") as Vector3) + (rope.get("exit_b") as Vector3)) * 0.5
+
+
+func _remove_gut_pull(i: int) -> void:
+	var rope: Node = (_gut_pulls[i] as Dictionary).get("rope")
+	if rope and is_instance_valid(rope):
+		var gm := (rope as GeometryInstance3D).material_override as ShaderMaterial
+		if gm and _organs:
+			for key in ["_organ_mats", "_all_mats"]:
+				var arr = _organs.get(key)
+				if arr is Array:
+					(arr as Array).erase(gm)
+		rope.queue_free()
+	_gut_pulls.remove_at(i)
+	if _fc_pull == i:
+		_fc_active = false
+		_fc_pull = -1
+	elif _fc_pull > i:
+		_fc_pull -= 1
+	gut_rope = (_gut_pulls[_gut_pulls.size() - 1] as Dictionary)["rope"] if not _gut_pulls.is_empty() else null
 var _gut_pulls: Array = []        # {rope, vid, off_ab, spread_ab, in_ab}
 var _gut_skin_ids: PackedInt32Array = PackedInt32Array()
 var _gut_skin_p: PackedVector3Array = PackedVector3Array()
@@ -4063,6 +4315,8 @@ func _begin_forceps(origin: Vector3, dir: Vector3) -> bool:
 		var rope: Node = (_gut_pulls[i] as Dictionary)["rope"]
 		if rope == null or not is_instance_valid(rope):
 			continue
+		if bool(rope.get("retracting")):
+			continue
 		var pk: Array = rope.call("ray_pick", origin, dir)
 		if int(pk[0]) >= 0 and float(pk[1]) < best_d:
 			best_d = float(pk[1])
@@ -4076,8 +4330,8 @@ func _begin_forceps(origin: Vector3, dir: Vector3) -> bool:
 		_fc_last = pts[bp]
 		_start_forceps_grip(bi, dir)
 		return true
-	# 2. 腹腔内的肠子：从这里扯出新的一段肠袢
-	if _gut_pulls.size() >= GUT_MAX_PULLS:
+	# 2. 腹腔内的肠子：从这里扯出新的一段肠袢（「放回」模式下不扯新的）
+	if forceps_mode == "putback" or _gut_pulls.size() >= GUT_MAX_PULLS:
 		return false
 	var hv: Variant = _ray_cavity_hit(origin, dir)
 	if hv == null:
@@ -4202,7 +4456,11 @@ func _end_forceps() -> void:
 	if _fc_pull >= 0 and _fc_pull < _gut_pulls.size():
 		var rope: Node = (_gut_pulls[_fc_pull] as Dictionary)["rope"]
 		if rope and is_instance_valid(rope):
+			var hp: Vector3 = rope.get("hold_pos")
 			rope.set("hold_index", -1)
+			if forceps_mode == "putback" and hp.distance_to(gut_wound_anchor(rope)) <= PUTBACK_RADIUS:
+				rope.call("start_retract", PUTBACK_TIME)
+				gut_putbacks += 1
 	_fc_active = false
 	_fc_pull = -1
 	stroke_active = false
@@ -4388,7 +4646,8 @@ func _retractor_xf(vid: int, out_bind: Vector3, extra_off: Vector3 = Vector3.ZER
 	z = (z * cos(ta) - n * sin(ta)).normalized()
 	y = z.cross(x).normalized()
 	var b := Basis(x, y, z).orthonormalized()
-	var origin := p - z * RETR_HOOK_Z - y * (RETR_UNDER_Y - 0.0015)
+	# 0.4.05：钩头接触点再沿皮表法线往外挪几毫米，避免钩身穿进皮肤；钩子仍扣在切面唇缘。
+	var origin := p + n * RETR_HOOK_OUT - z * RETR_HOOK_Z - y * (RETR_UNDER_Y - 0.0015)
 	return Transform3D(b, origin)
 
 
@@ -4491,6 +4750,7 @@ func _start_retractor_pull(ri: int) -> bool:
 	var out_w := _approx_world_bind(bind_p + (r["out_bind"] as Vector3) * 0.01) - world_p
 	var out_ab := _to_ab_delta(out_w)
 	_split_dir = _skin_split_dir(bind_p)
+	_activate_cut_for(vid)
 	var wl := 1 if _lip_left.has(vid) else (-1 if _lip_right.has(vid) else 0)
 	_setup_pull_geometry(bind_p, world_p, out_ab, wl)
 	if _pull_mode == 1 and not (_lip_left.has(vid) or _lip_right.has(vid)):
@@ -4579,6 +4839,7 @@ func _update_retractors() -> void:
 
 ## ---- 0.4.04 拉钩选中 / 移除 ----
 const RETR_TILT_DEG := 14.0
+const RETR_HOOK_OUT := 0.005   # 0.4.05：钩头沿法线外移，消除穿皮
 const RETR_RELEASE_T := 0.6
 var _retr_selected: int = -1
 var _retr_release: Array = []   # [{deltas: Array[[md, ids, d]], t}]

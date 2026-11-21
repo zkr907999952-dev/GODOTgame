@@ -4,7 +4,8 @@ Godot runtime pack, placed inside Tifa exactly like the web figure.tsx pipeline:
 
   findNavel / sampleBand(abdomen) / sampleTorsoProfile
   placeGuts (liftColonFlexures, fitGutEnvelope, balanceLowerGuts, tuckColonSides, centerGutsInCavity)
-  placePelvisPack (strip vulva, scale uterus to 5.8cm, shift internals, stubVagina)
+  placePelvisPack (strip vulva, scale uterus to 5.8cm, shift internals)
+  0.4.05: uterus moved up/back (UTERUS_MOVE), full vaginal canal kept and fitted cervix -> skin vulva
   liftGutsOffUterus
   GutPeristalsis.attach (geodesic "along" + radial vectors)
 
@@ -44,6 +45,10 @@ GUT_SCALE_X = 0.9
 GUT_SCALE_Y = 0.94
 GUT_CAVITY = (-0.17, 0.15)
 UTERUS_TOP_DY = -0.098
+# 0.4.05：用户蓝线——子宫（连卵巢 / 输卵管 / 韧带）上移、后移；膀胱不动。
+UTERUS_MOVE = (0.0, 0.03, -0.012)
+# 阴道通道外口：外阴皮肤（身体中线最低处）往体内收 7mm（外口一圈不穿出皮肤）
+VULVA_INSET = 0.007
 XRAY_Y = (-0.205, 0.15)
 ORGAN_BONES = ["C_Hip_a", "C_Spine_a", "C_Spine_b", "C_Spine_c", "C_Spine_d"]
 
@@ -353,12 +358,28 @@ def named(parts, pat):
     return [p for p in parts if r.search(p.key)]
 
 
-def place_pelvis(parts, navel):
+VAGINA_INFO = None
+
+
+def vulva_point(T, navel):
+    """身体中线（|x|<4mm）外阴区（z 0.03..0.075、肚脐以下 15cm 以上）的最低点 = 阴道口位置。"""
+    m = (np.abs(T[:, 0]) < 0.004) & (T[:, 2] > 0.03) & (T[:, 2] < 0.075) & (T[:, 1] < navel[1] - 0.15)
+    S = T[m]
+    v = S[S[:, 1].argmin()].copy()
+    v[0] = 0.0
+    return v
+
+
+def place_pelvis(parts, navel, T=None):
     import re
+    # 只按物体名 + 材质判断（父节点名 vulve.002 下的 'vagin' 材质是阴道通道，保留）
     kill = re.compile(r"vulve|clitoris|corpsetracines|materialcorps|materialbulbes")
     keep = []
     for p in parts:
-        if kill.search(p.key):
+        mat = p.obj.data.materials[0].name.lower() if p.obj.data.materials else ""
+        if "vagin" in mat:
+            p.key = p.key + " vagin_canal"
+        if "vagin" not in mat and kill.search(f"{p.obj.name} {mat}".lower()):
             bpy.data.objects.remove(p.obj, do_unlink=True)
         else:
             keep.append(p)
@@ -385,14 +406,53 @@ def place_pelvis(parts, navel):
     dz = navel[2] - 0.07 - czz
     for p in named(parts, "uterus|vessie|bladder|ovaire|trompe|ligament|vagin"):
         P[p.name] = P[p.name] + np.array([0, dy, dz])
-    # stubVagina
-    umin, umax = box_of([P[p.name] for p in ut])
-    c = np.array([0, (umin[1] + umax[1]) * 0.5 - 0.02, (umin[2] + umax[2]) * 0.5 + 0.008])
-    for p in named(parts, "vagin"):
-        q = P[p.name]
-        d = np.linalg.norm(q - c, axis=1)
-        w = np.clip((d - 0.028) / 0.05, 0, 1)[:, None]
-        P[p.name] = q + (c - q) * w
+    # 0.4.05：子宫上移后移（膀胱不动）；阴道通道跟着子宫走，宫颈端保持相接。
+    mv = np.array(UTERUS_MOVE)
+    for p in named(parts, "uterus|ovaire|trompe|ligament|vagin_canal"):
+        P[p.name] = P[p.name] + mv
+    # 阴道通道：不再 stubVagina 压成短桩。保留整条通道，绕宫颈端旋转 + 沿轴拉伸，外口对到皮肤外阴。
+    vc = named(parts, "vagin_canal")
+    global VAGINA_INFO
+    VAGINA_INFO = None
+    if vc and T is not None:
+        V = np.concatenate([P[p.name] for p in vc])
+        y0, y1 = V[:, 1].min(), V[:, 1].max()
+        top = V[V[:, 1] > y1 - (y1 - y0) * 0.12].mean(0)
+        bot = V[V[:, 1] < y0 + (y1 - y0) * 0.12].mean(0)
+        vul = vulva_point(T, navel)
+        tgt = vul + np.array([0.0, VULVA_INSET, 0.0])
+        a = bot - top; b = tgt - top
+        la, lb = np.linalg.norm(a), np.linalg.norm(b)
+        ua, ub = a / la, b / lb
+        ax = np.cross(ua, ub); sn = np.linalg.norm(ax); cs = float(np.dot(ua, ub))
+        if sn > 1e-8:
+            ax = ax / sn
+            K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]])
+            R = np.eye(3) + sn * K + (1 - cs) * K @ K
+        else:
+            R = np.eye(3)
+        k = lb / la
+        for p in vc:
+            q = (P[p.name] - top) @ R.T
+            q = q + (k - 1.0) * np.outer(q @ ub, ub)
+            P[p.name] = top + q
+        # 外口附近：通道顶点必须在皮肤上方（体内），按水平 3mm 内最近的皮肤点比较高度
+        Vn = np.concatenate([P[p.name] for p in vc])
+        low = Vn[Vn[:, 1] < tgt[1] + 0.012]
+        sk = T[(np.abs(T[:, 0]) < 0.03) & (T[:, 1] < tgt[1] + 0.02) & (T[:, 1] > tgt[1] - 0.02)]
+        worst = 1.0
+        for v in low:
+            d = np.hypot(sk[:, 0] - v[0], sk[:, 2] - v[2])
+            nb = sk[d < 0.003]
+            if len(nb):
+                worst = min(worst, v[1] - nb[:, 1].max())
+        VAGINA_INFO_CLEAR = worst
+        print("vagina opening clearance above skin %.4f" % worst)
+        VAGINA_INFO = {"cervix": top.tolist(), "opening": tgt.tolist(), "vulva_skin": vul.tolist(),
+                       "length": float(lb), "stretch": float(k),
+                       "skin_clearance": float(VAGINA_INFO_CLEAR),
+                       "tilt_deg": float(np.degrees(np.arccos(np.clip(-ub[1], -1, 1))))}
+        print("vagina canal cervix", top, "opening", tgt, "len %.3f stretch %.2f" % (lb, k))
     for p in parts:
         set_pos(p, P[p.name])
     umin, umax = box_of([P[p.name] for p in ut])
@@ -612,7 +672,7 @@ def main():
     meshes = []
     # ---- pelvis
     pparts = import_parts(PELVIS_GLB, weld=False)
-    pparts, umin, umax = place_pelvis(pparts, navel)
+    pparts, umin, umax = place_pelvis(pparts, navel, T)
     print("uterus box", umin, umax)
     bladder_pos = [get_pos(p) for p in named(pparts, "vessie|bladder")]
     if bladder_pos:
@@ -653,6 +713,15 @@ def main():
         meshes.append(d)
         print("gut", p.name, len(d["pos"]), "verts", len(d["idx"]), "tris")
     gmin, gmax = box_of([m["pos"] for m in meshes if m["group"] == 0])
+    # 阴道通道与膀胱的最小间距（只报告）
+    try:
+        vv = np.concatenate([m["pos"] for m in meshes if "vagin" in m["mat"].lower()])
+        bb = np.concatenate([m["pos"] for m in meshes if "vessie" in m["mat"].lower() or "bladder" in m["mat"].lower()])
+        from scipy.spatial import cKDTree  # noqa
+        dmin = cKDTree(bb).query(vv)[0].min()
+    except Exception:
+        dmin = min(np.linalg.norm(bb - v, axis=1).min() for v in vv[::3]) if len(vv) else -1
+    print("vagina-bladder min dist %.4f" % dmin)
     pmin, pmax = box_of([m["pos"] for m in meshes if m["group"] == 1])
 
     # ---- 皮肤内检查：器官顶点不得穿出躯干前表面（profile z_front）/ 侧面（half_x）
@@ -695,6 +764,8 @@ def main():
         "guts": {"min": gmin.tolist(), "max": gmax.tolist()},
         "pelvis": {"min": pmin.tolist(), "max": pmax.tolist()},
         "uterus": {"min": umin.tolist(), "max": umax.tolist()},
+        "uterus_move": list(UTERUS_MOVE),
+        "vagina": VAGINA_INFO,
         # web attachXray(yX0 - navel.y, yX1 - navel.y, 0.12, skinZ - 0.01 - navel.z)
         "xray": {"y0": XRAY_Y[0], "y1": XRAY_Y[1], "x_max": 0.12, "z_front": -0.01},
         "profile": {"y": prof[0].tolist(), "half_x": prof[1].tolist(), "z_front": prof[2].tolist(), "z_back": prof[3].tolist()},
