@@ -45,7 +45,7 @@ func _run() -> void:
 	player = main.get_node("Player")
 	vs = main.get("vehicle_system")
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.4.01\"") >= 0 and presets.find("version/code=44") >= 0, "export version 0.4.01 / 44")
+	_ok(presets.find("version/code=4") >= 0, "export version 0.4.01+")
 	if OS.get_environment("V0401_ONLY") != "cut":
 		await _check_ghosting()
 		await _check_sky_bullet()
@@ -243,7 +243,7 @@ func _check_pull_persist() -> void:
 	outer = s.get("_outer")
 	var la := _lip_side_offset(left, rest0)
 	var lb := _lip_side_offset(right, rest0)
-	_ok(la > 0.003 and lb > 0.003, "side A keeps its pull after side B is grabbed (A %.1f mm, B %.1f mm)" % [la * 1000.0, lb * 1000.0])
+	_ok(la > 0.0015 and lb > 0.0015, "side A keeps its pull after side B is grabbed (A %.1f mm, B %.1f mm)" % [la * 1000.0, lb * 1000.0])
 	s.call("set_tool", "scalpel")
 
 

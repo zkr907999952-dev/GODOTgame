@@ -36,6 +36,8 @@ var cut_open: bool = false
 var loop_ready: bool = false
 var flap_peeled: bool = false
 var lofted_tris: int = 0
+## 0.4.02：镜头碰撞忽略的分组（皮瓣、外露肠子、拉钩）。
+const CAMERA_IGNORE_GROUP := "camera_ignore"
 var path_points: PackedVector3Array = PackedVector3Array()  # bind-space
 var stroke_active: bool = false
 var persist: bool = false
@@ -201,7 +203,7 @@ func current_tool() -> String:
 
 
 func has_tool() -> bool:
-	return tool == "scalpel" or tool == "grab"
+	return tool == "scalpel" or tool == "grab" or tool == "retractor"
 
 
 func look_locked() -> bool:
@@ -895,6 +897,7 @@ func restore_body() -> void:
 	_clear_cut_preview()
 	_clear_trail()
 	_clear_guts()
+	_clear_retractors()
 	_show_scalpel(false)
 	if flap_node and is_instance_valid(flap_node):
 		flap_node.queue_free()
@@ -991,13 +994,15 @@ func set_tool(t: String) -> void:
 		tool_changed.emit(tool)
 		return
 	# 拿取与手术刀一样随时可切换，不必先切开或先剥皮瓣。
-	if t != "" and t != "scalpel" and t != "grab":
+	if t != "" and t != "scalpel" and t != "grab" and t != "retractor":
 		t = ""
 	if stroke_active:
 		cancel_stroke()
 	tool = t
 	if tool != "scalpel":
 		_show_scalpel(false)
+	if tool != "retractor":
+		_hide_retractor_ghost()
 	tool_changed.emit(tool)
 
 
@@ -1006,6 +1011,8 @@ func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
 		return false
 	if tool == "grab":
 		return _begin_grab(origin, dir)
+	if tool == "retractor":
+		return _begin_retractor(origin, dir)
 	if tool != "scalpel":
 		return false
 	if _cut_anim:
@@ -1057,8 +1064,11 @@ func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
 
 
 func drag_stroke(origin: Vector3, dir: Vector3) -> void:
-	if tool == "grab" and _grab_active:
+	if (tool == "grab" or tool == "retractor") and _grab_active:
 		_drag_grab(origin, dir)
+		return
+	if tool == "retractor" and _retr_placing:
+		hover_tool(origin, dir)
 		return
 	if not stroke_active or tool != "scalpel" or _cut_anim:
 		return
@@ -1108,6 +1118,7 @@ func _do_drag_stroke(origin: Vector3, dir: Vector3) -> void:
 
 func cancel_stroke() -> void:
 	_drag_pending = false
+	_retr_placing = false
 	if _grab_active:
 		_end_grab(false)
 	if not stroke_active:
@@ -1129,6 +1140,11 @@ func end_stroke() -> void:
 	if _grab_active:
 		_end_grab(true)
 		stroke_active = false
+		return
+	if _retr_placing:
+		_retr_placing = false
+		stroke_active = false
+		_place_retractor_at_ghost()
 		return
 	if not stroke_active:
 		return
@@ -1542,6 +1558,16 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 	_inner = _outer.twin
 	# 外翻位移场（rest + dsp），截面顶点从唇缘拷贝时一起继承。
 	Geom.evert_field(_outer, left, right, sdir, closed)
+	# 0.4.02：新切口穿过（X）或止于（T）旧切口时，旧截面在交叉处的那一段横在新开口上，
+	# 会挡住角上的皮瓣、看起来粘连。把旧截面中离新切线 CROSS_CLEAR 以内的面去掉，交叉处由新截面封边。
+	var cross_poly := PackedVector2Array()
+	for id_c in ids:
+		if id_c >= 0 and id_c < _outer.vert_count():
+			cross_poly.append(Vector2(_outer.pos[id_c].x, _outer.pos[id_c].y))
+	for part_c in _wall_parts:
+		var pmd_c: Geom.MeshData = (part_c as Dictionary).get("md")
+		if pmd_c:
+			cross_faces_cleared += _drop_faces_near_path(pmd_c, cross_poly, CROSS_CLEAR)
 	var wall := _make_loft_mesh(_outer, _inner, left, left, false, true)
 	var w2 := _make_loft_mesh(_outer, _inner, right, right, false, true)
 	_append_mesh(wall, w2)
@@ -2625,6 +2651,8 @@ func _spawn_flap(flap_md: Geom.MeshData, flap_outer: Geom.MeshData) -> bool:
 func _spawn_flap_rigid(mesh: ArrayMesh, origin: Vector3, parent: Node) -> bool:
 	var body := RigidBody3D.new()
 	body.name = "SurgeryFlap"
+	# 0.4.02：皮瓣不参与镜头碰撞避让（不会挡住 / 推近观察与手术镜头）。
+	body.add_to_group(CAMERA_IGNORE_GROUP)
 	body.mass = 0.28
 	body.gravity_scale = 1.0
 	body.continuous_cd = true
@@ -2761,6 +2789,7 @@ func _spawn_flap_verlet(world_md: Geom.MeshData, parent: Node) -> bool:
 	var floor_y := _catch_top_y()
 	var flap := load("res://scripts/surgery/surgery_flap_verlet.gd").new() as Node3D
 	flap.name = "SurgeryFlap"
+	flap.add_to_group(CAMERA_IGNORE_GROUP)
 	parent.add_child(flap)
 	var world: World3D = null
 	if flap.get_world_3d():
@@ -2829,6 +2858,7 @@ func _process(dt: float) -> void:
 		_xray_cached = xr
 		_update_cavity_visibility()
 	_update_guts(dt)
+	_update_retractors()
 	if _cut_anim:
 		debug_advance_cut_anim(dt)
 	if _evert_anim:
@@ -3256,6 +3286,34 @@ func debug_bake_pull() -> bool:
 	return _bake_pull()
 
 
+const CROSS_CLEAR := 0.0042
+var cross_faces_cleared: int = 0
+
+
+func _drop_faces_near_path(md: Geom.MeshData, poly: PackedVector2Array, r: float) -> int:
+	if poly.size() < 2 or md.face_count() == 0:
+		return 0
+	var keep := PackedInt32Array()
+	var dropped := 0
+	for f in md.face_count():
+		var c := md.centroid(f)
+		var c2 := Vector2(c.x, c.y)
+		var near := false
+		for i in poly.size() - 1:
+			if Geom._dist_point_seg_2d(c2, poly[i], poly[i + 1]) < r:
+				near = true
+				break
+		if near:
+			dropped += 1
+			continue
+		keep.append(md.idx[f * 3])
+		keep.append(md.idx[f * 3 + 1])
+		keep.append(md.idx[f * 3 + 2])
+	if dropped > 0:
+		md.idx = keep
+	return dropped
+
+
 func _drop_faces_inside(md: Geom.MeshData, poly: PackedVector2Array) -> Geom.MeshData:
 	var keep := PackedInt32Array()
 	var dropped := 0
@@ -3362,21 +3420,33 @@ func _update_guts(dt: float) -> void:
 	if gut_rope == null or not is_instance_valid(gut_rope):
 		gut_rope = GutRope.new()
 		gut_rope.name = "ExposedGuts"
+		gut_rope.add_to_group(CAMERA_IGNORE_GROUP)
 		add_child(gut_rope)
-	var a := _gut_world(_gut_ids[0], _gut_ids[1])
-	var b := _gut_world(_gut_ids[2], _gut_ids[3])
-	var c := (a + b) * 0.5
-	var nb := (_outer.nrm[_gut_ids[0]] + _outer.nrm[_gut_ids[2]]).normalized()
+		var gm := _gut_organ_material()
+		if gm:
+			gut_rope.call("use_organ_material", gm)
 	var fr: Transform3D = _organs.call("abdomen_frame") if _organs and _organs.has_method("abdomen_frame") else Transform3D.IDENTITY
+	var nb := (_outer.nrm[_gut_ids[0]] + _outer.nrm[_gut_ids[2]]).normalized()
 	var out_w := (_skel.global_transform.basis * nb).normalized()
 	if out_w.length_squared() < 0.5:
 		out_w = fr.basis.z.normalized()
-	# 两端锚点略缩进创口里（肠袢从里面出来）
-	gut_rope.set("anchor_a", a - out_w * 0.006)
-	gut_rope.set("anchor_b", b - out_w * 0.006)
+	# 0.4.02：锚点在腹腔里：创口两处唇缘对应的内壁（twin，同索引）顶点，按蒙皮 + 拿取位移每帧重算，再往里 1.2cm。
+	var a := _gut_inner_world(_gut_ids[0], _gut_ids[1], fr) - out_w * 0.012
+	var b := _gut_inner_world(_gut_ids[2], _gut_ids[3], fr) - out_w * 0.012
+	gut_rope.set("anchor_a", a)
+	gut_rope.set("anchor_b", b)
+	gut_rope.set("mes_root", (a + b) * 0.5 - out_w * 0.05)
 	gut_rope.set("out_dir", out_w)
 	gut_rope.set("max_len", gut_spill_max())
 	gut_rope.set("ab_frame", fr)
+	gut_rope.set("capsules", _gut_capsules())
+	var fy := -1e9
+	var host := get_parent() as Node3D
+	if host:
+		fy = host.global_position.y
+	if is_on_exam_bed():
+		fy = maxf(fy, _catch_top_y())
+	gut_rope.set("floor_y", fy)
 	if _organs:
 		var ec = _organs.get("_ellipsoid_c")
 		var er = _organs.get("_ellipsoid_r")
@@ -3386,8 +3456,80 @@ func _update_guts(dt: float) -> void:
 	gut_rope.call("step", dt)
 
 
+func _gut_inner_world(i: int, j: int, fr: Transform3D) -> Vector3:
+	var md: Geom.MeshData = _inner if _inner and _inner.vert_count() == _outer.vert_count() else _outer
+	var p: Vector3
+	if pose_locked and _posed_frozen.size() > maxi(i, j):
+		p = _gut_world(i, j) - fr.basis.z.normalized() * 0.012
+	elif _skel == null:
+		p = (md.pos[i] + md.pos[j]) * 0.5
+	else:
+		p = _skel.global_transform * ((Geom.skin_vertex(md.pos[i], i, md, _skel, _skin) + Geom.skin_vertex(md.pos[j], j, md, _skel, _skin)) * 0.5)
+	if _pull_r > 1e-5:
+		p += fr.basis * _pull_offset_cpu(fr.affine_inverse() * p)
+	return p
+
+
+## 体内小肠的材质副本（同贴图 / 同蠕动），加入器官材质列表以接收蠕动时钟；不做腹壁约束。
+func _gut_organ_material() -> ShaderMaterial:
+	if _organs == null:
+		return null
+	var mats = _organs.get("_organ_mats")
+	if not (mats is Array):
+		return null
+	var src: ShaderMaterial = null
+	for m in mats:
+		var sm := m as ShaderMaterial
+		if sm == null or not bool(sm.get_shader_parameter("is_gut")):
+			continue
+		var tex = sm.get_shader_parameter("albedo_tex")
+		if tex is Texture2D and str((tex as Texture2D).resource_path).find("small") >= 0:
+			src = sm
+			break
+	if src == null:
+		return null
+	var dup := src.duplicate() as ShaderMaterial
+	dup.set_shader_parameter("strike_k", 0.3)
+	dup.set_meta("exposed_gut", true)
+	(mats as Array).append(dup)
+	if _organs.has_method("register_deform_material"):
+		_organs.call("register_deform_material", dup, false)
+	return dup
+
+
+## 四肢精细命中箱胶囊（世界坐标 [a, b, r]）：手臂 / 手 / 腿 / 脚。躯干、头不算（锚点本来就在腹腔里）。
+func _gut_capsules() -> Array:
+	var out: Array = []
+	var host := get_parent()
+	if host == null or not host.has_method("get_hitboxes"):
+		return out
+	var hb: Node = host.call("get_hitboxes")
+	if hb == null:
+		return out
+	for body in hb.get_children():
+		if not (body is Node3D):
+			continue
+		var bone := str((body as Node).get_meta("hitbox_bone", ""))
+		if bone.begins_with("C_"):
+			continue
+		for cs in (body as Node).get_children():
+			if cs is CollisionShape3D and (cs as CollisionShape3D).shape is CapsuleShape3D:
+				var cap := (cs as CollisionShape3D).shape as CapsuleShape3D
+				var xf := (cs as CollisionShape3D).global_transform
+				var ax := xf.basis.y.normalized()
+				var hh := maxf(cap.height * 0.5 - cap.radius, 0.0)
+				out.append([xf.origin - ax * hh, xf.origin + ax * hh, cap.radius])
+	return out
+
+
 func _clear_guts() -> void:
 	if gut_rope and is_instance_valid(gut_rope):
+		var gm := gut_rope.material_override as ShaderMaterial
+		if gm and gm.has_meta("exposed_gut") and _organs:
+			for key in ["_organ_mats", "_all_mats"]:
+				var arr = _organs.get(key)
+				if arr is Array:
+					(arr as Array).erase(gm)
 		gut_rope.queue_free()
 	gut_rope = null
 	_gut_src = null
@@ -3400,6 +3542,365 @@ func has_exposed_guts() -> bool:
 	return gut_rope != null and is_instance_valid(gut_rope) and not gut_rope.is_queued_for_deletion()
 
 
+## ---- 0.4.02 拉钩（Roux 双头拉钩，手术工具包 5 号） ----
+const RETRACTOR_SCENE := "res://assets/surgery/retractor.glb"
+const RETR_PICK_DIST := 0.014      # 射线离唇缘顶点多近算点中切口边缘（米）
+const RETR_OPEN := 0.006           # 放下时把唇缘往外拉开的量
+const RETR_CLOSE_MAX := 0.006
+## 模型局部：刀身在 y≈-0.0148，长轴 z，+z 端（窄头、浅钩）钩进切口，钩子朝 +y 弯。
+const RETR_HOOK_Z := 0.066
+const RETR_UNDER_Y := -0.0148
+var _retractors: Array = []        # {node, vid, bind, out_bind}
+var _retr_ghost: Node3D = null
+var _retr_ghost_vid: int = -1
+var _retr_ghost_out: Vector3 = Vector3.ZERO
+var _retr_placing: bool = false
+var _retr_drag: int = -1
+var _retr_sig: Array = []
+
+
+func retractor_count() -> int:
+	return _retractors.size()
+
+
+func retractor_nodes() -> Array:
+	var out: Array = []
+	for r in _retractors:
+		out.append((r as Dictionary)["node"])
+	return out
+
+
+func retractor_ghost_visible() -> bool:
+	return _retr_ghost != null and is_instance_valid(_retr_ghost) and _retr_ghost.visible
+
+
+func _make_retractor_node(ghost: bool) -> Node3D:
+	var n: Node3D = null
+	if ResourceLoader.exists(RETRACTOR_SCENE):
+		var ps: PackedScene = load(RETRACTOR_SCENE)
+		if ps:
+			n = ps.instantiate() as Node3D
+	if n == null:
+		n = Node3D.new()
+		var mi := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(0.03, 0.002, 0.148)
+		mi.mesh = bm
+		mi.position = Vector3(0, RETR_UNDER_Y, 0)
+		n.add_child(mi)
+	n.name = "RetractorGhost" if ghost else "Retractor"
+	n.top_level = true
+	n.add_to_group(CAMERA_IGNORE_GROUP)
+	for c in n.find_children("*", "MeshInstance3D", true, false):
+		var mi2 := c as MeshInstance3D
+		mi2.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if ghost:
+			var gm := StandardMaterial3D.new()
+			gm.albedo_color = Color(0.55, 0.85, 1.0, 0.38)
+			gm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			gm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			gm.cull_mode = BaseMaterial3D.CULL_DISABLED
+			gm.no_depth_test = true
+			mi2.material_override = gm
+	add_child(n)
+	return n
+
+
+## 切口边缘候选：网格开放边界上、不在原腹带外缘的顶点（直切口两唇、环切 / 剥离洞缘）。
+func _lip_candidates() -> PackedInt32Array:
+	var out := PackedInt32Array()
+	if _outer == null:
+		return out
+	var seen: Dictionary = {}
+	for e in _boundary_edges(_outer):
+		for v in [(e as Vector2i).x, (e as Vector2i).y]:
+			if not seen.has(v) and not _band_edge.has(_qkey(_outer.pos[v])):
+				seen[v] = true
+				out.append(v)
+	return out
+
+
+func _pick_lip_vertex(origin: Vector3, dir: Vector3) -> int:
+	if _outer == null or not cut_open:
+		return -1
+	var d := dir.normalized()
+	var best := -1
+	var best_d := RETR_PICK_DIST
+	for v in _lip_candidates():
+		var w := _vert_world(v) - origin
+		var t := w.dot(d)
+		if t <= 0.0:
+			continue
+		var dist := (w - d * t).length()
+		if dist < best_d:
+			best_d = dist
+			best = v
+	return best
+
+
+## 唇缘顶点的「向外」方向（绑定空间，贴皮肤切平面）：从切口中心线指向这一侧唇缘。
+func _lip_out_bind(vid: int) -> Vector3:
+	var p := _outer.pos[vid]
+	var nrm := _outer.nrm[vid].normalized()
+	# 同一边界环上的前后邻点给出切线
+	var nb: Array = []
+	for e in _boundary_edges(_outer):
+		var ev := e as Vector2i
+		if ev.x == vid:
+			nb.append(ev.y)
+		elif ev.y == vid:
+			nb.append(ev.x)
+	var t := Vector3.RIGHT
+	if nb.size() >= 2:
+		t = (_outer.pos[nb[0]] - _outer.pos[nb[1]]).normalized()
+	elif nb.size() == 1:
+		t = (_outer.pos[nb[0]] - p).normalized()
+	var o := nrm.cross(t)
+	if o.length_squared() < 1e-10:
+		o = Vector3.UP
+	o = o.normalized()
+	# 指向远离开口：开口一侧没有面。看这个顶点所属的面质心在哪边。
+	var side := 0.0
+	for f in _outer.face_count():
+		for k in 3:
+			if _outer.idx[f * 3 + k] == vid:
+				side += (_outer.centroid(f) - p).dot(o)
+	if side < 0.0:
+		o = -o
+	return o
+
+
+func _vert_world(vid: int) -> Vector3:
+	if pose_locked and _posed_frozen.size() > vid:
+		return _posed_frozen[vid]
+	if _skel == null:
+		return _outer.pos[vid]
+	return _skel.global_transform * Geom.skin_vertex(_outer.pos[vid], vid, _outer, _skel, _skin)
+
+
+func _retractor_xf(vid: int, out_bind: Vector3, extra_off: Vector3 = Vector3.ZERO) -> Transform3D:
+	var p: Vector3 = _vert_world(vid) + extra_off
+	var sb := _skel.global_transform.basis if _skel else Basis.IDENTITY
+	var bone_b := Basis.IDENTITY
+	if _skel and _skin and _outer.bones.size() >= (vid + 1) * 4:
+		# 主骨骼的姿势旋转（跟随蒙皮）
+		var bi := _outer.bones[vid * 4]
+		var bw := _outer.weights[vid * 4]
+		if bw > 0.0 and bi < _skin.get_bind_count():
+			var bn := _skin.get_bind_bone(bi)
+			if bn < 0:
+				bn = _skel.find_bone(_skin.get_bind_name(bi))
+			if bn >= 0:
+				bone_b = (_skel.get_bone_global_pose(bn) * _skin.get_bind_pose(bi)).basis
+	var n := (sb * bone_b * _outer.nrm[vid]).normalized()
+	var o := (sb * bone_b * out_bind).normalized()
+	o = (o - n * o.dot(n)).normalized()
+	if o.length_squared() < 0.5:
+		o = n.cross(Vector3.UP).normalized()
+	var z := -o                      # +z 指向切口（钩头那端）
+	var y := -n                      # 钩子朝 +y 弯进体内
+	var x := y.cross(z).normalized()
+	var b := Basis(x, y, z).orthonormalized()
+	var origin := p - z * RETR_HOOK_Z - y * (RETR_UNDER_Y - 0.0015)
+	return Transform3D(b, origin)
+
+
+func hover_tool(origin: Vector3, dir: Vector3) -> void:
+	if not active or tool != "retractor":
+		_hide_retractor_ghost()
+		return
+	var vid := _pick_lip_vertex(origin, dir)
+	if vid < 0:
+		_hide_retractor_ghost()
+		return
+	if _retr_ghost == null or not is_instance_valid(_retr_ghost):
+		_retr_ghost = _make_retractor_node(true)
+	if vid != _retr_ghost_vid:
+		_retr_ghost_out = _lip_out_bind(vid)
+	_retr_ghost_vid = vid
+	_retr_ghost.global_transform = _retractor_xf(vid, _retr_ghost_out)
+	_retr_ghost.visible = true
+
+
+func _hide_retractor_ghost() -> void:
+	if _retr_ghost and is_instance_valid(_retr_ghost):
+		_retr_ghost.visible = false
+	_retr_ghost_vid = -1
+
+
+func _ray_hits_retractor(origin: Vector3, dir: Vector3) -> int:
+	var best := -1
+	var best_t := 1e9
+	var box := AABB(Vector3(-0.017, -0.02, -0.078), Vector3(0.034, 0.04, 0.156))
+	for i in _retractors.size():
+		var n: Node3D = (_retractors[i] as Dictionary)["node"]
+		if n == null or not is_instance_valid(n):
+			continue
+		var inv := n.global_transform.affine_inverse()
+		var lo := inv * origin
+		var ld := (inv.basis * dir).normalized()
+		var hit = box.intersects_ray(lo, ld)
+		if hit != null:
+			var t := ((hit as Vector3) - lo).length()
+			if t < best_t:
+				best_t = t
+				best = i
+	return best
+
+
+func _begin_retractor(origin: Vector3, dir: Vector3) -> bool:
+	if not cut_open or _outer == null:
+		return false
+	# 点中已放好的拉钩柄：拿起并拖动（拖动 = 拉动它钩住的唇缘）。
+	var ri := _ray_hits_retractor(origin, dir)
+	if ri >= 0:
+		return _begin_retractor_drag(ri)
+	hover_tool(origin, dir)
+	if _retr_ghost_vid < 0:
+		return false
+	_retr_placing = true
+	stroke_active = true
+	return true
+
+
+func _place_retractor_at_ghost() -> bool:
+	var vid := _retr_ghost_vid
+	var out_b := _retr_ghost_out
+	_hide_retractor_ghost()
+	return place_retractor(vid, out_b)
+
+
+## 在唇缘顶点 vid 放一把拉钩：钩头盖住截面、钩住唇缘，并把唇缘往外拉开一点（写进网格，不回弹）。
+func place_retractor(vid: int, out_b: Vector3 = Vector3.ZERO) -> bool:
+	if _outer == null or vid < 0 or vid >= _outer.vert_count():
+		return false
+	if out_b.length_squared() < 1e-10:
+		out_b = _lip_out_bind(vid)
+	_bake_pull()
+	var node := _make_retractor_node(false)
+	var rec := {"node": node, "vid": vid, "bind": _outer.pos[vid], "out_bind": out_b}
+	_retractors.append(rec)
+	_retr_sig = _retractor_sig()
+	# 初始拉开
+	if _start_retractor_pull(_retractors.size() - 1):
+		_pull_off = _pull_axis * RETR_OPEN if _pull_axis.length_squared() > 1e-8 else _pull_off
+		_apply_pull_uniforms()
+		_bake_pull()
+	_grab_active = false
+	_grab_kind = ""
+	_update_retractors()
+	return true
+
+
+func _start_retractor_pull(ri: int) -> bool:
+	var r: Dictionary = _retractors[ri]
+	var vid: int = r["vid"]
+	if vid < 0 or vid >= _outer.vert_count():
+		return false
+	var bind_p := _outer.pos[vid]
+	var world_p := _approx_world_bind(bind_p)
+	var out_w := _approx_world_bind(bind_p + (r["out_bind"] as Vector3) * 0.01) - world_p
+	var out_ab := _to_ab_delta(out_w)
+	_split_dir = _skin_split_dir(bind_p)
+	_setup_pull_geometry(bind_p, world_p, out_ab)
+	if _pull_mode == 1 and not (_lip_left.has(vid) or _lip_right.has(vid)):
+		# 拉钩不在最近一刀的直切口上：退回径向小范围拉动
+		_pull_mode = 0
+	if _pull_mode == 0:
+		_pull_axis = out_ab.normalized()
+		_pull_p = _to_ab_local(world_p)
+	_pull_r = PULL_RADIUS if _pull_mode != 0 else RETR_PICK_DIST * 1.6
+	_pull_raw = Vector3.ZERO
+	_pull_off = Vector3.ZERO
+	_pull_peak = 0.0
+	_pull_rest = Vector3.ZERO
+	return true
+
+
+func _begin_retractor_drag(ri: int) -> bool:
+	_bake_pull()
+	_retr_drag = ri
+	if not _start_retractor_pull(ri):
+		_retr_drag = -1
+		return false
+	var n: Node3D = (_retractors[ri] as Dictionary)["node"]
+	_grab_kind = "retractor"
+	_grab_active = true
+	stroke_active = true
+	_grab_last = n.global_transform * Vector3(0, 0, RETR_HOOK_Z)
+	_grab_vel = Vector3.ZERO
+	_apply_pull_uniforms()
+	return true
+
+
+## 测试：拿起第 ri 把拉钩，沿腹局部方向拖 off_ab（米）后松手。
+func debug_drag_retractor(ri: int, off_ab: Vector3) -> bool:
+	if ri < 0 or ri >= _retractors.size():
+		return false
+	if not _begin_retractor_drag(ri):
+		return false
+	_pull_raw = off_ab
+	_pull_off = _shape_pull(off_ab, true)
+	_apply_pull_uniforms()
+	_end_grab(false)
+	stroke_active = false
+	return true
+
+
+func _retractor_sig() -> Array:
+	return [_outer.get_instance_id() if _outer else 0, _outer.vert_count() if _outer else 0, _outer.idx.size() if _outer else 0]
+
+
+func _update_retractors() -> void:
+	if _retractors.is_empty() or _outer == null:
+		return
+	var sig := _retractor_sig()
+	if sig != _retr_sig:
+		# 拓扑变了（新切口 / 剥皮瓣）：按记下的绑定位置重新找最近的唇缘顶点。
+		_retr_sig = sig
+		var cands := _lip_candidates()
+		for r in _retractors:
+			var bp: Vector3 = (r as Dictionary)["bind"]
+			var best := -1
+			var bd := 1e9
+			for v in cands:
+				var dd := _outer.pos[v].distance_squared_to(bp)
+				if dd < bd:
+					bd = dd
+					best = v
+			(r as Dictionary)["vid"] = best
+	var fr_ok := _organs and _organs.has_method("abdomen_frame")
+	var fr: Transform3D = _organs.call("abdomen_frame") if fr_ok else Transform3D.IDENTITY
+	for i in _retractors.size():
+		var r2: Dictionary = _retractors[i]
+		var n: Node3D = r2["node"]
+		var vid: int = r2["vid"]
+		if n == null or not is_instance_valid(n) or vid < 0 or vid >= _outer.vert_count():
+			if n and is_instance_valid(n):
+				n.visible = false
+			continue
+		r2["bind"] = _outer.pos[vid]
+		var extra := Vector3.ZERO
+		if _pull_r > 1e-5 and fr_ok:
+			extra = fr.basis * _pull_offset_cpu(fr.affine_inverse() * _vert_world(vid))
+		n.global_transform = _retractor_xf(vid, r2["out_bind"], extra)
+		n.visible = true
+
+
+func _clear_retractors() -> void:
+	for r in _retractors:
+		var n: Node = (r as Dictionary)["node"]
+		if n and is_instance_valid(n):
+			n.queue_free()
+	_retractors = []
+	_retr_drag = -1
+	_retr_placing = false
+	if _retr_ghost and is_instance_valid(_retr_ghost):
+		_retr_ghost.queue_free()
+	_retr_ghost = null
+	_retr_ghost_vid = -1
+
+
 ## ---- 0.4.0 切口边缘红色渐变 ----
 const WOUND_TINT_R := 0.0045
 var _band_edge: Dictionary = {}
@@ -3410,7 +3911,22 @@ static func _qkey(p: Vector3) -> Vector3i:
 	return Vector3i(roundi(p.x * 10000.0), roundi(p.y * 10000.0), roundi(p.z * 10000.0))
 
 
+var _bnd_cache_key: Array = []
+var _bnd_cache: Dictionary = {}
+
+
 func _boundary_edges(md: Geom.MeshData) -> Dictionary:
+	# 同一网格、拓扑未变时复用（拉钩悬停每次鼠标移动都要查唇缘）。
+	var key := [md.get_instance_id(), md.vert_count(), md.idx.size(), hash(md.idx)]
+	if key == _bnd_cache_key:
+		return _bnd_cache
+	var res := _boundary_edges_raw(md)
+	_bnd_cache_key = key
+	_bnd_cache = res
+	return res
+
+
+func _boundary_edges_raw(md: Geom.MeshData) -> Dictionary:
 	var cnt: Dictionary = {}
 	for f in md.face_count():
 		for k in 3:
@@ -3595,7 +4111,7 @@ func _setup_pull_geometry(bind_p: Vector3, world_p: Vector3, want_side: Vector3 
 
 
 ## 把累计的拖拽量变成实际皮肤位移：沿张开方向（只张开，不能把唇缘推过切线）+ 少量切向，软饱和到 GRAB_SKIN_MAX。
-func _shape_pull(raw: Vector3) -> Vector3:
+func _shape_pull(raw: Vector3, allow_close: bool = false) -> Vector3:
 	var v := raw
 	if _pull_mode == 0 or _pull_axis.length_squared() < 1e-8:
 		if _split_dir.length_squared() > 1e-6:
@@ -3604,7 +4120,9 @@ func _shape_pull(raw: Vector3) -> Vector3:
 	else:
 		var along := raw.dot(_pull_axis)
 		var tang := raw - _pull_axis * along
-		v = _pull_axis * maxf(along, 0.0) + tang * 0.15
+		# 拉钩可以往回推一点（收小开口），但不超过 RETR_CLOSE_MAX，避免把唇缘推过切线。
+		var lo := -RETR_CLOSE_MAX if allow_close else 0.0
+		v = _pull_axis * maxf(along, lo) + tang * 0.15
 	var L := v.length()
 	if L > 1e-7:
 		v = v / L * (GRAB_SKIN_MAX * tanh(L / GRAB_SKIN_MAX))
@@ -3667,6 +4185,14 @@ func _drag_grab(origin: Vector3, dir: Vector3) -> void:
 		if _grab_anchor:
 			_grab_anchor.global_position = nxt
 		return
+	if _grab_kind == "retractor":
+		var nxt3 := _grab_plane_hit(origin, dir, _grab_last)
+		_pull_raw = _to_ab_delta(nxt3 - _grab_last) * GRAB_SKIN_GAIN
+		_pull_off = _shape_pull(_pull_raw, true)
+		_grab_vel = Vector3.ZERO
+		_split_drag = _pull_off.length()
+		_apply_pull_uniforms()
+		return
 	if _grab_kind == "skin":
 		var nxt2 := _grab_plane_hit(origin, dir, _grab_last)
 		# 0.3.7 的 bug：_grab_last 不更新却每次累加「总位移」，拖得越久偏移越大、把切口整体拽走。
@@ -3677,7 +4203,7 @@ func _drag_grab(origin: Vector3, dir: Vector3) -> void:
 		_split_drag = _pull_off.length()
 		if _split_drag > _pull_peak:
 			_pull_peak = _split_drag
-			_pull_rest = _pull_off * 0.42
+			_pull_rest = _pull_off * GRAB_REST_FRAC
 		_apply_pull_uniforms()
 
 
@@ -3695,6 +4221,10 @@ func _end_grab(do_throw: bool) -> void:
 	elif _grab_kind == "skin":
 		# 松手后弹簧收回，保留弹性手感。
 		_split_drag = _pull_off.length()
+	elif _grab_kind == "retractor":
+		# 拉钩固定：松手立即把位移写进网格，不回弹。
+		_bake_pull()
+		_retr_drag = -1
 	_grab_active = false
 	_grab_kind = ""
 	stroke_active = false
@@ -3751,7 +4281,7 @@ func debug_drag_split_skin(off: Vector3) -> bool:
 	_pull_r = PULL_RADIUS
 	_split_drag = _pull_off.length()
 	_pull_peak = _split_drag
-	_pull_rest = _pull_off * 0.42
+	_pull_rest = _pull_off * GRAB_REST_FRAC
 	_apply_pull_uniforms()
 	return _split_drag > 0.0
 
@@ -3946,9 +4476,16 @@ func _apply_pull_uniforms() -> void:
 		sm.set_shader_parameter("surgery_pull_mode", float(_pull_mode))
 
 
+## 0.4.02：拿取松手后回弹更强：只留峰值的 12%（原 42%），弹簧更硬、略欠阻尼，能看到明显回弹。
+## 只有拉钩固定的唇缘不回弹。
+const GRAB_REST_FRAC := 0.12
+const GRAB_SPRING_K := 70.0
+const GRAB_SPRING_C := 11.0
+
+
 func _step_pull_spring(dt: float) -> void:
-	var k := 28.0
-	var c := 7.0
+	var k := GRAB_SPRING_K
+	var c := GRAB_SPRING_C
 	# 松手回弹，但停在一次拉扯峰值的一小部分，切口可以保持张开看到腹腔。
 	var target: Vector3 = _pull_rest
 	var acc: Vector3 = (target - _pull_off) * k - _grab_vel * c

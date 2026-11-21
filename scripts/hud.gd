@@ -25,9 +25,11 @@ var _btn_camera: Button
 var _btn_xray: Button
 var _btn_surgery_enter: Button
 var _btn_surgery_exit: Button
+var _btn_surgery_restore: Button
 var _btn_surgery_view: Button
 var _btn_tool_scalpel: Button
 var _btn_tool_grab: Button
+var _btn_tool_retractor: Button
 var _btn_cut_straight: Button
 var _btn_cut_ring: Button
 var _btn_cut_confirm: Button
@@ -3635,6 +3637,14 @@ func _build_surgery_ui(root: Control) -> void:
 	_btn_surgery_exit.pressed.connect(_on_surgery_exit)
 	root.add_child(_btn_surgery_exit)
 
+	# 0.4.02：手术模式里「退出手术模式」右边的「复原」，与设置里的「复原身体」完全相同。
+	_btn_surgery_restore = _make_chrome_button("复原")
+	_btn_surgery_restore.name = "SurgeryRestoreButton"
+	_btn_surgery_restore.visible = false
+	_btn_surgery_restore.custom_minimum_size = Vector2(72, 32)
+	_btn_surgery_restore.pressed.connect(_on_restore_body_pressed)
+	root.add_child(_btn_surgery_restore)
+
 	_btn_surgery_view = _make_chrome_button("切换·第一人称")
 	_btn_surgery_view.name = "SurgeryViewButton"
 	_btn_surgery_view.visible = false
@@ -3659,8 +3669,14 @@ func _build_surgery_ui(root: Control) -> void:
 	_btn_tool_grab.pressed.connect(func(): _on_surgery_tool_picked("grab"))
 	_surgery_bar.add_child(_btn_tool_grab)
 
-	# 预留后续器械空位（缝合、拉钩等），本版不启用。
-	for label in ["缝合", "拉钩"]:
+	# 0.4.02：拉钩（固定皮瓣 / 撑开切口）。
+	_btn_tool_retractor = _make_chrome_button("拉钩")
+	_btn_tool_retractor.toggle_mode = true
+	_btn_tool_retractor.pressed.connect(func(): _on_surgery_tool_picked("retractor"))
+	_surgery_bar.add_child(_btn_tool_retractor)
+
+	# 预留后续器械空位（缝合），本版不启用。
+	for label in ["缝合"]:
 		var slot := _make_chrome_button(label)
 		slot.disabled = true
 		slot.modulate = Color(1, 1, 1, 0.45)
@@ -3808,6 +3824,13 @@ func _refresh_surgery_ui() -> void:
 		_btn_surgery_exit.visible = active
 		_btn_surgery_exit.position = Vector2(sl, st)
 		_btn_surgery_exit.custom_minimum_size = Vector2(160, 40) if touch_ui else Vector2(140, 32)
+	if _btn_surgery_restore:
+		_btn_surgery_restore.visible = active
+		var ew := 160.0 if touch_ui else 140.0
+		if _btn_surgery_exit:
+			ew = maxf(ew, _btn_surgery_exit.size.x)
+		_btn_surgery_restore.position = Vector2(sl + ew + 8.0, st)
+		_btn_surgery_restore.custom_minimum_size = Vector2(88, 40) if touch_ui else Vector2(72, 32)
 	if _btn_surgery_view:
 		_btn_surgery_view.visible = active
 		var first := false
@@ -3830,6 +3853,9 @@ func _refresh_surgery_ui() -> void:
 			_btn_tool_grab.disabled = false
 			_btn_tool_grab.set_pressed_no_signal(tool == "grab")
 			_style_button(_btn_tool_grab, tool == "grab")
+		if _btn_tool_retractor:
+			_btn_tool_retractor.set_pressed_no_signal(tool == "retractor")
+			_style_button(_btn_tool_retractor, tool == "retractor")
 		if _surgery_cut_bar:
 			_surgery_cut_bar.visible = tool == "scalpel"
 			_surgery_cut_bar.position = Vector2(sl, st + 92.0)

@@ -1319,6 +1319,14 @@ func _tp_dir(yaw: float, elev: float) -> Vector3:
 
 
 ## 相机碰撞：房间内用墙内包围盒（网页 pullCameraOutOfWalls），另外对世界碰撞体做球体扫掠。
+## 自检：镜头碰撞排除列表是否包含某个碰撞体。
+func debug_camera_ignores(co: CollisionObject3D) -> bool:
+	for n in get_tree().get_nodes_in_group("camera_ignore"):
+		if n == co or (n is Node and (n as Node).is_ancestor_of(co)):
+			return true
+	return false
+
+
 func _tp_collide(origin: Vector3, dir: Vector3, dist: float) -> float:
 	var d := dist
 	if camera_bounds.size != Vector3.ZERO:
@@ -1335,6 +1343,13 @@ func _tp_collide(origin: Vector3, dir: Vector3, dist: float) -> float:
 		var exclude: Array = [get_rid()]
 		if occupier is CollisionObject3D:
 			exclude.append((occupier as CollisionObject3D).get_rid())
+		# 0.4.02：被切下 / 拖走的皮瓣、外露肠子、拉钩不触发镜头避让。
+		for n in get_tree().get_nodes_in_group("camera_ignore"):
+			if n is CollisionObject3D and is_instance_valid(n):
+				exclude.append((n as CollisionObject3D).get_rid())
+			if n is Node:
+				for c in (n as Node).find_children("*", "CollisionObject3D", true, false):
+					exclude.append((c as CollisionObject3D).get_rid())
 		# A focus point inside the exam bed / character would otherwise make
 		# cast_motion return 0 and freeze dolly at the 0.12 m floor.
 		var overlap := PhysicsShapeQueryParameters3D.new()
@@ -2288,6 +2303,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			_look_pan_pixels(mm.relative)
 			get_viewport().set_input_as_handled()
 			return
+		# 0.4.02：拉钩工具悬停在切口边缘时显示放置预览。
+		var hs := active_surgery()
+		if hs and bool(hs.call("is_active")) and str(hs.call("current_tool")) == "retractor" and hs.has_method("hover_tool"):
+			var hr: Array = _screen_ray(mm.position)
+			hs.call("hover_tool", hr[0], hr[1])
 		# 手术选了工具后锁定环绕/转视角，指针只留给切割 / 拿取。
 		if surgery_look_locked():
 			get_viewport().set_input_as_handled()

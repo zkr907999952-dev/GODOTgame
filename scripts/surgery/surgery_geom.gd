@@ -511,8 +511,11 @@ static func insert_point_in_mesh(md: MeshData, p2: Vector2, p3_hint: Vector3 = V
 	var tri_i := [fa, fb, fc]
 	var bb := [bary.x, bary.y, bary.z]
 	var p := md.pos[fa] * bary.x + md.pos[fb] * bary.y + md.pos[fc] * bary.z
+	# 0.4.02：吸附半径随局部网格密度缩小（肚脐一带三角边只有 ~1mm，固定 1.2mm 吸附会让切线左右跳成锯齿、唇缘交错粘连）。
+	var emin := minf(md.pos[fa].distance_to(md.pos[fb]), minf(md.pos[fb].distance_to(md.pos[fc]), md.pos[fc].distance_to(md.pos[fa])))
+	var snap_r := minf(SNAP_DIST, emin * 0.3)
 	for k in 3:
-		if md.pos[tri_i[k]].distance_to(p) < SNAP_DIST:
+		if md.pos[tri_i[k]].distance_to(p) < snap_r:
 			return tri_i[k]
 	var kmin := 0
 	for k in 3:
@@ -610,9 +613,10 @@ static func sync_twin_faces(md: MeshData) -> void:
 static func _split_edge_at(md: MeshData, ia: int, ib: int, t: float) -> int:
 	# 若端点已足够近，复用（按实际距离，避免产生针状三角）。
 	var elen := md.pos[ia].distance_to(md.pos[ib])
-	if t <= 0.02 or t * elen < SNAP_DIST:
+	var snap_r := minf(SNAP_DIST, elen * 0.25)
+	if t <= 0.02 or t * elen < snap_r:
 		return ia
-	if t >= 0.98 or (1.0 - t) * elen < SNAP_DIST:
+	if t >= 0.98 or (1.0 - t) * elen < snap_r:
 		return ib
 	var p := md.pos[ia].lerp(md.pos[ib], t)
 	for i in md.vert_count():
@@ -721,7 +725,8 @@ static func connect_points(md: MeshData, ia: int, ib: int) -> PackedInt32Array:
 		var u_end := u if u < 0.5 else 1.0 - u
 		if near_v != cur and u_end < EDGE_SPLIT_SNAP and not chain.has(near_v):
 			var dl := _dist_point_seg_2d(_v2(md.pos[near_v]), a2, b2)
-			if dl < SNAP_DIST * 1.6:
+			var el := md.pos[best_ia].distance_to(md.pos[best_ib])
+			if dl < minf(SNAP_DIST * 0.6, el * 0.2):
 				mid = near_v
 		if mid < 0:
 			mid = _split_edge_at(md, best_ia, best_ib, clampf(best_u, 0.02, 0.98))
