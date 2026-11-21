@@ -30,6 +30,7 @@ var _btn_surgery_view: Button
 var _btn_tool_scalpel: Button
 var _btn_tool_grab: Button
 var _btn_tool_retractor: Button
+var _btn_tool_forceps: Button
 var _btn_cut_straight: Button
 var _btn_cut_ring: Button
 var _btn_cut_confirm: Button
@@ -3675,6 +3676,13 @@ func _build_surgery_ui(root: Control) -> void:
 	_btn_tool_retractor.pressed.connect(func(): _on_surgery_tool_picked("retractor"))
 	_surgery_bar.add_child(_btn_tool_retractor)
 
+	# 0.4.03：手术钳（夹住腹腔内的肠子 / 内脏往外扯）。
+	_btn_tool_forceps = _make_chrome_button("手术钳")
+	_btn_tool_forceps.name = "SurgeryForcepsButton"
+	_btn_tool_forceps.toggle_mode = true
+	_btn_tool_forceps.pressed.connect(func(): _on_surgery_tool_picked("forceps"))
+	_surgery_bar.add_child(_btn_tool_forceps)
+
 	# 预留后续器械空位（缝合），本版不启用。
 	for label in ["缝合"]:
 		var slot := _make_chrome_button(label)
@@ -3856,6 +3864,9 @@ func _refresh_surgery_ui() -> void:
 		if _btn_tool_retractor:
 			_btn_tool_retractor.set_pressed_no_signal(tool == "retractor")
 			_style_button(_btn_tool_retractor, tool == "retractor")
+		if _btn_tool_forceps:
+			_btn_tool_forceps.set_pressed_no_signal(tool == "forceps")
+			_style_button(_btn_tool_forceps, tool == "forceps")
 		if _surgery_cut_bar:
 			_surgery_cut_bar.visible = tool == "scalpel"
 			_surgery_cut_bar.position = Vector2(sl, st + 92.0)

@@ -2277,7 +2277,7 @@ static func split_path(md: MeshData, ids: PackedInt32Array, closed: bool, width:
 	return {"ok": true, "left": left, "right": right, "sdir": sdir}
 
 
-static func evert_field(md: MeshData, left: PackedInt32Array, right: PackedInt32Array, sdir: PackedVector3Array, closed: bool, scale: float = 1.0, hole: bool = false) -> int:
+static func evert_field(md: MeshData, left: PackedInt32Array, right: PackedInt32Array, sdir: PackedVector3Array, closed: bool, scale: float = 1.0, hole: bool = false, boost_c: Vector3 = Vector3.INF, boost_r: float = 0.028, boost_k: float = 0.9) -> int:
 	## 切口外翻：在 rest 上叠加一个平滑位移场到 md.dsp（twin 内壁较小），位移梯度 < 0.6，三角不会翻转或被拉成长条。
 	## 外皮：宽场把两侧推开 + 窄场让唇缘卷起抬高；内壁只推开约三成，截面因此朝外倾斜、露出红色断面。
 	var n := mini(left.size(), right.size())
@@ -2378,9 +2378,15 @@ static func evert_field(md: MeshData, left: PackedInt32Array, right: PackedInt32
 		if best_d < R2:
 			w2 = 1.0 - best_d / R2
 			w2 = w2 * w2 * e
-		md.dsp[v] += lat * (A1 * w1 + A2 * w2) + nr * (B1 * w1 + B2 * w2)
+		# 0.4.03：肚脐附近两唇外翻间距加大（boost_c 为肚脐绑定坐标），避免凹窝处两侧截面贴在一起。
+		var bk := 1.0
+		if boost_c != Vector3.INF:
+			var bd := Vector2(best_q.x - boost_c.x, best_q.y - boost_c.y).length()
+			var tb := clampf(1.0 - bd / boost_r, 0.0, 1.0)
+			bk = 1.0 + boost_k * tb * tb * (3.0 - 2.0 * tb)
+		md.dsp[v] += lat * (A1 * w1 + A2 * w2) * bk + nr * (B1 * w1 + B2 * w2)
 		if tw != null and v < tw.vert_count():
-			tw.dsp[v] += lat * (A1 * 0.3 * w1) + nr * (B1 * 0.6 * w1)
+			tw.dsp[v] += lat * (A1 * 0.3 * w1) * bk + nr * (B1 * 0.6 * w1)
 		moved += 1
 	return moved
 

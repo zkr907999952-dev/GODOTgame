@@ -306,38 +306,9 @@ func _check_ring_over_straight() -> void:
 
 # ---- 1. 外露肠子 ----
 func _check_guts() -> void:
-	# 承接环切覆盖直切口 + 剥皮瓣后的大洞：应有外露肠子链条。
+	# 0.4.03：肠子默认不外露，只能用手术钳从腹腔里扯出来（v0403_check 覆盖）。
 	await _phys(2)
-	await _frames(4)
-	var big := float(s.call("gut_spill_max"))
-	_ok(bool(s.call("has_exposed_guts")), "exposed guts chain appears at the peeled hole (opening %.0f mm, max spill %.0f mm)" % [float(s.call("wound_opening_size")) * 1000.0, big * 1000.0])
-	var rope: Node = s.get("gut_rope")
-	if rope == null:
-		return
-	_ok(int(rope.call("point_count")) >= 12, "guts are a segmented chain, not one rigid lump (%d points)" % int(rope.call("point_count")))
-	# 身体左右甩动（直接晃骨架根）几秒：肠子往外滑并摆动，两端始终钉在创口。
-	var skel: Node3D = s.get("_skel")
-	var base := skel.position
-	var swing := 0.0
-	var prev: PackedVector3Array = (rope.call("points") as PackedVector3Array).duplicate()
-	var fed0 := float(rope.get("fed_len"))
-	for i in 90:
-		skel.position = base + Vector3(sin(float(i) * 0.35) * 0.06, 0, 0)
-		await process_frame
-		var pts: PackedVector3Array = rope.call("points")
-		var mid := pts.size() / 2
-		swing = maxf(swing, pts[mid].distance_to(prev[mid]))
-		prev = pts.duplicate()
-	skel.position = base
-	var fed1 := float(rope.get("fed_len"))
-	var pts2: PackedVector3Array = rope.call("points")
-	var a: Vector3 = rope.get("anchor_a")
-	_ok(fed1 > fed0 + 0.01 and fed1 <= big + 1e-4, "shaking makes more bowel slide out, capped by the opening (%.0f -> %.0f mm, cap %.0f)" % [fed0 * 1000.0, fed1 * 1000.0, big * 1000.0])
-	_ok(swing > 0.002, "the chain swings with the body (max mid-point step %.1f mm)" % (swing * 1000.0))
-	_ok(pts2[0].distance_to(a) < 1e-4, "chain end stays pinned at the wound")
-	# 小创口 → 掉出长度更短。
-	var straight_cap := clampf(0.09 * 2.6, 0.0, 0.7)
-	_ok(big > straight_cap, "bigger opening allows a longer spill (hole %.0f mm > 9cm slit %.0f mm)" % [big * 1000.0, straight_cap * 1000.0])
+	await _frames(20)
+	_ok(not bool(s.call("has_exposed_guts")), "0.4.03: no automatic gut spill at the peeled hole")
 	s.call("restore_body")
 	await _frames(3)
-	_ok(not bool(s.call("has_exposed_guts")), "restore body removes the exposed guts")

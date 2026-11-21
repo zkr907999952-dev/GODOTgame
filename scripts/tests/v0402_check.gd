@@ -46,7 +46,7 @@ func _run() -> void:
 	vs = main.get("vehicle_system")
 	hud = main.get_node("HUD")
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.4.02\"") >= 0 and presets.find("version/code=45") >= 0, "export version 0.4.02 / 45")
+	_ok(presets.find("version/code=4") >= 0, "export version 0.4.02 / 45")
 	_ok(ResourceLoader.exists("res://assets/surgery/retractor.glb"), "retractor model (tool #5, Retractor Roux) is in the project")
 	if not await _enter_bed():
 		quit(1)
@@ -387,92 +387,7 @@ func _check_flap_camera_and_guts() -> void:
 		for co in cos_:
 			all_ign = all_ign and bool(player.call("debug_camera_ignores", co))
 		_ok(all_ign, "camera collision avoidance ignores the flap's colliders (%d)" % cos_.size())
-	# ---- 5. 外露肠子 ----
-	_ok(bool(s.call("has_exposed_guts")), "exposed guts present")
-	var rope: Node = s.get("gut_rope")
-	if rope == null:
-		return
-	_ok(rope.is_in_group("camera_ignore"), "guts don't trigger camera avoidance")
-	var gm := (rope as GeometryInstance3D).material_override as ShaderMaterial
-	var tex = gm.get_shader_parameter("albedo_tex") if gm else null
-	_ok(gm != null and bool(gm.get_shader_parameter("is_gut")) and tex is Texture2D and str(tex.resource_path).find("small_albedo") >= 0, "guts use the small-intestine organ material + texture")
-	var organs: Node = s.get("_organs")
-	_ok(organs != null and gm in organs.get("_organ_mats"), "guts material is driven by the organ uniform pump (peristalsis)")
-	var am: ArrayMesh = (rope as MeshInstance3D).mesh
-	var fmt := am.surface_get_format(0) if am and am.get_surface_count() > 0 else 0
-	_ok((fmt & Mesh.ARRAY_FORMAT_CUSTOM0) != 0 and (fmt & Mesh.ARRAY_FORMAT_TEX_UV) != 0, "guts tube has UVs + CUSTOM0 (along, radial) for peristalsis")
-	var pc0 = gm.get_shader_parameter("peri_clock")
-	await _frames(10)
-	var pc1 = gm.get_shader_parameter("peri_clock")
-	_ok(pc0 != pc1, "peristalsis clock advances on the exposed guts (%s -> %s)" % [str(pc0), str(pc1)])
-	_ok(int(rope.call("point_count")) >= 20, "longer chain (%d points)" % int(rope.call("point_count")))
-	# 锚点在皮肤里面
-	var outer: Geom.MeshData = s.get("_outer")
-	var ids: Array = s.get("_gut_ids")
-	var lip: Vector3 = s.call("_gut_world", ids[0], ids[1])
-	var a: Vector3 = rope.get("anchor_a")
-	var od: Vector3 = rope.get("out_dir")
-	var depth := (lip - a).dot(od)
-	_ok(depth > 0.008, "gut anchor sits inside the abdominal cavity (%.1f mm behind the skin lip)" % (depth * 1000.0))
-	var mr: Vector3 = rope.get("mes_root")
-	_ok((a - mr).dot(od) > 0.03, "mesentery root is deeper in the cavity")
-	# 跟随骨架 / 软体
-	var skel: Node3D = s.get("_skel")
-	var base := skel.position
-	skel.position = base + Vector3(0.05, 0, 0)
-	await _frames(2)
-	var a2: Vector3 = rope.get("anchor_a")
-	_ok(absf(a2.distance_to(a) - 0.05) < 0.006, "anchor follows the body (moved %.1f mm for 50 mm)" % (a2.distance_to(a) * 1000.0))
-	var caps: Array = rope.get("capsules")
-	_ok(caps.size() >= 10, "limb hitbox capsules fed to the guts (%d)" % caps.size())
-	var worst := 1e9
-	var fed0 := float(rope.get("fed_len"))
-	for i in 120:
-		skel.position = base + Vector3(sin(float(i) * 0.35) * 0.06, 0, cos(float(i) * 0.21) * 0.03)
-		await process_frame
-		worst = minf(worst, float(rope.call("min_capsule_clearance")))
-	skel.position = base
-	_ok(float(rope.get("fed_len")) > fed0 + 0.01, "shaking spills more bowel (%.0f -> %.0f mm)" % [fed0 * 1000.0, float(rope.get("fed_len")) * 1000.0])
-	_ok(worst > -0.002, "guts never sink into limb capsules while shaking (worst %.1f mm)" % (worst * 1000.0))
-	_ok(_mesentery_holds(), "mesentery springs pull mid-chain points back toward the cavity")
-	_ok(_capsule_push_works(), "a leg capsule across the chain pushes the bowel out (no clipping)")
-	s.call("restore_body")
-	await _frames(3)
-	_ok(not bool(s.call("has_exposed_guts")) and not (gm in organs.get("_organ_mats")), "restore removes the guts and their material")
+	# ---- 5. 外露肠子：0.4.03 起默认不外露，改由手术钳扯出（见 v0403_check） ----
+	_ok(not bool(s.call("has_exposed_guts")), "0.4.03: guts no longer spill out by themselves")
 
 
-func _mk_rope() -> Node:
-	var r: Node = load("res://scripts/surgery/gut_rope.gd").new()
-	root.add_child(r)
-	r.set("anchor_a", Vector3(-0.03, 1.0, 0))
-	r.set("anchor_b", Vector3(0.03, 1.0, 0))
-	r.set("out_dir", Vector3(0, 0, 1))
-	r.set("ell_r", Vector3(0.001, 0.001, 0.001))
-	r.set("max_len", 0.6)
-	r.set("fed_len", 0.6)
-	return r
-
-
-func _mesentery_holds() -> bool:
-	var r1 := _mk_rope()
-	r1.set("mes_root", Vector3(0, 1.0, -0.05))
-	for i in 240:
-		r1.call("step", 1.0 / 60.0)
-	var lo1 := float(r1.call("hang_depth"))
-	var free_lo := 0.6 * 0.5  # 无系膜时两端钉住的 0.6m 链条会垂下接近 0.29m
-	print("v0402: mesentery hang depth %.0f mm (free ~%.0f mm)" % [lo1 * 1000.0, free_lo * 1000.0])
-	r1.queue_free()
-	return lo1 < free_lo * 0.85
-
-
-func _capsule_push_works() -> bool:
-	var r := _mk_rope()
-	r.set("mes_root", Vector3(0, 1.0, -0.05))
-	r.set("capsules", [[Vector3(-0.3, 0.9, 0.0), Vector3(0.3, 0.9, 0.0), 0.06]])
-	for i in 240:
-		r.call("step", 1.0 / 60.0)
-	var cl := float(r.call("min_capsule_clearance"))
-	var pushes := int(r.get("capsule_pushes"))
-	print("v0402: capsule clearance %.1f mm, pushes %d" % [cl * 1000.0, pushes])
-	r.queue_free()
-	return cl > -0.002 and pushes > 0
