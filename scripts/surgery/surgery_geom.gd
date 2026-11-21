@@ -7,6 +7,10 @@ class_name SurgeryGeom
 const DEFAULT_THICKNESS := 0.012
 const EPS := 1e-6
 const PATH_CLOSE_DIST := 0.008
+## 0.3.9：嵌入切口时的吸附（米）。离已有顶点/边太近就吸附，避免碎三角。
+const SNAP_DIST := 0.0012
+const EDGE_SNAP_BARY := 0.12
+const EDGE_SPLIT_SNAP := 0.18
 ## 截面 / 腹腔袋分段上限：降低分面率，减轻手机负担。
 const WALL_MAX_SEGMENTS := 16
 const WRAP_MAX_SEGMENTS := 28
@@ -27,6 +31,10 @@ class MeshData:
 	var bones: PackedInt32Array = PackedInt32Array()
 	var weights: PackedFloat32Array = PackedFloat32Array()
 	var idx: PackedInt32Array = PackedInt32Array()
+	## 0.3.9：外翻目标位移（rest + dsp = 外翻后），随顶点复制/插值一起走，截面拷贝顶点时自动继承。
+	var dsp: PackedVector3Array = PackedVector3Array()
+	## 0.3.9：腹腔内壁孪生网格（同顶点序、反绕序）。拓扑操作对 twin 做同样的插值，保证 1:1。
+	var twin: MeshData = null
 
 	func vert_count() -> int:
 		return pos.size()
@@ -36,9 +44,12 @@ class MeshData:
 
 	func add_vert(p: Vector3, n: Vector3, t: Vector2, b: PackedInt32Array, w: PackedFloat32Array) -> int:
 		var i := pos.size()
+		if dsp.size() < i:
+			dsp.resize(i)
 		pos.append(p)
 		nrm.append(n)
 		uv.append(t)
+		dsp.append(Vector3.ZERO)
 		for k in 4:
 			bones.append(b[k] if k < b.size() else 0)
 		for k in 4:
@@ -53,7 +64,12 @@ class MeshData:
 		for k in 4:
 			b[k] = src.bones[si * 4 + k]
 			w[k] = src.weights[si * 4 + k]
-		return add_vert(src.pos[si], src.nrm[si], src.uv[si], b, w)
+		var ni := add_vert(src.pos[si], src.nrm[si], src.uv[si], b, w)
+		if si < src.dsp.size():
+			dsp[ni] = src.dsp[si]
+		if src == self and twin != null and si < twin.vert_count():
+			twin.copy_vert(twin, si)
+		return ni
 
 	func lerp_vert(ia: int, ib: int, t: float) -> int:
 		t = clampf(t, 0.0, 1.0)
@@ -93,7 +109,12 @@ class MeshData:
 		if n.length_squared() > EPS:
 			n = n.normalized()
 		var tex := uv[ia].lerp(uv[ib], t)
-		return add_vert(p, n, tex, b, w)
+		var ni := add_vert(p, n, tex, b, w)
+		if ia < dsp.size() and ib < dsp.size():
+			dsp[ni] = dsp[ia].lerp(dsp[ib], t)
+		if twin != null and ia < twin.vert_count() and ib < twin.vert_count():
+			twin.lerp_vert(ia, ib, t)
+		return ni
 
 	func add_face(a: int, b: int, c: int) -> void:
 		if a == b or b == c or c == a:
@@ -170,6 +191,34 @@ class MeshData:
 		m.bones = bones.duplicate()
 		m.weights = weights.duplicate()
 		m.idx = idx.duplicate()
+		m.dsp = dsp.duplicate()
+		if m.dsp.size() != m.pos.size():
+			m.dsp.resize(m.pos.size())
+		return m
+
+	func ensure_dsp() -> void:
+		if dsp.size() != pos.size():
+			dsp.resize(pos.size())
+
+	func has_dsp() -> bool:
+		for d in dsp:
+			if d.length_squared() > 1e-12:
+				return true
+		return false
+
+	func bake_dsp(amount: float = 1.0) -> void:
+		## 把外翻位移并入 rest（下一刀从已外翻的形状继续），并清零。
+		ensure_dsp()
+		for i in pos.size():
+			if dsp[i].length_squared() > 0.0:
+				pos[i] += dsp[i] * amount
+		dsp = PackedVector3Array()
+		dsp.resize(pos.size())
+
+	func with_dsp() -> MeshData:
+		var m := clone()
+		for i in m.pos.size():
+			m.pos[i] += m.dsp[i]
 		return m
 
 
@@ -254,16 +303,22 @@ static func extract_abdomen(mi: MeshInstance3D, navel: Vector3, include_front_on
 	return out
 
 
-static func make_cavity(outer: MeshData, thickness: float, organ_front_z: float = -1e9) -> MeshData:
+static func make_cavity(outer: MeshData, thickness: float, organ_front_z: float = -1e9, navel: Vector3 = Vector3.INF) -> MeshData:
 	var inner := MeshData.new()
 	var th := maxf(thickness, 0.004)
+	var has_nav := navel.x < 1e8
 	for i in outer.vert_count():
 		var n: Vector3 = outer.nrm[i]
 		if n.length_squared() < EPS:
 			n = Vector3.FORWARD
 		else:
 			n = n.normalized()
-		var p: Vector3 = outer.pos[i] - n * th
+		var thv := th
+		if has_nav:
+			# 0.3.9：小腹下缘（腹股沟折痕附近）躺下屈髋时皮肤会内收，内壁在这里贴近外皮，免得从折痕穿出。
+			var ry := outer.pos[i].y - navel.y
+			thv = th * lerpf(1.0, LOWER_INNER_FRAC, smoothstep(LOWER_TAPER_Y0, LOWER_TAPER_Y1, -ry))
+		var p: Vector3 = outer.pos[i] - n * thv
 		# 1:1 前壁只做厚度内收；不再把内壁推到脏器前方（否则包不住腹腔）。
 		# organ_front_z 仅作深度下限的参考，真正的后壁/侧壁由 make_cavity_wrap 补上。
 		if organ_front_z > -1e8 and p.z < organ_front_z - 0.06:
@@ -379,9 +434,10 @@ static func insert_point_in_mesh(md: MeshData, p2: Vector2, p3_hint: Vector3 = V
 	## 在 2D 投影里把点插进某个三角，返回顶点索引。已有近点则复用。
 	## 复用顶点必须在三维上也足够近；选三角时与 _project_to_mesh 一样，
 	## 在所有覆盖该 XY 的面里取离 p3_hint 最近的一张，避免预览和真正切口错位。
+	## p3_hint 只用来挑面/挑近点，从不直接写入顶点：防止世界坐标误当绑定坐标把腹网拉到天上。
 	var has_hint := p3_hint.x < 1e8
 	var best_i := -1
-	var best_d := (0.00035 * 0.00035) if has_hint else (0.00045 * 0.00045)
+	var best_d := SNAP_DIST * SNAP_DIST
 	for i in md.vert_count():
 		var d: float
 		if has_hint:
@@ -450,16 +506,55 @@ static func insert_point_in_mesh(md: MeshData, p2: Vector2, p3_hint: Vector3 = V
 				bary = Vector3(bx, by, bz)
 	if found < 0:
 		return -1
-	# 用三维重心插值，保证点落在原来的曲面上。
-	# 路径提示只在已经贴面时采用，避免世界坐标误当绑定坐标插入后把腹网拉到天上。
+	# 0.3.9：落点就是曲面上的重心插值（不再用 1.2cm 内的提示点替换，那会把顶点拉离曲面形成毛刺）。
+	# 太靠近已有顶点 → 复用；太靠近某条边 → 改为拆这条边，避免 1 拆 3 产生细长三角。
+	var tri_i := [fa, fb, fc]
+	var bb := [bary.x, bary.y, bary.z]
 	var p := md.pos[fa] * bary.x + md.pos[fb] * bary.y + md.pos[fc] * bary.z
-	if has_hint and p3_hint.distance_squared_to(p) <= 0.012 * 0.012:
-		p = p3_hint
+	for k in 3:
+		if md.pos[tri_i[k]].distance_to(p) < SNAP_DIST:
+			return tri_i[k]
+	var kmin := 0
+	for k in 3:
+		if bb[k] < bb[kmin]:
+			kmin = k
+	if bb[kmin] < EDGE_SNAP_BARY:
+		var e0: int = tri_i[(kmin + 1) % 3]
+		var e1: int = tri_i[(kmin + 2) % 3]
+		var w0: float = bb[(kmin + 1) % 3]
+		var w1: float = bb[(kmin + 2) % 3]
+		var te := w1 / maxf(w0 + w1, EPS)
+		return _split_edge_at(md, e0, e1, te)
+	var ni := _bary_vert(md, fa, fb, fc, bary)
+	if md.twin != null and fa < md.twin.vert_count() and fb < md.twin.vert_count() and fc < md.twin.vert_count():
+		_bary_vert(md.twin, fa, fb, fc, bary)
+	# 把原三角替换成三块。
+	var new_idx := PackedInt32Array()
+	for f3 in md.face_count():
+		if f3 == found:
+			new_idx.append(fa)
+			new_idx.append(fb)
+			new_idx.append(ni)
+			new_idx.append(fb)
+			new_idx.append(fc)
+			new_idx.append(ni)
+			new_idx.append(fc)
+			new_idx.append(fa)
+			new_idx.append(ni)
+		else:
+			new_idx.append(md.idx[f3 * 3])
+			new_idx.append(md.idx[f3 * 3 + 1])
+			new_idx.append(md.idx[f3 * 3 + 2])
+	md.idx = new_idx
+	return ni
+
+
+static func _bary_vert(md: MeshData, fa: int, fb: int, fc: int, bary: Vector3) -> int:
+	var p := md.pos[fa] * bary.x + md.pos[fb] * bary.y + md.pos[fc] * bary.z
 	var n := (md.nrm[fa] * bary.x + md.nrm[fb] * bary.y + md.nrm[fc] * bary.z)
 	if n.length_squared() > EPS:
 		n = n.normalized()
 	var tex := md.uv[fa] * bary.x + md.uv[fb] * bary.y + md.uv[fc] * bary.z
-	# 权重
 	var acc: Dictionary = {}
 	for src_i in [[fa, bary.x], [fb, bary.y], [fc, bary.z]]:
 		var si: int = src_i[0]
@@ -489,32 +584,35 @@ static func insert_point_in_mesh(md: MeshData, p2: Vector2, p3_hint: Vector3 = V
 		for k in 4:
 			wnew[k] /= sumw
 	var ni := md.add_vert(p, n, tex, bnew, wnew)
-	# 把原三角替换成三块。
-	var new_idx := PackedInt32Array()
-	for f3 in md.face_count():
-		if f3 == found:
-			new_idx.append(fa)
-			new_idx.append(fb)
-			new_idx.append(ni)
-			new_idx.append(fb)
-			new_idx.append(fc)
-			new_idx.append(ni)
-			new_idx.append(fc)
-			new_idx.append(fa)
-			new_idx.append(ni)
-		else:
-			new_idx.append(md.idx[f3 * 3])
-			new_idx.append(md.idx[f3 * 3 + 1])
-			new_idx.append(md.idx[f3 * 3 + 2])
-	md.idx = new_idx
+	md.ensure_dsp()
+	if fa < md.dsp.size() and fb < md.dsp.size() and fc < md.dsp.size():
+		md.dsp[ni] = md.dsp[fa] * bary.x + md.dsp[fb] * bary.y + md.dsp[fc] * bary.z
 	return ni
 
 
+static func sync_twin_faces(md: MeshData) -> void:
+	## 内壁 = 外皮同拓扑、反绕序。
+	if md == null or md.twin == null:
+		return
+	var tw := md.twin
+	if tw.vert_count() != md.vert_count():
+		push_warning("surgery: twin vertex count drift %d vs %d" % [tw.vert_count(), md.vert_count()])
+		return
+	var ni := PackedInt32Array()
+	ni.resize(md.idx.size())
+	for f in md.face_count():
+		ni[f * 3] = md.idx[f * 3]
+		ni[f * 3 + 1] = md.idx[f * 3 + 2]
+		ni[f * 3 + 2] = md.idx[f * 3 + 1]
+	tw.idx = ni
+
+
 static func _split_edge_at(md: MeshData, ia: int, ib: int, t: float) -> int:
-	# 若端点已足够近，复用。
-	if t <= 0.02:
+	# 若端点已足够近，复用（按实际距离，避免产生针状三角）。
+	var elen := md.pos[ia].distance_to(md.pos[ib])
+	if t <= 0.02 or t * elen < SNAP_DIST:
 		return ia
-	if t >= 0.98:
+	if t >= 0.98 or (1.0 - t) * elen < SNAP_DIST:
 		return ib
 	var p := md.pos[ia].lerp(md.pos[ib], t)
 	for i in md.vert_count():
@@ -616,7 +714,17 @@ static func connect_points(md: MeshData, ia: int, ib: int) -> PackedInt32Array:
 			# 没有相交边，直接结束（可能共面但数值漂了）。
 			chain.append(ib)
 			break
-		var mid := _split_edge_at(md, best_ia, best_ib, clampf(best_u, 0.02, 0.98))
+		# 0.3.9：交点很靠近边端点、且端点离连线很近时直接走端点，不拆出细长三角。
+		var mid := -1
+		var u := clampf(best_u, 0.0, 1.0)
+		var near_v := best_ia if u < 0.5 else best_ib
+		var u_end := u if u < 0.5 else 1.0 - u
+		if near_v != cur and u_end < EDGE_SPLIT_SNAP and not chain.has(near_v):
+			var dl := _dist_point_seg_2d(_v2(md.pos[near_v]), a2, b2)
+			if dl < SNAP_DIST * 1.6:
+				mid = near_v
+		if mid < 0:
+			mid = _split_edge_at(md, best_ia, best_ib, clampf(best_u, 0.02, 0.98))
 		if mid == cur:
 			chain.append(ib)
 			break
@@ -625,6 +733,15 @@ static func connect_points(md: MeshData, ia: int, ib: int) -> PackedInt32Array:
 	if chain[chain.size() - 1] != ib:
 		chain.append(ib)
 	return chain
+
+
+static func _dist_point_seg_2d(p: Vector2, a: Vector2, b: Vector2) -> float:
+	var ab := b - a
+	var L2 := ab.length_squared()
+	if L2 < 1e-14:
+		return p.distance_to(a)
+	var t := clampf((p - a).dot(ab) / L2, 0.0, 1.0)
+	return p.distance_to(a + ab * t)
 
 
 static func embed_path(md: MeshData, path3: PackedVector3Array) -> PackedInt32Array:
@@ -821,10 +938,15 @@ static func extract_inside(md: MeshData, loop_ids: PackedInt32Array) -> Dictiona
 	var outside := MeshData.new()
 	var map_in: Dictionary = {}
 	var map_out: Dictionary = {}
+	if md.twin != null and md.twin.vert_count() == md.vert_count():
+		inside.twin = MeshData.new()
+		outside.twin = MeshData.new()
 	var _xfer := func(dest: MeshData, mp: Dictionary, si: int) -> int:
 		var e := int(mp.get(si, -1))
 		if e < 0:
 			e = dest.copy_vert(md, si)
+			if dest.twin != null:
+				dest.twin.copy_vert(md.twin, si)
 			mp[si] = e
 		return e
 	var area_in := 0.0
@@ -868,6 +990,8 @@ static func extract_inside(md: MeshData, loop_ids: PackedInt32Array) -> Dictiona
 	for id2 in clean:
 		loop_in.append(_xfer.call(inside, map_in, id2))
 		loop_out.append(_xfer.call(outside, map_out, id2))
+	sync_twin_faces(inside)
+	sync_twin_faces(outside)
 	return {
 		"inside": inside,
 		"outside": outside,
@@ -1398,7 +1522,8 @@ static func line_path_on_mesh(md: MeshData, a: Vector3, b: Vector3, steps: int =
 	return path
 
 
-static func make_cavity_wrap(inner: MeshData, back_z: float, guts_min: Vector3 = Vector3.INF, guts_max: Vector3 = Vector3.INF, lumbar_z: float = -1e9) -> MeshData:
+static func make_cavity_wrap(inner: MeshData, back_z: float, guts_min: Vector3 = Vector3.INF, guts_max: Vector3 = Vector3.INF, lumbar_z: float = -1e9, skin: MeshData = null, torso_n: int = -1, navel: Vector3 = Vector3.INF) -> MeshData:
+	var has_nav := navel.x < 1e8
 	## 从前壁边界挤到腹腔后方，再封后盖，把脏器体积包进袋状腔。
 	## 后盖向中心收窄、后腰方向抬高，避免整圈前壁剪影直推到腰椎外皮之外。
 	var wrap := MeshData.new()
@@ -1440,6 +1565,18 @@ static func make_cavity_wrap(inner: MeshData, back_z: float, guts_min: Vector3 =
 		var src: int = ids[i]
 		front[i] = wrap.copy_vert(inner, src)
 		var p := inner.pos[src]
+		if has_nav and skin != null:
+			# 0.3.9：小腹下缘（腹股沟折痕）那段袋口往上、往里收，袋壁不再贴着折痕走（屈髋时会从折痕穿出）。
+			var lowf := smoothstep(WRAP_LOW_Y0 + 0.03, WRAP_LOW_Y1, navel.y - p.y)
+			if lowf > 0.0:
+				var pl := p
+				pl.y += WRAP_LOW_LIFT * 1.2 * lowf
+				pl.x = lerpf(pl.x, mid.x, 0.15 * lowf)
+				var fitf := _inset_inside_skin(skin, pl, 0.004 + 0.016 * lowf, torso_n)
+				wrap.pos[front[i]] = fitf[0]
+				for k3 in 4:
+					wrap.bones[front[i] * 4 + k3] = (fitf[1] as PackedInt32Array)[k3]
+					wrap.weights[front[i] * 4 + k3] = (fitf[2] as PackedFloat32Array)[k3]
 		# 后盖向腹中心收，下缘额外收得更紧，减轻后腰穿模。
 		var shrink := 0.38
 		if have_guts and p.y < mid.y:
@@ -1462,9 +1599,38 @@ static func make_cavity_wrap(inner: MeshData, back_z: float, guts_min: Vector3 =
 		for k in 4:
 			b[k] = inner.bones[src * 4 + k]
 			w[k] = inner.weights[src * 4 + k]
+		if has_nav:
+			bp.y += WRAP_LOW_LIFT * smoothstep(WRAP_LOW_Y0, WRAP_LOW_Y1, navel.y - bp.y)
+		if skin != null:
+			# 0.3.9：后盖/后腰点必须在皮肤内侧 WRAP_INSET 以上，并用最近皮肤顶点的骨骼权重（跟随后腰蒙皮，不再沿用前壁边界权重）。
+			var fit := _inset_inside_skin(skin, bp, WRAP_INSET, torso_n)
+			bp = fit[0]
+			b = fit[1]
+			w = fit[2]
 		back[i] = wrap.add_vert(bp, Vector3(0, 0, -1), inner.uv[src], b, w)
 		acc_back += bp
-	loft_wall(wrap, front, back, true)
+	if skin != null:
+		# 侧壁也收进皮肤内侧：两圈中间环，靠前那圈往里收得更深；小腹下缘（腹股沟折痕）再往上提，
+		# 否则屈髋躺下时侧壁会从折痕/后腰侧穿出（腰侧与折痕是凹的，直连前后会戳出皮肤）。
+		var prev := front
+		for ring in [[0.22, WRAP_INSET + 0.010], [0.6, WRAP_INSET + 0.004]]:
+			var rr := PackedInt32Array()
+			rr.resize(n)
+			for i3 in n:
+				var pf: Vector3 = wrap.pos[front[i3]]
+				var pb: Vector3 = wrap.pos[back[i3]]
+				var pm := pf.lerp(pb, float(ring[0]))
+				if has_nav:
+					var low := smoothstep(WRAP_LOW_Y0, WRAP_LOW_Y1, navel.y - pm.y)
+					pm.y += WRAP_LOW_LIFT * low
+					pm.x = lerpf(pm.x, mid.x, 0.18 * low)
+				var fit2 := _inset_inside_skin(skin, pm, float(ring[1]), torso_n)
+				rr[i3] = wrap.add_vert(fit2[0], Vector3(0, 0, -1), wrap.uv[front[i3]], fit2[1], fit2[2])
+			loft_wall(wrap, prev, rr, true)
+			prev = rr
+		loft_wall(wrap, prev, back, true)
+	else:
+		loft_wall(wrap, front, back, true)
 	# 后盖中心必须是均值。0.3.5 改写后盖时丢掉了「acc /= n」，
 	# 中心变成所有后盖顶点之和（约 28 倍），腹腔袋被拉到天上。
 	acc = acc_back / float(n)
@@ -1475,11 +1641,70 @@ static func make_cavity_wrap(inner: MeshData, back_z: float, guts_min: Vector3 =
 	for k2 in 4:
 		bones0[k2] = wrap.bones[back[0] * 4 + k2]
 		weights0[k2] = wrap.weights[back[0] * 4 + k2]
+	if skin != null:
+		var fit3 := _inset_inside_skin(skin, acc, WRAP_INSET, torso_n)
+		acc = fit3[0]
+		bones0 = fit3[1]
+		weights0 = fit3[2]
 	var cid := wrap.add_vert(acc, Vector3(0, 0, -1), Vector2(0.5, 0.5), bones0, weights0)
 	# 后盖朝 -Z（从 +Z 看为顺时针）。
 	for i2 in n:
 		wrap.add_face(cid, back[(i2 + 1) % n], back[i2])
 	return wrap
+
+
+const WRAP_INSET := 0.014
+const WRAP_LOW_Y0 := 0.11
+const WRAP_LOW_Y1 := 0.2
+const WRAP_LOW_LIFT := 0.035
+const LOWER_TAPER_Y0 := 0.10
+const LOWER_TAPER_Y1 := 0.185
+const LOWER_INNER_FRAC := 0.1
+
+
+static func _inset_inside_skin(skin: MeshData, p: Vector3, inset: float, weight_n: int = -1) -> Array:
+	## 取最近的几个皮肤顶点：若 p 在其切平面外侧或离皮肤不足 inset，就沿法线往里推；骨骼权重取最近点。
+	var best: Array = [[1e9, -1], [1e9, -1], [1e9, -1]]
+	for i in skin.vert_count():
+		var d := skin.pos[i].distance_squared_to(p)
+		if d < best[2][0]:
+			best[2] = [d, i]
+			best.sort_custom(func(x, y): return x[0] < y[0])
+	var b := PackedInt32Array()
+	var w := PackedFloat32Array()
+	b.resize(4)
+	w.resize(4)
+	var i0: int = best[0][1]
+	if i0 < 0:
+		return [p, b, w]
+	var sp := Vector3.ZERO
+	var sn := Vector3.ZERO
+	var cnt := 0
+	for e in best:
+		if int(e[1]) >= 0:
+			sp += skin.pos[int(e[1])]
+			sn += skin.nrm[int(e[1])]
+			cnt += 1
+	sp /= float(cnt)
+	if sn.length_squared() > EPS:
+		sn = sn.normalized()
+	var q := p
+	var h := (p - sp).dot(sn)
+	if h > -inset:
+		q = p - sn * (h + inset)
+	# 骨骼权重只取躯干（Dress）部分的最近点，避免取到大腿权重、屈髋时跟着腿戳出腹股沟。
+	var iw := i0
+	if weight_n > 0 and i0 >= weight_n:
+		var bd := 1e9
+		for j in weight_n:
+			var dj := skin.pos[j].distance_squared_to(q)
+			if dj < bd:
+				bd = dj
+				iw = j
+	for k in 4:
+		b[k] = skin.bones[iw * 4 + k]
+		w[k] = skin.weights[iw * 4 + k]
+	return [q, b, w]
 
 
 static func dense_loft_tris(path_count: int, closed: bool, sides: int = 2) -> int:
@@ -1924,3 +2149,316 @@ static func _evert_neighborhood(md: MeshData, left: PackedInt32Array, right: Pac
 			if (p - best_mid).dot(side) < 0.0:
 				side = -side
 			md.pos[vi] = p + side * (0.005 * fall) + md.nrm[vi] * (0.002 * fall)
+
+
+## ───────────── 0.3.9：真正沿切线分开 + 平滑外翻场 ─────────────
+
+static func split_path(md: MeshData, ids: PackedInt32Array, closed: bool, width: float) -> Dictionary:
+	## 沿已嵌入的顶点链把网格真正切开：中间点（闭环为全部点）复制成左右两份，
+	## 每个三角按「非切线顶点」在切线局部左右哪一侧，只引用那一侧的副本（twin 内壁同步）。
+	## 左侧 = sdir 正方向，sdir = 法线 × 切向。返回 {ok, left, right, sdir}。
+	var path := PackedInt32Array()
+	for i in ids.size():
+		var id: int = ids[i]
+		if id < 0 or id >= md.vert_count():
+			continue
+		if path.size() > 0 and path[path.size() - 1] == id:
+			continue
+		path.append(id)
+	if closed and path.size() >= 2 and path[0] == path[path.size() - 1]:
+		path.remove_at(path.size() - 1)
+	var n := path.size()
+	if n < 2 or (closed and n < 3):
+		return {"ok": false, "left": path, "right": path, "sdir": PackedVector3Array()}
+	var P := PackedVector3Array()
+	var sdir := PackedVector3Array()
+	P.resize(n)
+	sdir.resize(n)
+	for i in n:
+		P[i] = md.pos[path[i]]
+	for i in n:
+		var ip := (i - 1 + n) % n if closed else maxi(i - 1, 0)
+		var inx := (i + 1) % n if closed else mini(i + 1, n - 1)
+		var tang := P[inx] - P[ip]
+		var nr: Vector3 = md.nrm[path[i]]
+		if nr.length_squared() < EPS:
+			nr = Vector3(0, 0, 1)
+		var sd := nr.normalized().cross(tang)
+		if sd.length_squared() < 1e-14:
+			sd = Vector3.RIGHT
+		sdir[i] = sd.normalized()
+	var split_at: Dictionary = {}
+	var on_path: Dictionary = {}
+	for i in n:
+		on_path[path[i]] = i
+		if closed or (i > 0 and i < n - 1):
+			split_at[path[i]] = i
+	# 每个用到切点的三角判定左右。
+	var face_side: Dictionary = {}
+	for f in md.face_count():
+		var tri := [md.idx[f * 3], md.idx[f * 3 + 1], md.idx[f * 3 + 2]]
+		var k := -1
+		for v in tri:
+			if split_at.has(v):
+				k = int(split_at[v])
+				break
+		if k < 0:
+			continue
+		var c := Vector3.ZERO
+		var cnt := 0
+		for v2 in tri:
+			if not on_path.has(v2):
+				c += md.pos[v2]
+				cnt += 1
+		if cnt == 0:
+			c = (md.pos[tri[0]] + md.pos[tri[1]] + md.pos[tri[2]]) / 3.0
+		else:
+			c /= float(cnt)
+		# 用离 c 最近的相邻线段判定（拐角处更稳）。
+		var best_s := 0.0
+		var best_d := 1e9
+		var segs := []
+		if closed or k > 0:
+			segs.append([(k - 1 + n) % n, k])
+		if closed or k < n - 1:
+			segs.append([k, (k + 1) % n])
+		for sg in segs:
+			var a: Vector3 = P[sg[0]]
+			var b: Vector3 = P[sg[1]]
+			var ab := b - a
+			var t := clampf((c - a).dot(ab) / maxf(ab.length_squared(), 1e-14), 0.0, 1.0)
+			var q := a + ab * t
+			var d := c.distance_to(q)
+			var sd2: Vector3 = sdir[sg[0]].lerp(sdir[sg[1]], t)
+			if d < best_d:
+				best_d = d
+				best_s = (c - q).dot(sd2)
+		face_side[f] = 1 if best_s >= 0.0 else -1
+	var left := PackedInt32Array()
+	var right := PackedInt32Array()
+	left.resize(n)
+	right.resize(n)
+	var copy_of: Dictionary = {}
+	for i in n:
+		var id2: int = path[i]
+		left[i] = id2
+		right[i] = id2
+		if split_at.has(id2):
+			var cp := md.copy_vert(md, id2)
+			copy_of[id2] = cp
+			right[i] = cp
+	for f2 in face_side.keys():
+		if int(face_side[f2]) >= 0:
+			continue
+		for kk in 3:
+			var vi: int = md.idx[f2 * 3 + kk]
+			if copy_of.has(vi):
+				md.idx[f2 * 3 + kk] = int(copy_of[vi])
+	var hw := width * 0.5
+	for i in n:
+		if left[i] == right[i]:
+			continue
+		var dv: Vector3 = sdir[i] * hw
+		md.pos[left[i]] += dv
+		md.pos[right[i]] -= dv
+		if md.twin != null and right[i] < md.twin.vert_count():
+			md.twin.pos[left[i]] += dv
+			md.twin.pos[right[i]] -= dv
+	sync_twin_faces(md)
+	if closed:
+		left.append(left[0])
+		right.append(right[0])
+		sdir.append(sdir[0])
+	return {"ok": true, "left": left, "right": right, "sdir": sdir}
+
+
+static func evert_field(md: MeshData, left: PackedInt32Array, right: PackedInt32Array, sdir: PackedVector3Array, closed: bool, scale: float = 1.0, hole: bool = false) -> int:
+	## 切口外翻：在 rest 上叠加一个平滑位移场到 md.dsp（twin 内壁较小），位移梯度 < 0.6，三角不会翻转或被拉成长条。
+	## 外皮：宽场把两侧推开 + 窄场让唇缘卷起抬高；内壁只推开约三成，截面因此朝外倾斜、露出红色断面。
+	var n := mini(left.size(), right.size())
+	if n < 2:
+		return 0
+	md.ensure_dsp()
+	var tw := md.twin
+	if tw != null:
+		tw.ensure_dsp()
+	var M := PackedVector3Array()
+	var S := PackedVector3Array()
+	var U := PackedFloat32Array()
+	var tot := 0.0
+	for i in n:
+		var m: Vector3 = (md.pos[left[i]] + md.pos[right[i]]) * 0.5
+		if i > 0:
+			tot += m.distance_to(M[i - 1])
+		M.append(m)
+		U.append(tot)
+		S.append(sdir[i] if i < sdir.size() else Vector3.RIGHT)
+	if tot < 1e-5:
+		return 0
+	var cen := Vector3.ZERO
+	for m2 in M:
+		cen += m2
+	cen /= float(n)
+	var R1 := 0.016 * scale
+	var R2 := 0.0055 * scale
+	var A1 := 0.0042 * scale
+	var A2 := 0.0024 * scale
+	var B1 := 0.0008 * scale
+	var B2 := 0.0016 * scale
+	var lip_side: Dictionary = {}
+	if not hole:
+		for i2 in n:
+			lip_side[left[i2]] = 1.0
+			lip_side[right[i2]] = -1.0 if left[i2] != right[i2] else 0.0
+	var lo := M[0]
+	var hi := M[0]
+	for m3 in M:
+		lo = lo.min(m3)
+		hi = hi.max(m3)
+	lo -= Vector3.ONE * R1
+	hi += Vector3.ONE * R1
+	var moved := 0
+	for v in md.vert_count():
+		var p: Vector3 = md.pos[v]
+		if p.x < lo.x or p.y < lo.y or p.z < lo.z or p.x > hi.x or p.y > hi.y or p.z > hi.z:
+			continue
+		var best_d := 1e9
+		var best_q := Vector3.ZERO
+		var best_u := 0.0
+		var best_s := Vector3.ZERO
+		for i3 in n - 1:
+			var a: Vector3 = M[i3]
+			var b: Vector3 = M[i3 + 1]
+			var ab := b - a
+			var t := clampf((p - a).dot(ab) / maxf(ab.length_squared(), 1e-14), 0.0, 1.0)
+			var q := a + ab * t
+			var d := p.distance_to(q)
+			if d < best_d:
+				best_d = d
+				best_q = q
+				best_u = lerpf(U[i3], U[i3 + 1], t) / tot
+				best_s = S[i3].lerp(S[i3 + 1], t)
+		if best_d >= R1:
+			continue
+		var e := 1.0
+		if not closed:
+			e = pow(maxf(sin(PI * best_u), 0.0), 0.6)
+		if e <= 1e-4:
+			continue
+		var nr: Vector3 = md.nrm[v]
+		if nr.length_squared() < EPS:
+			nr = Vector3(0, 0, 1)
+		nr = nr.normalized()
+		var lat: Vector3
+		if hole:
+			lat = p - cen
+			lat -= nr * lat.dot(nr)
+			if lat.length_squared() < 1e-12:
+				continue
+			lat = lat.normalized()
+		else:
+			var sg := 0.0
+			if lip_side.has(v):
+				sg = float(lip_side[v])
+			if sg == 0.0:
+				sg = 1.0 if (p - best_q).dot(best_s) >= 0.0 else -1.0
+			lat = best_s.normalized() * sg
+			lat -= nr * lat.dot(nr)
+			if lat.length_squared() < 1e-12:
+				continue
+			lat = lat.normalized()
+		var w1 := 1.0 - best_d / R1
+		w1 = w1 * w1 * e
+		var w2 := 0.0
+		if best_d < R2:
+			w2 = 1.0 - best_d / R2
+			w2 = w2 * w2 * e
+		md.dsp[v] += lat * (A1 * w1 + A2 * w2) + nr * (B1 * w1 + B2 * w2)
+		if tw != null and v < tw.vert_count():
+			tw.dsp[v] += lat * (A1 * 0.3 * w1) + nr * (B1 * 0.6 * w1)
+		moved += 1
+	return moved
+
+
+static func tri_quality(a: Vector3, b: Vector3, c: Vector3) -> float:
+	## 1 = 等边，0 = 退化。4√3·面积 / 边长平方和。
+	var ar := (b - a).cross(c - a).length() * 0.5
+	var s2 := a.distance_squared_to(b) + b.distance_squared_to(c) + c.distance_squared_to(a)
+	if s2 < 1e-16:
+		return 0.0
+	return 6.928203 * ar / s2
+
+
+static func component_faces(md: MeshData, seeds: PackedInt32Array) -> Dictionary:
+	## 从种子顶点出发、经共享顶点连通的所有三角（真正切开后皮瓣与身体互不相连）。
+	var v2f: Dictionary = {}
+	for f in md.face_count():
+		for k in 3:
+			var v: int = md.idx[f * 3 + k]
+			if not v2f.has(v):
+				v2f[v] = []
+			(v2f[v] as Array).append(f)
+	var seen_f: Dictionary = {}
+	var seen_v: Dictionary = {}
+	var stack: Array = []
+	for sv in seeds:
+		if not seen_v.has(sv):
+			seen_v[sv] = true
+			stack.append(sv)
+	while not stack.is_empty():
+		var v3: int = stack.pop_back()
+		for f2 in v2f.get(v3, []):
+			if seen_f.has(f2):
+				continue
+			seen_f[f2] = true
+			for k2 in 3:
+				var w: int = md.idx[f2 * 3 + k2]
+				if not seen_v.has(w):
+					seen_v[w] = true
+					stack.append(w)
+	return seen_f
+
+
+static func extract_faces(md: MeshData, inside_faces: Dictionary, loop_in_src: PackedInt32Array, loop_out_src: PackedInt32Array) -> Dictionary:
+	## 按给定三角集合拆成 inside/outside（twin 同步），返回与 extract_inside 相同格式。
+	var inside := MeshData.new()
+	var outside := MeshData.new()
+	if md.twin != null and md.twin.vert_count() == md.vert_count():
+		inside.twin = MeshData.new()
+		outside.twin = MeshData.new()
+	var map_in: Dictionary = {}
+	var map_out: Dictionary = {}
+	var _xfer := func(dest: MeshData, mp: Dictionary, si: int) -> int:
+		var e := int(mp.get(si, -1))
+		if e < 0:
+			e = dest.copy_vert(md, si)
+			if dest.twin != null:
+				dest.twin.copy_vert(md.twin, si)
+			mp[si] = e
+		return e
+	for f in md.face_count():
+		var a := md.idx[f * 3]
+		var b := md.idx[f * 3 + 1]
+		var c := md.idx[f * 3 + 2]
+		if inside_faces.has(f):
+			inside.add_face(_xfer.call(inside, map_in, a), _xfer.call(inside, map_in, b), _xfer.call(inside, map_in, c))
+		else:
+			outside.add_face(_xfer.call(outside, map_out, a), _xfer.call(outside, map_out, b), _xfer.call(outside, map_out, c))
+	var loop_in := PackedInt32Array()
+	var loop_out := PackedInt32Array()
+	for id in loop_in_src:
+		if id >= 0 and id < md.vert_count():
+			loop_in.append(_xfer.call(inside, map_in, id))
+	for id2 in loop_out_src:
+		if id2 >= 0 and id2 < md.vert_count():
+			loop_out.append(_xfer.call(outside, map_out, id2))
+	sync_twin_faces(inside)
+	sync_twin_faces(outside)
+	return {
+		"inside": inside,
+		"outside": outside,
+		"loop_in": loop_in,
+		"loop_out": loop_out,
+		"inside_faces": inside.face_count(),
+		"outside_faces": outside.face_count(),
+	}

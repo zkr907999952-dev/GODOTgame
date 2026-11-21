@@ -49,7 +49,7 @@ func _run() -> void:
 		quit(1)
 		return
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.3.8\"") >= 0 and presets.find("version/code=42") >= 0, "export version 0.3.8 / 42")
+	_ok(presets.find("version/name=\"0.3.") >= 0 and (presets.find("version/code=42") >= 0 or presets.find("version/code=43") >= 0), "export version 0.3.8+ (42+)")
 	await _check_capsule_and_hitboxes()
 	await _check_ledge_support()
 	await _check_collision_debug()

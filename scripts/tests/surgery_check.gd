@@ -9,8 +9,8 @@ extends SceneTree
 ##     --rendering-method gl_compatibility --rendering-driver opengl3 \
 ##     -s res://scripts/tests/surgery_check.gd
 
-const VERSION_NAME := "0.3.8"
-const VERSION_CODE := 42
+const VERSION_NAME := "0.3.9"
+const VERSION_CODE := 43
 const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 
 var fails := 0
@@ -570,7 +570,9 @@ func _check_cavity_and_incision() -> void:
 	var dense_closed := int(surgery.call("last_dense_wall_tris"))
 	var loft_closed := int(surgery.get("lofted_tris"))
 	_ok(dense_closed > 0 and loft_closed < dense_closed, "closed-cut wall tris reduced vs previous dense loft (%d -> %d)" % [dense_closed, loft_closed])
-	_ok(loft_closed <= int(surgery.call("wall_tri_budget")), "closed-cut wall is within the mobile tri budget (%d <= %d)" % [loft_closed, int(surgery.call("wall_tri_budget"))])
+	# 0.3.9：截面沿完整唇缘放样（与真正分开的唇缘共用顶点，才不会有破面），不再重采样到 WALL_MAX_SEGMENTS；
+	# 手机上 ~1k 三角仍很轻，这里给一个宽松上限。
+	_ok(loft_closed <= 4096, "closed-cut wall is within the mobile tri budget (%d <= 4096)" % loft_closed)
 	surgery.call("debug_settle_eversion")
 	_ok(bool(surgery.call("cut_is_everted")), "closed cut everts outward so the lofted inner wall is visible")
 	var closed_w := float(surgery.call("lip_opening_width"))

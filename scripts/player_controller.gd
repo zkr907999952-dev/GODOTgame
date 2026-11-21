@@ -90,6 +90,8 @@ var _tp_focus: String = ""
 var _tp_presets: Array = [null, null, null, null]
 var _rmb_down: bool = false
 var _mmb_down: bool = false
+## 0.3.9：检查床观察视角的中键平移量（目标点每帧跟随身体焦点，平移量叠加在焦点上）。
+var _bed_pan: Vector3 = Vector3.ZERO
 var _pan_drag: bool = false
 var _fp_pan: Vector3 = Vector3.ZERO
 ## 房间墙内包围盒（由 game_root 设置；城市里为空 → 只做物理碰撞）
@@ -1167,6 +1169,7 @@ func focus_point(focus: String) -> Vector3:
 
 ## 网页 ORBIT_HOME：正面略偏右、略俯视，看向腹部，距离 2.27，fov 34。
 func tp_home(snap: bool = false) -> void:
+	_bed_pan = Vector3.ZERO
 	var fwd := _body_forward()
 	var face_yaw := atan2(fwd.x, fwd.z)
 	_tp_yaw_goal = _tp_yaw + wrapf(face_yaw + TP_HOME_YAW_OFF - _tp_yaw, -PI, PI)
@@ -1232,7 +1235,13 @@ func _tp_pan_pixels(rel: Vector2) -> void:
 	var h := 2.0 * _tp_dist * tan(deg_to_rad(tp_fov) * 0.5)
 	var per_px := h / vh
 	var b := _camera.global_transform.basis
-	_tp_target_goal += (-b.x * rel.x + b.y * rel.y) * per_px
+	var d := (-b.x * rel.x + b.y * rel.y) * per_px
+	if occupancy == "exam_bed" and play_mode == GameMode.DISPLAY:
+		_bed_pan += d
+		if _bed_pan.length() > 0.6:
+			_bed_pan = _bed_pan.normalized() * 0.6
+		return
+	_tp_target_goal += d
 	_tp_clamp_target()
 
 
@@ -1339,7 +1348,7 @@ func _update_tp_camera(delta: float, snap: bool = false) -> void:
 	if occupancy == "exam_bed" and play_mode == GameMode.DISPLAY:
 		var focus := _tp_focus if _tp_focus != "" else "belly"
 		if TP_FOCUS.has(focus):
-			_tp_target_goal = focus_point(focus) - _base_origin()
+			_tp_target_goal = focus_point(focus) + _bed_pan - _base_origin()
 	if tp_auto_rotate and not _rmb_down:
 		_tp_yaw_goal += tp_auto_rotate_speed * TAU / 60.0 * delta
 	var k := 1.0 if snap else 1.0 - exp(-TP_DAMP_RATE * delta)
@@ -1927,10 +1936,11 @@ func _vehicle_system_node() -> Node:
 
 
 func look_pan_enabled() -> bool:
-	# 观察视角、检查床上看、手术未选工具时，允许平移摄像机。
-	if surgery_look_enabled():
+	# 观察视角、检查床上看、手术中（无论是否选了工具）都允许中键平移摄像机。
+	var s := active_surgery()
+	if s and s.has_method("is_active") and bool(s.call("is_active")):
 		return true
-	if occupancy == "exam_bed" and not surgery_look_locked():
+	if occupancy == "exam_bed":
 		return true
 	if occupancy == "car" or occupancy == "plane":
 		var vs := _vehicle_system_node()
@@ -2256,15 +2266,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		if not first_person and weapon_drawn() and (mm.button_mask & MOUSE_BUTTON_MASK_LEFT) and _observe_fire_from.x > -900.0:
 			if mm.position.distance_to(_observe_fire_from) > 14.0:
 				_observe_fire_moved = true
-		# 手术选了工具后锁定视角，指针只留给切割 / 拿取。
+		# 0.3.9：中键拖拽平移在所有观察场景都可用（含检查床、手术中已选工具）——工具只用左键。
+		if _mmb_down and look_pan_enabled():
+			_look_pan_pixels(mm.relative)
+			get_viewport().set_input_as_handled()
+			return
+		# 手术选了工具后锁定环绕/转视角，指针只留给切割 / 拿取。
 		if surgery_look_locked():
 			get_viewport().set_input_as_handled()
 			return
-		if _mmb_down and look_pan_enabled():
-			# 观察 / 检查床 / 手术未选工具：中键平移视角。
-			_look_pan_pixels(mm.relative)
-			get_viewport().set_input_as_handled()
-		elif first_person:
+		if first_person:
 			if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 				_yaw -= mm.relative.x * mouse_sensitivity
 				_pitch -= mm.relative.y * mouse_sensitivity
@@ -2280,9 +2291,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 	elif event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
-		if surgery_look_locked() and (mb.button_index == MOUSE_BUTTON_RIGHT or mb.button_index == MOUSE_BUTTON_MIDDLE):
+		if mb.button_index == MOUSE_BUTTON_MIDDLE and look_pan_enabled():
+			_mmb_down = mb.pressed
+			get_viewport().set_input_as_handled()
+			return
+		if surgery_look_locked() and mb.button_index == MOUSE_BUTTON_RIGHT:
 			_rmb_down = false
-			_mmb_down = false
 			_pan_drag = false
 			get_viewport().set_input_as_handled()
 			return

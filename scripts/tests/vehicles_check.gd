@@ -4,8 +4,8 @@ const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
 ## 0.2.31 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.3.8"
-const VERSION_CODE := 42
+const VERSION_NAME := "0.3.9"
+const VERSION_CODE := 43
 
 var fails := 0
 var main: Node

@@ -7,6 +7,7 @@ const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 const SCALPEL_GLB := "res://assets/surgery/scalpel.glb"
 const WALL_THICKNESS := 0.012
 const SLIT_WIDTH := 0.0025
+const WALL_MIN_SEG := 0.0012
 const OVAL_RX := 0.035
 const OVAL_RY := 0.028
 const WALL_MAX_SEGMENTS := Geom.WALL_MAX_SEGMENTS
@@ -66,6 +67,13 @@ var _body_loop: PackedInt32Array = PackedInt32Array()
 var _loop_out: PackedInt32Array = PackedInt32Array()
 var _loop_in: PackedInt32Array = PackedInt32Array()
 var _wall_md: Geom.MeshData
+## 0.3.9：截面分块（{md, ring}）；剥皮瓣时去掉该环的两侧截面，其余累积保留。
+var _wall_parts: Array = []
+var _ring_serial: int = 0
+var _ring_open_id: int = -1
+var _organ_z: float = -1e9
+var _skin_mi: MeshInstance3D = null
+var _wrap_torso_n: int = -1
 var _posed_cache: PackedVector3Array = PackedVector3Array()
 var _posed_dirty: bool = true
 var _breath_amp_saved: float = -1.0
@@ -907,6 +915,8 @@ func restore_body() -> void:
 	_inner = null
 	_rest = null
 	_wall_md = null
+	_wall_parts = []
+	_ring_open_id = -1
 	_wrap = null
 	_outer_rest = null
 	_inner_rest = null
@@ -1271,60 +1281,67 @@ func try_peel_at(origin: Vector3, dir: Vector3) -> bool:
 func peel_flap() -> bool:
 	if not can_grab_flap() or _outer == null or _inner == null:
 		return false
-	# 张开后：内唇=_flap_loop 是皮瓣边，外唇=_body_loop 是留在身上的洞缘。
+	# 0.3.9：环形切口已真正切开，皮瓣是独立连通块；按连通性取出（不再按 2D 环重新分类，也不会内外拓扑不一致）。
 	var loop := _flap_loop if _flap_loop.size() >= 3 else _path_ids
 	if loop.size() < 3:
 		return false
-	var ext_o: Dictionary = Geom.extract_inside(_outer, loop)
-	var ext_i: Dictionary = Geom.extract_inside(_inner, loop)
+	_bake_evert()
+	_ensure_twin()
+	var seeds := PackedInt32Array()
+	for id in loop:
+		if id >= 0 and id < _outer.vert_count():
+			seeds.append(id)
+	var comp: Dictionary = Geom.component_faces(_outer, seeds)
+	var ext_o: Dictionary
+	if comp.size() > 0 and comp.size() < _outer.face_count() / 2:
+		ext_o = Geom.extract_faces(_outer, comp, loop, _body_loop)
+	else:
+		ext_o = Geom.extract_inside(_outer, loop)
 	if int(ext_o.get("inside_faces", 0)) < 1 or int(ext_o.get("outside_faces", 0)) < 1:
 		push_warning("surgery: flap isolation failed (inside=%s outside=%s)" % [ext_o.get("inside_faces"), ext_o.get("outside_faces")])
 		return false
 	var body_o: Geom.MeshData = ext_o["outside"]
 	var flap_o: Geom.MeshData = ext_o["inside"]
-	var body_i: Geom.MeshData = ext_i["outside"]
-	var flap_i: Geom.MeshData = ext_i["inside"]
+	if body_o.twin == null:
+		body_o.twin = Geom.make_cavity(body_o, thickness, _organ_z, _navel_rest)
+	if flap_o.twin == null:
+		flap_o.twin = Geom.make_cavity(flap_o, thickness, _organ_z, _navel_rest)
+	var body_i: Geom.MeshData = body_o.twin
+	var flap_i: Geom.MeshData = flap_o.twin
 	var loop_body_o: PackedInt32Array = ext_o["loop_out"]
-	var loop_body_i: PackedInt32Array = ext_i["loop_out"]
 	var loop_flap_o: PackedInt32Array = ext_o["loop_in"]
-	var loop_flap_i: PackedInt32Array = ext_i["loop_in"]
-	if _body_loop.size() >= 3:
-		loop_body_o = _ensure_loop_in_mesh(ext_o["outside"], _outer, _body_loop)
-		loop_body_i = _ensure_loop_in_mesh(ext_i["outside"], _inner, _body_loop)
-	# 身体：外剩余 + 内剩余 + 洞缘层状壁。
-	var body := _merge_meshes(body_o, body_i)
-	var wall_body := Geom.MeshData.new()
-	# loft 要在同一 MeshData 里引用两端顶点，先把内外合并进 body，再对映射后的环做 loft。
-	# _merge_meshes 把 b 的顶点追加到 a：body 当前 = body_o + body_i（索引已偏移）。
-	# 上面那行已经 merge 了，所以要重新映射 inner loop。
-	# 重做一次更清晰：
-	body = body_o.clone()
-	var inner_off := body.vert_count()
-	_append_mesh(body, body_i)
-	var map_i_loop := PackedInt32Array()
-	for id in loop_body_i:
-		map_i_loop.append(id + inner_off)
-	var peel_wall := _make_loft_mesh(body_o, body_i, loop_body_o, loop_body_i, true)
-	lofted_tris = peel_wall.face_count()
+	if loop_body_o.size() < 3:
+		loop_body_o = Geom.mesh_boundary_loop(body_o)
+	# 身体：去掉这个环两侧的截面，换成洞缘一圈截面（外/内同索引）。
+	var kept: Array = []
+	for part in _wall_parts:
+		if int((part as Dictionary).get("ring", -1)) != _ring_open_id or _ring_open_id < 0:
+			kept.append(part)
+	_wall_parts = kept
+	var peel_wall := _make_loft_mesh(body_o, body_i, _closed_ids(loop_body_o), _closed_ids(loop_body_o), true, true)
+	_wall_parts.append({"md": peel_wall, "ring": -1})
+	_rebuild_wall_md()
+	lofted_tris = _wall_md.face_count()
 	_outer = body_o
 	_inner = body_i
-	_wall_md = peel_wall
 	_lip_left = loop_body_o
 	_lip_right = loop_body_o
-	_lip_left_i = loop_body_i
-	_lip_right_i = loop_body_i
+	_lip_left_i = loop_body_o
+	_lip_right_i = loop_body_o
 	_lip_closed = true
+	_ring_open_id = -1
 	_hole_loops.append(loop_body_o)
 	_start_eversion()
-	_rebuild_surgical_meshes(body_o, body_i, peel_wall)
+	_rebuild_surgical_meshes(_outer, _inner, _wall_md)
 	# 皮瓣：外补丁 + 内补丁 + 周圈壁，转到世界空间后落地。
 	var flap_md := flap_o.clone()
 	var fo := flap_md.vert_count()
 	_append_mesh(flap_md, flap_i)
+	var lf := _closed_ids(loop_flap_o)
 	var flap_inner_loop := PackedInt32Array()
-	for id2 in loop_flap_i:
+	for id2 in lf:
 		flap_inner_loop.append(id2 + fo)
-	Geom.loft_wall(flap_md, loop_flap_o, flap_inner_loop, true)
+	Geom.loft_wall(flap_md, lf, flap_inner_loop, false)
 	# 0.3.8：前 flap_o.face_count() 个三角是皮瓣外表面（正常皮肤），其余（内面 + 周圈断面）才是红色截面。
 	_flap_outer_faces = flap_o.face_count()
 	if not _spawn_flap(flap_md, flap_o):
@@ -1336,6 +1353,55 @@ func peel_flap() -> bool:
 	persist = true
 	_update_cavity_visibility()
 	return true
+
+
+## 0.3.9：闭环索引首尾相接（loft 用 closed=false 走一整圈，避免重复首点产生零面积三角）。
+func _closed_ids(loop: PackedInt32Array) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for id in loop:
+		if out.size() > 0 and out[out.size() - 1] == id:
+			continue
+		out.append(id)
+	if out.size() >= 3 and out[0] != out[out.size() - 1]:
+		out.append(out[0])
+	return out
+
+
+func _ensure_twin() -> void:
+	if _outer == null:
+		return
+	if _inner == null or _inner.vert_count() != _outer.vert_count() or _inner.idx.size() != _outer.idx.size():
+		_inner = Geom.make_cavity(_outer, thickness, _organ_z, _navel_rest)
+	_outer.twin = _inner
+	_outer.ensure_dsp()
+	_inner.ensure_dsp()
+
+
+func _bake_evert() -> void:
+	## 上一刀的外翻并入 rest：之后的切割/剥离从已外翻的形状继续，旧切口不会合拢。
+	if _outer == null:
+		return
+	var w := 1.0
+	if _evert_anim:
+		_evert_anim = false
+	_outer.bake_dsp(w)
+	if _inner:
+		_inner.bake_dsp(w)
+	for part in _wall_parts:
+		var md: Geom.MeshData = (part as Dictionary).get("md")
+		if md:
+			md.bake_dsp(w)
+	_evert = 1.0
+	_evert_vel = 0.0
+
+
+func _rebuild_wall_md() -> void:
+	var w := Geom.MeshData.new()
+	for part in _wall_parts:
+		var md: Geom.MeshData = (part as Dictionary).get("md")
+		if md and md.face_count() > 0:
+			_append_mesh(w, md)
+	_wall_md = w
 
 
 func _ensure_loop_in_mesh(dest: Geom.MeshData, src: Geom.MeshData, loop: PackedInt32Array) -> PackedInt32Array:
@@ -1359,10 +1425,10 @@ func _ensure_loop_in_mesh(dest: Geom.MeshData, src: Geom.MeshData, loop: PackedI
 	return out
 
 
-func _make_loft_mesh(outer: Geom.MeshData, inner: Geom.MeshData, loop_o: PackedInt32Array, loop_i: PackedInt32Array, closed: bool) -> Geom.MeshData:
+func _make_loft_mesh(outer: Geom.MeshData, inner: Geom.MeshData, loop_o: PackedInt32Array, loop_i: PackedInt32Array, closed: bool, full: bool = false) -> Geom.MeshData:
 	var cap := WALL_MAX_SEGMENTS
-	var src_o := Geom.resample_index_loop(outer, loop_o, cap)
-	var src_i := Geom.resample_index_loop(inner, loop_i, cap)
+	var src_o := _thin_lip(outer, loop_o) if full else Geom.resample_index_loop(outer, loop_o, cap)
+	var src_i := src_o if full and loop_o == loop_i else (_thin_lip(inner, loop_i) if full else Geom.resample_index_loop(inner, loop_i, cap))
 	var n := mini(src_o.size(), src_i.size())
 	if src_o.size() != src_i.size() and n >= 2:
 		src_o = Geom.resample_index_loop(outer, src_o, n)
@@ -1382,6 +1448,26 @@ func _make_loft_mesh(outer: Geom.MeshData, inner: Geom.MeshData, loop_o: PackedI
 		ids_i.append(int(map_i[id2]))
 	Geom.loft_wall(wall, ids_o, ids_i, closed)
 	return wall
+
+
+## 0.3.9：截面沿唇缘全部顶点走，但相距不到 WALL_MIN_SEG 的相邻点合并（12mm 高的截面配 0.3mm 宽会成针状三角）。
+func _thin_lip(md: Geom.MeshData, ids: PackedInt32Array) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	var n := ids.size()
+	for i in n:
+		var id: int = ids[i]
+		if id < 0 or id >= md.vert_count():
+			continue
+		var last := i == n - 1
+		if out.size() > 0 and not last and md.pos[id].distance_to(md.pos[out[out.size() - 1]]) < WALL_MIN_SEG:
+			continue
+		if last and out.size() > 1 and id != out[out.size() - 1] and md.pos[id].distance_to(md.pos[out[out.size() - 1]]) < WALL_MIN_SEG:
+			out[out.size() - 1] = id
+			continue
+		if out.size() > 0 and out[out.size() - 1] == id:
+			continue
+		out.append(id)
+	return out
 
 
 func _merge_meshes(a: Geom.MeshData, b: Geom.MeshData) -> Geom.MeshData:
@@ -1414,69 +1500,70 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 	last_path_count = work.size()
 	if closed and work.size() >= 2 and work[0].distance_to(work[work.size() - 1]) <= Geom.PATH_CLOSE_DIST:
 		work.remove_at(work.size() - 1)
-	var ids := Geom.embed_path_paired(_outer, _inner, work)
+	# 0.3.9：先把上一刀的外翻并入 rest，再在外皮上嵌入路径；内壁是 twin，所有拆分按同一插值同步（不再 IDW 近似）。
+	_bake_evert()
+	_ensure_twin()
+	var ids := Geom.embed_path(_outer, work)
 	if ids.size() < 2:
 		push_warning("surgery: path embed failed")
 		return false
 	if closed:
 		ids = Geom.close_path_ids(_outer, ids)
-		Geom.sync_inner(_outer, _inner)
 		if ids.size() >= 3 and ids[0] != ids[ids.size() - 1]:
 			ids.append(ids[0])
+	Geom.sync_twin_faces(_outer)
 	_path_ids = ids
 	last_embedded_bind = PackedVector3Array()
 	for id in ids:
 		if id >= 0 and id < _outer.vert_count():
 			last_embedded_bind.append(_outer.pos[id])
-	var wall: Geom.MeshData
+	# 真正切开：切线上的顶点复制成左右两份，三角只引用自己那一侧（内壁同索引同步）。
+	var sp: Dictionary = Geom.split_path(_outer, ids, closed, SLIT_WIDTH)
+	if not bool(sp.get("ok", false)):
+		push_warning("surgery: split failed")
+		return false
+	var left: PackedInt32Array = sp["left"]
+	var right: PackedInt32Array = sp["right"]
+	var sdir: PackedVector3Array = sp["sdir"]
+	_inner = _outer.twin
+	# 外翻位移场（rest + dsp），截面顶点从唇缘拷贝时一起继承。
+	Geom.evert_field(_outer, left, right, sdir, closed)
+	var wall := _make_loft_mesh(_outer, _inner, left, left, false, true)
+	var w2 := _make_loft_mesh(_outer, _inner, right, right, false, true)
+	_append_mesh(wall, w2)
+	last_dense_loft_tris = Geom.dense_loft_tris(left.size(), closed, 2)
+	_lip_left = left
+	_lip_right = right
+	_lip_left_i = left
+	_lip_right_i = right
+	_lip_closed = closed
 	if closed:
 		loop_ready = true
-		# 先沿环做内外壁之间的层状截面；皮瓣仍留在身上，等拿取工具剥离。
-		# 再把环缝微微张开，切开的皮肤有真实裂口。
-		var slit_o: Dictionary = Geom.open_loop_slit(_outer, ids, SLIT_WIDTH)
-		var slit_i: Dictionary = Geom.open_loop_slit(_inner, ids, SLIT_WIDTH)
-		var left: PackedInt32Array = slit_o.get("left", ids)
-		var right: PackedInt32Array = slit_o.get("right", ids)
-		var left_i: PackedInt32Array = slit_i.get("left", ids)
-		var right_i: PackedInt32Array = slit_i.get("right", ids)
-		# 剥离仍用嵌入后、张开前的环（ids）；左右唇只用于可见截面。
-		last_dense_loft_tris = Geom.dense_loft_tris(left.size(), true, 2)
-		wall = _make_loft_mesh(_outer, _inner, left, left_i, true)
-		var wall2 := _make_loft_mesh(_outer, _inner, right, right_i, true)
-		_append_mesh(wall, wall2)
-		_flap_loop = left
-		_body_loop = right
-		_lip_left = left
-		_lip_right = right
-		_lip_left_i = left_i
-		_lip_right_i = right_i
-		_lip_closed = true
-		lofted_tris = wall.face_count()
+		# 闭环：法线×切向 指向左侧；按路径 XY 面积正负判断左侧是不是环内（皮瓣）。
+		var poly := PackedVector3Array()
+		for id3 in ids:
+			poly.append(_outer.pos[id3])
+		var sa := 0.0
+		for k in poly.size():
+			var pa := poly[k]
+			var pb := poly[(k + 1) % poly.size()]
+			sa += pa.x * pb.y - pb.x * pa.y
+		var inside_left := sa >= 0.0
+		_flap_loop = left if inside_left else right
+		_body_loop = right if inside_left else left
+		_ring_serial += 1
+		_ring_open_id = _ring_serial
+		_wall_parts.append({"md": wall, "ring": _ring_open_id})
 	else:
-		loop_ready = false
-		_flap_loop = PackedInt32Array()
-		var slit_o2: Dictionary = Geom.open_slit(_outer, ids, SLIT_WIDTH)
-		var slit_i2: Dictionary = Geom.open_slit(_inner, ids, SLIT_WIDTH)
-		var lo: PackedInt32Array = slit_o2.get("left", ids)
-		var ro: PackedInt32Array = slit_o2.get("right", ids)
-		var li: PackedInt32Array = slit_i2.get("left", ids)
-		var ri: PackedInt32Array = slit_i2.get("right", ids)
-		last_dense_loft_tris = Geom.dense_loft_tris(lo.size(), false, 2)
-		wall = _make_loft_mesh(_outer, _inner, lo, li, false)
-		var w2 := _make_loft_mesh(_outer, _inner, ro, ri, false)
-		_append_mesh(wall, w2)
-		_lip_left = lo
-		_lip_right = ro
-		_lip_left_i = li
-		_lip_right_i = ri
-		_lip_closed = false
-		lofted_tris = wall.face_count()
+		loop_ready = _ring_open_id >= 0 and not flap_peeled
+		_wall_parts.append({"md": wall, "ring": -1})
+	_rebuild_wall_md()
+	lofted_tris = wall.face_count()
 	cut_open = true
 	cavity_exposed = true
 	persist = true
-	_wall_md = wall
 	_start_eversion()
-	_rebuild_surgical_meshes(_outer, _inner, wall)
+	_rebuild_surgical_meshes(_outer, _inner, _wall_md)
 	_posed_dirty = true
 	if work.size() >= 2:
 		# 涂鸦跟提交路径一致，不再用未经同一套嵌入的原始副本。
@@ -1513,6 +1600,7 @@ func _find_meshes() -> void:
 			_skin_name = mi.name
 			skin_ymax = _mesh_ymax(mi)
 	_dress = dress
+	_skin_mi = skin_mi
 	if _dress:
 		_dress_mesh_orig = _dress.mesh
 		_skin = _dress.skin
@@ -1548,10 +1636,13 @@ func _bake_if_needed() -> bool:
 	_outer = extracted["abdomen"]
 	_rest = extracted["rest"]
 	var organ_z := _organ_front_z()
-	_inner = Geom.make_cavity(_outer, thickness, organ_z)
+	_organ_z = organ_z
+	_inner = Geom.make_cavity(_outer, thickness, organ_z, _navel_rest)
+	_outer.twin = _inner
 	_lumbar_z = Geom.lumbar_exterior_z(_rest, _navel_rest)
 	var back_z := minf(_guts_min.z - 0.006, organ_z - 0.055)
-	_wrap = Geom.make_cavity_wrap(_inner, back_z, _guts_min, _guts_max, _lumbar_z)
+	var wrap_skin := _wrap_skin_md()
+	_wrap = Geom.make_cavity_wrap(_inner, back_z, _guts_min, _guts_max, _lumbar_z, wrap_skin, _wrap_torso_n, _navel_rest)
 	# 用去掉腹部的 Dress 替换原网格，避免与手术网格重叠。
 	if _rest.face_count() > 0:
 		_dress.mesh = _rest.to_array_mesh()
@@ -1572,6 +1663,275 @@ func _bake_if_needed() -> bool:
 	_posed_dirty = true
 	_update_cavity_visibility()
 	return true
+
+
+## 0.3.9：腹腔袋贴合用的皮肤点云（上半身 Dress 余下部分 + 下半身 Skin 的腰臀段，绑定空间）。
+func _wrap_skin_md() -> Geom.MeshData:
+	var md := Geom.MeshData.new()
+	var srcs: Array = []
+	if _rest:
+		srcs.append(_rest)
+	if _skin_mi and _skin_mi.mesh and _skin_mi.mesh.get_surface_count() > 0:
+		var arr: Array = _skin_mi.mesh.surface_get_arrays(0)
+		var lm := Geom.MeshData.new()
+		var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var nr: PackedVector3Array = arr[Mesh.ARRAY_NORMAL] if arr[Mesh.ARRAY_NORMAL] != null else PackedVector3Array()
+		var bo: PackedInt32Array = arr[Mesh.ARRAY_BONES] if arr[Mesh.ARRAY_BONES] != null else PackedInt32Array()
+		var we: PackedFloat32Array = arr[Mesh.ARRAY_WEIGHTS] if arr[Mesh.ARRAY_WEIGHTS] != null else PackedFloat32Array()
+		var stride := 4
+		if bo.size() >= v.size() * 8:
+			stride = 8
+		# 两块网格的 Skin 绑定槽位可能不同：按骨骼名映射到 Dress 的槽位。
+		var remap: Dictionary = {}
+		var sk2: Skin = _skin_mi.skin
+		if sk2 and _skin and sk2 != _skin:
+			var by_name: Dictionary = {}
+			for j in _skin.get_bind_count():
+				by_name[String(_skin.get_bind_name(j))] = j
+			for j2 in sk2.get_bind_count():
+				var nm := String(sk2.get_bind_name(j2))
+				remap[j2] = int(by_name.get(nm, -1))
+		if bo.size() >= v.size() * 4 and nr.size() == v.size():
+			for i in v.size():
+				var p := v[i]
+				if absf(p.y - _navel_rest.y) > 0.3:
+					continue
+				var b := PackedInt32Array()
+				var w := PackedFloat32Array()
+				b.resize(4)
+				w.resize(4)
+				var bad := false
+				for k in 4:
+					b[k] = bo[i * stride + k]
+					w[k] = we[i * stride + k]
+					if w[k] <= 0.0:
+						b[k] = 0
+					elif not remap.is_empty():
+						b[k] = int(remap.get(b[k], -1))
+						if b[k] < 0:
+							bad = true
+				if bad:
+					continue
+				lm.add_vert(p, nr[i], Vector2.ZERO, b, w)
+			srcs.append(lm)
+	_wrap_torso_n = -1
+	for si in srcs.size():
+		var m: Geom.MeshData = srcs[si]
+		for i2 in m.vert_count():
+			if absf(m.pos[i2].y - _navel_rest.y) > 0.3:
+				continue
+			md.copy_vert(m, i2)
+		if si == 0 and _rest:
+			_wrap_torso_n = md.vert_count()
+	return md
+
+
+## 0.3.9 自检：腹腔袋（后盖/侧壁）与内壁在当前姿势下离皮肤的最小间隙。
+## 返回 {wrap_max, inner_max, wrap_bad, inner_bad, worst}，*_max 为「最靠外」的有符号距离（负 = 在皮肤内侧）。
+func debug_cavity_clearance(margin: float = 0.002) -> Dictionary:
+	var out := {"wrap_max": -1.0, "inner_max": -1.0, "wrap_bad": 0, "inner_bad": 0, "worst": Vector3.ZERO, "wrap_n": 0}
+	if _skel == null or _inner == null:
+		return out
+	var cloud := _wrap_skin_md()
+	if _outer:
+		for i in _outer.vert_count():
+			cloud.copy_vert(_outer, i)
+	var cw := Geom.world_positions(cloud, _skel, _skin)
+	var cn := PackedVector3Array()
+	cn.resize(cloud.vert_count())
+	var gb := _skel.global_transform.basis
+	for i2 in cloud.vert_count():
+		cn[i2] = (gb * (Geom.skin_basis(i2, cloud, _skel, _skin) * cloud.nrm[i2])).normalized()
+	var cell := 0.03
+	var grid: Dictionary = {}
+	for i3 in cw.size():
+		var key := Vector3i(floori(cw[i3].x / cell), floori(cw[i3].y / cell), floori(cw[i3].z / cell))
+		var lst: PackedInt32Array = grid.get(key, PackedInt32Array())
+		lst.append(i3)
+		grid[key] = lst
+	if _wrap:
+		var ww := Geom.world_positions(_wrap, _skel, _skin)
+		out["wrap_n"] = ww.size()
+		for p2 in ww:
+			var h: float = _clearance_at(p2, grid, cw, cn, cell)
+			if h > float(out["wrap_max"]):
+				out["wrap_max"] = h
+				out["worst"] = p2
+			if h > -margin:
+				out["wrap_bad"] = int(out["wrap_bad"]) + 1
+	var iw := Geom.world_positions(_inner, _skel, _skin)
+	var bad_rel: Array = []
+	for vi in iw.size():
+		var p3: Vector3 = iw[vi]
+		var h2: float = _clearance_at(p3, grid, cw, cn, cell)
+		if h2 > float(out["inner_max"]):
+			out["inner_worst_rel"] = _inner.pos[vi] - _navel_rest
+		out["inner_max"] = maxf(float(out["inner_max"]), h2)
+		if h2 > -margin and bad_rel.size() < 400:
+			bad_rel.append(_inner.pos[vi] - _navel_rest)
+		if h2 > -margin:
+			out["inner_bad"] = int(out["inner_bad"]) + 1
+	out["inner_bad_rel"] = bad_rel
+	return out
+
+
+## 0.3.9 自检：腹腔袋顶点与三角重心在当前姿势下是否在皮肤里面（沿朝背方向射线与身体三角求交，奇数 = 在内）。
+func debug_wrap_outside(which: String = "wrap") -> Dictionary:
+	var out := {"tested": 0, "outside": 0, "pts": []}
+	if _skel == null or _wrap == null or _rest == null:
+		return out
+	var tgt: Geom.MeshData = _wrap
+	if which == "inner":
+		tgt = _inner
+	elif which == "outer_in":
+		tgt = _outer.clone()
+		for i0 in tgt.vert_count():
+			tgt.pos[i0] -= tgt.nrm[i0].normalized() * 0.0008
+	var body := _rest.clone()
+	var cloud := _wrap_skin_md_full()
+	_append_mesh(body, cloud)
+	if _outer and which == "wrap":
+		_append_mesh(body, _outer)
+	var bw := Geom.world_positions(body, _skel, _skin)
+	var ww := Geom.world_positions(tgt, _skel, _skin)
+	var fr: Transform3D = _organs.call("abdomen_frame") if _organs and _organs.has_method("abdomen_frame") else Transform3D.IDENTITY
+	var dir := -fr.basis.z.normalized()
+	var pts := PackedVector3Array()
+	for p in ww:
+		pts.append(p)
+	var face_of: Dictionary = {}
+	if which == "wrap":
+		for f in _wrap.face_count():
+			var A := ww[_wrap.idx[f * 3]]
+			var B := ww[_wrap.idx[f * 3 + 1]]
+			var C := ww[_wrap.idx[f * 3 + 2]]
+			for bc in [Vector3(1, 1, 1) / 3.0, Vector3(0.6, 0.2, 0.2), Vector3(0.2, 0.6, 0.2), Vector3(0.2, 0.2, 0.6), Vector3(0.5, 0.5, 0.0), Vector3(0.0, 0.5, 0.5), Vector3(0.5, 0.0, 0.5)]:
+				face_of[pts.size()] = f
+				pts.append(A * bc.x + B * bc.y + C * bc.z)
+	# 只保留射线附近的身体三角，加速。
+	var lo := pts[0]
+	var hi := pts[0]
+	for q in pts:
+		lo = lo.min(q)
+		hi = hi.max(q)
+	var tris := PackedInt32Array()
+	for f2 in body.face_count():
+		var a := bw[body.idx[f2 * 3]]
+		var b := bw[body.idx[f2 * 3 + 1]]
+		var c := bw[body.idx[f2 * 3 + 2]]
+		var tlo := a.min(b).min(c)
+		var thi := a.max(b).max(c)
+		# 沿 dir 方向无限延伸：只在垂直于 dir 的两个轴上裁剪。
+		var ok := true
+		for ax in 3:
+			if thi[ax] < lo[ax] - 0.25 or tlo[ax] > hi[ax] + 0.25:
+				ok = false
+		if ok:
+			tris.append(f2)
+	var gb := _skel.global_transform.basis
+	var dirs := [dir, (dir + fr.basis.x.normalized()).normalized(), (dir - fr.basis.x.normalized()).normalized()]
+	var qi := -1
+	for q2 in pts:
+		qi += 1
+		var outside_votes := 0
+		for d in dirs:
+			var best_t := 1e9
+			var best_f := -1
+			for f3 in tris:
+				var r: Variant = Geometry3D.ray_intersects_triangle(q2, d, bw[body.idx[f3 * 3]], bw[body.idx[f3 * 3 + 1]], bw[body.idx[f3 * 3 + 2]])
+				if r != null:
+					var t := ((r as Vector3) - q2).length()
+					if t < best_t:
+						best_t = t
+						best_f = f3
+			if best_f < 0:
+				outside_votes += 1
+				continue
+			var nsum := Vector3.ZERO
+			for k in 3:
+				var vi: int = body.idx[best_f * 3 + k]
+				nsum += gb * (Geom.skin_basis(vi, body, _skel, _skin) * body.nrm[vi])
+			# 最近交点处皮肤法线与射线同向 = 从里往外穿出 = 点在体内。
+			if nsum.dot(d) <= 0.0:
+				outside_votes += 1
+		out["tested"] = int(out["tested"]) + 1
+		if outside_votes >= 2:
+			out["outside"] = int(out["outside"]) + 1
+			if (out["pts"] as Array).size() < 40:
+				if which == "inner":
+					(out["pts"] as Array).append(fr.affine_inverse() * q2)
+					continue
+				var tag: Variant = qi if qi < tgt.vert_count() else [int(face_of.get(qi, -1)), _wrap.idx[int(face_of.get(qi, 0)) * 3], _wrap.idx[int(face_of.get(qi, 0)) * 3 + 1], _wrap.idx[int(face_of.get(qi, 0)) * 3 + 2]]
+				(out["pts"] as Array).append(tag)
+	return out
+
+
+func _wrap_skin_md_full() -> Geom.MeshData:
+	## Skin（下半身）带三角的网格，骨骼槽位映射到 Dress。
+	var lm := Geom.MeshData.new()
+	if _skin_mi == null or _skin_mi.mesh == null or _skin_mi.mesh.get_surface_count() < 1:
+		return lm
+	var arr: Array = _skin_mi.mesh.surface_get_arrays(0)
+	var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	var nr: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
+	var bo: PackedInt32Array = arr[Mesh.ARRAY_BONES]
+	var we: PackedFloat32Array = arr[Mesh.ARRAY_WEIGHTS]
+	var ind: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+	var stride := 8 if bo.size() >= v.size() * 8 else 4
+	var remap: Dictionary = {}
+	var sk2: Skin = _skin_mi.skin
+	if sk2 and _skin and sk2 != _skin:
+		var by_name: Dictionary = {}
+		for j in _skin.get_bind_count():
+			by_name[String(_skin.get_bind_name(j))] = j
+		for j2 in sk2.get_bind_count():
+			remap[j2] = int(by_name.get(String(sk2.get_bind_name(j2)), 0))
+	for i in v.size():
+		var b := PackedInt32Array()
+		var w := PackedFloat32Array()
+		b.resize(4)
+		w.resize(4)
+		for k in 4:
+			w[k] = we[i * stride + k]
+			b[k] = int(remap.get(bo[i * stride + k], bo[i * stride + k])) if w[k] > 0.0 else 0
+		lm.add_vert(v[i], nr[i], Vector2.ZERO, b, w)
+	for f in ind.size() / 3:
+		lm.add_face(ind[f * 3], ind[f * 3 + 1], ind[f * 3 + 2])
+	return lm
+
+
+func _clearance_at(p: Vector3, grid: Dictionary, cw: PackedVector3Array, cn: PackedVector3Array, cell: float) -> float:
+	var k0 := Vector3i(floori(p.x / cell), floori(p.y / cell), floori(p.z / cell))
+	var bd := PackedFloat32Array([1e9, 1e9, 1e9])
+	var bi := PackedInt32Array([-1, -1, -1])
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				var key := k0 + Vector3i(dx, dy, dz)
+				if not grid.has(key):
+					continue
+				var lst: PackedInt32Array = grid[key]
+				for j in lst:
+					var d := cw[j].distance_squared_to(p)
+					if d < bd[2]:
+						if d < bd[0]:
+							bd[2] = bd[1]; bi[2] = bi[1]; bd[1] = bd[0]; bi[1] = bi[0]; bd[0] = d; bi[0] = j
+						elif d < bd[1]:
+							bd[2] = bd[1]; bi[2] = bi[1]; bd[1] = d; bi[1] = j
+						else:
+							bd[2] = d; bi[2] = j
+	if bi[0] < 0:
+		return -1.0
+	var sp := Vector3.ZERO
+	var sn := Vector3.ZERO
+	var c := 0
+	for k in 3:
+		if bi[k] >= 0:
+			sp += cw[bi[k]]
+			sn += cn[bi[k]]
+			c += 1
+	sp /= float(c)
+	return (p - sp).dot(sn.normalized())
 
 
 func _organ_front_z() -> float:
@@ -1641,6 +2001,7 @@ func _cavity_display_mesh() -> ArrayMesh:
 func _cavity_material() -> Material:
 	if _cavity_shader_mat == null:
 		_cavity_shader_mat = _make_shell_material(Color(0.55, 0.18, 0.16, 1.0))
+		_cavity_shader_mat.set_shader_parameter("clip_low", 1.0)
 		_register_deform_mat(_cavity_shader_mat)
 	return _cavity_shader_mat
 
@@ -2513,62 +2874,34 @@ func _lips_valid(md: Geom.MeshData, lips: PackedInt32Array) -> bool:
 
 
 func _start_eversion() -> void:
+	## 0.3.9：外翻目标 = rest + dsp（切割时算好的平滑位移场）；外皮、内壁、截面同一套位移，截面不会和唇缘脱开。
 	if _outer == null:
 		return
+	_outer.ensure_dsp()
 	_outer_rest = _outer.clone()
-	_inner_rest = _inner.clone() if _inner else null
-	_wall_rest = _wall_md.clone() if _wall_md else null
-	_outer_evert = _outer_rest.clone()
-	_inner_evert = _inner_rest.clone() if _inner_rest else null
-	_wall_evert = _wall_rest.clone() if _wall_rest else null
-	if _lips_valid(_outer_evert, _lip_left) and _lips_valid(_outer_evert, _lip_right):
-		if _lip_closed and _lip_left.size() >= 3:
-			Geom.evert_loop_lips(_outer_evert, _lip_left, _lip_right, 1.0, EVERT_ROLL)
-			if _inner_evert and _lips_valid(_inner_evert, _lip_left_i) and _lips_valid(_inner_evert, _lip_right_i):
-				Geom.evert_loop_lips(_inner_evert, _lip_left_i, _lip_right_i, 1.0, EVERT_ROLL * 0.85)
-		else:
-			Geom.evert_open_lips(_outer_evert, _lip_left, _lip_right, 1.0, EVERT_ROLL)
-			if _inner_evert and _lips_valid(_inner_evert, _lip_left_i) and _lips_valid(_inner_evert, _lip_right_i):
-				Geom.evert_open_lips(_inner_evert, _lip_left_i, _lip_right_i, 1.0, EVERT_ROLL * 0.85)
+	_outer_evert = _outer.with_dsp()
+	if _inner:
+		_inner.ensure_dsp()
+		_inner_rest = _inner.clone()
+		_inner_evert = _inner.with_dsp()
+	else:
+		_inner_rest = null
+		_inner_evert = null
+	if _wall_md:
+		_wall_md.ensure_dsp()
+		_wall_rest = _wall_md.clone()
+		_wall_evert = _wall_md.with_dsp()
+	else:
+		_wall_rest = null
+		_wall_evert = null
 	var valid_holes: Array = []
 	for loop in _hole_loops:
-		if loop is PackedInt32Array and _lips_valid(_outer_evert, loop as PackedInt32Array):
-			Geom.evert_hole_rim(_outer_evert, loop, 1.0, EVERT_ROLL * 0.8)
+		if loop is PackedInt32Array and _lips_valid(_outer, loop as PackedInt32Array):
 			valid_holes.append(loop)
 	_hole_loops = valid_holes
-	_evert_wall_from_lips()
 	_evert = 0.0
 	_evert_vel = 0.0
 	_evert_anim = true
-
-
-func _evert_wall_from_lips() -> void:
-	## 保持截面拓扑不变，按腹壁/内壁对应顶点的外翻位移去推截面，这样才跟得上肚子。
-	if _wall_rest == null:
-		return
-	_wall_evert = _wall_rest.clone()
-	_apply_corresponding_evert(_wall_evert, _wall_rest, _outer_rest, _outer_evert)
-	_apply_corresponding_evert(_wall_evert, _wall_rest, _inner_rest, _inner_evert)
-
-
-func _apply_corresponding_evert(dest: Geom.MeshData, dest_rest: Geom.MeshData, src_rest: Geom.MeshData, src_evert: Geom.MeshData) -> void:
-	if dest == null or dest_rest == null or src_rest == null or src_evert == null:
-		return
-	if src_rest.vert_count() != src_evert.vert_count():
-		return
-	for i in dest.vert_count():
-		var p: Vector3 = dest_rest.pos[i]
-		var best := -1
-		var best_s := 1e-8
-		for j in src_rest.vert_count():
-			var s := src_rest.pos[j].distance_squared_to(p)
-			if s <= best_s:
-				best_s = s
-				best = j
-		if best >= 0:
-			var delta: Vector3 = src_evert.pos[best] - src_rest.pos[best]
-			if delta.length_squared() > 1e-12:
-				dest.pos[i] = dest.pos[i] + delta
 
 
 func _step_eversion(dt: float) -> void:
@@ -2847,6 +3180,17 @@ func _setup_pull_geometry(bind_p: Vector3, world_p: Vector3, want_side: Vector3 
 		var sd := _to_ab_local(_approx_world_bind(mid_bind + sd_bind.normalized() * 0.01)) - _to_ab_local(_approx_world_bind(mid_bind))
 		var ab_dir := (_pull_b - _pull_a).normalized() if (_pull_b - _pull_a).length_squared() > 1e-10 else Vector3.ZERO
 		sd -= ab_dir * sd.dot(ab_dir)
+		# 0.3.9：张开方向必须贴着皮肤切平面。原来带有很大的法向分量，而切口在弯曲的腹部上鼓出端点连线，
+		# 两侧唇缘相对连线的「侧向距离」几乎为 0，拿取拉不开任何一侧（看起来黏在一起）。
+		var mid_n: Vector3 = Vector3.ZERO
+		for li2 in [l0, r0, l1, r1, _lip_left[n / 2], _lip_right[n / 2]]:
+			mid_n += _outer.nrm[li2]
+		if mid_n.length_squared() > 1e-10:
+			var bmid := (_outer.pos[_lip_left[n / 2]] + _outer.pos[_lip_right[n / 2]]) * 0.5
+			var n_ab := _to_ab_local(_approx_world_bind(bmid + mid_n.normalized() * 0.01)) - _to_ab_local(_approx_world_bind(bmid))
+			if n_ab.length_squared() > 1e-12:
+				n_ab = n_ab.normalized()
+				sd -= n_ab * sd.dot(n_ab)
 		if sd.length_squared() < 1e-10:
 			return
 		sd = sd.normalized()
@@ -3369,31 +3713,35 @@ func _punch_bullet_hole_bind(center: Vector3, axis: Vector3, radius: float) -> b
 	var path := Geom.circle_path_on_mesh(_outer, center, axis, radius, BULLET_SIDES)
 	if path.size() < 5:
 		return false
-	var ids := Geom.embed_path_paired(_outer, _inner, path)
+	_bake_evert()
+	_ensure_twin()
+	var ids := Geom.embed_path(_outer, path)
 	if ids.size() < 3:
 		return false
 	ids = Geom.close_path_ids(_outer, ids)
-	Geom.sync_inner(_outer, _inner)
 	if ids.size() >= 3 and ids[0] != ids[ids.size() - 1]:
 		ids.append(ids[0])
+	Geom.sync_twin_faces(_outer)
 	var ext_o: Dictionary = Geom.extract_inside(_outer, ids)
-	var ext_i: Dictionary = Geom.extract_inside(_inner, ids)
 	if int(ext_o.get("inside_faces", 0)) < 1 or int(ext_o.get("outside_faces", 0)) < 1:
 		return false
 	var body_o: Geom.MeshData = ext_o["outside"]
-	var body_i: Geom.MeshData = ext_i["outside"]
+	if body_o.twin == null:
+		body_o.twin = Geom.make_cavity(body_o, thickness, _organ_z, _navel_rest)
+	var body_i: Geom.MeshData = body_o.twin
 	var loop_o: PackedInt32Array = ext_o["loop_out"]
-	var loop_i: PackedInt32Array = ext_i["loop_out"]
-	# 柱状壁沿弹道：若内环可用就用内环，否则把外环沿弹轴平移到腹腔深度。
-	var wall := _make_bullet_cylinder(body_o, body_i, loop_o, loop_i, axis)
+	# 弹孔缘轻微外翻（位移场，内壁同步），再做柱状壁，壁顶点继承同一位移。
+	var lc := _closed_ids(loop_o)
+	var sd := PackedVector3Array()
+	sd.resize(lc.size())
+	Geom.evert_field(body_o, lc, lc, sd, true, 0.45, true)
+	var wall := _make_bullet_cylinder(body_o, body_i, loop_o, loop_o, axis)
 	if wall.face_count() < 1:
 		return false
 	_outer = body_o
 	_inner = body_i
-	if _wall_md and _wall_md.face_count() > 0:
-		_append_mesh(_wall_md, wall)
-	else:
-		_wall_md = wall
+	_wall_parts.append({"md": wall, "ring": -1})
+	_rebuild_wall_md()
 	lofted_tris = _wall_md.face_count()
 	bullet_holes += 1
 	bullet_plugs_removed += 1
