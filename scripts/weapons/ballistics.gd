@@ -12,6 +12,12 @@ const PROJ_SCENE := preload("res://assets/weapons/shared/projectiles.scn")
 const MESH_CAM_DIST := 0.85
 const MAX_LIVE := 64
 const MAX_DECALS := 48
+## 0.3.8：弹孔贴图（assets/props/bullet_hole.png）。中心黑孔约 1cm，裂纹扩散到 DECAL_SIZE；
+## 停留 DECAL_HOLD 秒后在 DECAL_FADE 秒内淡出并释放节点。
+const DECAL_TEX := "res://assets/props/bullet_hole.png"
+const DECAL_SIZE := 0.07
+const DECAL_HOLD := 3.0
+const DECAL_FADE := 0.6
 const STEP_MAX := 0.08  # 每子步最大行程（米），防止穿墙
 const G := Vector3(0, -9.8, 0)
 
@@ -45,7 +51,7 @@ var _live: Array = []  # Dictionary
 var _pool: Array[MeshInstance3D] = []
 var _decals: Array = []
 var _spent: Array = []  # 短暂留在命中点的弹头
-var _decal_mesh: SphereMesh
+var _decal_mesh: Mesh
 var _decal_mat: StandardMaterial3D
 var _spark_mat: StandardMaterial3D
 var _tracer_mat: StandardMaterial3D
@@ -60,15 +66,20 @@ func _ready() -> void:
 		if c is MeshInstance3D and (c as MeshInstance3D).mesh:
 			_meshes[str(c.name)] = (c as MeshInstance3D).mesh
 	root.free()
-	_decal_mesh = SphereMesh.new()
-	_decal_mesh.radius = 0.012
-	_decal_mesh.height = 0.008
-	_decal_mesh.radial_segments = 8
-	_decal_mesh.rings = 4
+	var quad := QuadMesh.new()
+	quad.size = Vector2(DECAL_SIZE, DECAL_SIZE)
+	_decal_mesh = quad
 	_decal_mat = StandardMaterial3D.new()
-	_decal_mat.albedo_color = Color(0.12, 0.08, 0.06)
-	_decal_mat.roughness = 0.9
+	_decal_mat.albedo_color = Color(1, 1, 1)
+	_decal_mat.roughness = 0.95
 	_decal_mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	_decal_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_decal_mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	_decal_mat.render_priority = 1
+	if ResourceLoader.exists(DECAL_TEX):
+		_decal_mat.albedo_texture = load(DECAL_TEX)
+	else:
+		_decal_mat.albedo_color = Color(0.12, 0.08, 0.06)
 	_spark_mat = StandardMaterial3D.new()
 	_spark_mat.albedo_color = Color(1.0, 0.75, 0.35)
 	_spark_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -255,6 +266,33 @@ func _physics_process(dt: float) -> void:
 			continue
 		i += 1
 	_step_spent(dt)
+	_step_decals(dt)
+
+
+## 0.3.8：弹孔 DECAL_HOLD 秒后淡出（GeometryInstance3D.transparency），完全透明后释放，节省绘制开销。
+func _step_decals(dt: float) -> void:
+	if _decals.is_empty():
+		return
+	var keep: Array = []
+	for d in _decals:
+		if not is_instance_valid(d):
+			continue
+		var mi := d as MeshInstance3D
+		if mi == null:
+			continue
+		var age := float(mi.get_meta("decal_age", 0.0)) + dt
+		mi.set_meta("decal_age", age)
+		if age >= DECAL_HOLD + DECAL_FADE:
+			mi.queue_free()
+			continue
+		if age > DECAL_HOLD:
+			mi.transparency = clampf((age - DECAL_HOLD) / DECAL_FADE, 0.0, 1.0)
+		keep.append(mi)
+	_decals = keep
+
+
+func decal_lifetime() -> float:
+	return DECAL_HOLD + DECAL_FADE
 
 
 func _step(p: Dictionary, dt: float) -> bool:
@@ -478,6 +516,17 @@ func _character_segment_hit(from: Vector3, to: Vector3, extra: Array = [], skip_
 		if blocked:
 			if not best.is_empty() and best.get("collider") == n:
 				pass
+		# 0.3.8：有精细命中箱（活体）时用命中箱代替粗糙的皮肤网格包围盒。
+		var hbn: Node = n.call("get_hitboxes") if n.has_method("get_hitboxes") else null
+		if hbn != null and bool(hbn.get("enabled")):
+			if not blocked:
+				var hr := _hitbox_ray(n, from, to)
+				if not hr.is_empty():
+					var t3: float = ((hr["position"] as Vector3) - from).dot(dir)
+					if t3 > 0.002 and t3 <= best_t:
+						best_t = t3
+						best = {"position": hr["position"], "normal": hr["normal"], "collider": n, "hitbox_bone": hr["hitbox_bone"]}
+			continue
 		# 皮肤网格 AABB（可见身体，不含头发/眼睛/武器/独立脏器展示）
 		if n is Node3D:
 			for mi in n.find_children("*", "MeshInstance3D", true, false):
@@ -553,7 +602,64 @@ func _ray(from: Vector3, to: Vector3, extra: Array = []) -> Dictionary:
 	q.exclude = ex
 	q.collide_with_areas = false
 	q.collision_mask = 1 | 2
-	return w3.direct_space_state.intersect_ray(q)
+	var r := w3.direct_space_state.intersect_ray(q)
+	# 0.3.8：打到活人的移动胶囊 / 分身 BodyHit 时，改用跟随骨骼的精细胶囊命中箱判定：
+	# 命中则返回命中箱上的点（附 hitbox_bone），没打到任何部位（例如从腋下 / 两腿之间穿过）就忽略该胶囊继续检测。
+	var guard := 0
+	while not r.is_empty() and guard < 4:
+		guard += 1
+		var col = r.get("collider")
+		var host := _hitbox_host_for(col)
+		if host == null:
+			break
+		var hb: Dictionary = _hitbox_ray(host, from, to)
+		if not hb.is_empty():
+			hb["collider"] = col
+			hb["rid"] = r.get("rid")
+			return hb
+		ex.append((col as CollisionObject3D).get_rid())
+		q.exclude = ex
+		r = w3.direct_space_state.intersect_ray(q)
+	return r
+
+
+## 移动胶囊 / BodyHit 所属、带有启用中的精细命中箱的角色；没有则 null（布娃娃骨骼、世界等直接用原结果）。
+func _hitbox_host_for(col: Object) -> Node:
+	if col == null or not is_instance_valid(col) or col is PhysicalBone3D or not (col is CollisionObject3D):
+		return null
+	var host := _body_of(col)
+	if host == null or not host.has_method("get_hitboxes"):
+		return null
+	if not (col == host or (col as Node).name == "BodyHit"):
+		return null
+	var hb: Node = host.call("get_hitboxes")
+	if hb == null or not bool(hb.get("enabled")):
+		return null
+	return host
+
+
+## 只对 host 自己的命中箱做射线（第 6 层），其他角色的命中箱逐个排除。
+func _hitbox_ray(host: Node, from: Vector3, to: Vector3) -> Dictionary:
+	var w3 := _world()
+	var hb: Node = host.call("get_hitboxes") if host.has_method("get_hitboxes") else null
+	if w3 == null or hb == null:
+		return {}
+	var q := PhysicsRayQueryParameters3D.create(from, to)
+	q.collision_mask = 32
+	q.collide_with_areas = false
+	var ex: Array[RID] = []
+	for _i in 8:
+		q.exclude = ex
+		var r := w3.direct_space_state.intersect_ray(q)
+		if r.is_empty():
+			return {}
+		var c = r.get("collider")
+		if c is Node and bool(hb.call("owns", c)):
+			r["hitbox_bone"] = str((c as Node).get_meta("hitbox_bone", ""))
+			r["hitbox"] = c
+			return r
+		ex.append(r["rid"])
+	return {}
 
 
 func _mesh_far_enough(pos: Vector3) -> bool:
@@ -788,6 +894,9 @@ func _decal_parent_for(col: Object) -> Node:
 		return _host if _host else (get_tree().current_scene if get_tree() else self)
 	if col is Node and (col as Node).is_in_group(IGNORE_GROUP):
 		return null
+	# 0.3.8：命中箱 / 分身 BodyHit 也是 StaticBody3D，必须先判人体。
+	if col is Node and ((col as Node).has_meta("hitbox_host") or _body_of(col) != null):
+		return null
 	if col is StaticBody3D or col is CSGShape3D or col is GridMap:
 		return _host if _host else (get_tree().current_scene if get_tree() else self)
 	# t27u：人体（活人胶囊、布娃娃骨骼、任何属于有器官角色的碰撞体）一律不画黑点弹孔，伤口由皮肤 shader/伤口贴花负责。
@@ -811,8 +920,13 @@ func _spawn_decal(p: Vector3, n: Vector3, spark: bool, col: Object = null) -> vo
 	if not p.is_finite() or not n.is_finite() or n.length_squared() < 1e-10:
 		n = Vector3.UP
 	var face := -n if n.length_squared() > 1e-10 else Vector3.FORWARD
-	mi.global_transform = Transform3D(safe_basis_looking_at(face, Vector3.UP), p + n.normalized() * 0.003)
+	# 四边形 +Z 朝外（贴图正面朝向射击者一侧的表面法线），随机旋转与 ±15% 尺寸变化。
+	var bas := safe_basis_looking_at(face, Vector3.UP)
+	bas = bas * Basis(Vector3(0, 0, 1), _rng.randf() * TAU)
+	bas = bas.scaled_local(Vector3.ONE * _rng.randf_range(0.85, 1.15))
+	mi.global_transform = Transform3D(bas, p + n.normalized() * 0.003)
 	mi.set_meta("decal_parent_static", not (par is PhysicsBody3D))
+	mi.set_meta("decal_age", 0.0)
 	_decals.append(mi)
 	while _decals.size() > MAX_DECALS:
 		var o: Node = _decals.pop_front()

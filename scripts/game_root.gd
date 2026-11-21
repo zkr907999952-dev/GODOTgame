@@ -11,6 +11,7 @@ const LightingRigScript = preload("res://scripts/lighting_rig.gd")
 const CloneDollScript = preload("res://scripts/clone_doll.gd")
 const GameSettingsScript = preload("res://scripts/game_settings.gd")
 const BulletCamScript = preload("res://scripts/weapons/bullet_cam.gd")
+const CollisionDebugScript = preload("res://scripts/collision_debug.gd")
 const VehicleSystemScript = preload("res://scripts/vehicles/vehicle_system.gd")
 ## 分身上限（每个分身 = 一套蒙皮网格 + 脏器 + 物理；共享网格 / 贴图资源）
 const CLONE_MAX := 8
@@ -65,6 +66,7 @@ var map_view: Node3D
 var _overhead_preview: bool = false
 var _busy: bool = false
 var _clones_root: Node3D
+var collision_debug: Node
 var settings: Node
 var bullet_cam: Node
 var vehicle_system: Node
@@ -91,6 +93,9 @@ func _ready() -> void:
 	if _player and _player.has_method("apply_saved_look_settings"):
 		_player.call("apply_saved_look_settings")
 		_player.call("apply_screen_orientation")
+	collision_debug = CollisionDebugScript.new()
+	collision_debug.name = "CollisionDebug"
+	add_child(collision_debug)
 	bullet_cam = BulletCamScript.new()
 	bullet_cam.name = "BulletCam"
 	add_child(bullet_cam)
@@ -170,8 +175,9 @@ func action_for_key(key: int, mode: String = "") -> String:
 	if in_veh and key == KEY_V:
 		return "vehicle_cam"
 	# 载具内电脑 Tab 切换第一/第三人称，不切换行走/观察模式，也不影响上下车或聊天。
+	# 0.3.8：检查床是特殊载具，Tab 仍是行走 ↔ 观察视角切换（toggle_mode），不走载具一三人称。
 	if in_veh and key == KEY_TAB:
-		return "vehicle_cam"
+		return "toggle_mode" if on_exam_bed() else "vehicle_cam"
 	# Occupied G toggles landing gear in the fighter; it must not holster.
 	if in_veh and key == KEY_G and vehicle_system and str(vehicle_system.call("kind_of", vehicle_system.get("occupied"))) == "plane":
 		return "vehicle_gear"
@@ -185,6 +191,39 @@ func action_for_key(key: int, mode: String = "") -> String:
 	if key == KEY_T and can_toggle_surgery():
 		return "surgery_toggle"
 	return a
+
+
+## 0.3.8 设置 →「显示碰撞」。不保存，进游戏默认关闭。
+func set_show_collision(on: bool) -> void:
+	if collision_debug:
+		collision_debug.call("set_enabled", on)
+
+
+func is_showing_collision() -> bool:
+	return collision_debug != null and bool(collision_debug.get("enabled"))
+
+
+## 0.3.8 设置 →「复原身体」：本体与所有分身满血；尸体复活（布娃娃 → 蹲 → 站起）；
+## 清除伤口 / 内脏损伤 / 手术切口 / 腹部弹孔，世界里的弹孔贴花也一并清掉。返回复原的身体数量。
+func restore_all_bodies() -> int:
+	var n := 0
+	for b in get_tree().get_nodes_in_group("health_body"):
+		if b.is_queued_for_deletion() or not b.has_method("restore_body"):
+			continue
+		b.call("restore_body")
+		n += 1
+	if _player and _player.has_method("get_weapons"):
+		var ws: Node = _player.call("get_weapons")
+		var bal: Node = ws.get("ballistics") if ws else null
+		if bal and bal.has_method("clear_decals"):
+			bal.call("clear_decals")
+	return n
+
+
+func on_exam_bed() -> bool:
+	if vehicle_system == null or vehicle_system.get("occupied") == null or not vehicle_system.has_method("kind_of"):
+		return false
+	return str(vehicle_system.call("kind_of", vehicle_system.get("occupied"))) == "exam_bed"
 
 
 func _unhandled_input(event: InputEvent) -> void:

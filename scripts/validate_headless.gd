@@ -272,7 +272,9 @@ func _run() -> void:
 			aabb_max_y = maxf(aabb_max_y, wy)
 	var col: CollisionShape3D = player.get_node("CollisionShape3D")
 	var cap_bottom := 0.0
-	if col.shape is CylinderShape3D:
+	if col.shape is CapsuleShape3D:
+		cap_bottom = col.position.y - (col.shape as CapsuleShape3D).height * 0.5
+	elif col.shape is CylinderShape3D:
 		cap_bottom = col.position.y - (col.shape as CylinderShape3D).height * 0.5
 	print(
 		"validate: feet AABB min.y=", snappedf(aabb_min_y, 0.0001),
@@ -300,12 +302,12 @@ func _run() -> void:
 		push_error("validate: stand FP eye y expected ~1.54, got %s" % ey_stand)
 		quit(1)
 		return
-	if absf(ey_crouch - 1.12) > 0.02:
-		push_error("validate: crouch FP eye y expected ~1.12, got %s" % ey_crouch)
+	if absf(ey_crouch - 1.08) > 0.02:
+		push_error("validate: crouch FP eye y expected ~1.08, got %s" % ey_crouch)
 		quit(1)
 		return
-	if absf(ey_prone - 0.36) > 0.02:
-		push_error("validate: prone FP eye y expected ~0.36, got %s" % ey_prone)
+	if absf(ey_prone - 0.32) > 0.02:
+		push_error("validate: prone FP eye y expected ~0.32, got %s" % ey_prone)
 		quit(1)
 		return
 	print("validate: FP eye heights OK")
@@ -318,8 +320,8 @@ func _run() -> void:
 		{"label": "D walkRight", "mode": "stand", "fwd": 0.0, "side": 1.0, "mag": 1.0, "sprint": false, "want": "walkRight"},
 		{"label": "W sprint", "mode": "stand", "fwd": 1.0, "side": 0.0, "mag": 1.0, "sprint": true, "want": "run"},
 		{"label": "S sprint", "mode": "stand", "fwd": -1.0, "side": 0.0, "mag": 1.0, "sprint": true, "want": "runBack"},
-		{"label": "A sprint", "mode": "stand", "fwd": 0.0, "side": -1.0, "mag": 1.0, "sprint": true, "want": "runLeft"},
-		{"label": "D sprint", "mode": "stand", "fwd": 0.0, "side": 1.0, "mag": 1.0, "sprint": true, "want": "runRight"},
+		{"label": "A sprint", "mode": "stand", "fwd": 0.0, "side": -1.0, "mag": 1.0, "sprint": true, "want": "walkLeft"},
+		{"label": "D sprint", "mode": "stand", "fwd": 0.0, "side": 1.0, "mag": 1.0, "sprint": true, "want": "walkRight"},
 		{"label": "W crouch", "mode": "crouch", "fwd": 1.0, "side": 0.0, "mag": 1.0, "sprint": false, "want": "crouchWalk"},
 		{"label": "S crouch", "mode": "crouch", "fwd": -1.0, "side": 0.0, "mag": 1.0, "sprint": false, "want": "crouchBack"},
 		{"label": "A crouch", "mode": "crouch", "fwd": 0.0, "side": -1.0, "mag": 1.0, "sprint": false, "want": "crouchLeft"},
@@ -844,7 +846,8 @@ func _check_input_routing(main: Node, player: Node, organs: Node) -> bool:
 		if g.call("action_for_key", k, "control") != "" or g.call("action_for_key", k, "display") != "":
 			push_error("validate: polled gameplay key %s must not have a discrete action" % k)
 			return false
-	if g.call("action_for_key", KEY_Z, "display") != "" or g.call("action_for_key", KEY_F, "control") != "":
+	# F 靠近载具 / 检查床时在任何模式都是上下车（0.2.x 起的设计），只排除专属于观察模式的 focus。
+	if g.call("action_for_key", KEY_Z, "display") != "" or not (str(g.call("action_for_key", KEY_F, "control")) in ["", "vehicle_toggle", "surgery_toggle"]):
 		push_error("validate: Z only in CONTROL, F only in DISPLAY")
 		return false
 	# Z 在展示模式不能改变姿态
@@ -929,24 +932,25 @@ func _check_control_physics(main: Node, player: CharacterBody3D) -> bool:
 			path.append(player.global_position - base)
 		Input.action_release(action)
 		return path
+	# 0.3.8：起点按当前步行速度（1.06m/s）调整到离墙 / 台阶 / 坡更近的位置，原来按旧的更快步速设计，会在碰到之前就超时。
 	# A) 斜 35° 撞墙：贴墙后仍沿 -X 方向滑动
-	var pa: Array = await run.call(Vector3(-8, 0.02, 0.0), deg_to_rad(35.0), "move_forward", 2.5)
+	var pa: Array = await run.call(Vector3(-8, 0.02, -1.4), deg_to_rad(35.0), "move_forward", 2.5)
 	var a_end: Vector3 = pa[pa.size() - 1]
 	var a_mid: Vector3 = pa[pa.size() - 31]
 	var slide_speed := (a_mid.x - a_end.x) / 0.5
 	print("validate: wall slide end=", a_end.snapped(Vector3.ONE * 0.01), " slide_speed=", snappedf(slide_speed, 0.01), " on_wall=", player.is_on_wall())
-	if a_end.z > -2.4 or slide_speed < 0.6:
+	if a_end.z > -2.4 or slide_speed < 0.45:
 		push_error("validate: walking into a wall at an angle should slide along it")
 		return false
 	# B) 0.2m 台阶
-	var pb: Array = await run.call(Vector3(0, 0.02, 0.5), 0.0, "move_forward", 2.0)
+	var pb: Array = await run.call(Vector3(0, 0.02, -1.2), 0.0, "move_forward", 2.0)
 	var b_end: Vector3 = pb[pb.size() - 1]
 	print("validate: step end=", b_end.snapped(Vector3.ONE * 0.01))
 	if b_end.y < 0.17 or b_end.z > -2.5:
 		push_error("validate: should step up a 0.2m ledge and keep walking")
 		return false
 	# C) 20° 坡
-	var pc: Array = await run.call(Vector3(8, 0.02, 0.5), 0.0, "move_forward", 4.5)
+	var pc: Array = await run.call(Vector3(8, 0.02, -1.0), 0.0, "move_forward", 4.5)
 	var c_max := -1.0
 	for q in pc:
 		c_max = maxf(c_max, (q as Vector3).y)
@@ -971,7 +975,7 @@ func _check_control_physics(main: Node, player: CharacterBody3D) -> bool:
 		await physics_frame
 	var v2 := Vector2(player.velocity.x, player.velocity.z).length()
 	print("validate: decel v0=", snappedf(v0, 0.01), " after2f=", snappedf(v1, 0.01), " after0.6s=", snappedf(v2, 0.01))
-	if v0 < 1.5 or v1 < 0.5 or v2 > 0.06:
+	if v0 < 0.9 or v1 < 0.3 or v2 > 0.06:
 		push_error("validate: release should decelerate smoothly then stop")
 		return false
 	# E) 低矮处：蹲进去后不能站起

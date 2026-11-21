@@ -13,6 +13,8 @@ const CharacterHealthScript := preload("res://scripts/character_health.gd")
 const RagdollSystemScript := preload("res://scripts/ragdoll_system.gd")
 const HitReactionScript := preload("res://scripts/hit_reaction.gd")
 const CombatDamage := preload("res://scripts/combat_damage.gd")
+const CharacterHitboxesScript := preload("res://scripts/character_hitboxes.gd")
+const GetupBlendScript := preload("res://scripts/getup_blend.gd")
 const CHAR_LIGHT_LAYER := 1 << 17
 const SEC_SYNC := ["hair_enabled", "hair_damp", "hair_inertia", "hair_gravity", "hair_wind", "blink_enabled", "breath_enabled", "breath_amp", "breath_speed"]
 
@@ -30,6 +32,8 @@ var spawn_map: String = "room"
 var _map_visible: bool = true
 var on_exam_bed: Node = null
 var occupancy: String = ""
+var hitboxes: Node3D
+var _getup: RefCounted = null
 
 
 func _ready() -> void:
@@ -41,10 +45,11 @@ func _ready() -> void:
 	hit.collision_layer = 2
 	hit.collision_mask = 1 | 2
 	var cs := CollisionShape3D.new()
-	var cyl := CylinderShape3D.new()
-	cyl.radius = 0.3
-	cyl.height = 1.64
-	cs.shape = cyl
+	# 0.3.8：与本体一致改为胶囊；精细命中由 CharacterHitboxes（第 6 层）负责。
+	var cap := CapsuleShape3D.new()
+	cap.radius = 0.3
+	cap.height = 1.64
+	cs.shape = cap
 	cs.position = Vector3(0, 0.82, 0)
 	hit.add_child(cs)
 	add_child(hit)
@@ -82,6 +87,12 @@ func _ready() -> void:
 	add_child(ragdoll)
 	if skeleton:
 		ragdoll.call("setup", skeleton, self)
+	if skeleton:
+		hitboxes = CharacterHitboxesScript.new()
+		hitboxes.name = "Hitboxes"
+		add_child(hitboxes)
+		hitboxes.call("setup", skeleton, self)
+	health.revived.connect(_on_character_revived)
 	hit_react = HitReactionScript.new()
 	hit_react.name = "HitReaction"
 	add_child(hit_react)
@@ -160,9 +171,15 @@ func get_head_world_position() -> Vector3:
 	return global_position + Vector3.UP * 1.62
 
 
+func get_hitboxes() -> Node3D:
+	return hitboxes
+
+
 func set_map_active(on: bool) -> void:
 	_map_visible = on
 	visible = on
+	if hitboxes:
+		hitboxes.call("set_enabled", on and not is_dead())
 	if is_dead() and ragdoll:
 		ragdoll.call("set_map_frozen", not on)
 
@@ -181,6 +198,9 @@ func _set_pose_drivers_frozen(on: bool) -> void:
 
 
 func _on_character_died(info: Dictionary) -> void:
+	_getup = null
+	if hitboxes:
+		hitboxes.call("set_enabled", false)
 	_set_pose_drivers_frozen(true)
 	if body_hit:
 		body_hit.collision_layer = 0
@@ -203,6 +223,79 @@ func _on_character_died(info: Dictionary) -> void:
 	if ragdoll:
 		ragdoll.call("start", imp, hit, col)
 	print("clone: died, ragdoll started (", name, ")")
+
+
+## 0.3.8「复原身体」：满血；尸体复活；清伤口 / 内脏损伤 / 手术切口 / 腹部弹孔。
+func restore_body() -> void:
+	if health == null:
+		return
+	if is_dead():
+		health.call("revive", float(health.get("max_hp")))
+	else:
+		health.call("reset", float(health.get("max_hp")))
+	if organs and organs.has_method("reset_interaction"):
+		organs.call("reset_interaction")
+	if hit_react and hit_react.has_method("clear"):
+		hit_react.call("clear")
+	if surgery and surgery.has_method("restore_body"):
+		surgery.call("restore_body")
+
+
+## 复活：布娃娃当前姿态 → 平滑过渡到蹲姿 → 站起（GetupBlend），原点移到尸体骨盆下方的地面。
+func _on_character_revived() -> void:
+	var snap: Array[Transform3D] = []
+	if ragdoll and bool(ragdoll.get("active")) and skeleton:
+		snap = GetupBlendScript.capture_world(skeleton)
+	var feet := global_position
+	if ragdoll and bool(ragdoll.get("active")) and ragdoll.has_method("get_pelvis_point"):
+		var p: Vector3 = ragdoll.call("get_pelvis_point")
+		feet = Vector3(p.x, global_position.y, p.z)
+		var w3 := get_world_3d()
+		if w3:
+			var q := PhysicsRayQueryParameters3D.create(p + Vector3.UP * 0.8, p + Vector3.DOWN * 3.0, 1)
+			var hit := w3.direct_space_state.intersect_ray(q)
+			if not hit.is_empty():
+				feet = hit["position"]
+	if ragdoll:
+		if not _map_visible:
+			ragdoll.call("set_map_frozen", false)
+		ragdoll.call("stop")
+	_set_pose_drivers_frozen(false)
+	var sec := get_secondary()
+	if sec:
+		sec.set("breath_enabled", true)
+		sec.set("blink_enabled", true)
+		sec.set("hair_enabled", true)
+	if body_hit:
+		body_hit.collision_layer = 2
+		for c in body_hit.get_children():
+			if c is CollisionShape3D:
+				(c as CollisionShape3D).disabled = false
+	if hitboxes:
+		hitboxes.call("set_enabled", _map_visible)
+	if not is_on_exam_bed():
+		global_position = feet
+	_getup = null
+	if loco:
+		loco.call("set_mode", "crouch" if not snap.is_empty() else "stand")
+		loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, 0.016, 0.0)
+	if not snap.is_empty() and skeleton and not is_on_exam_bed():
+		_getup = GetupBlendScript.new()
+		_getup.call("begin", skeleton, snap)
+	print("clone: revived (", name, ")")
+
+
+func is_getting_up() -> bool:
+	return _getup != null
+
+
+func _tick_getup(delta: float) -> void:
+	if _getup == null:
+		return
+	if bool(_getup.call("apply", delta)) and loco:
+		loco.call("set_mode", "stand")
+	if not bool(_getup.call("is_active")):
+		_getup = null
 
 
 func _find_skeleton(n: Node) -> Skeleton3D:
@@ -324,6 +417,7 @@ func _physics_process(delta: float) -> void:
 		loco.set("navel_t", navel_t)
 		loco.set("navel_stir", organs.get("navel_stir_off") if organs else Vector2.ZERO)
 		loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, delta, 1.65)
+		_tick_getup(delta)
 		if hit_react:
 			var skip := PackedStringArray(["L_Shoulder_a", "R_Shoulder_a"])
 			hit_react.call("apply_to_skeleton", delta, skip)

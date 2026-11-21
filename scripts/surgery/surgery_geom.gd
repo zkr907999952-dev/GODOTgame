@@ -1011,7 +1011,7 @@ static func ray_hit_mesh(md: MeshData, posed: PackedVector3Array, origin: Vector
 	return best
 
 
-static func oval_path_on_mesh(md: MeshData, center: Vector3, rx: float, ry: float, steps: int = 24) -> PackedVector3Array:
+static func oval_path_on_mesh(md: MeshData, center: Vector3, rx: float, ry: float, steps: int = 24, grid: Dictionary = {}) -> PackedVector3Array:
 	## 在腹前用绑定空间 XY 椭圆取样，再投影到网格表面，生成闭合路径。
 	## 投影与 line_path_on_mesh / _project_to_mesh 相同：在覆盖该 XY 的面里取离提示点最近的一张，
 	## 避免环状预览落在第一张 XY 命中面上、嵌入却贴到另一层而错位。
@@ -1019,7 +1019,7 @@ static func oval_path_on_mesh(md: MeshData, center: Vector3, rx: float, ry: floa
 	for i in steps:
 		var ang := TAU * float(i) / float(steps)
 		var hint := Vector3(center.x + cos(ang) * rx, center.y + sin(ang) * ry, center.z)
-		path.append(_project_to_mesh(md, hint, hint))
+		path.append(project_to_mesh_grid(md, grid, hint, hint))
 	# 闭合：末点不要重复，判定时再连回起点。
 	return path
 
@@ -1388,13 +1388,13 @@ static func lumbar_exterior_z(md: MeshData, navel: Vector3, y0: float = -0.16, y
 	return zmin
 
 
-static func line_path_on_mesh(md: MeshData, a: Vector3, b: Vector3, steps: int = 12) -> PackedVector3Array:
+static func line_path_on_mesh(md: MeshData, a: Vector3, b: Vector3, steps: int = 12, grid: Dictionary = {}) -> PackedVector3Array:
 	var path := PackedVector3Array()
 	var n := maxi(steps, 2)
 	for i in n + 1:
 		var t := float(i) / float(n)
 		var p: Vector3 = a.lerp(b, t)
-		path.append(_project_to_mesh(md, p, p))
+		path.append(project_to_mesh_grid(md, grid, p, p))
 	return path
 
 
@@ -1629,6 +1629,106 @@ static func _project_to_mesh(md: MeshData, hint: Vector3, fallback: Vector3) -> 
 			best_s = s2
 			best = md.pos[j]
 	return best
+
+
+## 0.3.8 切割预览加速：绑定空间 XY 网格索引（面 + 顶点）。预览每次拖动都要把 13–25 个点投影到腹网、
+## 找最近顶点，旧实现每个点遍历全部三角 / 顶点（GDScript 里几十万次运算，手机上明显卡顿）。
+## 结果与暴力搜索一致：面按 XY 包围盒（外扩 1.5mm，覆盖重心容差）登记到所有覆盖的格子。
+const GRID_CELL := 0.01
+
+
+static func build_xy_grid(md: MeshData, cell: float = GRID_CELL) -> Dictionary:
+	var faces: Dictionary = {}
+	var verts: Dictionary = {}
+	var pad := 0.0015
+	for f in md.face_count():
+		var a := md.pos[md.idx[f * 3]]
+		var b := md.pos[md.idx[f * 3 + 1]]
+		var c := md.pos[md.idx[f * 3 + 2]]
+		var x0 := floori((minf(a.x, minf(b.x, c.x)) - pad) / cell)
+		var x1 := floori((maxf(a.x, maxf(b.x, c.x)) + pad) / cell)
+		var y0 := floori((minf(a.y, minf(b.y, c.y)) - pad) / cell)
+		var y1 := floori((maxf(a.y, maxf(b.y, c.y)) + pad) / cell)
+		for ix in range(x0, x1 + 1):
+			for iy in range(y0, y1 + 1):
+				var key := Vector2i(ix, iy)
+				if not faces.has(key):
+					faces[key] = []
+				(faces[key] as Array).append(f)
+	for i in md.vert_count():
+		var key2 := Vector2i(floori(md.pos[i].x / cell), floori(md.pos[i].y / cell))
+		if not verts.has(key2):
+			verts[key2] = []
+		(verts[key2] as Array).append(i)
+	return {"cell": cell, "faces": faces, "verts": verts, "nf": md.face_count(), "nv": md.vert_count()}
+
+
+static func grid_valid(md: MeshData, grid: Dictionary) -> bool:
+	return md != null and not grid.is_empty() and int(grid.get("nf", -1)) == md.face_count() and int(grid.get("nv", -1)) == md.vert_count()
+
+
+static func project_to_mesh_grid(md: MeshData, grid: Dictionary, hint: Vector3, fallback: Vector3) -> Vector3:
+	if not grid_valid(md, grid):
+		return _project_to_mesh(md, hint, fallback)
+	var cell: float = grid["cell"]
+	var list = (grid["faces"] as Dictionary).get(Vector2i(floori(hint.x / cell), floori(hint.y / cell)))
+	var p2 := _v2(hint)
+	var best := fallback
+	var best_s := 1e9
+	var found := false
+	if list is Array:
+		for f in list:
+			var a := md.pos[md.idx[f * 3]]
+			var b := md.pos[md.idx[f * 3 + 1]]
+			var c := md.pos[md.idx[f * 3 + 2]]
+			var bary := _bary_2d(p2, _v2(a), _v2(b), _v2(c))
+			if bary.x >= -1e-3 and bary.y >= -1e-3 and bary.z >= -1e-3:
+				var got: Vector3 = a * bary.x + b * bary.y + c * bary.z
+				var s := got.distance_squared_to(hint)
+				if s < best_s:
+					best_s = s
+					best = got
+					found = true
+	if found:
+		return best
+	var vi := nearest_vertex_grid(md, grid, hint)
+	return md.pos[vi] if vi >= 0 else fallback
+
+
+## 最近顶点（3D 距离）。按 XY 格子由近到远一圈圈搜，找到的距离不超过已搜半径就是精确解。
+static func nearest_vertex_grid(md: MeshData, grid: Dictionary, p: Vector3) -> int:
+	if md == null or md.vert_count() < 1:
+		return -1
+	if grid_valid(md, grid):
+		var cell: float = grid["cell"]
+		var verts: Dictionary = grid["verts"]
+		var cx := floori(p.x / cell)
+		var cy := floori(p.y / cell)
+		var best := -1
+		var best_s := 1e18
+		for r in 6:
+			for ix in range(cx - r, cx + r + 1):
+				for iy in range(cy - r, cy + r + 1):
+					if maxi(absi(ix - cx), absi(iy - cy)) != r:
+						continue
+					var list = verts.get(Vector2i(ix, iy))
+					if not (list is Array):
+						continue
+					for i in list:
+						var s := md.pos[i].distance_squared_to(p)
+						if s < best_s:
+							best_s = s
+							best = i
+			if best >= 0 and best_s <= (float(r) * cell) * (float(r) * cell):
+				return best
+	var bi := 0
+	var bs := 1e18
+	for j in md.vert_count():
+		var s2 := md.pos[j].distance_squared_to(p)
+		if s2 < bs:
+			bs = s2
+			bi = j
+	return bi
 
 
 static func skin_basis(vi: int, md: MeshData, skel: Skeleton3D, skin: Skin) -> Basis:

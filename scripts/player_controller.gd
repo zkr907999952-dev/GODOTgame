@@ -10,6 +10,8 @@ const RagdollSystemScript = preload("res://scripts/ragdoll_system.gd")
 const HitReactionScript = preload("res://scripts/hit_reaction.gd")
 const CorpseDragScript = preload("res://scripts/corpse_drag.gd")
 const CombatDamage := preload("res://scripts/combat_damage.gd")
+const CharacterHitboxesScript := preload("res://scripts/character_hitboxes.gd")
+const GetupBlendScript := preload("res://scripts/getup_blend.gd")
 ## 角色控制器：展示互动 / 角色控制 双模式 + SoftLoco 网页 loco 动画驱动 Skeleton3D。
 ## Web loco bind: mesh faces +Z; Godot move uses -Z forward → visual Body needs π yaw offset.
 const BODY_YAW_OFFSET := PI
@@ -123,6 +125,12 @@ var _health: Node
 var _ragdoll: Node
 var _hit_react: Node
 var _corpse_drag: Node
+var _hitboxes: Node = null
+var _getup: RefCounted = null
+## 0.3.8：胶囊移动体的「脚底支撑」——胶囊圆底在台阶边缘会滑落，用一块扁圆柱探测脚下地面，
+## 在台阶边缘 / 下楼梯时保持站稳，表现与旧圆柱一致。
+var _ledge_support: bool = false
+var _was_grounded: bool = false
 var _col_layer_live: int = 2
 var _col_mask_live: int = 1
 var _interact_held: bool = false
@@ -252,18 +260,24 @@ func _ready() -> void:
 	_corpse_drag.name = "CorpseDrag"
 	add_child(_corpse_drag)
 	_corpse_drag.call("setup", self, skel)
+	if skel:
+		_hitboxes = CharacterHitboxesScript.new()
+		add_child(_hitboxes)
+		_hitboxes.call("setup", skel, self)
+		for hb in _hitboxes.call("bodies"):
+			add_collision_exception_with(hb)
 	# 角色胶囊互相碰撞，并与布娃娃骨骼碰撞。Godot 碰撞是双向 AND：
 	# 双方 layer/mask 都要能对上。布娃娃骨骼 mask 现已含角色层，同体骨骼用 exception 防自碰。
 	collision_layer = 2
 	collision_mask = 1 | 2
 	_col_layer_live = collision_layer
 	_col_mask_live = collision_mask
-	if _col.shape is CylinderShape3D:
-		_capsule_stand_h = (_col.shape as CylinderShape3D).height
+	if _col.shape is CapsuleShape3D or _col.shape is CylinderShape3D:
+		_capsule_stand_h = _shape_h()
 		_capsule_stand_y = _col.position.y
 		_cap_h_from = _capsule_stand_h
 		_cap_h_to = _capsule_stand_h
-		_cap_r_from = (_col.shape as CylinderShape3D).radius
+		_cap_r_from = _shape_r()
 		_cap_r_to = _cap_r_from
 		_cap_y_from = _capsule_stand_y
 		_cap_y_to = _capsule_stand_y
@@ -414,6 +428,9 @@ func _set_pose_drivers_frozen(on: bool) -> void:
 
 func _on_character_died(info: Dictionary) -> void:
 	_set_pose_drivers_frozen(true)
+	_getup = null
+	if _hitboxes:
+		_hitboxes.call("set_enabled", false)
 	if _col:
 		_col.disabled = true
 	collision_layer = 0
@@ -447,6 +464,11 @@ func _on_character_died(info: Dictionary) -> void:
 
 func _on_character_revived() -> void:
 	# 把原点移到尸体骨盆投影的地面，再关掉布娃娃、恢复站立胶囊。
+	# 0.3.8：从布娃娃姿态平滑过渡到蹲下，再站起（GetupBlend）。
+	var skel := get_skeleton()
+	var snap: Array[Transform3D] = []
+	if _ragdoll and bool(_ragdoll.get("active")) and skel:
+		snap = GetupBlendScript.capture_world(skel)
 	var feet := global_position
 	if _ragdoll and _ragdoll.has_method("get_pelvis_point"):
 		var p: Vector3 = _ragdoll.call("get_pelvis_point")
@@ -469,10 +491,16 @@ func _on_character_revived() -> void:
 		_col.disabled = false
 	collision_layer = _col_layer_live
 	collision_mask = _col_mask_live
-	_set_stance("stand")
+	if _hitboxes:
+		_hitboxes.call("set_enabled", true)
+	_set_stance("crouch" if not snap.is_empty() else "stand")
 	global_position = feet
 	velocity = Vector3.ZERO
 	reset_physics_interpolation()
+	_getup = null
+	if not snap.is_empty():
+		_getup = GetupBlendScript.new()
+		_getup.call("begin", skel, snap)
 	if _loco and _loco.has_method("apply_pose"):
 		_loco.call("apply_pose", 0.0, 0.0, 0.0, false, false, 0.016, 0.0)
 	print("player: revived at ", feet)
@@ -497,6 +525,40 @@ func _after_pose_feedback(delta: float) -> void:
 		if _corpse_drag.call("is_dragging"):
 			_corpse_drag.call("apply_left_hand")
 			_corpse_drag.call("physics_tick", delta)
+	_tick_getup(delta)
+
+
+## 起身过渡：动画写完骨骼后再混入布娃娃姿态；蹲够了自动站起。
+func _tick_getup(delta: float) -> void:
+	if _getup == null:
+		return
+	if bool(_getup.call("apply", delta)):
+		if not _set_stance("stand"):
+			pass  # 头顶空间不足时保持蹲姿
+	if not bool(_getup.call("is_active")):
+		_getup = null
+
+
+func is_getting_up() -> bool:
+	return _getup != null
+
+
+## 0.3.8「复原身体」：满血；死亡则复活并从布娃娃过渡到蹲下再站起；清除伤口、弹孔和手术切口。
+func restore_body() -> void:
+	if _health == null:
+		return
+	if is_dead():
+		_health.call("revive", float(_health.get("max_hp")))
+	else:
+		_health.call("reset", float(_health.get("max_hp")))
+	if _organs and _organs.has_method("reset_interaction"):
+		_organs.call("reset_interaction")
+	if _organs and _organs.has_method("clear_wounds"):
+		_organs.call("clear_wounds")
+	if _hit_react and _hit_react.has_method("clear"):
+		_hit_react.call("clear")
+	if _surgery and _surgery.has_method("restore_body"):
+		_surgery.call("restore_body")
 
 
 func _update_corpse_drag_aim() -> void:
@@ -1683,17 +1745,62 @@ func debug_head_shadow_state() -> Dictionary:
 
 ## Place capsule so its bottom matches mesh soles (AABB min.y ≈ 0 in character space).
 func _align_capsule_to_feet() -> void:
-	if not (_col.shape is CylinderShape3D):
+	if not (_col.shape is CapsuleShape3D or _col.shape is CylinderShape3D):
 		return
-	var cap := _col.shape as CylinderShape3D
 	# Mesh feet are at y≈0 (skinned GLB fitStanding). Old capsule bottom was ~0.28 → feet sank.
-	_col.position.y = cap.height * 0.5
-	_capsule_stand_h = cap.height
+	_col.position.y = _shape_h() * 0.5
+	_capsule_stand_h = _shape_h()
 	_capsule_stand_y = _col.position.y
 	print(
 		"player: capsule aligned bottom≈0 (h=%.3f y=%.3f)"
-		% [cap.height, _col.position.y]
+		% [_shape_h(), _col.position.y]
 	)
+
+
+## 移动碰撞体高度 / 半径（0.3.8 起为 CapsuleShape3D；height 含两端半球）。
+func _shape_h() -> float:
+	if _col.shape is CapsuleShape3D:
+		return (_col.shape as CapsuleShape3D).height
+	if _col.shape is CylinderShape3D:
+		return (_col.shape as CylinderShape3D).height
+	return 1.64
+
+
+func _shape_r() -> float:
+	if _col.shape is CapsuleShape3D:
+		return (_col.shape as CapsuleShape3D).radius
+	if _col.shape is CylinderShape3D:
+		return (_col.shape as CylinderShape3D).radius
+	return 0.3
+
+
+func _set_shape_hr(h: float, r: float) -> void:
+	if _col.shape is CapsuleShape3D:
+		var cap := _col.shape as CapsuleShape3D
+		var rr := minf(r, h * 0.5)
+		if h >= cap.height:
+			cap.height = h
+			cap.radius = rr
+		else:
+			cap.radius = rr
+			cap.height = h
+	elif _col.shape is CylinderShape3D:
+		(_col.shape as CylinderShape3D).height = h
+		(_col.shape as CylinderShape3D).radius = r
+
+
+func get_hitboxes() -> Node:
+	return _hitboxes
+
+
+func movement_shape_kind() -> String:
+	if _col == null or _col.shape == null:
+		return ""
+	if _col.shape is CapsuleShape3D:
+		return "capsule"
+	if _col.shape is CylinderShape3D:
+		return "cylinder"
+	return _col.shape.get_class()
 
 
 func _print_body_info() -> void:
@@ -1702,8 +1809,8 @@ func _print_body_info() -> void:
 		print("player: skeleton bones=", skel.get_bone_count())
 	var aabb := _calc_aabb(_body)
 	var cap_bottom := 0.0
-	if _col.shape is CylinderShape3D:
-		cap_bottom = _col.position.y - (_col.shape as CylinderShape3D).height * 0.5
+	if _col.shape is CapsuleShape3D or _col.shape is CylinderShape3D:
+		cap_bottom = _col.position.y - _shape_h() * 0.5
 	print(
 		"player: body AABB ", aabb,
 		" feet≈", aabb.position.y,
@@ -2273,12 +2380,11 @@ func can_fit_stance(stance: String) -> bool:
 	var hr: Vector2 = STANCE_CAPSULE.get(stance, STANCE_CAPSULE["stand"])
 	if stance == "stand":
 		hr.x = _capsule_stand_h
-	var cur := (_col.shape as CylinderShape3D) if _col.shape is CylinderShape3D else null
-	if cur and hr.x <= cur.height + 0.001:
+	if hr.x <= _shape_h() + 0.001:
 		return true  # 变矮永远可以
-	var shape := CylinderShape3D.new()
+	var shape := CapsuleShape3D.new()
 	shape.radius = maxf(0.05, hr.y - 0.02)
-	shape.height = maxf(0.1, hr.x - 0.06)
+	shape.height = maxf(shape.radius * 2.0 + 0.01, hr.x - 0.06)
 	var q := PhysicsShapeQueryParameters3D.new()
 	q.shape = shape
 	# 底部抬高 4cm，避免与地面接触算重叠
@@ -2317,14 +2423,13 @@ func _begin_fp_eye_blend(new_stance: String) -> void:
 
 
 func _apply_stance_capsule() -> void:
-	if not (_col.shape is CylinderShape3D):
+	if not (_col.shape is CapsuleShape3D or _col.shape is CylinderShape3D):
 		return
-	var cap := _col.shape as CylinderShape3D
-	# Web FP capsule approx: stand 1.64/0.3, crouch 0.94/0.26, prone 0.42/0.22.
+	# Web FP capsule approx: stand 1.64/0.3, crouch 0.94/0.26, prone 0.42/0.21（胶囊半径 ≤ 高度一半）.
 	# Blend height/radius/eye over STANCE_BLEND_DUR (0.7s). Bottom stays ≈ 0.
 	_begin_fp_eye_blend(_stance)
-	_cap_h_from = cap.height
-	_cap_r_from = cap.radius
+	_cap_h_from = _shape_h()
+	_cap_r_from = _shape_r()
 	_cap_y_from = _col.position.y
 	_cam_h_from = camera_height
 	match _stance:
@@ -2336,7 +2441,7 @@ func _apply_stance_capsule() -> void:
 			fp_eye_height = FP_EYE_CROUCH.y + FP_EYE_LIFT
 		"prone":
 			_cap_h_to = 0.42
-			_cap_r_to = 0.22
+			_cap_r_to = 0.21
 			_cap_y_to = 0.42 * 0.5
 			_cam_h_to = 0.4
 			fp_eye_height = FP_EYE_PRONE.y + FP_EYE_LIFT
@@ -2384,15 +2489,15 @@ func is_stance_blending() -> bool:
 
 
 func _update_stance_capsule_blend(delta: float) -> void:
-	if not (_col.shape is CylinderShape3D):
+	if not (_col.shape is CapsuleShape3D or _col.shape is CylinderShape3D):
 		return
+	if _stance_blend >= 1.0 and is_equal_approx(_shape_h(), _cap_h_to):
+		return  # 0.3.8：过渡结束后不再每帧改形状（物理引擎会重建形状）
 	if _stance_blend < 1.0:
 		_stance_blend = minf(1.0, _stance_blend + delta / STANCE_BLEND_DUR)
 	var t := _stance_blend
 	var u := t * t * (3.0 - 2.0 * t)
-	var cap := _col.shape as CylinderShape3D
-	cap.height = lerpf(_cap_h_from, _cap_h_to, u)
-	cap.radius = lerpf(_cap_r_from, _cap_r_to, u)
+	_set_shape_hr(lerpf(_cap_h_from, _cap_h_to, u), lerpf(_cap_r_from, _cap_r_to, u))
 	_col.position.y = lerpf(_cap_y_from, _cap_y_to, u)
 	camera_height = lerpf(_cam_h_from, _cam_h_to, u)
 
@@ -2489,8 +2594,9 @@ func debug_next_body_yaw(look_yaw: float, body_yaw: float, moving: bool) -> floa
 	return wrapf(body_yaw, -PI, PI)
 
 
-## 台阶上抬：贴地且水平运动被挡住时，试「上抬 STEP_HEIGHT → 前移 → 下落」，
-## 落点是可站立地面就把角色抬到台阶高度（随后 move_and_slide 正常前进）。
+## 台阶上抬（0.3.8 胶囊版）：贴地且水平运动被陡面挡住时，用脚底扁圆柱探测前方落脚面，
+## 落差 ≤ STEP_HEIGHT 且抬高后能前进（头顶有空间、不是墙）就把角色抬到台阶高度。
+## 胶囊圆底落在台阶棱上时法线是斜的，旧的「胶囊下落找地面」会判成悬空，所以改用脚底探测。
 func _try_step_up(motion: Vector3) -> bool:
 	if motion.length_squared() < 1e-8:
 		return false
@@ -2500,31 +2606,81 @@ func _try_step_up(motion: Vector3) -> bool:
 		return false  # 没被挡
 	if hit.get_normal().angle_to(Vector3.UP) <= floor_max_angle:
 		return false  # 可走的坡，交给 move_and_slide
-	var up := Vector3.UP * STEP_HEIGHT
-	var up_col := KinematicCollision3D.new()
-	var up_travel := up
-	if test_move(xf, up, up_col, safe_margin):
-		up_travel = up_col.get_travel()
-		if up_travel.y < 0.05:
-			return false  # 头顶没空间
-	var xf_up := xf.translated(up_travel)
-	# 前探至少 radius 的一部分，保证落脚点在台阶上
 	var probe := motion.normalized() * maxf(motion.length(), 0.08)
-	if test_move(xf_up, probe):
-		return false  # 抬高后仍被挡（是墙，不是台阶）
-	var xf_fwd := xf_up.translated(probe)
-	var down_col := KinematicCollision3D.new()
-	if not test_move(xf_fwd, -up_travel - Vector3(0.0, 0.02, 0.0), down_col, safe_margin):
-		return false  # 前方悬空
-	if down_col.get_normal().angle_to(Vector3.UP) > floor_max_angle:
-		return false
-	var land_y := xf_fwd.origin.y + down_col.get_travel().y
-	var rise := land_y - xf.origin.y
+	var sy := _foot_support_y(xf.origin + probe, STEP_HEIGHT, 0.02)
+	if is_nan(sy):
+		return false  # 前方没有可站的台面（墙 / 悬空 / 太陡）
+	var rise := sy - xf.origin.y
 	if rise < 0.01 or rise > STEP_HEIGHT + 0.001:
 		return false
+	var lift := Vector3.UP * (rise + 0.004)
+	if test_move(xf, lift, null, safe_margin):
+		return false  # 头顶没空间
+	if test_move(xf.translated(lift), probe, null, safe_margin):
+		return false  # 抬高后仍被挡（是墙，不是台阶）
 	global_position.y += rise
 	_step_smooth += rise  # 相机平滑跟上
 	return true
+
+
+var _foot_disc: CylinderShape3D = null
+var _foot_q: PhysicsShapeQueryParameters3D = null
+
+
+## 脚底支撑面高度：在 at 上方 up 处放一块与胶囊同半径的扁圆柱，向下扫 up+down，
+## 返回碰到的可站立表面的世界 y；没有 / 起点就重叠 / 太陡返回 NAN。只查世界层（1）。
+func _foot_support_y(at: Vector3, up: float, down: float) -> float:
+	var w3 := get_world_3d()
+	if w3 == null:
+		return NAN
+	if _foot_disc == null:
+		_foot_disc = CylinderShape3D.new()
+		_foot_q = PhysicsShapeQueryParameters3D.new()
+		_foot_q.shape = _foot_disc
+		_foot_q.collision_mask = 1
+		_foot_q.collide_with_areas = false
+	_foot_disc.radius = maxf(0.08, _shape_r() - 0.01)
+	_foot_disc.height = 0.04
+	_foot_q.exclude = [get_rid()]
+	var span := up + down
+	var start := at + Vector3(0.0, up + _foot_disc.height * 0.5, 0.0)
+	_foot_q.transform = Transform3D(Basis.IDENTITY, start)
+	_foot_q.motion = Vector3(0.0, -span, 0.0)
+	var space := w3.direct_space_state
+	var r := space.cast_motion(_foot_q)
+	if r.size() < 2 or float(r[0]) >= 1.0 or float(r[1]) <= 0.0:
+		return NAN  # 范围内没有地面，或一开始就嵌在物体里（墙）
+	var travel := span * float(r[0])
+	_foot_q.transform = Transform3D(Basis.IDENTITY, start - Vector3(0.0, span * float(r[1]), 0.0))
+	_foot_q.motion = Vector3.ZERO
+	var info := space.get_rest_info(_foot_q)
+	if not info.is_empty():
+		var n: Vector3 = info.get("normal", Vector3.UP)
+		if n.angle_to(Vector3.UP) > floor_max_angle + 0.02:
+			return NAN
+	return at.y + up - travel
+
+
+## 胶囊站在台阶棱上 / 下台阶：move_and_slide 判不出地面时，用脚底支撑把角色托住或贴到下一级。
+func _apply_ledge_support(jumped: bool) -> void:
+	_ledge_support = false
+	if is_on_floor() or jumped or velocity.y > 0.0 or not _was_grounded:
+		return
+	var sy := _foot_support_y(global_position, 0.25, STEP_HEIGHT)
+	if is_nan(sy):
+		return
+	var rise := sy - global_position.y
+	if rise > 0.0005 and test_move(global_transform, Vector3.UP * rise, null, safe_margin):
+		return
+	global_position.y = sy
+	velocity.y = 0.0
+	_step_smooth += rise
+	_ledge_support = true
+
+
+## 调试 / 自检：当前是否靠脚底支撑站稳（胶囊不在地面上）。
+func debug_ledge_supported() -> bool:
+	return _ledge_support
 
 
 func _physics_process(delta: float) -> void:
@@ -2558,7 +2714,8 @@ func _physics_process(delta: float) -> void:
 	_update_fp_eye_blend(delta)
 	_update_stance_capsule_blend(delta)
 
-	var on_floor := is_on_floor()
+	var on_floor := is_on_floor() or _ledge_support
+	var jumped := false
 	# 土狼时间 + 跳跃缓冲（网页 coyote 0.14 / jumpBuf 0.14）
 	_coyote = COYOTE_TIME if on_floor else maxf(0.0, _coyote - delta)
 	var touch_jump := touch_jump_req
@@ -2651,6 +2808,7 @@ func _physics_process(delta: float) -> void:
 		_jump_buf = 0.0
 		_coyote = 0.0
 		on_floor = false
+		jumped = true
 	if not on_floor or velocity.y > 0.0:
 		velocity.y = maxf(velocity.y - gravity * delta, -FP_MAX_FALL)
 
@@ -2671,9 +2829,11 @@ func _physics_process(delta: float) -> void:
 	if on_floor and velocity.y <= 0.0:
 		_try_step_up(Vector3(velocity.x, 0.0, velocity.z) * delta)
 	move_and_slide()
+	_apply_ledge_support(jumped)
+	_was_grounded = is_on_floor() or _ledge_support
 	_stomp_ragdolls(delta)
 	_fti_tick()
-	if is_on_floor():
+	if _was_grounded:
 		_coyote = COYOTE_TIME
 
 	# CONTROL/FP: body look BEFORE apply_pose. DISPLAY: gaze at active camera.

@@ -4,8 +4,8 @@ const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
 ## 0.2.31 载具 / 检查床 / 地图传送 / RoomCollision 自检。
 ##   godot --headless --path . -s res://scripts/tests/vehicles_check.gd
 
-const VERSION_NAME := "0.3.7"
-const VERSION_CODE := 41
+const VERSION_NAME := "0.3.8"
+const VERSION_CODE := 42
 
 var fails := 0
 var main: Node
@@ -2280,6 +2280,8 @@ func _check_0226_playtest_fixes() -> void:
 				# Yaw the car 70° and confirm the cockpit view yaws with it.
 				var xf0: Transform3D = drive.global_transform
 				drive.global_rotate(Vector3.UP, 1.22)
+				# 0.3.8：相机用物理插值后的车身姿态，至少要过一个物理步才会更新（帧变快后 1 帧内可能没有物理步）。
+				await _phys(2)
 				if vs.has_method("_vehicle_camera"):
 					vs.call("_vehicle_camera", 0.016)
 				await _frames(1)
@@ -3559,6 +3561,16 @@ func _check_0231_playtest_fixes() -> void:
 
 
 
+## 0.3.8：下车有 380ms 防连点锁和开门动画；帧变快后固定等几帧不够，改为等到真正下车（最多约 3 秒）。
+func _leave_vehicle() -> void:
+	for i in 180:
+		if vs == null or vs.get("occupied") == null:
+			return
+		if int(vs.get("_board_phase")) >= 0:
+			vs.call("try_toggle")
+		await _phys(1)
+
+
 func _check_035_pan_and_tab() -> void:
 	## 0.3.5：观察视角手机双指平移、电脑中键平移；载具内电脑 Tab 切换第一/第三人称。
 	## 保留 0.3.1 右键环绕、「观察」仅手机、取消双指载具环绕、地图捏合缩放。
@@ -3576,10 +3588,7 @@ func _check_035_pan_and_tab() -> void:
 	_ok(root_src.find("KEY_TAB: \"toggle_mode\"") >= 0 or root_src.find("KEY_TAB: \"toggle_mode\"") >= 0, "Tab still toggles play mode when not in a vehicle")
 
 	# Not in a vehicle: Tab stays toggle_mode.
-	if vs and vs.get("occupied"):
-		vs.call("try_toggle")
-		await _frames(4)
-		await _phys(2)
+	await _leave_vehicle()
 	_ok(str(main.call("action_for_key", KEY_TAB, "control")) == "toggle_mode", "Tab toggles play mode when on foot")
 	_ok(str(main.call("action_for_key", KEY_TAB, "display")) == "toggle_mode", "Tab toggles play mode in observation when on foot")
 
@@ -3641,10 +3650,7 @@ func _check_035_pan_and_tab() -> void:
 			vs.call("_vehicle_camera", 0.016)
 		var eye1: Vector3 = cam.global_position if cam else Vector3.ZERO
 		_ok(eye1.distance_to(eye0) > 0.01, "vehicle middle-mouse / two-finger pan translates the camera (d=%.4f)" % eye0.distance_to(eye1))
-	if vs.get("occupied"):
-		vs.call("try_toggle")
-		await _frames(6)
-		await _phys(2)
+	await _leave_vehicle()
 	_ok(str(main.call("action_for_key", KEY_TAB, "control")) == "toggle_mode", "Tab returns to play-mode toggle after leaving the vehicle")
 
 
@@ -3783,10 +3789,7 @@ func _check_036_plane_orbit_zoom_and_stick() -> void:
 	_ok(pv_src.find("func _mount_stick_pivot") >= 0, "cockpit stick is hinged at its base")
 	_ok(pv_src.find("STICK_PITCH") >= 0 and pv_src.find("飞出") < 0 or pv_src.find("不把杆平移出座舱") >= 0, "stick uses a small in-cockpit angular range")
 
-	if vs and vs.get("occupied"):
-		vs.call("try_toggle")
-		await _frames(6)
-		await _phys(2)
+	await _leave_vehicle()
 
 	var plane: Node = null
 	for v in vs.vehicles:

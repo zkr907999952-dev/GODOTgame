@@ -129,6 +129,11 @@ static func zone_from_point(body: Node, hit: Vector3) -> String:
 
 
 static func zone_of(body: Node, hit: Vector3, collider: Object = null) -> String:
+	# 0.3.8：精细命中箱直接带骨骼名。
+	if collider is Node and (collider as Node).has_meta("hitbox_bone"):
+		var hbn := str((collider as Node).get_meta("hitbox_bone"))
+		if hbn != "":
+			return zone_from_bone(hbn)
 	if collider is PhysicalBone3D:
 		var bn := str((collider as PhysicalBone3D).bone_name)
 		if bn != "":

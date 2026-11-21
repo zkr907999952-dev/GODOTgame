@@ -3,22 +3,13 @@ shader_type spatial;
 render_mode blend_mix, cull_disabled, depth_draw_opaque, diffuse_burley, specular_schlick_ggx, shadows_disabled;
 
 #include "res://shaders/organ_common.gdshaderinc"
+#include "res://shaders/surgery_pull.gdshaderinc"
 
 uniform vec4 albedo_color : source_color = vec4(0.72, 0.28, 0.26, 1.0);
 uniform float roughness = 0.55;
 uniform float metallic = 0.0;
 uniform float xray = 0.0;
-uniform vec3 surgery_pull_p = vec3(0.0);
-uniform vec3 surgery_pull_off = vec3(0.0);
-uniform float surgery_pull_r = 0.0;
 
-vec3 surgery_pull_offset(vec3 l) {
-	if (surgery_pull_r < 1e-5) return vec3(0.0);
-	float d = length(l - surgery_pull_p);
-	float t = clamp(1.0 - d / max(surgery_pull_r, 1e-4), 0.0, 1.0);
-	float k = t * t * (3.0 - 2.0 * t);
-	return surgery_pull_off * k;
-}
 
 void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;

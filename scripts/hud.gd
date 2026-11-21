@@ -131,6 +131,8 @@ var _flight_mode_row: Control
 var _flight_mode_option: OptionButton
 var _chk_bullet_cam: CheckButton
 var _chk_bullet_hole: CheckButton
+var _chk_show_collision: CheckButton
+var _btn_restore_body: Button
 var _cam_chance_slider: HSlider
 var _cam_chance_value: Label
 var _hit_force_slider: HSlider
@@ -1489,7 +1491,14 @@ func _style_panel(p: PanelContainer) -> void:
 	p.add_theme_stylebox_override("panel", sb)
 
 
+## 0.3.8：按钮样式只在状态变化时改写。每次 add_theme_*_override 都会让整个 HUD 重新计算主题 / 布局（实测约 38ms），
+## 手术切割预览每次拖动都会刷新工具栏 5 个按钮，这就是预览卡顿的主要来源。
 func _style_button(b: Button, active: bool) -> void:
+	if b == null:
+		return
+	if b.has_meta("_styled_active") and bool(b.get_meta("_styled_active")) == active:
+		return
+	b.set_meta("_styled_active", active)
 	var sb := StyleBoxFlat.new()
 	if active:
 		sb.bg_color = Color(0.28, 0.48, 0.78, 0.95)
@@ -1662,6 +1671,19 @@ func _build_settings_panel() -> PanelContainer:
 	_chk_bullet_hole.button_pressed = false
 	_chk_bullet_hole.toggled.connect(_on_bullet_hole_toggled)
 	v.add_child(_chk_bullet_hole)
+
+	# 0.3.8：显示碰撞（所有碰撞体半透明覆盖）与复原身体（本体 + 所有分身满血、复活、清伤口 / 弹孔 / 手术切口）。
+	_chk_show_collision = CheckButton.new()
+	_chk_show_collision.text = "显示碰撞"
+	_chk_show_collision.button_pressed = false
+	_chk_show_collision.toggled.connect(_on_show_collision_toggled)
+	v.add_child(_chk_show_collision)
+
+	_btn_restore_body = Button.new()
+	_btn_restore_body.text = "复原身体"
+	_btn_restore_body.custom_minimum_size = Vector2(220, 34)
+	_btn_restore_body.pressed.connect(_on_restore_body_pressed)
+	v.add_child(_btn_restore_body)
 
 	var ch_row := HBoxContainer.new()
 	var ch_l := Label.new()
@@ -3224,6 +3246,20 @@ func _on_bullet_cam_chance(v: float) -> void:
 	var s := _settings()
 	if s:
 		s.call("set_bullet_cam_chance", v / 100.0)
+
+
+func _on_show_collision_toggled(on: bool) -> void:
+	var g := get_parent()
+	if g and g.has_method("set_show_collision"):
+		g.call("set_show_collision", on)
+
+
+func _on_restore_body_pressed() -> void:
+	var g := get_parent()
+	if g and g.has_method("restore_all_bodies"):
+		var n := int(g.call("restore_all_bodies"))
+		if _status:
+			_status.text = "已复原 %d 个身体" % n
 
 
 func _on_bullet_hole_toggled(on: bool) -> void:

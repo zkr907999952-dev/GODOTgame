@@ -1,4 +1,5 @@
 extends SceneTree
+## 0.3.8 手术模式自检：拿取只拉被抓唇缘（切口两端不动）、皮瓣外皮 + 红色截面、复原身体清切口、预览网格加速、正式手术刀模型（详见 v0308_check）。
 ## 0.3.7 手术模式自检：修复切割预览拉不出与被拉到天上的异常网格；预览仍与切口对齐。
 ## 0.3.6 手术模式自检：预览与切口对齐、更浅更窄红线、独立刚体皮瓣、分身可上检查床并进入手术。
 ## 0.3.5 手术模式自检：弹孔贯穿设置默认关且仅特写可穿孔；腹腔不穿后腰；
@@ -8,8 +9,8 @@ extends SceneTree
 ##     --rendering-method gl_compatibility --rendering-driver opengl3 \
 ##     -s res://scripts/tests/surgery_check.gd
 
-const VERSION_NAME := "0.3.7"
-const VERSION_CODE := 41
+const VERSION_NAME := "0.3.8"
+const VERSION_CODE := 42
 const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 
 var fails := 0
@@ -549,7 +550,8 @@ func _check_cavity_and_incision() -> void:
 	_ok(bool(fol.get("ok", false)), "wall centroid follows a pose change (wall=%.4f belly=%.4f)" % [float(fol.get("wall", 0.0)), float(fol.get("belly", 0.0))])
 	surgery.call("set_tool", "grab")
 	_ok(str(surgery.call("current_tool")) == "grab", "拿取 can be selected on an open cut to drag split skin")
-	_ok(bool(surgery.call("debug_drag_split_skin", Vector3(0.02, 0.0, 0.01))), "split skin is draggable with 拿取")
+	# 0.3.8：拿取只沿唇缘张开方向拉（沿切口方向只保留 15%），所以这里朝垂直切口的方向拖。
+	_ok(bool(surgery.call("debug_drag_split_skin", Vector3(0.0, 0.02, 0.01))), "split skin is draggable with 拿取")
 	_ok(float(surgery.call("split_skin_drag_offset")) > 0.004, "split-skin pull offset is applied (%.4f)" % float(surgery.call("split_skin_drag_offset")))
 	surgery.call("debug_release_split_skin")
 	surgery.call("set_tool", "grab")  # deselect

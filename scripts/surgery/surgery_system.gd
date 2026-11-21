@@ -59,7 +59,7 @@ var _surgical_mi: MeshInstance3D
 var _cavity_mi: MeshInstance3D
 var _wall_mi: MeshInstance3D
 var _preview: MeshInstance3D
-var _scalpel: MeshInstance3D
+var _scalpel: Node3D
 var _path_ids: PackedInt32Array = PackedInt32Array()
 var _flap_loop: PackedInt32Array = PackedInt32Array()
 var _body_loop: PackedInt32Array = PackedInt32Array()
@@ -142,6 +142,23 @@ var last_embedded_bind: PackedVector3Array = PackedVector3Array()
 var _preview_compare_path: PackedVector3Array = PackedVector3Array()
 var _flap_rest_size: Vector3 = Vector3.ZERO
 var _split_dir: Vector3 = Vector3.ZERO
+var _flap_outer_faces: int = 0
+## 0.3.8 拿取：拖拽强度（指针位移 → 皮肤位移）和上限都比 0.3.7 低。
+const GRAB_SKIN_GAIN := 0.5
+const GRAB_SKIN_MAX := 0.06
+const GRAB_FLAP_GAIN := 0.6
+const GRAB_THROW_GAIN := 10.0
+const GRAB_THROW_MAX := 3.5
+## 拿取切口：0 = 旧的径向整体平移，1 = 直线切口（只拉被抓一侧、两端固定），2 = 环形洞缘。
+var _pull_mode: int = 0
+var _pull_a: Vector3 = Vector3.ZERO
+var _pull_b: Vector3 = Vector3.ZERO
+var _pull_axis: Vector3 = Vector3.ZERO
+var _pull_raw: Vector3 = Vector3.ZERO
+var _flap_goal: Vector3 = Vector3.ZERO
+var _flap_goal_set: bool = false
+var _flap_grab_off: Vector3 = Vector3.ZERO
+const GRAB_FLAP_FOLLOW := 7.0
 
 
 func setup(p: Node, skel: Skeleton3D, organs: Node) -> void:
@@ -214,6 +231,7 @@ func set_cut_mode(m: String) -> void:
 
 
 func has_cut_preview() -> bool:
+	_sync_pending_drag()
 	if not _cut_preview:
 		return false
 	if cut_mode == "ring":
@@ -236,10 +254,12 @@ func is_cut_animating() -> bool:
 
 
 func straight_preview_ends() -> Array:
+	_sync_pending_drag()
 	return [_preview_a, _preview_b]
 
 
 func ring_preview_params() -> Dictionary:
+	_sync_pending_drag()
 	return {"center": _preview_center, "rx": _preview_rx, "ry": _preview_ry}
 
 
@@ -292,6 +312,7 @@ func incision_trail_visible_without_xray() -> bool:
 
 
 func preview_path_bind() -> PackedVector3Array:
+	_sync_pending_drag()
 	return _preview_path_bind()
 
 
@@ -855,6 +876,100 @@ func exit_surgery() -> void:
 	mode_changed.emit(false)
 
 
+## 0.3.8「复原身体」：撤掉所有手术切口 / 皮瓣 / 腹腔 / 弹孔冲压，Dress 换回原始网格；手术模式中则立即重新烘焙干净腹网。
+func restore_body() -> void:
+	var was_active := active
+	if _grab_active:
+		_end_grab(false)
+	stroke_active = false
+	_drag_pending = false
+	_cut_anim = false
+	_clear_cut_preview()
+	_clear_trail()
+	_show_scalpel(false)
+	if flap_node and is_instance_valid(flap_node):
+		flap_node.queue_free()
+	flap_node = null
+	flap_kind = ""
+	for n in [_grab_anchor, _flap_catch, _surgical_mi, _cavity_mi, _wall_mi]:
+		if n != null and is_instance_valid(n):
+			(n as Node).queue_free()
+	_grab_anchor = null
+	_flap_catch = null
+	_surgical_mi = null
+	_cavity_mi = null
+	_wall_mi = null
+	if _dress and _dress_mesh_orig:
+		_dress.mesh = _dress_mesh_orig
+		if _skin:
+			_dress.skin = _skin
+	_outer = null
+	_inner = null
+	_rest = null
+	_wall_md = null
+	_wrap = null
+	_outer_rest = null
+	_inner_rest = null
+	_wall_rest = null
+	_outer_evert = null
+	_inner_evert = null
+	_wall_evert = null
+	_baked = false
+	cut_open = false
+	loop_ready = false
+	flap_peeled = false
+	cavity_exposed = false
+	persist = false
+	lofted_tris = 0
+	path_points = PackedVector3Array()
+	_path_ids = PackedInt32Array()
+	_flap_loop = PackedInt32Array()
+	_body_loop = PackedInt32Array()
+	_loop_out = PackedInt32Array()
+	_loop_in = PackedInt32Array()
+	_trail_bind = PackedVector3Array()
+	_evert = 0.0
+	_evert_vel = 0.0
+	_evert_anim = false
+	_lip_left = PackedInt32Array()
+	_lip_right = PackedInt32Array()
+	_lip_left_i = PackedInt32Array()
+	_lip_right_i = PackedInt32Array()
+	_lip_closed = false
+	_hole_loops = []
+	_split_dir = Vector3.ZERO
+	_pull_off = Vector3.ZERO
+	_pull_raw = Vector3.ZERO
+	_pull_r = 0.0
+	_pull_mode = 0
+	_pull_peak = 0.0
+	_pull_rest = Vector3.ZERO
+	_split_drag = 0.0
+	_flap_goal_set = false
+	_apply_pull_uniforms()
+	_pinned_points = PackedInt32Array()
+	bullet_holes = 0
+	bullet_wall_tris = 0
+	bullet_plugs_removed = 0
+	_posed_cache = PackedVector3Array()
+	_posed_frozen = PackedVector3Array()
+	_posed_dirty = true
+	_invalidate_grid()
+	_anim_world = PackedVector3Array()
+	_anim_src = PackedVector3Array()
+	_xray_cached = -1
+	if pose_locked:
+		_lock_pose_for_stroke(false)
+	if was_active:
+		_bake_if_needed()
+		_update_cavity_visibility()
+	preview_changed.emit()
+
+
+func is_body_pristine() -> bool:
+	return not cut_open and not flap_peeled and bullet_holes == 0 and flap_node == null and _trail_bind.is_empty() and (_dress == null or _dress_mesh_orig == null or _dress.mesh == _dress_mesh_orig or active)
+
+
 func set_tool(t: String) -> void:
 	# 再点已选工具则取消选择，恢复视角控制。
 	if t == tool:
@@ -936,6 +1051,39 @@ func drag_stroke(origin: Vector3, dir: Vector3) -> void:
 		return
 	if not stroke_active or tool != "scalpel" or _cut_anim:
 		return
+	# 0.3.8：同一帧里的多次拖动事件只处理最后一次（鼠标 / 触屏一帧可能来好几次），其余在 _process / 松手时补上。
+	var f := Engine.get_process_frames()
+	if f == _drag_last_frame:
+		_drag_pending = true
+		_drag_pend_o = origin
+		_drag_pend_d = dir
+		return
+	_drag_last_frame = f
+	_drag_pending = false
+	_do_drag_stroke(origin, dir)
+
+
+var _drag_pending: bool = false
+var _drag_pend_o: Vector3 = Vector3.ZERO
+var _drag_pend_d: Vector3 = Vector3.FORWARD
+var _drag_last_frame: int = -1
+var preview_rebuilds: int = 0
+
+
+## 查询预览状态前先补上本帧被合并的拖动事件，状态永远与最后一次输入一致。
+func _sync_pending_drag() -> void:
+	if _drag_pending:
+		_flush_pending_drag()
+
+
+func _flush_pending_drag() -> void:
+	_drag_pending = false
+	if stroke_active and tool == "scalpel" and not _cut_anim:
+		_drag_last_frame = Engine.get_process_frames()
+		_do_drag_stroke(_drag_pend_o, _drag_pend_d)
+
+
+func _do_drag_stroke(origin: Vector3, dir: Vector3) -> void:
 	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
 	var bind_p: Vector3
 	if hit != null:
@@ -948,6 +1096,7 @@ func drag_stroke(origin: Vector3, dir: Vector3) -> void:
 
 
 func cancel_stroke() -> void:
+	_drag_pending = false
 	if _grab_active:
 		_end_grab(false)
 	if not stroke_active:
@@ -964,6 +1113,8 @@ func cancel_stroke() -> void:
 
 
 func end_stroke() -> void:
+	if _drag_pending:
+		_flush_pending_drag()
 	if _grab_active:
 		_end_grab(true)
 		stroke_active = false
@@ -1174,6 +1325,8 @@ func peel_flap() -> bool:
 	for id2 in loop_flap_i:
 		flap_inner_loop.append(id2 + fo)
 	Geom.loft_wall(flap_md, loop_flap_o, flap_inner_loop, true)
+	# 0.3.8：前 flap_o.face_count() 个三角是皮瓣外表面（正常皮肤），其余（内面 + 周圈断面）才是红色截面。
+	_flap_outer_faces = flap_o.face_count()
 	if not _spawn_flap(flap_md, flap_o):
 		return false
 	flap_peeled = true
@@ -1450,6 +1603,7 @@ func _make_skinned_mi(nm: String, mesh: Mesh, use_skin_mat: bool) -> MeshInstanc
 
 
 func _rebuild_surgical_meshes(outer: Geom.MeshData, inner: Geom.MeshData, wall: Geom.MeshData) -> void:
+	_invalidate_grid()
 	if _surgical_mi:
 		_surgical_mi.mesh = _mesh_with_evert(outer, _outer_rest, _outer_evert)
 		if _skin:
@@ -1768,19 +1922,38 @@ func _trail_tri(st: SurfaceTool, p0: Vector3, p1: Vector3, p2: Vector3, uv0: Vec
 
 
 func _approx_world_bind(bind_p: Vector3) -> Vector3:
-	if _outer == null or _skel == null:
+	if _outer == null or _skel == null or _outer.vert_count() < 1:
 		return bind_p
-	var best := 0
-	var best_s := 1e9
-	for i in _outer.vert_count():
-		var s := _outer.pos[i].distance_squared_to(bind_p)
-		if s < best_s:
-			best_s = s
-			best = i
+	var best := _nearest_outer(bind_p)
 	if pose_locked and _posed_frozen.size() > best:
 		return _posed_frozen[best]
 	var posed := Geom.skin_vertex(bind_p, best, _outer, _skel, _skin)
 	return _skel.global_transform * posed
+
+
+var _grid: Dictionary = {}
+var _grid_src: Object = null
+var grid_builds: int = 0
+
+
+## 0.3.8：腹网 XY 网格索引（预览投影 / 最近顶点加速）；腹网拓扑一变就重建。
+func _outer_grid() -> Dictionary:
+	if _outer == null:
+		return {}
+	if _grid_src != _outer or not Geom.grid_valid(_outer, _grid):
+		_grid = Geom.build_xy_grid(_outer)
+		_grid_src = _outer
+		grid_builds += 1
+	return _grid
+
+
+func _invalidate_grid() -> void:
+	_grid = {}
+	_grid_src = null
+
+
+func _nearest_outer(bind_p: Vector3) -> int:
+	return maxi(0, Geom.nearest_vertex_grid(_outer, _outer_grid(), bind_p))
 
 
 func _approx_world_and_normal(bind_p: Vector3) -> Array:
@@ -1791,13 +1964,7 @@ func _approx_world_and_normal(bind_p: Vector3) -> Array:
 	var posed := _posed_world()
 	if posed.size() != _outer.vert_count():
 		return [w, nrm]
-	var best := 0
-	var best_s := 1e9
-	for i in _outer.vert_count():
-		var s := _outer.pos[i].distance_squared_to(bind_p)
-		if s < best_s:
-			best_s = s
-			best = i
+	var best := _nearest_outer(bind_p)
 	# 用含该顶点的一个三角估计外向法线。
 	for f in _outer.face_count():
 		var ia := _outer.idx[f * 3]
@@ -1829,28 +1996,77 @@ func _clear_trail() -> void:
 		_preview.mesh = null
 
 
+## 0.3.8：正式手术刀模型（assets/surgery/scalpel.glb）。模型长轴沿 X，刀尖在 -X 端，刀身平面为 XZ。
+## 运行时量出刀尖顶点和总长，把刀尖放到 _scalpel 原点、整把缩放到 SCALPEL_LEN；
+## 摆放时刀尖贴在切点，刀柄沿行进方向后仰约 45°、刃口朝皮肤。模型缺失时回退到白色圆柱（CylinderMesh）。
+const SCALPEL_LEN := 0.145
+const SCALPEL_TILT := 0.75  # 刀柄离开皮肤的仰角（弧度，约 43°）
+var scalpel_model_loaded: bool = false
+var scalpel_tip_local: Vector3 = Vector3.ZERO
+var _scalpel_last_p: Vector3 = Vector3.INF
+var _scalpel_tan: Vector3 = Vector3.ZERO
+
+
+func _collect_mesh_points(n: Node, xf: Transform3D, out: PackedVector3Array) -> void:
+	var t := xf
+	if n is Node3D:
+		t = xf * (n as Node3D).transform
+	if n is MeshInstance3D and (n as MeshInstance3D).mesh != null:
+		var m: Mesh = (n as MeshInstance3D).mesh
+		for si in m.get_surface_count():
+			var pts: PackedVector3Array = m.surface_get_arrays(si)[Mesh.ARRAY_VERTEX]
+			for pt in pts:
+				out.append(t * pt)
+		(n as MeshInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	for c in n.get_children():
+		_collect_mesh_points(c, t, out)
+
+
 func _make_scalpel() -> void:
-	_scalpel = MeshInstance3D.new()
+	_scalpel = Node3D.new()
 	_scalpel.name = "SurgeryScalpel"
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = Color(1, 1, 1)
+	scalpel_model_loaded = false
 	if ResourceLoader.exists(SCALPEL_GLB):
 		var packed := load(SCALPEL_GLB)
 		if packed is PackedScene:
-			var inst: Node = packed.instantiate()
-			_scalpel.add_child(inst)
-		elif packed is Mesh:
-			_scalpel.mesh = packed
-			_scalpel.material_override = mat
-	if _scalpel.mesh == null and _scalpel.get_child_count() == 0:
+			var inst: Node = (packed as PackedScene).instantiate()
+			if inst is Node3D:
+				var pts := PackedVector3Array()
+				_collect_mesh_points(inst, Transform3D.IDENTITY, pts)
+				if pts.size() > 3:
+					var tip := pts[0]
+					var mx := pts[0].x
+					for pt in pts:
+						if pt.x < tip.x:
+							tip = pt
+						mx = maxf(mx, pt.x)
+					var sc := SCALPEL_LEN / maxf(mx - tip.x, 1e-4)
+					var holder := Node3D.new()
+					holder.name = "ScalpelModel"
+					holder.transform = Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * sc), -tip * sc)
+					holder.add_child(inst)
+					_scalpel.add_child(holder)
+					scalpel_tip_local = Vector3.ZERO
+					scalpel_model_loaded = true
+				else:
+					inst.free()
+			else:
+				inst.free()
+	if not scalpel_model_loaded:
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(1, 1, 1)
 		var cyl := CylinderMesh.new()
 		cyl.top_radius = 0.0025
 		cyl.bottom_radius = 0.004
 		cyl.height = 0.11
 		cyl.radial_segments = 10
-		_scalpel.mesh = cyl
-		_scalpel.material_override = mat
+		var mi := MeshInstance3D.new()
+		mi.mesh = cyl
+		mi.material_override = mat
+		# 圆柱沿 Y；转到 -X 方向为刀尖、底端在原点，与正式模型同一套朝向。
+		mi.transform = Transform3D(Basis(Vector3(0, 0, 1), PI * 0.5), Vector3(0.055, 0, 0))
+		_scalpel.add_child(mi)
 	add_child(_scalpel)
 	_scalpel.visible = false
 
@@ -1858,19 +2074,40 @@ func _make_scalpel() -> void:
 func _show_scalpel(on: bool) -> void:
 	if _scalpel:
 		_scalpel.visible = on
+		if not on:
+			_scalpel_last_p = Vector3.INF
 
 
-func _place_scalpel(world_p: Vector3, dir: Vector3) -> void:
+## dir/nrm：给了 nrm 时 dir 是切割行进方向（动画沿路径）；否则 dir 是视线，用相邻两次落点估计行进方向。
+func _place_scalpel(world_p: Vector3, dir: Vector3, nrm: Vector3 = Vector3.ZERO) -> void:
 	if _scalpel == null:
 		return
-	# 圆柱默认沿 Y；把 Y 对齐切入方向。
-	var d := dir.normalized()
-	var up := Vector3.UP
-	if absf(d.dot(up)) > 0.95:
-		up = Vector3.RIGHT
-	var basis := Basis().looking_at(d, up)
-	# looking_at 让 -Z 朝向目标，再把圆柱 Y 转到 -Z。
-	_scalpel.global_transform = Transform3D(basis * Basis.from_euler(Vector3(-PI * 0.5, 0, 0)), world_p - d * 0.05)
+	var n := nrm
+	var tan := dir
+	if n.length_squared() < 1e-8:
+		n = -dir.normalized()
+		if _scalpel_last_p != Vector3.INF and world_p.distance_to(_scalpel_last_p) > 0.002:
+			_scalpel_tan = (world_p - _scalpel_last_p).normalized()
+		if _scalpel_last_p == Vector3.INF or world_p.distance_to(_scalpel_last_p) > 0.002:
+			_scalpel_last_p = world_p
+		tan = _scalpel_tan
+	n = n.normalized()
+	tan = tan - n * tan.dot(n)
+	if tan.length_squared() < 1e-6:
+		# 没有行进方向：刀柄朝屏幕上方 / 身体头部方向。
+		tan = Vector3.UP - n * Vector3.UP.dot(n)
+		if tan.length_squared() < 1e-6:
+			tan = Vector3.FORWARD - n * Vector3.FORWARD.dot(n)
+		tan = -tan
+	tan = tan.normalized()
+	var ca := cos(SCALPEL_TILT)
+	var sa := sin(SCALPEL_TILT)
+	var tip_dir := (tan * ca - n * sa).normalized()    # 刀柄 → 刀尖
+	var edge := (-n * ca - tan * sa).normalized()      # 刃口朝皮肤
+	var xw := -tip_dir
+	var zw := edge
+	var yw := zw.cross(xw).normalized()
+	_scalpel.global_transform = Transform3D(Basis(xw, yw, zw), world_p)
 
 
 func _find_exam_bed() -> Node:
@@ -1986,7 +2223,7 @@ func _spawn_flap(flap_md: Geom.MeshData, flap_outer: Geom.MeshData) -> bool:
 		c /= float(world_md.vert_count())
 	for i6 in world_md.vert_count():
 		world_md.pos[i6] -= c
-	var mesh := world_md.to_array_mesh()
+	var mesh := _flap_two_surface_mesh(world_md, _flap_outer_faces)
 	if mesh.get_surface_count() < 1:
 		return false
 	if flap_node and is_instance_valid(flap_node):
@@ -2016,7 +2253,13 @@ func _spawn_flap_rigid(mesh: ArrayMesh, origin: Vector3, parent: Node) -> bool:
 	var mi := MeshInstance3D.new()
 	mi.name = "FlapMesh"
 	mi.mesh = mesh
-	mi.material_override = _wall_material()
+	# 0.3.8：外表面用正常皮肤材质，只有截面（内面 + 周圈壁）是红色。
+	# 两种材质都不注册腹部形变：皮瓣已是独立刚体，不能再被腹部拖拽 / 拿取的 shader 位移扭曲。
+	if mesh.get_surface_count() >= 2:
+		mi.set_surface_override_material(0, _flap_skin_material())
+		mi.set_surface_override_material(1, _flap_cut_material())
+	else:
+		mi.material_override = _flap_cut_material()
 	body.add_child(mi)
 	var col := CollisionShape3D.new()
 	col.name = "FlapShape"
@@ -2038,6 +2281,100 @@ func _spawn_flap_rigid(mesh: ArrayMesh, origin: Vector3, parent: Node) -> bool:
 
 
 
+## 皮瓣网格分两个 surface：0 = 外表面（皮肤），1 = 内面 + 周圈断面（红色）。
+func _flap_two_surface_mesh(md: Geom.MeshData, outer_faces: int) -> ArrayMesh:
+	var nf := md.face_count()
+	var split := clampi(outer_faces, 0, nf)
+	if split <= 0 or split >= nf:
+		return md.to_array_mesh()
+	var am := ArrayMesh.new()
+	for part in 2:
+		var f0 := 0 if part == 0 else split
+		var f1 := split if part == 0 else nf
+		var sub := Geom.MeshData.new()
+		var remap: Dictionary = {}
+		var empty_b := PackedInt32Array([0, 0, 0, 0])
+		var empty_w := PackedFloat32Array([0, 0, 0, 0])
+		for f in range(f0, f1):
+			var ids := PackedInt32Array()
+			for k in 3:
+				var vi: int = md.idx[f * 3 + k]
+				if not remap.has(vi):
+					remap[vi] = sub.add_vert(md.pos[vi], md.nrm[vi], md.uv[vi], empty_b, empty_w)
+				ids.append(int(remap[vi]))
+			sub.add_face(ids[0], ids[1], ids[2])
+		sub.bones = PackedInt32Array()
+		sub.weights = PackedFloat32Array()
+		if sub.face_count() < 1:
+			continue
+		var arrays: Array = []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = sub.pos
+		arrays[Mesh.ARRAY_NORMAL] = sub.nrm
+		arrays[Mesh.ARRAY_TEX_UV] = sub.uv
+		arrays[Mesh.ARRAY_INDEX] = sub.idx
+		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return am
+
+
+var _flap_skin_mat: Material = null
+var _flap_cut_mat: ShaderMaterial = null
+
+
+## 皮瓣外表面：沿用身体皮肤的贴图（albedo / 法线），但用普通 StandardMaterial3D，不跟腹部形变 / 透视挖孔。
+func _flap_skin_material() -> Material:
+	if _flap_skin_mat:
+		return _flap_skin_mat
+	var src: Material = _dress.get_active_material(0) if _dress else null
+	var m := StandardMaterial3D.new()
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	m.roughness = 0.62
+	m.metallic = 0.0
+	m.metallic_specular = 0.32
+	m.albedo_color = Color(0.93, 0.80, 0.74)
+	if src is ShaderMaterial:
+		var sm := src as ShaderMaterial
+		var tex = sm.get_shader_parameter("albedo_tex")
+		if tex is Texture2D:
+			m.albedo_texture = tex
+			m.albedo_color = Color(1, 1, 1)
+			var ac = sm.get_shader_parameter("albedo_color")
+			if ac is Color:
+				m.albedo_color = Color(ac.r, ac.g, ac.b, 1.0)
+		var nt = sm.get_shader_parameter("normal_tex")
+		var has_n = sm.get_shader_parameter("has_normal")
+		if nt is Texture2D and (has_n == null or bool(has_n)):
+			m.normal_enabled = true
+			m.normal_texture = nt
+	elif src is StandardMaterial3D:
+		var dup := (src as StandardMaterial3D).duplicate() as StandardMaterial3D
+		dup.cull_mode = BaseMaterial3D.CULL_DISABLED
+		_flap_skin_mat = dup
+		return dup
+	_flap_skin_mat = m
+	return m
+
+
+## 皮瓣截面：与切口断面同色，但不注册腹部形变（独立刚体不该被腹部 shader 拉扯）。
+func _flap_cut_material() -> ShaderMaterial:
+	if _flap_cut_mat == null:
+		_flap_cut_mat = _make_shell_material(Color(0.72, 0.28, 0.26, 1.0))
+	return _flap_cut_mat
+
+
+func flap_surface_materials() -> Array:
+	## 自检：[外表面材质, 截面材质]（皮瓣不存在时为空）。
+	if flap_node == null or not is_instance_valid(flap_node):
+		return []
+	var mi := flap_node.get_node_or_null("FlapMesh") as MeshInstance3D
+	if mi == null or mi.mesh == null:
+		return []
+	var out: Array = []
+	for i in mi.mesh.get_surface_count():
+		out.append(mi.get_surface_override_material(i) if mi.get_surface_override_material(i) else mi.material_override)
+	return out
+
+
 func _spawn_flap_verlet(world_md: Geom.MeshData, parent: Node) -> bool:
 	var floor_y := _catch_top_y()
 	var flap := load("res://scripts/surgery/surgery_flap_verlet.gd").new() as Node3D
@@ -2046,7 +2383,7 @@ func _spawn_flap_verlet(world_md: Geom.MeshData, parent: Node) -> bool:
 	var world: World3D = null
 	if flap.get_world_3d():
 		world = flap.get_world_3d()
-	flap.call("setup_from_mesh", world_md, _wall_material(), world, floor_y)
+	flap.call("setup_from_mesh", world_md, _flap_cut_material(), world, floor_y)
 	flap_node = flap
 	flap_kind = "verlet"
 	return true
@@ -2115,6 +2452,13 @@ func _process(dt: float) -> void:
 		_step_eversion(dt)
 	if not _grab_active and _pull_off.length_squared() > 1e-8:
 		_step_pull_spring(dt)
+	if _grab_active and _grab_kind == "flap" and _flap_goal_set and flap_node and is_instance_valid(flap_node):
+		var cur := flap_centroid()
+		var step := (_flap_goal - cur) * (1.0 - exp(-GRAB_FLAP_FOLLOW * dt))
+		if step.length_squared() > 1e-10:
+			_move_flap_by(step)
+	if _drag_pending:
+		_flush_pending_drag()
 
 
 func _parent_trail(mi: MeshInstance3D) -> void:
@@ -2139,13 +2483,7 @@ func _approx_bind_and_normal(bind_p: Vector3) -> Array:
 	var weights := PackedFloat32Array([1, 0, 0, 0])
 	if _outer == null or _outer.vert_count() < 1:
 		return [bind_p, nrm, bones, weights]
-	var best := 0
-	var best_s := 1e9
-	for i in _outer.vert_count():
-		var s := _outer.pos[i].distance_squared_to(bind_p)
-		if s < best_s:
-			best_s = s
-			best = i
+	var best := _nearest_outer(bind_p)
 	if best < _outer.nrm.size():
 		nrm = _outer.nrm[best]
 		if nrm.length_squared() > 1e-10:
@@ -2439,6 +2777,9 @@ func _begin_flap_grab(origin: Vector3, dir: Vector3) -> bool:
 	_grab_last = hit
 	_grab_vel = Vector3.ZERO
 	_flap_throw_speed = 0.0
+	_flap_grab_off = flap_centroid() - hit
+	_flap_goal = flap_centroid()
+	_flap_goal_set = false
 	_ensure_grab_anchor(hit)
 	_pin_flap_to_anchor()
 	return true
@@ -2464,14 +2805,157 @@ func _begin_skin_grab(origin: Vector3, dir: Vector3) -> bool:
 	_grab_last = world_p
 	_grab_vel = Vector3.ZERO
 	_split_drag = 0.0
-	_pull_p = _to_ab_local(world_p)
 	_pull_off = Vector3.ZERO
-	_pull_r = 0.11
+	_pull_raw = Vector3.ZERO
+	_pull_r = PULL_RADIUS
 	_pull_peak = 0.0
 	_pull_rest = Vector3.ZERO
 	_split_dir = _skin_split_dir(bind_p)
+	_setup_pull_geometry(bind_p, world_p)
 	_apply_pull_uniforms()
 	return true
+
+
+## 0.3.8：拿取切口的几何约束。直线切口：只拉被抓的那一侧唇缘，沿切口两端权重为 0（切口端点钉在身上），
+## 离切线越远越弱；环形洞缘：只拉被抓的那一段洞缘。避免像 0.3.7 那样把整段切口连同两侧一起拖走错位。
+const PULL_RADIUS := 0.055
+
+
+func _setup_pull_geometry(bind_p: Vector3, world_p: Vector3, want_side: Vector3 = Vector3.ZERO) -> void:
+	_pull_p = _to_ab_local(world_p)
+	_pull_mode = 0
+	_pull_axis = Vector3.ZERO
+	if _outer == null:
+		return
+	var nv := _outer.vert_count()
+	var straight := (not _lip_closed) and _lip_left.size() >= 2 and _lip_right.size() >= 2 and _lip_left != _lip_right
+	if straight:
+		var n := mini(_lip_left.size(), _lip_right.size())
+		var l0: int = _lip_left[0]
+		var r0: int = _lip_right[0]
+		var l1: int = _lip_left[n - 1]
+		var r1: int = _lip_right[n - 1]
+		if l0 >= nv or r0 >= nv or l1 >= nv or r1 >= nv:
+			return
+		_pull_a = _to_ab_local(_approx_world_bind((_outer.pos[l0] + _outer.pos[r0]) * 0.5))
+		_pull_b = _to_ab_local(_approx_world_bind((_outer.pos[l1] + _outer.pos[r1]) * 0.5))
+		var sd_bind := _split_dir if _split_dir.length_squared() > 1e-8 else _skin_split_dir(bind_p)
+		if sd_bind.length_squared() < 1e-8:
+			return
+		# 分开方向是绑定空间的，换算到腹局部空间（与 _pull_a/_pull_b、shader 一致；躺在检查床上两者朝向不同）。
+		var mid_bind := (_outer.pos[l0] + _outer.pos[r0] + _outer.pos[l1] + _outer.pos[r1]) * 0.25
+		var sd := _to_ab_local(_approx_world_bind(mid_bind + sd_bind.normalized() * 0.01)) - _to_ab_local(_approx_world_bind(mid_bind))
+		var ab_dir := (_pull_b - _pull_a).normalized() if (_pull_b - _pull_a).length_squared() > 1e-10 else Vector3.ZERO
+		sd -= ab_dir * sd.dot(ab_dir)
+		if sd.length_squared() < 1e-10:
+			return
+		sd = sd.normalized()
+		var sign := 1.0
+		if want_side.length_squared() > 1e-10:
+			sign = 1.0 if want_side.dot(sd) >= 0.0 else -1.0
+		else:
+			var ab := _pull_b - _pull_a
+			var t := clampf((_pull_p - _pull_a).dot(ab) / maxf(ab.length_squared(), 1e-8), 0.0, 1.0)
+			var q := _pull_a + ab * t
+			var side := (_pull_p - q).dot(sd)
+			if absf(side) < 0.0008:
+				# 点在切线上：看离哪一侧唇缘顶点更近。
+				var dl := 1e9
+				var dr := 1e9
+				for i in n:
+					if _lip_left[i] < nv:
+						dl = minf(dl, _outer.pos[_lip_left[i]].distance_squared_to(bind_p))
+					if _lip_right[i] < nv:
+						dr = minf(dr, _outer.pos[_lip_right[i]].distance_squared_to(bind_p))
+				sign = 1.0 if dr < dl else -1.0
+			else:
+				sign = 1.0 if side >= 0.0 else -1.0
+		_pull_axis = sd * sign
+		_pull_mode = 1
+		return
+	var loop: PackedInt32Array = _hole_loops[_hole_loops.size() - 1] if not _hole_loops.is_empty() else _lip_left
+	if loop.size() < 3:
+		return
+	var pts: Array[Vector3] = []
+	var c := Vector3.ZERO
+	for id in loop:
+		if id < 0 or id >= nv:
+			continue
+		var pa := _to_ab_local(_approx_world_bind(_outer.pos[id]))
+		pts.append(pa)
+		c += pa
+	if pts.size() < 3:
+		return
+	c /= float(pts.size())
+	var hr := 1e9
+	for pa2 in pts:
+		hr = minf(hr, pa2.distance_to(c))
+	var ax := (want_side if want_side.length_squared() > 1e-10 else _pull_p - c)
+	if ax.length_squared() < 1e-10:
+		return
+	_pull_a = c
+	_pull_b = Vector3(hr, 0.0, 0.0)
+	_pull_axis = ax.normalized()
+	_pull_mode = 2
+
+
+## 把累计的拖拽量变成实际皮肤位移：沿张开方向（只张开，不能把唇缘推过切线）+ 少量切向，软饱和到 GRAB_SKIN_MAX。
+func _shape_pull(raw: Vector3) -> Vector3:
+	var v := raw
+	if _pull_mode == 0 or _pull_axis.length_squared() < 1e-8:
+		if _split_dir.length_squared() > 1e-6:
+			var along0 := _split_dir * raw.dot(_split_dir)
+			v = along0 * 0.85 + raw * 0.15
+	else:
+		var along := raw.dot(_pull_axis)
+		var tang := raw - _pull_axis * along
+		v = _pull_axis * maxf(along, 0.0) + tang * 0.15
+	var L := v.length()
+	if L > 1e-7:
+		v = v / L * (GRAB_SKIN_MAX * tanh(L / GRAB_SKIN_MAX))
+	return v
+
+
+func pull_mode() -> int:
+	return _pull_mode
+
+
+## 自检：当前拿取位移下，某个绑定空间点（腹局部坐标）的位移量（与 shader 同一公式）。
+func debug_pull_offset_at_ab(l: Vector3) -> Vector3:
+	return _pull_offset_cpu(l)
+
+
+func debug_pull_endpoints_ab() -> Array:
+	return [_pull_a, _pull_b, _pull_axis]
+
+
+func _pull_offset_cpu(l: Vector3) -> Vector3:
+	if _pull_r < 1e-5:
+		return Vector3.ZERO
+	var w := 0.0
+	if _pull_mode == 1:
+		var ab := _pull_b - _pull_a
+		var L2 := maxf(ab.dot(ab), 1e-8)
+		var t := clampf((l - _pull_a).dot(ab) / L2, 0.0, 1.0)
+		var q := _pull_a + ab * t
+		var r := l - q
+		var side := r.dot(_pull_axis)
+		var ends := sqrt(maxf(sin(PI * t), 0.0))
+		var wside := smoothstep(0.0, 0.0015, side)
+		var wfall := 1.0 - smoothstep(0.0, _pull_r, r.length())
+		var tp := clampf((_pull_p - _pull_a).dot(ab) / L2, 0.0, 1.0)
+		var wgrab := 1.0 - smoothstep(0.0, 0.07, absf(t - tp) * sqrt(L2))
+		w = ends * wside * wfall * (0.35 + 0.65 * wgrab)
+	elif _pull_mode == 2:
+		var r2 := l - _pull_a
+		var dist := r2.length()
+		var rim := absf(dist - _pull_b.x)
+		var cosang := r2.dot(_pull_axis) / maxf(dist, 1e-5)
+		w = smoothstep(0.15, 0.85, cosang) * (1.0 - smoothstep(0.0, _pull_r, rim))
+	else:
+		var t0 := clampf(1.0 - l.distance_to(_pull_p) / maxf(_pull_r, 1e-4), 0.0, 1.0)
+		w = t0 * t0 * (3.0 - 2.0 * t0)
+	return _pull_off * w
 
 
 func _drag_grab(origin: Vector3, dir: Vector3) -> void:
@@ -2480,23 +2964,21 @@ func _drag_grab(origin: Vector3, dir: Vector3) -> void:
 	if _grab_kind == "flap":
 		var nxt := _grab_plane_hit(origin, dir, _grab_last)
 		var delta: Vector3 = nxt - _grab_last
-		_grab_vel = delta
+		_grab_vel = delta * GRAB_FLAP_GAIN
 		_grab_last = nxt
-		_move_flap_by(delta)
+		# 0.3.8：皮瓣不再瞬移到指针，而是在 _process 里以较低的跟随强度追上目标（拖拽更轻、更稳）。
+		_flap_goal = nxt + _flap_grab_off
+		_flap_goal_set = true
 		if _grab_anchor:
 			_grab_anchor.global_position = nxt
 		return
 	if _grab_kind == "skin":
 		var nxt2 := _grab_plane_hit(origin, dir, _grab_last)
-		var off: Vector3 = nxt2 - _grab_last
-		# 优先沿着切口两侧把皮肉拉开，带弹性，避免把网格拽变形。
-		var local := _to_ab_delta(off)
-		if _split_dir.length_squared() > 1e-6:
-			var along := _split_dir * local.dot(_split_dir)
-			local = along * 0.85 + local * 0.15
-		_pull_off += local
-		if _pull_off.length() > 0.13:
-			_pull_off = _pull_off.normalized() * 0.13
+		# 0.3.7 的 bug：_grab_last 不更新却每次累加「总位移」，拖得越久偏移越大、把切口整体拽走。
+		# 现在用相对按下点的总位移 × 增益，再按切口约束成只张开被抓的一侧。
+		_pull_raw = _to_ab_delta(nxt2 - _grab_last) * GRAB_SKIN_GAIN
+		_pull_off = _shape_pull(_pull_raw)
+		_grab_vel = Vector3.ZERO
 		_split_drag = _pull_off.length()
 		if _split_drag > _pull_peak:
 			_pull_peak = _split_drag
@@ -2508,9 +2990,10 @@ func _end_grab(do_throw: bool) -> void:
 	if not _grab_active:
 		return
 	if _grab_kind == "flap":
-		var vel := _grab_vel * (18.0 if do_throw else 0.0)
-		if vel.length() > 6.0:
-			vel = vel.normalized() * 6.0
+		var vel := _grab_vel * (GRAB_THROW_GAIN if do_throw else 0.0)
+		if vel.length() > GRAB_THROW_MAX:
+			vel = vel.normalized() * GRAB_THROW_MAX
+		_flap_goal_set = false
 		_unpin_flap()
 		_apply_flap_throw(vel if do_throw else Vector3.ZERO)
 		_flap_throw_speed = vel.length() if do_throw else 0.0
@@ -2551,7 +3034,7 @@ func debug_throw_flap(vel: Vector3) -> bool:
 		_grab_active = true
 		_ensure_grab_anchor(flap_centroid())
 		_pin_flap_to_anchor()
-	_grab_vel = vel / 18.0
+	_grab_vel = vel / GRAB_THROW_GAIN
 	_end_grab(true)
 	return _flap_throw_speed > 0.0 or vel.length() <= 0.0
 
@@ -2565,15 +3048,11 @@ func debug_drag_split_skin(off: Vector3) -> bool:
 	var mid := _navel_rest
 	if _lip_left.size() > 0 and _lip_left[0] < _outer.vert_count():
 		mid = _outer.pos[_lip_left[_lip_left.size() / 2]]
-	_pull_p = mid
-	_pull_off = off
-	_split_dir = _skin_split_dir(_pull_p)
-	if _split_dir.length_squared() > 1e-6:
-		var along2 := _split_dir * _pull_off.dot(_split_dir)
-		_pull_off = along2 * 0.85 + _pull_off * 0.15
-	if _pull_off.length() > 0.13:
-		_pull_off = _pull_off.normalized() * 0.13
-	_pull_r = 0.11
+	_split_dir = _skin_split_dir(mid)
+	_setup_pull_geometry(mid, _approx_world_bind(mid), off)
+	_pull_raw = off
+	_pull_off = _shape_pull(off)
+	_pull_r = PULL_RADIUS
 	_split_drag = _pull_off.length()
 	_pull_peak = _split_drag
 	_pull_rest = _pull_off * 0.42
@@ -2765,6 +3244,10 @@ func _apply_pull_uniforms() -> void:
 		sm.set_shader_parameter("surgery_pull_p", _pull_p)
 		sm.set_shader_parameter("surgery_pull_off", _pull_off)
 		sm.set_shader_parameter("surgery_pull_r", _pull_r if _pull_off.length_squared() > 1e-8 else 0.0)
+		sm.set_shader_parameter("surgery_pull_a", _pull_a)
+		sm.set_shader_parameter("surgery_pull_b", _pull_b)
+		sm.set_shader_parameter("surgery_pull_axis", _pull_axis)
+		sm.set_shader_parameter("surgery_pull_mode", float(_pull_mode))
 
 
 func _step_pull_spring(dt: float) -> void:
@@ -3015,12 +3498,12 @@ func _preview_path_bind() -> PackedVector3Array:
 	if not _cut_preview or _outer == null:
 		return PackedVector3Array()
 	if cut_mode == "ring":
-		var path := Geom.oval_path_on_mesh(_outer, _preview_center, _preview_rx, _preview_ry, 24)
+		var path := Geom.oval_path_on_mesh(_outer, _preview_center, _preview_rx, _preview_ry, 24, _outer_grid())
 		if path.size() >= 3:
 			if path[0].distance_to(path[path.size() - 1]) > Geom.PATH_CLOSE_DIST:
 				path.append(path[0])
 		return path
-	return Geom.line_path_on_mesh(_outer, _preview_a, _preview_b, 12)
+	return Geom.line_path_on_mesh(_outer, _preview_a, _preview_b, 12, _outer_grid())
 
 
 func _clear_cut_preview() -> void:
@@ -3028,6 +3511,8 @@ func _clear_cut_preview() -> void:
 	_preview_handle = ""
 	_preview_rx = 0.0
 	_preview_ry = 0.0
+	_dash_path_cache = PackedVector3Array()
+	_handles_cache = ""
 	if _dash:
 		_dash.visible = false
 		_dash.mesh = null
@@ -3053,35 +3538,56 @@ func _finish_confirmed_cut(path: PackedVector3Array, closed: bool) -> bool:
 	return ok
 
 
+var _anim_world: PackedVector3Array = PackedVector3Array()
+var _anim_nrm: PackedVector3Array = PackedVector3Array()
+var _anim_acc: PackedFloat32Array = PackedFloat32Array()
+var _anim_src: PackedVector3Array = PackedVector3Array()
+
+
+## 0.3.8：切割动画路径的世界坐标 / 法线 / 弧长只在动画开始时算一次（动画期间姿态锁定）。
+func _cache_anim_path() -> void:
+	_anim_src = _cut_anim_path.duplicate()
+	_anim_world = PackedVector3Array()
+	_anim_nrm = PackedVector3Array()
+	_anim_acc = PackedFloat32Array()
+	var total := 0.0
+	for i in _cut_anim_path.size():
+		var wn: Array = _approx_world_and_normal(_cut_anim_path[i])
+		_anim_world.append(wn[0])
+		_anim_nrm.append(wn[1])
+		if i > 0:
+			total += _anim_world[i].distance_to(_anim_world[i - 1])
+		_anim_acc.append(total)
+
+
 func _place_scalpel_on_path(u: float) -> void:
 	if _cut_anim_path.size() < 2:
 		return
+	if _anim_src != _cut_anim_path or _anim_world.size() != _cut_anim_path.size():
+		_cache_anim_path()
 	var t := clampf(u, 0.0, 1.0)
 	if _cut_anim_closed and t >= 0.999:
 		t = 1.0
-	var acc := PackedFloat32Array()
-	acc.resize(_cut_anim_path.size())
-	acc[0] = 0.0
-	var total := 0.0
-	for i in range(1, _cut_anim_path.size()):
-		total += _approx_world_bind(_cut_anim_path[i]).distance_to(_approx_world_bind(_cut_anim_path[i - 1]))
-		acc[i] = total
+	var total := _anim_acc[_anim_acc.size() - 1]
 	if total < 1e-6:
 		total = 1.0
 	var want := t * total
-	var p := _cut_anim_path[0]
+	var world := _anim_world[0]
+	var nrm := _anim_nrm[0]
 	var tan := Vector3(0, 0, -1)
-	for i in range(1, _cut_anim_path.size()):
-		if acc[i] >= want or i == _cut_anim_path.size() - 1:
-			var span := maxf(acc[i] - acc[i - 1], 1e-6)
-			var f := clampf((want - acc[i - 1]) / span, 0.0, 1.0)
-			p = _cut_anim_path[i - 1].lerp(_cut_anim_path[i], f)
-			tan = _approx_world_bind(_cut_anim_path[i]) - _approx_world_bind(_cut_anim_path[i - 1])
+	for i in range(1, _anim_world.size()):
+		if _anim_acc[i] >= want or i == _anim_world.size() - 1:
+			var span := maxf(_anim_acc[i] - _anim_acc[i - 1], 1e-6)
+			var f := clampf((want - _anim_acc[i - 1]) / span, 0.0, 1.0)
+			world = _anim_world[i - 1].lerp(_anim_world[i], f)
+			nrm = _anim_nrm[i - 1].lerp(_anim_nrm[i], f)
+			tan = _anim_world[i] - _anim_world[i - 1]
 			break
-	var world := _approx_world_bind(p)
 	if tan.length_squared() < 1e-8:
 		tan = Vector3(0, 0, -1)
-	_place_scalpel(world, tan.normalized())
+	if nrm.length_squared() < 1e-8:
+		nrm = Vector3(0, 0, 1)
+	_place_scalpel(world, tan.normalized(), nrm.normalized())
 	_show_scalpel(true)
 
 
@@ -3151,7 +3657,9 @@ func _ray_to_preview_plane(origin: Vector3, dir: Vector3) -> Vector3:
 	# 反投到绑定空间：用最近点。
 	if _outer == null:
 		return _navel_rest
-	_posed_dirty = true
+	# 0.3.8：拖动中姿态已锁定（_posed_frozen），不要每个事件都重新蒙皮整张腹网。
+	if not pose_locked:
+		_posed_dirty = true
 	var posed := _posed_world()
 	var best := 0
 	var best_s := 1e9
@@ -3199,6 +3707,10 @@ func _update_cut_preview() -> void:
 		if _handles:
 			_handles.visible = false
 		return
+	if pose_locked and _dash and _dash.visible and _dash.mesh != null and path == _dash_path_cache and _handles_key() == _handles_cache:
+		return  # 0.3.8：路径没变就不重建虚线网格
+	_dash_path_cache = path.duplicate()
+	preview_rebuilds += 1
 	var mesh := _build_dashed_trail(path)
 	if _dash:
 		_dash.mesh = mesh
@@ -3211,6 +3723,14 @@ func _update_cut_preview() -> void:
 		_dash.visible = mesh != null and mesh.get_surface_count() > 0
 	_update_preview_handles()
 	preview_changed.emit()
+
+
+var _dash_path_cache: PackedVector3Array = PackedVector3Array()
+var _handles_cache: String = ""
+
+
+func _handles_key() -> String:
+	return "%s|%s|%s|%s|%s|%s|%s" % [cut_mode, _preview_a, _preview_b, _preview_center, _preview_rx, _preview_ry, has_cut_preview()]
 
 
 func _make_dash() -> void:
@@ -3380,6 +3900,7 @@ func _update_preview_handles() -> void:
 			var ic := md.add_vert(tri[2], n, Vector2.ZERO, bones, weights)
 			md.add_face(ia, ib, ic)
 	_handles.mesh = md.to_array_mesh()
+	_handles_cache = _handles_key()
 	_parent_trail(_handles)
 	if _handles.get_parent() == _skel:
 		_handles.transform = Transform3D.IDENTITY
