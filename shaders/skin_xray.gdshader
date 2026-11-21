@@ -18,6 +18,12 @@ void fragment() {
 		if (bw > 0.12) {
 			ALBEDO = mix(ALBEDO, cavity_color, smoothstep(0.12, 0.55, bw));
 		}
+		if (v_wound > 0.002) {
+			// 唇缘处深红，几毫米内平滑过渡回正常皮肤；略湿润。
+			float wk = smoothstep(0.0, 1.0, v_wound);
+			ALBEDO = mix(ALBEDO, wound_tint_color * mix(1.35, 0.85, wk), wk * 0.92);
+			ROUGHNESS = mix(ROUGHNESS, 0.38, wk);
+		}
 		AO_LIGHT_AFFECT = 0.0;
 	}
 }

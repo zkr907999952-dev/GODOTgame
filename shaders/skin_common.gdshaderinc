@@ -25,6 +25,10 @@ uniform float skin_drag_k = 1.0;
 
 varying vec3 v_ab;
 varying vec3 v_wp;
+// 0.4.0：切口边缘皮肤上的红色渐变（只在手术腹网的独立材质上开启；顶点色 G 通道 = 1 − 伤缘权重）。
+uniform float wound_tint_on = 0.0;
+uniform vec3 wound_tint_color : source_color = vec3(0.55, 0.05, 0.04);
+varying float v_wound;
 // 第一人称近裁球：只对「不渲染 fp_head 图层(19)」的相机生效 → 第一人称主相机；镜子 / 第三人称不受影响。
 uniform vec3 fp_eye_w = vec3(0.0);
 uniform float fp_clip_r = 0.0;
@@ -208,6 +212,7 @@ void vertex() {
 	VERTEX += inverse(mat3(MODEL_MATRIX)) * off_w;
 	v_ab = l;
 	v_wp = wp;
+	v_wound = wound_tint_on > 0.5 ? clamp(1.0 - COLOR.g, 0.0, 1.0) : 0.0;
 }
 
 void skin_surface(vec2 uv, bool front, inout vec3 albedo, inout float metal, inout float rough,

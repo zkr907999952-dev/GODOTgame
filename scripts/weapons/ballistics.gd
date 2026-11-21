@@ -19,6 +19,9 @@ const DECAL_SIZE := 0.07
 const DECAL_HOLD := 3.0
 const DECAL_FADE := 0.6
 const STEP_MAX := 0.08  # 每子步最大行程（米），防止穿墙
+## 0.4.0：最远飞行距离（米）。按武器 range_m×2 取值，夹在 [FLIGHT_MIN, MAX_FLIGHT_M] 内；超过仍未碰撞就销毁。
+const MAX_FLIGHT_M := 800.0
+const FLIGHT_MIN := 150.0
 const G := Vector3(0, -9.8, 0)
 
 ## 各武器默认弹道（可被 WeaponDef 覆盖）
@@ -142,6 +145,15 @@ func ignore_rids() -> Array[RID]:
 		if n is CollisionObject3D and is_instance_valid(n):
 			out.append((n as CollisionObject3D).get_rid())
 	return out
+
+
+## 测试计数：粗检一步走完的帧数。
+var coarse_steps: int = 0
+
+
+func flight_limit(par: Dictionary) -> float:
+	var r := float(par.get("range_m", MAX_FLIGHT_M * 0.5))
+	return clampf(r * 2.0, FLIGHT_MIN, MAX_FLIGHT_M)
 
 
 func live_count() -> int:
@@ -324,9 +336,26 @@ func _step(p: Dictionary, dt: float) -> bool:
 			_end(p, false)
 			return false
 		# 超远弹道直接结束，避免非法 look_at / 精度炸掉错误。
-		if from.distance_squared_to(p.get("origin", from)) > 400.0 * 400.0:
+		var lim := flight_limit(par)
+		if from.distance_squared_to(p.get("origin", from)) > lim * lim:
 			_end(p, false)
 			return false
+		var allow_owner0 := bool(p.get("hit_owner", false))
+		# 0.4.0：粗检。整段剩余时间的直线行程（一帧内重力弯曲只有毫米级）先扫一次；
+		# 空旷（例如朝天开枪）就一步走完，不再每 8cm 一条射线 + 人体检测、每帧 48 个子步。
+		if guard == 1 and remain > step_t * 1.5:
+			var vel_c := (vel + G * remain) * exp(-drag * speed * remain)
+			var to_c := from + (vel + vel_c) * 0.5 * remain
+			var saved0 := hit_owner
+			hit_owner = allow_owner0
+			var clear := _ray(from, to_c, p.get("skip", [])).is_empty() and _character_segment_hit(from, to_c, p.get("skip", []), p.get("skip_bodies", [])).is_empty()
+			hit_owner = saved0
+			if clear and to_c.is_finite():
+				p["pos"] = to_c
+				p["vel"] = vel_c
+				remain = 0.0
+				coarse_steps += 1
+				break
 		var to := from + travel
 		var allow_owner := bool(p.get("hit_owner", false))
 		var saved_owner := hit_owner

@@ -2462,3 +2462,74 @@ static func extract_faces(md: MeshData, inside_faces: Dictionary, loop_in_src: P
 		"inside_faces": inside.face_count(),
 		"outside_faces": outside.face_count(),
 	}
+
+
+static func flip_slivers(md: MeshData, qmin: float = 0.08, passes: int = 3) -> int:
+	## 0.4.01：切口端点 / 唇缘附近的细长三角做边翻转（只翻内部边；唇缘已是开放边界，不会被翻）。
+	## 翻转后两张三角的最差质量必须变好，且法线方向不反。twin 由调用方 sync_twin_faces 同步。
+	var flips := 0
+	for _p in passes:
+		var emap: Dictionary = {}
+		for f in md.face_count():
+			for k in 3:
+				var a := md.idx[f * 3 + k]
+				var b := md.idx[f * 3 + (k + 1) % 3]
+				emap[Vector2i(a, b)] = f
+		var changed := false
+		for f in md.face_count():
+			var ia := md.idx[f * 3]
+			var ib := md.idx[f * 3 + 1]
+			var ic := md.idx[f * 3 + 2]
+			if ia == ib or ib == ic or ia == ic:
+				continue
+			var q0 := tri_quality(md.pos[ia], md.pos[ib], md.pos[ic])
+			if q0 >= qmin:
+				continue
+			# 最长边 (a,b)，对顶点 c
+			var tri := [ia, ib, ic]
+			var best_k := 0
+			var best_l := -1.0
+			for k2 in 3:
+				var l := md.pos[tri[k2]].distance_squared_to(md.pos[tri[(k2 + 1) % 3]])
+				if l > best_l:
+					best_l = l
+					best_k = k2
+			var a2: int = tri[best_k]
+			var b2: int = tri[(best_k + 1) % 3]
+			var c2: int = tri[(best_k + 2) % 3]
+			if not emap.has(Vector2i(b2, a2)):
+				continue
+			var g: int = emap[Vector2i(b2, a2)]
+			var d2 := -1
+			for k3 in 3:
+				var v := md.idx[g * 3 + k3]
+				if v != a2 and v != b2:
+					d2 = v
+			if d2 < 0 or d2 == c2:
+				continue
+			var qg := tri_quality(md.pos[md.idx[g * 3]], md.pos[md.idx[g * 3 + 1]], md.pos[md.idx[g * 3 + 2]])
+			# 新三角 (c,a,d) 与 (d,b,c)，保持与原来相同的绕向
+			var q1 := tri_quality(md.pos[c2], md.pos[a2], md.pos[d2])
+			var q2 := tri_quality(md.pos[d2], md.pos[b2], md.pos[c2])
+			if minf(q1, q2) <= minf(q0, qg) + 1e-4:
+				continue
+			var n_old := (md.pos[b2] - md.pos[a2]).cross(md.pos[c2] - md.pos[a2]) + (md.pos[a2] - md.pos[b2]).cross(md.pos[d2] - md.pos[b2])
+			var n1 := (md.pos[a2] - md.pos[c2]).cross(md.pos[d2] - md.pos[c2])
+			var n2 := (md.pos[b2] - md.pos[d2]).cross(md.pos[c2] - md.pos[d2])
+			if n1.dot(n_old) <= 0.0 or n2.dot(n_old) <= 0.0:
+				continue
+			# 新边 (c,d) 不能已存在（否则非流形）
+			if emap.has(Vector2i(c2, d2)) or emap.has(Vector2i(d2, c2)):
+				continue
+			md.idx[f * 3] = c2
+			md.idx[f * 3 + 1] = a2
+			md.idx[f * 3 + 2] = d2
+			md.idx[g * 3] = d2
+			md.idx[g * 3 + 1] = b2
+			md.idx[g * 3 + 2] = c2
+			flips += 1
+			changed = true
+			break
+		if not changed:
+			break
+	return flips

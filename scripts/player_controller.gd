@@ -196,6 +196,11 @@ func _ready() -> void:
 	_fti_cur = global_position
 	_pivot.top_level = true
 	_pivot.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	# 0.4.0 拖影根因：Godot 4.5+ 的场景树物理插值里，关闭插值的子节点仍跟随「已插值」的父节点。
+	# Body 每帧已手动加上「插值原点 − 物理原点」偏移，若 Player 本身再被引擎插值，偏移就被加了两次，
+	# 身体比镜头多落后最多一个物理步、且随插值分数来回跳 → 走跑时快速闪烁的重影。
+	# 所以 Player 根节点不再走引擎插值，渲染位置完全由 _body_interp_apply / 器官 _process 摆放决定。
+	physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
 	process_priority = -10
 	_setup_body_params()
 	_cam_shape = SphereShape3D.new()
@@ -762,6 +767,18 @@ func debug_body_interp_error() -> float:
 		return 99.0
 	var want := _base_origin() - global_position
 	var got := (_body.global_position - global_position) - global_transform.basis * _body_rest_pos
+	return got.distance_to(want)
+
+
+## 自检（0.4.0）：引擎实际渲染的 Body 位置与镜头插值原点推出的期望位置之差（米），应≈0。
+func debug_body_render_error() -> float:
+	if _body == null:
+		return 99.0
+	var want := _base_origin() + global_transform.basis * _body_rest_pos
+	# Player 与 Body 都不走引擎插值 → 渲染变换就是 global_transform（若 Player 走插值，这里会再叠一层插值偏移）。
+	var got := _body.global_position
+	if physics_interpolation_mode != Node.PHYSICS_INTERPOLATION_MODE_OFF and is_physics_interpolated_and_enabled():
+		got += get_global_transform_interpolated().origin - global_position
 	return got.distance_to(want)
 
 

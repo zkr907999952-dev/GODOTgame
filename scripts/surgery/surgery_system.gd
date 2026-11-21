@@ -894,6 +894,7 @@ func restore_body() -> void:
 	_cut_anim = false
 	_clear_cut_preview()
 	_clear_trail()
+	_clear_guts()
 	_show_scalpel(false)
 	if flap_node and is_instance_valid(flap_node):
 		flap_node.queue_free()
@@ -1279,6 +1280,7 @@ func try_peel_at(origin: Vector3, dir: Vector3) -> bool:
 
 
 func peel_flap() -> bool:
+	_bake_pull()
 	if not can_grab_flap() or _outer == null or _inner == null:
 		return false
 	# 0.3.9：环形切口已真正切开，皮瓣是独立连通块；按连通性取出（不再按 2D 环重新分类，也不会内外拓扑不一致）。
@@ -1317,6 +1319,14 @@ func peel_flap() -> bool:
 	for part in _wall_parts:
 		if int((part as Dictionary).get("ring", -1)) != _ring_open_id or _ring_open_id < 0:
 			kept.append(part)
+	# 0.4.01：被环切覆盖的直切口，环内那段截面随皮瓣一起去掉（环外的保留）。
+	var ring_poly := PackedVector2Array()
+	for vi in loop_body_o:
+		ring_poly.append(Vector2(body_o.pos[vi].x, body_o.pos[vi].y))
+	for part2 in kept:
+		var pmd: Geom.MeshData = (part2 as Dictionary).get("md")
+		if pmd and ring_poly.size() >= 3:
+			(part2 as Dictionary)["md"] = _drop_faces_inside(pmd, ring_poly)
 	_wall_parts = kept
 	var peel_wall := _make_loft_mesh(body_o, body_i, _closed_ids(loop_body_o), _closed_ids(loop_body_o), true, true)
 	_wall_parts.append({"md": peel_wall, "ring": -1})
@@ -1486,6 +1496,7 @@ func _append_mesh(dest: Geom.MeshData, src: Geom.MeshData) -> int:
 
 
 func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
+	_bake_pull()
 	if _outer == null or _inner == null or path.size() < 2:
 		return false
 	var work := path.duplicate()
@@ -1525,6 +1536,9 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 	var left: PackedInt32Array = sp["left"]
 	var right: PackedInt32Array = sp["right"]
 	var sdir: PackedVector3Array = sp["sdir"]
+	# 0.4.01：唇缘 / 端点附近的细长三角做边翻转（毛刺、尖刺），内壁同步。
+	Geom.flip_slivers(_outer, 0.08, 24)
+	Geom.sync_twin_faces(_outer)
 	_inner = _outer.twin
 	# 外翻位移场（rest + dsp），截面顶点从唇缘拷贝时一起继承。
 	Geom.evert_field(_outer, left, right, sdir, closed)
@@ -1565,10 +1579,8 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 	_start_eversion()
 	_rebuild_surgical_meshes(_outer, _inner, _wall_md)
 	_posed_dirty = true
-	if work.size() >= 2:
-		# 涂鸦跟提交路径一致，不再用未经同一套嵌入的原始副本。
-		_trail_bind = work.duplicate()
-		_update_trail()
+	# 0.4.0：切开后不再在皮肤上留粉红涂鸦线；改由切口边缘的红色渐变（_with_wound_color）表现。
+	_clear_trail()
 	_update_cavity_visibility()
 	return lofted_tris > 0
 
@@ -1635,6 +1647,7 @@ func _bake_if_needed() -> bool:
 		return false
 	_outer = extracted["abdomen"]
 	_rest = extracted["rest"]
+	_band_edge = _boundary_vert_keys(_outer)
 	var organ_z := _organ_front_z()
 	_organ_z = organ_z
 	_inner = Geom.make_cavity(_outer, thickness, organ_z, _navel_rest)
@@ -1651,6 +1664,14 @@ func _bake_if_needed() -> bool:
 			_dress.skin = _skin
 		_dress.skeleton = _dress.skeleton
 	_surgical_mi = _make_skinned_mi("SurgicalAbdomen", _outer.to_array_mesh(), true)
+	# 0.4.0：手术腹网用独立的皮肤材质副本，开启切口边缘红色渐变（顶点色）；身体其余皮肤不受影响。
+	if _surgical_mi.material_override is ShaderMaterial:
+		var wm := (_surgical_mi.material_override as ShaderMaterial).duplicate() as ShaderMaterial
+		wm.set_shader_parameter("wound_tint_on", 1.0)
+		_surgical_mi.material_override = wm
+		if _organs and _organs.has_method("register_deform_material"):
+			_organs.call("register_deform_material", wm, true)
+	_surgical_mi.mesh = _with_wound_color(_surgical_mi.mesh as ArrayMesh, _outer)
 	_cavity_mi = _make_skinned_mi("SurgicalCavity", _cavity_display_mesh(), false)
 	_cavity_mi.material_override = _cavity_material()
 	_wall_mi = _make_skinned_mi("SurgicalWall", ArrayMesh.new(), false)
@@ -1965,7 +1986,7 @@ func _make_skinned_mi(nm: String, mesh: Mesh, use_skin_mat: bool) -> MeshInstanc
 func _rebuild_surgical_meshes(outer: Geom.MeshData, inner: Geom.MeshData, wall: Geom.MeshData) -> void:
 	_invalidate_grid()
 	if _surgical_mi:
-		_surgical_mi.mesh = _mesh_with_evert(outer, _outer_rest, _outer_evert)
+		_surgical_mi.mesh = _with_wound_color(_mesh_with_evert(outer, _outer_rest, _outer_evert), outer)
 		if _skin:
 			_surgical_mi.skin = _skin
 		_apply_evert_weight()
@@ -2807,6 +2828,7 @@ func _process(dt: float) -> void:
 	if xr != _xray_cached:
 		_xray_cached = xr
 		_update_cavity_visibility()
+	_update_guts(dt)
 	if _cut_anim:
 		debug_advance_cut_anim(dt)
 	if _evert_anim:
@@ -3132,6 +3154,7 @@ func _begin_skin_grab(origin: Vector3, dir: Vector3) -> bool:
 	else:
 		world_p = (hit as Dictionary)["point"]
 		bind_p = (hit as Dictionary)["bind"]
+	_bake_pull()
 	_grab_kind = "skin"
 	_grab_active = true
 	stroke_active = true
@@ -3147,6 +3170,334 @@ func _begin_skin_grab(origin: Vector3, dir: Vector3) -> bool:
 	_setup_pull_geometry(bind_p, world_p)
 	_apply_pull_uniforms()
 	return true
+
+
+## 0.4.0：拿取拉开的位移永久保留。开始新的拿取 / 下一刀 / 剥皮瓣之前，把当前 shader 拉扯位移
+## （与 surgery_pull.gdshaderinc 同一公式）换算回绑定空间写进网格，再清零 shader 拉扯。
+## 这样拉开 A 侧后再拉 B 侧（或另一条切口），A 侧保持张开；只有「复原身体」会清掉。
+func _bake_pull() -> bool:
+	if _pull_r < 1e-5 or _pull_off.length_squared() < 1e-10 or _outer == null or _skel == null:
+		return false
+	if _organs == null or not _organs.has_method("abdomen_frame"):
+		return false
+	_bake_evert()
+	var fr: Transform3D = _organs.call("abdomen_frame")
+	var mds: Array = [_outer]
+	if _inner:
+		mds.append(_inner)
+	for part in _wall_parts:
+		var wmd: Geom.MeshData = (part as Dictionary).get("md")
+		if wmd:
+			mds.append(wmd)
+	if _wrap and _wrap.bones.size() >= _wrap.vert_count() * 4:
+		mds.append(_wrap)
+	var moved := 0
+	for md in mds:
+		moved += _bake_pull_md(md, fr)
+	pulls_baked += 1
+	_pull_off = Vector3.ZERO
+	_pull_raw = Vector3.ZERO
+	_pull_r = 0.0
+	_pull_mode = 0
+	_pull_peak = 0.0
+	_pull_rest = Vector3.ZERO
+	_grab_vel = Vector3.ZERO
+	_apply_pull_uniforms()
+	_rebuild_wall_md()
+	_start_eversion()
+	_evert = 1.0
+	_evert_vel = 0.0
+	_evert_anim = false
+	_rebuild_surgical_meshes(_outer, _inner, _wall_md)
+	_apply_evert_weight()
+	_posed_dirty = true
+	return moved > 0
+
+
+var pulls_baked: int = 0
+
+
+func _bake_pull_md(md: Geom.MeshData, fr: Transform3D) -> int:
+	var n := md.vert_count()
+	if n == 0 or md.bones.size() < n * 4:
+		return 0
+	var w0 := Geom.world_positions(md, _skel, _skin)
+	var off_w := PackedVector3Array()
+	off_w.resize(n)
+	var any := false
+	for i in n:
+		var o := _pull_offset_cpu(fr.affine_inverse() * w0[i])
+		if o.length_squared() > 1e-12:
+			off_w[i] = fr.basis * o
+			any = true
+	if not any:
+		return 0
+	var h := 0.001
+	var cols: Array = []
+	for ax in [Vector3(h, 0, 0), Vector3(0, h, 0), Vector3(0, 0, h)]:
+		var m := md.clone()
+		for i in n:
+			m.pos[i] += ax
+		cols.append(Geom.world_positions(m, _skel, _skin))
+	var moved := 0
+	for i in n:
+		if off_w[i].length_squared() < 1e-12:
+			continue
+		var jb := Basis(((cols[0] as PackedVector3Array)[i] - w0[i]) / h, ((cols[1] as PackedVector3Array)[i] - w0[i]) / h, ((cols[2] as PackedVector3Array)[i] - w0[i]) / h)
+		if absf(jb.determinant()) < 1e-6:
+			continue
+		md.pos[i] += jb.inverse() * off_w[i]
+		moved += 1
+	return moved
+
+
+## 测试：把当前拉扯并入网格（与开始下一次拿取时相同）。
+func debug_bake_pull() -> bool:
+	return _bake_pull()
+
+
+func _drop_faces_inside(md: Geom.MeshData, poly: PackedVector2Array) -> Geom.MeshData:
+	var keep := PackedInt32Array()
+	var dropped := 0
+	for f in md.face_count():
+		var c := md.centroid(f)
+		if Geometry2D.is_point_in_polygon(Vector2(c.x, c.y), poly):
+			dropped += 1
+			continue
+		keep.append(md.idx[f * 3])
+		keep.append(md.idx[f * 3 + 1])
+		keep.append(md.idx[f * 3 + 2])
+	if dropped == 0:
+		return md
+	md.idx = keep
+	return md
+
+
+## ---- 0.4.01 外露肠子（链条软体） ----
+const GutRope := preload("res://scripts/surgery/gut_rope.gd")
+const GUT_LEN_PER_M := 2.6     # 每米创口尺寸可掉出的肠子长度
+const GUT_MAX_LEN := 0.7
+const GUT_MIN_OPENING := 0.03  # 创口尺寸低于 3cm 不掉出
+var gut_rope: MeshInstance3D = null
+var _gut_src: Object = null
+var _gut_ids: Array = []       # [a_l, a_r, b_l, b_r] 外皮顶点（两端锚点各取左右唇中点）
+var _gut_opening: float = 0.0
+var _gut_sig: Array = []
+
+
+## 创口尺寸（米）：已剥皮瓣的洞取周长，开放的直切口取长度；环切未剥皮瓣 / 弹孔不算。
+func wound_opening_size() -> float:
+	return _gut_opening
+
+
+func gut_spill_max() -> float:
+	return clampf(_gut_opening * GUT_LEN_PER_M, 0.0, GUT_MAX_LEN) if _gut_opening >= GUT_MIN_OPENING else 0.0
+
+
+func _gut_rebuild_ids() -> void:
+	_gut_src = _outer
+	_gut_ids = []
+	_gut_opening = 0.0
+	if _outer == null or not cut_open:
+		return
+	var n := _outer.vert_count()
+	if flap_peeled and not _hole_loops.is_empty():
+		var loop: PackedInt32Array = _hole_loops[_hole_loops.size() - 1]
+		var m := loop.size()
+		if m < 6:
+			return
+		var per := 0.0
+		for i in m:
+			per += _outer.pos[loop[i]].distance_to(_outer.pos[loop[(i + 1) % m]])
+		_gut_opening = per
+		# 洞缘下半圈相隔约 1/6 周的两点作为肠袢两端（肠子从洞口下缘掉出）
+		var lo := 0
+		for i2 in m:
+			if _outer.pos[loop[i2]].y < _outer.pos[loop[lo]].y:
+				lo = i2
+		var k := maxi(1, m / 12)
+		_gut_ids = [loop[(lo - k + m) % m], loop[(lo - k + m) % m], loop[(lo + k) % m], loop[(lo + k) % m]]
+		return
+	if _lip_closed:
+		return
+	var nl := mini(_lip_left.size(), _lip_right.size())
+	if nl < 4:
+		return
+	for id in _lip_left:
+		if id < 0 or id >= n:
+			return
+	var length := 0.0
+	for i3 in nl - 1:
+		length += _outer.pos[_lip_left[i3]].distance_to(_outer.pos[_lip_left[i3 + 1]])
+	_gut_opening = length
+	var ia := nl / 3
+	var ib := (2 * nl) / 3
+	_gut_ids = [_lip_left[ia], _lip_right[ia], _lip_left[ib], _lip_right[ib]]
+
+
+func _gut_world(i: int, j: int) -> Vector3:
+	if pose_locked and _posed_frozen.size() > maxi(i, j):
+		return (_posed_frozen[i] + _posed_frozen[j]) * 0.5
+	return _skel.global_transform * ((Geom.skin_vertex(_outer.pos[i], i, _outer, _skel, _skin) + Geom.skin_vertex(_outer.pos[j], j, _outer, _skel, _skin)) * 0.5)
+
+
+func _update_guts(dt: float) -> void:
+	if _outer == null or _skel == null or not cut_open:
+		if gut_rope:
+			_clear_guts()
+		return
+	var sig := [_outer.get_instance_id(), _outer.vert_count(), _outer.idx.size(), flap_peeled, _hole_loops.size()]
+	if _gut_src != _outer or sig != _gut_sig:
+		_gut_sig = sig
+		_gut_rebuild_ids()
+	if _gut_ids.size() < 4 or gut_spill_max() <= 0.0:
+		if gut_rope and is_instance_valid(gut_rope):
+			gut_rope.queue_free()
+		gut_rope = null
+		return
+	for id in _gut_ids:
+		if int(id) >= _outer.vert_count():
+			_gut_rebuild_ids()
+			return
+	if gut_rope == null or not is_instance_valid(gut_rope):
+		gut_rope = GutRope.new()
+		gut_rope.name = "ExposedGuts"
+		add_child(gut_rope)
+	var a := _gut_world(_gut_ids[0], _gut_ids[1])
+	var b := _gut_world(_gut_ids[2], _gut_ids[3])
+	var c := (a + b) * 0.5
+	var nb := (_outer.nrm[_gut_ids[0]] + _outer.nrm[_gut_ids[2]]).normalized()
+	var fr: Transform3D = _organs.call("abdomen_frame") if _organs and _organs.has_method("abdomen_frame") else Transform3D.IDENTITY
+	var out_w := (_skel.global_transform.basis * nb).normalized()
+	if out_w.length_squared() < 0.5:
+		out_w = fr.basis.z.normalized()
+	# 两端锚点略缩进创口里（肠袢从里面出来）
+	gut_rope.set("anchor_a", a - out_w * 0.006)
+	gut_rope.set("anchor_b", b - out_w * 0.006)
+	gut_rope.set("out_dir", out_w)
+	gut_rope.set("max_len", gut_spill_max())
+	gut_rope.set("ab_frame", fr)
+	if _organs:
+		var ec = _organs.get("_ellipsoid_c")
+		var er = _organs.get("_ellipsoid_r")
+		if ec is Vector3 and er is Vector3:
+			gut_rope.set("ell_c", ec)
+			gut_rope.set("ell_r", (er as Vector3) * 0.92)
+	gut_rope.call("step", dt)
+
+
+func _clear_guts() -> void:
+	if gut_rope and is_instance_valid(gut_rope):
+		gut_rope.queue_free()
+	gut_rope = null
+	_gut_src = null
+	_gut_ids = []
+	_gut_opening = 0.0
+	_gut_sig = []
+
+
+func has_exposed_guts() -> bool:
+	return gut_rope != null and is_instance_valid(gut_rope) and not gut_rope.is_queued_for_deletion()
+
+
+## ---- 0.4.0 切口边缘红色渐变 ----
+const WOUND_TINT_R := 0.0045
+var _band_edge: Dictionary = {}
+var wound_tint_verts: int = 0
+
+
+static func _qkey(p: Vector3) -> Vector3i:
+	return Vector3i(roundi(p.x * 10000.0), roundi(p.y * 10000.0), roundi(p.z * 10000.0))
+
+
+func _boundary_edges(md: Geom.MeshData) -> Dictionary:
+	var cnt: Dictionary = {}
+	for f in md.face_count():
+		for k in 3:
+			var a := md.idx[f * 3 + k]
+			var b := md.idx[f * 3 + (k + 1) % 3]
+			var key := Vector2i(mini(a, b), maxi(a, b))
+			cnt[key] = int(cnt.get(key, 0)) + 1
+	var out: Dictionary = {}
+	for key in cnt:
+		if int(cnt[key]) == 1:
+			out[key] = true
+	return out
+
+
+func _boundary_vert_keys(md: Geom.MeshData) -> Dictionary:
+	var out: Dictionary = {}
+	if md == null:
+		return out
+	for e in _boundary_edges(md):
+		out[_qkey(md.pos[(e as Vector2i).x])] = true
+		out[_qkey(md.pos[(e as Vector2i).y])] = true
+	return out
+
+
+## 每个顶点的伤缘权重（1 = 唇缘 / 洞缘 / 弹孔边，WOUND_TINT_R 内平滑降到 0）。原腹带外缘不算。
+func wound_weights(md: Geom.MeshData) -> PackedFloat32Array:
+	var n := md.vert_count()
+	var w := PackedFloat32Array()
+	w.resize(n)
+	var lips: Dictionary = {}
+	for e in _boundary_edges(md):
+		for v in [(e as Vector2i).x, (e as Vector2i).y]:
+			if not _band_edge.has(_qkey(md.pos[v])):
+				lips[v] = true
+	if lips.is_empty():
+		return w
+	var cell := WOUND_TINT_R
+	var grid: Dictionary = {}
+	for v in lips:
+		var c := Vector3i((md.pos[v] / cell).floor())
+		if not grid.has(c):
+			grid[c] = []
+		(grid[c] as Array).append(v)
+	for i in n:
+		var p := md.pos[i]
+		var c0 := Vector3i((p / cell).floor())
+		var best := cell * cell
+		for dx in range(-1, 2):
+			for dy in range(-1, 2):
+				for dz in range(-1, 2):
+					var arr = grid.get(c0 + Vector3i(dx, dy, dz))
+					if arr == null:
+						continue
+					for v2 in arr:
+						best = minf(best, p.distance_squared_to(md.pos[v2]))
+		if best < cell * cell:
+			var t := sqrt(best) / WOUND_TINT_R
+			w[i] = 1.0 - t * t * (3.0 - 2.0 * t)
+	return w
+
+
+func _with_wound_color(am: ArrayMesh, md: Geom.MeshData) -> ArrayMesh:
+	if am == null or md == null or am.get_surface_count() < 1:
+		return am
+	var arrays := am.surface_get_arrays(0)
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	if verts.size() != md.vert_count():
+		return am
+	var w := wound_weights(md)
+	var cols := PackedColorArray()
+	cols.resize(verts.size())
+	var tinted := 0
+	for i in verts.size():
+		cols[i] = Color(1.0, 1.0 - w[i], 1.0 - w[i], 1.0)
+		if w[i] > 0.5:
+			tinted += 1
+	wound_tint_verts = tinted
+	arrays[Mesh.ARRAY_COLOR] = cols
+	var blends: Array = []
+	for bi in am.get_blend_shape_count():
+		blends.append(am.surface_get_blend_shape_arrays(0)[bi])
+	var out := ArrayMesh.new()
+	out.blend_shape_mode = am.blend_shape_mode
+	for bi2 in am.get_blend_shape_count():
+		out.add_blend_shape(am.get_blend_shape_name(bi2))
+	out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, blends)
+	return out
 
 
 ## 0.3.8：拿取切口的几何约束。直线切口：只拉被抓的那一侧唇缘，沿切口两端权重为 0（切口端点钉在身上），
@@ -3386,6 +3737,7 @@ func debug_throw_flap(vel: Vector3) -> bool:
 func debug_drag_split_skin(off: Vector3) -> bool:
 	if not cut_open or _outer == null:
 		return false
+	_bake_pull()
 	_grab_kind = "skin"
 	_grab_active = true
 	stroke_active = true

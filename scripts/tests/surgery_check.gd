@@ -9,8 +9,8 @@ extends SceneTree
 ##     --rendering-method gl_compatibility --rendering-driver opengl3 \
 ##     -s res://scripts/tests/surgery_check.gd
 
-const VERSION_NAME := "0.3.9"
-const VERSION_CODE := 43
+const VERSION_NAME := "0.4.01"
+const VERSION_CODE := 44
 const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 
 var fails := 0
@@ -516,10 +516,11 @@ func _check_cavity_and_incision() -> void:
 	if surgery.get("_outer"):
 		var changed := int(surgery.get("_outer").face_count()) != faces_before or int(surgery.get("_outer").vert_count()) != verts_before or int(surgery.get("lofted_tris")) > 0
 		_ok(changed, "surgical mesh topology changed after the cut")
-	_ok(bool(surgery.call("has_incision_trail")), "red graffiti remains on the skin after the cut commits")
+	# 0.4.01：切开后不再留粉红涂鸦线，改为切口边缘皮肤红色渐变。
+	_ok(not bool(surgery.call("has_incision_trail")) and int(surgery.get("wound_tint_verts")) > 0, "no graffiti line after the cut; lips carry the red skin gradient instead")
 	if organs and organs.has_method("set_xray_enabled"):
 		organs.call("set_xray_enabled", false)
-	_ok(bool(surgery.call("incision_trail_visible_without_xray")), "incision graffiti remains visible with 透视 off")
+	_ok(not bool(surgery.call("incision_trail_visible_without_xray")), "no incision graffiti with 透视 off")
 	var pose_before_evert: Dictionary = _pose_snapshot()
 	surgery.call("debug_settle_eversion")
 	_ok(bool(surgery.call("cut_is_everted")), "committed open cut everts so the inner wall is exposed")
@@ -579,7 +580,7 @@ func _check_cavity_and_incision() -> void:
 	_ok(closed_w > 0.003, "everted closed lips open wider than the raw slit (%.4f)" % closed_w)
 	if organs and organs.has_method("set_xray_enabled"):
 		organs.call("set_xray_enabled", false)
-	_ok(bool(surgery.call("incision_trail_visible_without_xray")), "graffiti stays visible in the normal shaded view")
+	_ok(int(surgery.get("wound_tint_verts")) > 0, "red lip gradient persists after eversion")
 	_ok(bool(surgery.get("cavity_exposed")), "cavity inner wall is exposed after the cut")
 	_ok(not bool(surgery.call("cavity_hidden_until_cut")), "cavity is no longer hidden after the cut")
 	_ok(bool(surgery.call("can_grab_flap")), "closed path can isolate a flap (grab ready)")
