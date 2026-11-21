@@ -18,6 +18,10 @@ void fragment() {
 		if (bw > 0.12) {
 			ALBEDO = mix(ALBEDO, cavity_color, smoothstep(0.12, 0.55, bw));
 		}
+		float nb = navel_blush_w(v_ab);
+		if (nb > 0.002) {
+			ALBEDO = mix(ALBEDO, navel_blush_color, nb * 0.62);
+		}
 		if (v_wound > 0.002) {
 			// 唇缘处深红，几毫米内平滑过渡回正常皮肤；略湿润。
 			float wk = smoothstep(0.0, 1.0, v_wound);

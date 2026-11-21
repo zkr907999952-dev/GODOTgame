@@ -154,6 +154,17 @@ vec3 fist_offset(vec3 l) {
 uniform float navel_on = 0.0;
 uniform vec4 navel_m = vec4(0.0);
 uniform vec2 navel_s = vec2(0.0, 0.006);
+// 0.4.06：插肚脐时脐周柔和潮红
+uniform float navel_blush = 0.0;
+uniform vec3 navel_blush_color : source_color = vec3(0.78, 0.16, 0.18);
+
+float navel_blush_w(vec3 l) {
+	if (navel_blush <= 0.001) return 0.0;
+	float r = length(vec2(l.x, l.y));
+	float k = 1.0 - smoothstep(0.016, 0.068, r);
+	k *= smoothstep(-0.025, 0.008, l.z);
+	return clamp(navel_blush * k, 0.0, 1.0);
+}
 
 float almond_u(float dx, float dy, float hx, float hy) {
 	float ny = dy / max(1e-6, hy);

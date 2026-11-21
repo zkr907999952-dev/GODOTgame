@@ -74,6 +74,26 @@ var _player_col_layer: int = 2
 var _player_col_mask: int = 3
 
 
+var assets_preloaded: int = 0
+
+const STARTUP_ASSETS: PackedStringArray = [
+	"res://assets/surgery/scalpel.glb",
+	"res://assets/surgery/retractor.glb",
+	"res://assets/surgery/forceps.glb",
+	"res://assets/props/arm.glb",
+	"res://assets/props/bayonet.glb",
+	"res://assets/props/bayonet-long.glb",
+	"res://assets/props/bullet_hole.png",
+	"res://assets/organs/small_tile_albedo.png",
+	"res://assets/organs/small_tile_normal.png",
+	"res://scenes/vehicles/car.tscn",
+	"res://scenes/vehicles/plane.tscn",
+	"res://scenes/vehicles/exam_bed.tscn",
+	"res://shaders/surgery_wall.gdshader",
+	"res://shaders/incision_trail.gdshader",
+	"res://scripts/surgery/surgery_flap_verlet.gd",
+]
+
 func _ready() -> void:
 	map_view = MapViewScript.new()
 	map_view.name = "MapView"
@@ -116,6 +136,7 @@ func _ready() -> void:
 	# first map open (that hitch is what 0.2.31 is fixing).
 	if _city and _city.has_method("ensure_collisions"):
 		_city.call("ensure_collisions")
+	_preload_runtime_assets()
 	call_deferred("_warmup_city_at_startup")
 	call_deferred("_bind_ballistics")
 	print("game_root: ready — Tab 模式 · WASD/Shift/空格 · Ctrl/C 蹲 · Z 匍匐 · E 拖尸体 · M 地图 · H 界面 · X 透视")
@@ -349,6 +370,50 @@ func _apply_map_visibility(id: String, notify_vehicles: bool = true) -> void:
 		vehicle_system.call("sync_world_visibility")
 	if (not in_room) and vehicle_system and vehicle_system.has_method("warmup_city"):
 		vehicle_system.call("warmup_city")
+
+
+
+func _preload_runtime_assets() -> void:
+	## 0.4.06：游戏一打开就把手术器械、载具、武器、肠材质等重资源载入，避免玩到一半卡顿。
+	var n := 0
+	for p in STARTUP_ASSETS:
+		if ResourceLoader.exists(p):
+			load(p)
+			n += 1
+	n += _preload_dir("res://assets/weapons/")
+	n += _preload_dir("res://assets/surgery/")
+	n += _preload_dir("res://assets/organs/")
+	assets_preloaded = n
+	print("game_root: preloaded ", n, " startup assets")
+
+
+func _preload_dir(dir: String) -> int:
+	var n := 0
+	if not dir.ends_with("/"):
+		dir += "/"
+	if not DirAccess.dir_exists_absolute(dir):
+		return 0
+	var d := DirAccess.open(dir)
+	if d == null:
+		return 0
+	d.list_dir_begin()
+	var name := d.get_next()
+	while name != "":
+		if name.begins_with("."):
+			name = d.get_next()
+			continue
+		var path := dir + name
+		if d.current_is_dir():
+			n += _preload_dir(path)
+		else:
+			var ext := name.get_extension().to_lower()
+			if ext in ["glb", "gltf", "tscn", "tres", "png", "jpg", "webp", "gdshader", "res", "mesh", "material"]:
+				if ResourceLoader.exists(path):
+					load(path)
+					n += 1
+		name = d.get_next()
+	d.list_dir_end()
+	return n
 
 
 func _warmup_city_defaults() -> void:

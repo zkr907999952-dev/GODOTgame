@@ -2901,6 +2901,36 @@ func point_over_ui(pos: Vector2) -> bool:
 	return _over(_root_ui, pos, get_viewport().get_visible_rect().size)
 
 
+## 0.4.06：只挡住真正可点的控件（按钮 / 滑条 / 输入框 / 打开的面板），
+## 忽略手术工具条空边或半透明大容器对腹部点击的误挡。
+func point_over_interactive(pos: Vector2) -> bool:
+	if _root_ui == null or not _root_ui.visible:
+		return false
+	return _over_interactive(_root_ui, pos)
+
+
+func _over_interactive(n: Node, pos: Vector2) -> bool:
+	for ch in n.get_children():
+		var c := ch as Control
+		if c == null or not c.visible:
+			continue
+		var r := c.get_global_rect()
+		if r.size.x < 2.0 or r.size.y < 2.0:
+			r.size = Vector2(maxf(r.size.x, c.custom_minimum_size.x), maxf(r.size.y, c.custom_minimum_size.y))
+		var interactive := c is BaseButton or c is Range or c is TextEdit or c is LineEdit or c is ItemList or c is OptionButton
+		# 打开的设置 / 地图 / 面板：整块都算交互
+		var panel := c is PanelContainer or c is Panel
+		if r.grow(6.0).has_point(pos) and (interactive or (panel and c.visible and r.size.x > 80.0 and r.size.y > 80.0 and c.mouse_filter == Control.MOUSE_FILTER_STOP)):
+			# 手术工具条本身是 HBox，不要整条吞点击；只认上面的按钮（interactive）
+			if c == _surgery_bar or c == _surgery_cut_bar:
+				pass
+			else:
+				return true
+		if _over_interactive(c, pos):
+			return true
+	return false
+
+
 func _over(n: Node, pos: Vector2, vp: Vector2) -> bool:
 	for ch in n.get_children():
 		var c := ch as Control
@@ -3879,6 +3909,12 @@ func _refresh_surgery_ui() -> void:
 	if _surgery_bar:
 		_surgery_bar.visible = active
 		_surgery_bar.position = Vector2(sl, st + 48.0)
+		if touch_ui:
+			for b in [_btn_tool_scalpel, _btn_tool_grab, _btn_tool_retractor, _btn_tool_forceps, _btn_retr_remove, _btn_fc_pull, _btn_fc_back]:
+				if b:
+					b.custom_minimum_size = Vector2(maxf(b.custom_minimum_size.x, 80.0), 48.0)
+					b.add_theme_font_size_override("font_size", 16)
+			_surgery_bar.add_theme_constant_override("separation", 10)
 	if active:
 		var tool := str(s.call("current_tool")) if s else ""
 		if _btn_tool_scalpel:
@@ -3906,7 +3942,12 @@ func _refresh_surgery_ui() -> void:
 			_btn_retr_remove.visible = s != null and s.has_method("selected_retractor") and int(s.call("selected_retractor")) >= 0
 		if _surgery_cut_bar:
 			_surgery_cut_bar.visible = tool == "scalpel"
-			_surgery_cut_bar.position = Vector2(sl, st + 92.0)
+			_surgery_cut_bar.position = Vector2(sl, st + (104.0 if touch_ui else 92.0))
+			if touch_ui:
+				for b in [_btn_cut_straight, _btn_cut_ring, _btn_cut_confirm]:
+					if b:
+						b.custom_minimum_size = Vector2(maxf(b.custom_minimum_size.x, 88.0), 48.0)
+						b.add_theme_font_size_override("font_size", 16)
 		var cmode := str(s.call("current_cut_mode")) if s and s.has_method("current_cut_mode") else "straight"
 		if _btn_cut_straight:
 			_btn_cut_straight.set_pressed_no_signal(cmode == "straight")

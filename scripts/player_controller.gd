@@ -908,6 +908,11 @@ func _try_begin_interact(screen: Vector2) -> bool:
 	if surg and bool(surg.call("is_active")):
 		if not bool(surg.call("has_tool")):
 			return false
+		# 触屏走独立路径（多坐标解释 + 像素容差）；鼠标仍用原来的单射线，避免回归。
+		if _touch_surgery:
+			return _try_begin_surgery_touch(screen, surg)
+		if surg.has_method("set_touch_pick"):
+			surg.call("set_touch_pick", false)
 		var ray: Array = _screen_ray(screen)
 		if bool(surg.call("begin_stroke", ray[0], ray[1])):
 			_interact_held = true
@@ -1011,6 +1016,40 @@ func _pointer_to_navel_dist(p: Vector2, navel: Vector3) -> float:
 func _tap_near_limit() -> float:
 	# 只接受确实点在肚脐附近的点击；不再用屏幕短边 28% 的大圆把任意点击吸过去。
 	return 56.0
+
+
+func _try_begin_surgery_touch(screen: Vector2, surg: Node) -> bool:
+	if _camera == null:
+		return false
+	if surg.has_method("set_touch_pick"):
+		surg.call("set_touch_pick", true)
+	var tried := {}
+	var try_px := func(px: Vector2) -> bool:
+		var k := Vector2i(int(round(px.x)), int(round(px.y)))
+		if tried.has(k):
+			return false
+		tried[k] = true
+		var origin: Vector3 = _camera.project_ray_origin(px)
+		var dir: Vector3 = _camera.project_ray_normal(px)
+		if bool(surg.call("begin_stroke", origin, dir)):
+			_interact_held = true
+			_interact_screen = screen
+			return true
+		# 拉钩没有命中时仍更新幽灵预览（手指没有鼠标悬停）
+		if str(surg.call("current_tool")) == "retractor" and surg.has_method("hover_tool"):
+			surg.call("hover_tool", origin, dir)
+		return false
+	for p in pointer_variants(screen):
+		if try_px.call(p):
+			return true
+	var prim := to_camera_pixel(screen)
+	# 指尖像素容差：绕点击点再试一圈，应对胖手指 / DPI 偏差
+	for off in [Vector2(20, 0), Vector2(-20, 0), Vector2(0, 20), Vector2(0, -20),
+			Vector2(16, 16), Vector2(-16, 16), Vector2(16, -16), Vector2(-16, -16),
+			Vector2(28, 0), Vector2(-28, 0), Vector2(0, 28), Vector2(0, -28)]:
+		if try_px.call(prim + off):
+			return true
+	return false
 
 
 func _try_begin_interact_near(screen: Vector2, variants: Array[Vector2]) -> bool:
@@ -1907,6 +1946,7 @@ func _calc_aabb(n: Node) -> AABB:
 ## 触屏操作开启时，触摸模拟出来的鼠标事件（device = DEVICE_ID_EMULATION）只给 GUI 用，
 ## 这里不再处理，避免与 touch_controls 的手指逻辑重复（同一次点按 = 两次互动）。
 var touch_active: bool = false
+var _touch_surgery: bool = false
 ## 已确认的指针坐标解释（-1 = 自动尝试多种）
 var _ptr_mode: int = -1
 ## 最近一次互动是否走了肚脐近距兜底（自检用）
@@ -2029,10 +2069,21 @@ func touch_set_fov(v: float) -> void:
 
 
 ## 观察视角：手指按在角色身上 = 当前工具（与鼠标左键同一套逻辑）
+func _set_touch_surgery(on: bool) -> void:
+	_touch_surgery = on
+	var surg := active_surgery()
+	if surg and surg.has_method("set_touch_pick"):
+		surg.call("set_touch_pick", on)
+
+
 func touch_tool_begin(screen: Vector2) -> bool:
 	if _interact_held:
 		_end_interact()
+	var surg0 := active_surgery()
+	_set_touch_surgery(surg0 != null and bool(surg0.call("is_active")))
 	var ok := _try_begin_interact(screen)
+	if not ok:
+		_set_touch_surgery(false)
 	_last_tool_begin = {
 		"ok": ok,
 		"screen": screen,
@@ -2058,6 +2109,7 @@ func touch_tool_drag(screen: Vector2) -> void:
 func touch_tool_end() -> void:
 	if _interact_held:
 		_end_interact()
+	_set_touch_surgery(false)
 
 
 func touch_tool_active() -> bool:

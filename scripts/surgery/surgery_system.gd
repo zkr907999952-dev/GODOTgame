@@ -45,6 +45,8 @@ const CAMERA_IGNORE_GROUP := "camera_ignore"
 var path_points: PackedVector3Array = PackedVector3Array()  # bind-space
 var stroke_active: bool = false
 var persist: bool = false
+## 0.4.06：仅触屏路径打开。放大拾取半径 / 射线容差，不影响鼠标。
+var touch_pick: bool = false
 var flap_node: Node3D = null
 var flap_kind: String = ""  # "rigid" | "softbody" | "verlet" | ""
 var cavity_exposed: bool = false
@@ -1038,7 +1040,7 @@ func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
 	if _cut_anim:
 		return false
 	_lock_pose_for_stroke(true)
-	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
+	var hit: Variant = _mesh_hit(origin, dir)
 	var bind_p := Vector3.ZERO
 	var world_p := Vector3.ZERO
 	if hit != null:
@@ -2051,6 +2053,77 @@ func _mesh_ymax(mi: MeshInstance3D) -> float:
 		if p.y > m:
 			m = p.y
 	return m
+
+
+func set_touch_pick(on: bool) -> void:
+	touch_pick = on
+
+
+func is_touch_pick() -> bool:
+	return touch_pick
+
+
+func _touch_slop() -> float:
+	return 0.045 if touch_pick else 0.0
+
+
+func _lip_pick_dist() -> float:
+	return 0.032 if touch_pick else RETR_PICK_DIST
+
+
+func _handle_pick_r2() -> float:
+	var r := 0.028 if touch_pick else 0.014
+	return r * r
+
+
+func _gut_pick_dist() -> float:
+	return 0.030 if touch_pick else GUT_PICK_DIST
+
+
+## 精确命中腹网；触屏时允许射线与网格最近点有几厘米容差。
+func _mesh_hit(origin: Vector3, dir: Vector3) -> Variant:
+	if _outer == null:
+		return null
+	var hit: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
+	if hit != null or not touch_pick:
+		return hit
+	return _nearest_mesh_on_ray(origin, dir, _touch_slop())
+
+
+func _nearest_mesh_on_ray(origin: Vector3, dir: Vector3, slop: float) -> Variant:
+	if _outer == null or slop <= 1e-6:
+		return null
+	var d := dir.normalized()
+	var posed := _posed_world()
+	var best_i := -1
+	var best_perp := slop
+	var best_t := 1e9
+	for i in posed.size():
+		var w: Vector3 = posed[i] - origin
+		var t := w.dot(d)
+		if t <= 0.02:
+			continue
+		var perp := (w - d * t).length()
+		if perp < best_perp - 1e-6 or (absf(perp - best_perp) <= 1e-6 and t < best_t):
+			best_perp = perp
+			best_t = t
+			best_i = i
+	if best_i < 0:
+		return null
+	return {"bind": _outer.pos[best_i], "point": posed[best_i], "i0": best_i}
+
+
+func apply_puncture_hole(world_p: Vector3, world_dir: Vector3, radius: float = 0.016) -> bool:
+	## 0.4.06：肚脐捅穿 / 刺刀匕首最终刺穿 —— 小环切并去掉圆心皮瓣，可复原，手术钳可用。
+	if not _bake_if_needed():
+		return false
+	var d := world_dir
+	if d.length_squared() < 1e-8:
+		d = Vector3(0, 0, -1)
+	else:
+		d = d.normalized()
+	var r := clampf(radius, 0.008, 0.03)
+	return _punch_bullet_hole_world(world_p, d, r)
 
 
 func _bake_if_needed() -> bool:
@@ -4139,6 +4212,11 @@ func _gut_rim_world() -> PackedVector3Array:
 	else:
 		ids.append_array(_lip_left)
 		ids.append_array(_lip_right)
+	# 0.4.06：弹孔 / 肚脐捅穿 / 刺刀切口只有 _hole_loops，没有左右唇
+	if ids.is_empty() and not _hole_loops.is_empty():
+		for loop2 in _hole_loops:
+			if loop2 is PackedInt32Array:
+				ids.append_array(loop2 as PackedInt32Array)
 	var nv := _outer.vert_count()
 	var step := maxi(1, ids.size() / 48)
 	for i in range(0, ids.size(), step):
@@ -4165,11 +4243,7 @@ func _gut_exit(anchor: Vector3, rim: PackedVector3Array, hole_c: Vector3, in_w: 
 func _gut_skin_samples(hole_c_w: Vector3) -> Array:
 	if _gut_skin_ids.is_empty():
 		var cb := Vector3.ZERO
-		var rim_ids: PackedInt32Array = PackedInt32Array()
-		rim_ids.append_array(_lip_left)
-		rim_ids.append_array(_lip_right)
-		if flap_peeled and not _hole_loops.is_empty():
-			rim_ids = _hole_loops[_hole_loops.size() - 1]
+		var rim_ids: PackedInt32Array = _hole_or_lip_ids()
 		var cnt := 0
 		for id in rim_ids:
 			if id >= 0 and id < _outer.vert_count():
@@ -4289,7 +4363,7 @@ func _ray_cavity_hit(origin: Vector3, dir: Vector3) -> Variant:
 	var near := 1e9
 	for q in rim:
 		near = minf(near, q.distance_to(hit))
-	if near > 0.06:
+	if near > (0.09 if touch_pick else 0.06):
 		return null
 	var sh: Variant = Geom.ray_hit_mesh(_outer, _posed_world(), origin, dir)
 	if sh != null:
@@ -4299,7 +4373,11 @@ func _ray_cavity_hit(origin: Vector3, dir: Vector3) -> Variant:
 			var near2 := 1e9
 			for q2 in rim:
 				near2 = minf(near2, q2.distance_to(sp))
-			if near2 > 0.006:
+			# 直切口缝很窄（6mm）；弹孔 / 捅穿孔径约 1.5cm，唇缘外翻后略放宽，触屏再稍加容差。
+			var lip_tol := 0.022 if (bullet_holes > 0 or (flap_peeled and not _hole_loops.is_empty())) else 0.006
+			if touch_pick:
+				lip_tol = maxf(lip_tol, 0.018)
+			if near2 > lip_tol:
 				return null
 	return hit
 
@@ -4308,7 +4386,7 @@ func _begin_forceps(origin: Vector3, dir: Vector3) -> bool:
 	_fc_active = false
 	_fc_pull = -1
 	# 1. 已扯出的肠袢：直接夹住重新拖动
-	var best_d := GUT_PICK_DIST
+	var best_d := _gut_pick_dist()
 	var bi := -1
 	var bp := -1
 	for i in _gut_pulls.size():
@@ -4364,15 +4442,24 @@ func _start_forceps_grip(pi: int, dir: Vector3) -> void:
 	_place_forceps(_fc_last, dir)
 
 
-func _new_gut_pull(hit: Vector3) -> Dictionary:
-	var fr: Transform3D = _organs.call("abdomen_frame")
-	# 参考顶点：最近的创缘内壁顶点（twin 同索引），锚点 = 它 + 腹局部偏移，跟着蒙皮 / 软体 / 拿取位移走。
+func _hole_or_lip_ids() -> PackedInt32Array:
 	var ids := PackedInt32Array()
 	if flap_peeled and not _hole_loops.is_empty():
 		ids = _hole_loops[_hole_loops.size() - 1]
 	else:
 		ids.append_array(_lip_left)
 		ids.append_array(_lip_right)
+	if ids.is_empty() and not _hole_loops.is_empty():
+		for loop2 in _hole_loops:
+			if loop2 is PackedInt32Array:
+				ids.append_array(loop2 as PackedInt32Array)
+	return ids
+
+
+func _new_gut_pull(hit: Vector3) -> Dictionary:
+	var fr: Transform3D = _organs.call("abdomen_frame")
+	# 参考顶点：最近的创缘内壁顶点（twin 同索引），锚点 = 它 + 腹局部偏移，跟着蒙皮 / 软体 / 拿取位移走。
+	var ids := _hole_or_lip_ids()
 	var best := -1
 	var bd := 1e9
 	for id in ids:
@@ -4566,7 +4653,7 @@ func _pick_lip_vertex(origin: Vector3, dir: Vector3) -> int:
 		return -1
 	var d := dir.normalized()
 	var best := -1
-	var best_d := RETR_PICK_DIST
+	var best_d := _lip_pick_dist()
 	for v in _lip_candidates():
 		var w := _vert_world(v) - origin
 		var t := w.dot(d)
@@ -6120,7 +6207,7 @@ func _pick_preview_handle(origin: Vector3, dir: Vector3, bind_hint: Vector3) -> 
 	else:
 		names = PackedStringArray(["start", "end"])
 	var best := ""
-	var best_s := 0.014 * 0.014
+	var best_s := _handle_pick_r2()
 	for h in names:
 		var hb: Vector3 = _handle_bind(h)
 		var hw: Vector3 = _approx_world_bind(hb)
