@@ -254,6 +254,12 @@ func start_cover(point: Vector3) -> void:
 	last_cover = true
 
 
+func clear_cover() -> void:
+	cover_life = 0.0
+	cover_weight = 0.0
+	last_cover = false
+
+
 func is_covering() -> bool:
 	return cover_life > 0.0 and cover_weight > 0.05
 
@@ -261,6 +267,14 @@ func is_covering() -> bool:
 func apply_cover(delta: float) -> void:
 	if skeleton == null:
 		return
+	# 「掰开」等动作占用双手时不捂腹，避免一只手被两套 IK 拧反。
+	if _host and _host.has_method("get_actions"):
+		var acts = _host.call("get_actions")
+		if acts and acts.has_method("busy") and bool(acts.call("busy")):
+			cover_life = 0.0
+			cover_weight = 0.0
+			last_cover = false
+			return
 	if not _host_unarmed():
 		cover_life = 0.0
 		cover_weight = 0.0
@@ -724,11 +738,10 @@ func _set_cover_hand(ha: int, side: String, want: Vector3, fwd: Vector3, right: 
 	if fingers.length_squared() < 1e-8:
 		fingers = -up
 	fingers = fingers.normalized()
-	# 手的语义 Z（指根×拇指方向）：左手 = 掌心方向，右手 = 手背方向（镜像）。
-	# 旧代码两只手都把 Z 当掌心，右手因此用手背捂肚子。
+	# 手的语义 Z：左手 = 掌心，右手 = 手背（镜像骨架）。写完后再量一次真实掌心，
+	# 若朝外（分身上常见一只手被镜像拧反），绕手指轴转 180° 把掌心扳向腹部。
 	var sem_z := palm if side == "L" else -palm
 	var sem_w := Basis(fingers, sem_z.cross(fingers), sem_z).orthonormalized()
-	# SEM 在骨架空间写入手骨
 	var sk_inv := skeleton.global_transform.affine_inverse()
 	var sem_s := (sk_inv.basis * sem_w).orthonormalized()
 	var hand_g := (sem_s * _hand_sem_local(side).inverse()).orthonormalized()
@@ -740,6 +753,40 @@ func _set_cover_hand(ha: int, side: String, want: Vector3, fwd: Vector3, right: 
 	if w < 0.999:
 		q = skeleton.get_bone_pose_rotation(ha).slerp(q, clampf(w, 0.0, 1.0))
 	skeleton.set_bone_pose_rotation(ha, q)
+	_correct_cover_palm(ha, side, palm, w)
+
+
+func _correct_cover_palm(ha: int, side: String, want_palm: Vector3, w: float) -> void:
+	## 量出当前食指→小指 与 手→中指 的叉积（按左右手镜像约定取掌心），若背向腹部则绕手指轴翻转。
+	if ha < 0 or w <= 0.0 or want_palm.length_squared() < 1e-10:
+		return
+	skeleton.force_update_transform()
+	var mid := skeleton.find_bone("%s_Middle_a" % side)
+	var idx := skeleton.find_bone("%s_Index_a" % side)
+	var pnk := skeleton.find_bone("%s_Pinky_a" % side)
+	if mid < 0 or idx < 0 or pnk < 0:
+		return
+	var sk := skeleton.global_transform
+	var f: Vector3 = skeleton.get_bone_global_pose(mid).origin - skeleton.get_bone_global_pose(ha).origin
+	var ac: Vector3 = skeleton.get_bone_global_pose(idx).origin - skeleton.get_bone_global_pose(pnk).origin
+	var n := (sk.basis * f.cross(ac)).normalized()
+	if n.length_squared() < 1e-8:
+		return
+	var palm := n if side == "L" else -n
+	if palm.dot(want_palm.normalized()) >= 0.05:
+		return
+	var axis := (sk.basis * f).normalized() if f.length_squared() > 1e-8 else want_palm
+	var hb := (sk.basis * skeleton.get_bone_global_pose(ha).basis).orthonormalized()
+	hb = Basis(axis, PI) * hb
+	var sk_inv := sk.affine_inverse()
+	var want := (sk_inv.basis * hb).orthonormalized()
+	var par := skeleton.get_bone_parent(ha)
+	var par_b := skeleton.get_bone_global_pose(par).basis.orthonormalized() if par >= 0 else Basis.IDENTITY
+	var q := (par_b.inverse() * want).get_rotation_quaternion()
+	if w < 0.999:
+		q = skeleton.get_bone_pose_rotation(ha).slerp(q, clampf(w, 0.0, 1.0))
+	skeleton.set_bone_pose_rotation(ha, q)
+	skeleton.force_update_transform()
 
 
 func _aim_bone(bi: int, from: Vector3, to: Vector3, w: float) -> void:

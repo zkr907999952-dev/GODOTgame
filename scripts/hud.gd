@@ -1848,6 +1848,7 @@ func _build_interact_panel() -> PanelContainer:
 	v.add_child(_interact_status)
 	_build_tool_boxes(v)
 	_build_clone_box(v)
+	_build_interact_action_bar(v)
 	_refresh_interact_status()
 	return p
 
@@ -2760,6 +2761,8 @@ func _process(_delta: float) -> void:
 	_refresh_corpse_drag_btn()
 	_refresh_possess_aim(_delta)
 	_refresh_bed_actions()
+	if _panel_interact and _panel_interact.visible:
+		_refresh_interact_actions()
 	# 模式由任何途径改变（Tab / 按钮 / 脚本）都刷新状态栏
 	if _player and "play_mode" in _player and int(_player.play_mode) != _last_mode:
 		_last_mode = int(_player.play_mode)
@@ -3810,12 +3813,119 @@ func _surgery() -> Node:
 	return null
 
 
+# ------------------------------------------------------------------ 动作栏（互动菜单，可扩展）
+func _action_host() -> Node:
+	var rig: Node = _target_org()
+	if rig:
+		var p: Node = rig.get_parent()
+		if p and p.has_method("get_actions"):
+			return p
+	if _player and _player.has_method("get_actions"):
+		return _player
+	return null
+
+
+func _host_actions(host: Node):
+	if host and host.has_method("get_actions"):
+		return host.call("get_actions")
+	return null
+
+
+func _build_interact_action_bar(v: VBoxContainer) -> void:
+	_section(v, "动作")
+	var hint := Label.new()
+	hint.text = "对当前互动目标使用。以后可在此栏加入更多动作。"
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.custom_minimum_size = Vector2(210, 0)
+	hint.add_theme_font_size_override("font_size", 12)
+	hint.add_theme_color_override("font_color", Color(0.7, 0.74, 0.8))
+	v.add_child(hint)
+	_interact_action_box = VBoxContainer.new()
+	_interact_action_box.name = "ActionBar"
+	_interact_action_box.add_theme_constant_override("separation", 6)
+	v.add_child(_interact_action_box)
+	_refresh_interact_actions()
+
+
+func _refresh_interact_actions() -> void:
+	if _interact_action_box == null:
+		return
+	var host := _action_host()
+	var acts = _host_actions(host)
+	var items: Array = acts.call("list", host) if acts else []
+	var act := str(acts.get("active_id")) if acts else ""
+	var busy := acts != null and bool(acts.call("busy"))
+	var sig := "%s|%s|%s|%s" % [act, str(busy), str(host), str(items.size())]
+	if sig == _interact_action_sig and _interact_action_box.get_child_count() > 0:
+		debug_interact_action_labels = PackedStringArray()
+		for c in _interact_action_box.get_children():
+			if c is Button:
+				debug_interact_action_labels.append((c as Button).text)
+		return
+	_interact_action_sig = sig
+	for c in _interact_action_box.get_children():
+		c.queue_free()
+	debug_interact_action_labels = PackedStringArray()
+	var any := false
+	for it in items:
+		var d: Dictionary = it
+		if not bool(d.get("available", true)) and not bool(d.get("active", false)):
+			continue
+		any = true
+		var label := str(d["stop_label"]) if bool(d.get("active", false)) else str(d["label"])
+		var b := Button.new()
+		b.text = label
+		b.custom_minimum_size = Vector2(200, 36) if touch_ui else Vector2(200, 30)
+		b.add_theme_font_size_override("font_size", 15 if touch_ui else 14)
+		_style_button(b, bool(d.get("active", false)))
+		b.pressed.connect(_on_interact_action_pick.bind(str(d["id"])))
+		_interact_action_box.add_child(b)
+		debug_interact_action_labels.append(label)
+	if busy:
+		var stop := Button.new()
+		stop.text = "停止"
+		stop.custom_minimum_size = Vector2(200, 36) if touch_ui else Vector2(200, 30)
+		stop.add_theme_font_size_override("font_size", 15 if touch_ui else 14)
+		_style_button(stop, false)
+		stop.pressed.connect(_on_interact_action_pick.bind("__stop"))
+		_interact_action_box.add_child(stop)
+		debug_interact_action_labels.append("停止")
+	if not any and not busy:
+		var empty := Label.new()
+		empty.text = "暂无可用动作"
+		empty.add_theme_font_size_override("font_size", 12)
+		empty.add_theme_color_override("font_color", Color(0.7, 0.74, 0.8))
+		_interact_action_box.add_child(empty)
+
+
+func _on_interact_action_pick(id: String) -> void:
+	var host := _action_host()
+	var acts = _host_actions(host)
+	if acts == null:
+		return
+	if id == "__stop":
+		acts.call("stop")
+	else:
+		acts.call("toggle_on", host, id)
+	_interact_action_sig = ""
+	_refresh_interact_actions()
+	_refresh_bed_actions()
+
+
+## 测试用：等同在互动菜单动作栏点一下。
+func debug_run_interact_action(id: String) -> void:
+	_on_interact_action_pick(id)
+
+
 # ------------------------------------------------------------------ 0.4.08 检查床「动作」
 var _btn_bed_action: Button
 var _bed_action_panel: PanelContainer
 var _bed_action_box: VBoxContainer
 var _bed_action_sig: String = ""
 var debug_bed_action_visible: bool = false
+var _interact_action_box: VBoxContainer
+var _interact_action_sig: String = ""
+var debug_interact_action_labels: PackedStringArray = PackedStringArray()
 
 
 func _build_bed_action_ui(root: Control) -> void:

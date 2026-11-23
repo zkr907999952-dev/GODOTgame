@@ -228,6 +228,8 @@ func _build_vulva_flaps() -> void:
 	if vf.build(best, vp, Vector3(op[0], op[1], op[2]), ml):
 		vulva = vf
 		vf.flaps_mi.add_to_group("vulva_flaps")
+		if vf.soft_mat and vf.soft_mat not in _all_mats:
+			_all_mats.append(vf.soft_mat)
 		print("organs: vulva flaps faces=", vf.removed_faces, " slit verts=", vf.slit_verts, " rim=", vf.rim_size(), " vestibule tris=", vf.vest_tris, " holes filled=", vf.holes_filled)
 	else:
 		push_warning("organs: vulva flap split failed")
@@ -1998,11 +2000,19 @@ func _build_organs() -> bool:
 			mat.set_shader_parameter("use_tex", true)
 			mat.set_shader_parameter("albedo_tex", tex_cache[tex_id][0])
 			mat.set_shader_parameter("normal_tex", tex_cache[tex_id][1])
-			mat.set_shader_parameter("base_color", Color(1, 1, 1, 1))
+			var bc := Color(1, 1, 1, 1)
+			var ln0 := (str(matname) + " " + str(mname)).to_lower()
+			if ln0.find("vagin") >= 0 or ln0.find("vulva") >= 0 or ln0.find("labia") >= 0:
+				bc = Color(0.92, 0.84, 0.82, 1.0)
+			mat.set_shader_parameter("base_color", bc)
 			mat.set_shader_parameter("roughness", 0.48)
 		else:
 			# 网页 polishOrgans：无贴图时颜色向 #c4786a 靠 12%
 			var c := Color(col.r, col.g, col.b, 1.0).lerp(Color("#c4786a"), 0.12)
+			var ln := (str(matname) + " " + str(mname)).to_lower()
+			if ln.find("vagin") >= 0 or ln.find("vulva") >= 0 or ln.find("labia") >= 0:
+				# 阴道 / 外阴内壁：从过饱和红收成自然黏膜粉
+				c = c.lerp(Color(0.81, 0.60, 0.57), 0.55)
 			mat.set_shader_parameter("use_tex", false)
 			mat.set_shader_parameter("base_color", c)
 			mat.set_shader_parameter("roughness", 0.42)

@@ -8,6 +8,7 @@ const WeaponSystemScript = preload("res://scripts/weapons/weapon_system.gd")
 const CharacterHealthScript = preload("res://scripts/character_health.gd")
 const RagdollSystemScript = preload("res://scripts/ragdoll_system.gd")
 const HitReactionScript = preload("res://scripts/hit_reaction.gd")
+const CharacterActionsScript = preload("res://scripts/body/character_actions.gd")
 const CorpseDragScript = preload("res://scripts/corpse_drag.gd")
 const CombatDamage := preload("res://scripts/combat_damage.gd")
 const CharacterHitboxesScript := preload("res://scripts/character_hitboxes.gd")
@@ -126,6 +127,7 @@ var _weapons: Node
 var _health: Node
 var _ragdoll: Node
 var _hit_react: Node
+var actions = CharacterActionsScript.new()
 var _corpse_drag: Node
 var _hitboxes: Node = null
 var _getup: RefCounted = null
@@ -384,6 +386,15 @@ func get_hit_reaction() -> Node:
 	return _hit_react
 
 
+
+func get_actions():
+	return actions
+
+
+func is_ragdoll() -> bool:
+	return _ragdoll != null and bool(_ragdoll.get("active"))
+
+
 func get_corpse_drag() -> Node:
 	return _corpse_drag
 
@@ -528,6 +539,12 @@ func _after_pose_feedback(delta: float) -> void:
 		_hit_react.call("apply_to_skeleton", delta, skip)
 		if _hit_react.has_method("apply_cover") and not weapon_drawn():
 			_hit_react.call("apply_cover", delta)
+	# 检查床上的动作由 VehicleSystem 在坐姿之后套用，避免打两遍。
+	if actions and occupancy != "exam_bed":
+		var org: Node = get_organs()
+		var sk: Skeleton3D = get_skeleton()
+		actions.step(delta, org)
+		actions.apply_pose(sk, org)
 	if _corpse_drag:
 		if _corpse_drag.call("is_dragging"):
 			_corpse_drag.call("apply_left_hand")
