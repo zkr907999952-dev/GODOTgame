@@ -150,6 +150,60 @@ vec3 dent_offset(vec3 p) {
 	return dent_off * exp(-dot(d, d) / (dent.w * dent.w));
 }
 
+// 阴道扩张器：沿阴道轴把管壁 / 外阴撑成开合椭圆，露出内壁与宫颈。
+// spec_o.xyz = 开口(ab-local)，w = 插入深度（<=0 关闭）
+// spec_d.xyz = 朝宫颈方向，w = 尖端半开距（米）
+// spec_u.xyz = 开合方向（耻骨/会阴），w = 叶片半宽
+// spec_m.x = 混合，y = 闭合半高
+uniform vec4 spec_o = vec4(0.0);
+uniform vec4 spec_d = vec4(0.0);
+uniform vec4 spec_u = vec4(0.0);
+uniform vec4 spec_m = vec4(0.0);
+
+vec3 speculum_offset(vec3 p) {
+	float depth = spec_o.w;
+	if (depth <= 0.0) return vec3(0.0);
+	vec3 o = spec_o.xyz;
+	vec3 ax = spec_d.xyz;
+	float al = length(ax);
+	if (al < 1e-5) return vec3(0.0);
+	ax /= al;
+	vec3 up = spec_u.xyz;
+	up = up - ax * dot(up, ax);
+	float ul = length(up);
+	if (ul < 1e-5) return vec3(0.0);
+	up /= ul;
+	vec3 side = cross(ax, up);
+	float sl = length(side);
+	if (sl < 1e-5) return vec3(0.0);
+	side /= sl;
+	float half_tip = max(spec_d.w, 0.002);
+	float half_side = max(spec_u.w, 0.008);
+	float mixv = clamp(spec_m.x, 0.0, 1.0);
+	float half_closed = max(spec_m.y, 0.002);
+	vec3 v = p - o;
+	float s = dot(v, ax);
+	float smin = -0.022;
+	float smax = depth + 0.014;
+	if (s < smin - 0.025 || s > smax + 0.025) return vec3(0.0);
+	float along_w = smoothstep(smin - 0.018, smin, s) * (1.0 - smoothstep(smax, smax + 0.02, s));
+	if (along_w < 0.01) return vec3(0.0);
+	float along = clamp(s / max(depth, 1e-4), 0.0, 1.15);
+	float ry = mix(half_closed, half_tip, clamp(along, 0.0, 1.0)) + 0.003;
+	float rx = half_side * mix(0.42, 0.62, clamp(along, 0.0, 1.0));
+	float xu = dot(v, side);
+	float yu = dot(v, up);
+	vec3 radial = side * xu + up * yu;
+	float pr = length(radial);
+	if (pr < 1e-6) return vec3(0.0);
+	float e = (xu * xu) / max(rx * rx, 1e-8) + (yu * yu) / max(ry * ry, 1e-8);
+	if (e >= 1.0) return vec3(0.0);
+	float k = 1.0 / sqrt(max(e, 1e-6));
+	float cap = (max(rx, ry) + 0.02) / pr;
+	k = min(k, cap);
+	return (radial / pr) * (pr * k - pr) * mixv * along_w;
+}
+
 // 弹道通道（最多 4 条）：ball_a.xyz = 入射点(ab-local)，w = 半径；ball_b.xyz = 方向，w = 长度（<=0 关闭）
 uniform vec4 ball_a[4];
 uniform vec4 ball_b[4];

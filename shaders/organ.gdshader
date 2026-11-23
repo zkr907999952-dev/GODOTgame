@@ -136,8 +136,10 @@ void vertex() {
 		off += belly * 0.72;
 		off += uter_offset(l);
 		off += rod_offset(l + off) * 0.55;
+		off += speculum_offset(l + off);
 	} else {
 		off += belly * 0.62;
+		off += speculum_offset(l + off);
 	}
 	vec3 off_w = ab_dir_to_world(off);
 	wp += off_w;

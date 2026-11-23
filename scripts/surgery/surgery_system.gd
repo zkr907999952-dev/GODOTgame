@@ -4,6 +4,7 @@ extends Node
 class_name SurgerySystem
 
 const Geom := preload("res://scripts/surgery/surgery_geom.gd")
+const SpeculumTool := preload("res://scripts/surgery/speculum_tool.gd")
 const SCALPEL_GLB := "res://assets/surgery/scalpel.glb"
 const WALL_THICKNESS := 0.012
 const SLIT_WIDTH := 0.0025
@@ -26,10 +27,12 @@ signal mode_changed(active: bool)
 signal tool_changed(tool: String)
 signal cut_mode_changed(mode: String)
 signal preview_changed()
+signal speculum_changed()
 
 var player: Node = null
 var active: bool = false
-var tool: String = ""  # "" | "scalpel" | "grab"  — 进入时无工具，可转视角
+var tool: String = ""  # "" | "scalpel" | "grab" | "retractor" | "forceps" | "speculum"  — 进入时无工具，可转视角
+var speculum = null
 var cut_mode: String = "straight"  # "straight" | "ring"
 var thickness: float = WALL_THICKNESS
 var cut_open: bool = false
@@ -206,6 +209,9 @@ func setup(p: Node, skel: Skeleton3D, organs: Node) -> void:
 	_make_trail()
 	_make_dash()
 	_make_scalpel()
+	if speculum == null:
+		speculum = SpeculumTool.new()
+	speculum.setup(self, _organs, _skel)
 
 
 func is_active() -> bool:
@@ -217,7 +223,46 @@ func current_tool() -> String:
 
 
 func has_tool() -> bool:
-	return tool == "scalpel" or tool == "grab" or tool == "retractor" or tool == "forceps"
+	return tool == "scalpel" or tool == "grab" or tool == "retractor" or tool == "forceps" or tool == "speculum"
+
+
+
+func is_speculum_present() -> bool:
+	return speculum != null and speculum.is_present()
+
+
+func is_speculum_inserted() -> bool:
+	return speculum != null and speculum.is_ready()
+
+
+func speculum_angle() -> float:
+	return float(speculum.opening_angle()) if speculum else 0.0
+
+
+func set_speculum_angle(deg: float) -> void:
+	if speculum:
+		speculum.set_opening_angle(deg)
+
+
+func request_remove_speculum() -> bool:
+	return speculum.request_remove() if speculum else false
+
+
+func debug_insert_speculum() -> bool:
+	return speculum.begin_insert() if speculum else false
+
+
+func debug_finish_speculum_anim() -> void:
+	if speculum:
+		speculum.debug_finish_anim()
+
+
+func speculum_node() -> Node3D:
+	return speculum.node if speculum else null
+
+
+func speculum_state() -> String:
+	return str(speculum.state) if speculum else "idle"
 
 
 func look_locked() -> bool:
@@ -912,6 +957,8 @@ func restore_body() -> void:
 	_clear_trail()
 	_clear_guts()
 	_clear_retractors()
+	if speculum:
+		speculum.force_clear()
 	_show_scalpel(false)
 	if flap_node and is_instance_valid(flap_node):
 		flap_node.queue_free()
@@ -999,12 +1046,18 @@ func restore_body() -> void:
 
 
 func is_body_pristine() -> bool:
-	return not cut_open and not flap_peeled and bullet_holes == 0 and flap_node == null and _trail_bind.is_empty() and (_dress == null or _dress_mesh_orig == null or _dress.mesh == _dress_mesh_orig or active)
+	return not cut_open and not flap_peeled and bullet_holes == 0 and flap_node == null and _trail_bind.is_empty() and not is_speculum_present() and (_dress == null or _dress_mesh_orig == null or _dress.mesh == _dress_mesh_orig or active)
 
 
 func set_tool(t: String) -> void:
 	# 再点已选工具则取消选择，恢复视角控制。
+	# 扩张器已取出但工具仍选中：再点一次是重新插入，而不是取消选择。
 	if t == tool:
+		if t == "speculum" and speculum and not speculum.is_present():
+			speculum.begin_insert()
+			speculum_changed.emit()
+			tool_changed.emit(tool)
+			return
 		if stroke_active:
 			cancel_stroke()
 		tool = ""
@@ -1013,7 +1066,7 @@ func set_tool(t: String) -> void:
 		tool_changed.emit(tool)
 		return
 	# 拿取与手术刀一样随时可切换，不必先切开或先剥皮瓣。
-	if t != "" and t != "scalpel" and t != "grab" and t != "retractor" and t != "forceps":
+	if t != "" and t != "scalpel" and t != "grab" and t != "retractor" and t != "forceps" and t != "speculum":
 		t = ""
 	if stroke_active:
 		cancel_stroke()
@@ -1025,6 +1078,8 @@ func set_tool(t: String) -> void:
 		_hide_retractor_ghost()
 		if _retr_selected >= 0:
 			select_retractor(-1)
+	if tool == "speculum" and speculum:
+		speculum.begin_insert()
 	tool_changed.emit(tool)
 
 
@@ -1048,6 +1103,10 @@ func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
 		return _begin_retractor(origin, dir)
 	if tool == "forceps":
 		return _begin_forceps(origin, dir)
+	if tool == "speculum":
+		if speculum and speculum.is_ready() and speculum.hits_ray(origin, dir):
+			return speculum.request_remove()
+		return false
 	if tool != "scalpel":
 		return false
 	if _cut_anim:
@@ -3507,7 +3566,11 @@ func _navel_world() -> Vector3:
 func _process(dt: float) -> void:
 	if active and not is_on_exam_bed():
 		exit_surgery()
-		return
+	if speculum:
+		var st0 := str(speculum.state)
+		speculum.step(dt)
+		if str(speculum.state) != st0:
+			speculum_changed.emit()
 	if not active and not persist:
 		return
 	if (active or persist) and not pose_locked:
