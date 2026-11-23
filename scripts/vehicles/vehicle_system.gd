@@ -102,6 +102,10 @@ func setup(g: Node, p: CharacterBody3D) -> void:
 	game = g
 	player = p
 	name = "VehicleSystem"
+	if player and player.has_method("get_actions"):
+		var acts = player.call("get_actions")
+		if acts:
+			bed_actions = acts
 	preload_vehicle_resources()
 	# Room exam bed is available immediately (room is the default map).
 	# City map collisions + default vehicles also start during init so the
@@ -1906,6 +1910,8 @@ func bed_action_list() -> Array:
 func toggle_bed_action(id: String) -> bool:
 	if not bed_actions_available():
 		return false
+	if bed_actions.has_method("toggle_on"):
+		return bool(bed_actions.call("toggle_on", player, id))
 	return bed_actions.toggle(id)
 
 

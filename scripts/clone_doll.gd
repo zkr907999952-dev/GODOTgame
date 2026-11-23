@@ -12,6 +12,7 @@ const CharacterLookScript := preload("res://scripts/character_look.gd")
 const CharacterHealthScript := preload("res://scripts/character_health.gd")
 const RagdollSystemScript := preload("res://scripts/ragdoll_system.gd")
 const HitReactionScript := preload("res://scripts/hit_reaction.gd")
+const CharacterActionsScript := preload("res://scripts/body/character_actions.gd")
 const CombatDamage := preload("res://scripts/combat_damage.gd")
 const CharacterHitboxesScript := preload("res://scripts/character_hitboxes.gd")
 const GetupBlendScript := preload("res://scripts/getup_blend.gd")
@@ -27,6 +28,7 @@ var surgery: Node
 var health: Node
 var ragdoll: Node
 var hit_react: Node
+var actions
 var body_hit: StaticBody3D
 var spawn_map: String = "room"
 var _map_visible: bool = true
@@ -98,6 +100,7 @@ func _ready() -> void:
 	add_child(hit_react)
 	if skeleton:
 		hit_react.call("setup", skeleton, self)
+	actions = CharacterActionsScript.new()
 	_sync_from_source()
 	organs.call("set_interact_mode", organs.get("interact_mode"))
 
@@ -233,6 +236,14 @@ func apply_hit_reaction(info: Dictionary) -> void:
 	if hit_react.get("last_amp") > 0.0 and hit_react.is_active():
 		return
 	hit_react.call("apply_from_info", info, float(info.get("damage", 20.0)))
+
+
+func get_actions():
+	return actions
+
+
+func is_ragdoll() -> bool:
+	return ragdoll != null and bool(ragdoll.get("active"))
 
 
 func get_hit_reaction() -> Node:
@@ -479,6 +490,9 @@ func _apply_bed_pose(delta: float) -> void:
 	var vs := _vehicle_system()
 	if vs and vs.has_method("apply_patient_pose"):
 		vs.call("apply_patient_pose", self, on_exam_bed, delta)
+	if actions:
+		actions.step(delta, organs)
+		actions.apply_pose(skeleton, organs)
 
 
 func _physics_process(delta: float) -> void:
@@ -511,3 +525,6 @@ func _physics_process(delta: float) -> void:
 			hit_react.call("apply_to_skeleton", delta, skip)
 			if hit_react.has_method("apply_cover"):
 				hit_react.call("apply_cover", delta)
+		if actions:
+			actions.step(delta, organs)
+			actions.apply_pose(skeleton, organs)

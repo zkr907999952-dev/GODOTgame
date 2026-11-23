@@ -132,12 +132,19 @@ func build(dress: MeshInstance3D, vulva_point: Vector3, canal_opening: Vector3, 
 			var t0 := pos[v].dot(slit_dir)
 			lo = minf(lo, t0)
 			hi = maxf(hi, t0)
+		var body_seam := {}
+		for kv in keep:
+			body_seam[kv] = true
 		for v in order:
 			var p := pos[v]
 			var wx := clampf(1.0 - absf(p.x) / REGION_HALF_X, 0.0, 1.0)
-			var t := (p.dot(slit_dir) - lo) / maxf(hi - lo, 1e-5)
-			var wt := clampf(sin(PI * clampf(t, 0.0, 1.0)) * 1.6, 0.0, 1.0)
-			w.append(wx * wt)
+			var tt := (p.dot(slit_dir) - lo) / maxf(hi - lo, 1e-5)
+			var wt := clampf(sin(PI * clampf(tt, 0.0, 1.0)) * 1.6, 0.0, 1.0)
+			# 与身体切口重合的外缘顶点必须完全不动，否则拨开后面片与躯干之间出现破缝。
+			if body_seam.has(v):
+				w.append(0.0)
+			else:
+				w.append(wx * wt)
 		_w[si] = w
 		var sg := 1.0 if si == 0 else -1.0
 		_hinge_p[si] = Vector3(sg * REGION_HALF_X, vulva.y, (Z0 + Z1) * 0.5)
@@ -228,7 +235,7 @@ func _fill_holes(fl: PackedInt32Array, pos: PackedVector3Array, used: Dictionary
 		var bb := AABB(pos[path[0]], Vector3.ZERO)
 		for v in path:
 			bb = bb.expand(pos[v])
-		if bb.size.length() > 0.02:
+		if bb.size.length() > 0.045:
 			continue
 		# 边界走向与所在三角形同向 → 补洞三角形反向绕（与周围面同朝向）
 		for i in range(1, path.size() - 1):
@@ -378,8 +385,8 @@ func _commit() -> void:
 ## 两瓣之间的开口边缘（每瓣内侧的开放边，左瓣前→后 + 右瓣后→前 = 一圈）与阴道通道内层黏膜外口那一圈
 ## 之间做一圈黏膜管（前庭）。外圈顶点每帧取两瓣转动后的位置（与皮瓣边缘完全重合），内圈固定在通道外口
 ## → 任何拨开程度下皮肤与通道之间都没有缝隙，看进去是连续的粉色黏膜一直通到阴道内。
-const VEST_N := 28
-const VEST_ROWS := 4
+const VEST_N := 48
+const VEST_ROWS := 6
 var vest_mi: MeshInstance3D
 var _rim: Array = []            # [[side, local_index], …] 一圈
 var _mouth := PackedVector3Array()
@@ -389,8 +396,9 @@ var _vest_bones := PackedInt32Array()
 var _vest_w := PackedFloat32Array()
 var _vest_per := 4
 var _vest_am: ArrayMesh
-var _vest_mat: StandardMaterial3D
+var _vest_mat: ShaderMaterial
 var vest_tris := 0
+var soft_mat: ShaderMaterial
 
 
 ## 0.4.08：手指落点——每瓣靠裂隙一侧（距中线约 8.5mm、裂隙中段）的大阴唇皮肤点，
@@ -405,7 +413,7 @@ func contact(side: int) -> Array:
 	var src: PackedVector3Array = (_arrays[si] as Array)[Mesh.ARRAY_VERTEX]
 	if int(_contact_i[si]) < 0:
 		var sg := 1.0 if si == 0 else -1.0
-		var want := Vector3(sg * 0.0085, vulva.y + 0.002, vulva.z + 0.004)
+		var want := Vector3(sg * 0.0110, vulva.y + 0.0025, vulva.z + 0.005)
 		var best := 0
 		var bd := INF
 		for i in src.size():
@@ -624,14 +632,12 @@ func _setup_vestibule(dress: MeshInstance3D) -> void:
 				var id: int = int(e[1]) * _vest_per + j
 				_vest_bones.append(bi[id] if id < bi.size() else 0)
 				_vest_w.append(wi[id] if id < wi.size() else (1.0 if j == 0 else 0.0))
-	_vest_mat = StandardMaterial3D.new()
-	_vest_mat.albedo_color = Color(0.66, 0.33, 0.35)
-	_vest_mat.roughness = 0.42
-	_vest_mat.metallic_specular = 0.55
-	_vest_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_vest_mat.rim_enabled = true
-	_vest_mat.rim = 0.25
-	_vest_mat.rim_tint = 0.6
+	_vest_mat = ShaderMaterial.new()
+	_vest_mat.shader = preload("res://shaders/vulva_soft.gdshader")
+	# 自然黏膜粉（略偏肤色，不要饱和大红）
+	_vest_mat.set_shader_parameter("mucosa_color", Color(0.81, 0.60, 0.57, 1.0))
+	_vest_mat.set_shader_parameter("roughness_v", 0.50)
+	soft_mat = _vest_mat
 	_vest_am = ArrayMesh.new()
 	vest_mi = MeshInstance3D.new()
 	vest_mi.name = "VulvaVestibule"
