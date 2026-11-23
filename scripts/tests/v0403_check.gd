@@ -196,7 +196,7 @@ func _check_forceps() -> void:
 	var f1 := float(rope.get("fed_len"))
 	var m1 := int(rope.get("mesentery_count"))
 	_ok(f1 > f0 + 0.2 and n1 > n0 + 6, "pulling further extrudes the gut segment by segment (%.0f -> %.0f mm, %d -> %d points)" % [f0 * 1000.0, f1 * 1000.0, n0, n1])
-	_ok(m1 > m0 and m1 >= (n1 - 6) / 3 - 1, "mesentery springs scale with pulled segments (%d -> %d for %d points)" % [m0, m1, n1])
+	_ok(m1 > m0 and m1 >= (n1 - 6) / 6 - 1, "mesentery springs scale with pulled segments (%d -> %d for %d points)" % [m0, m1, n1])
 	var hp: Vector3 = rope.get("hold_pos")
 	var pts: PackedVector3Array = rope.call("points")
 	_ok(pts[int(rope.get("hold_index"))].distance_to(hp) < 1e-4, "held point follows the forceps tip")

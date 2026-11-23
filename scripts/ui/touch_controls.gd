@@ -680,7 +680,12 @@ func _on_down(idx: int, p: Vector2) -> void:
 			queue_redraw()
 		get_viewport().set_input_as_handled()
 		return
-	if hud and hud.has_method("point_over_ui") and bool(hud.call("point_over_ui", p)):
+	# 手术模式：只挡住真正的按钮 / 面板，避免工具条空边或半透明层吞掉腹部点击。
+	if _in_surgery() and hud and hud.has_method("point_over_interactive"):
+		if bool(hud.call("point_over_interactive", p)):
+			f["role"] = "ui"
+			return
+	elif hud and hud.has_method("point_over_ui") and bool(hud.call("point_over_ui", p)):
 		f["role"] = "ui"
 		return
 	if _blocked():
@@ -732,7 +737,8 @@ func _on_down(idx: int, p: Vector2) -> void:
 		elif bool(player.call("touch_tool_begin", p)):
 			f["role"] = "tool"
 		else:
-			f["role"] = "none"
+			# 没点中身体时改为调视角，方便再对准；不改鼠标路径。
+			f["role"] = "look" if _fp() else "orbit"
 		get_viewport().set_input_as_handled()
 		queue_redraw()
 		return

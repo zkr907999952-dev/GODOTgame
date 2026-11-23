@@ -151,6 +151,14 @@ var _navel_grab: bool = false
 var _navel_t0: float = 0.0
 var _navel_o: Vector3 = Vector3.ZERO
 var _navel_plane_z: float = 0.006
+## 0.4.06：插肚脐潮红 + 最深处按住超过 2 秒捅穿（小环切并去掉圆心皮瓣）
+const NAVEL_PIERCE_HOLD := 2.0
+const NAVEL_PIERCE_R := 0.016
+var navel_blush: float = 0.0
+var navel_pierced: bool = false
+var _navel_deep_t: float = 0.0
+var _blade_entry_cut: bool = false
+var _blade_exit_cut: bool = false
 
 
 func setup(skel: Skeleton3D) -> bool:
@@ -169,6 +177,7 @@ func setup(skel: Skeleton3D) -> bool:
 	_fit_hit_ellipsoid()
 	_build_organ_aabbs()
 	_install_skin_xray()
+	_build_vulva_flaps()
 	if not _build_organs():
 		return false
 	_build_fx()
@@ -182,6 +191,57 @@ func setup(skel: Skeleton3D) -> bool:
 	_push_uniforms()
 	print("organs: ready meshes=", organ_meshes.size(), " skin=", skin_meshes.size(), " navel=", _navel_rest)
 	return true
+
+
+# ------------------------------------------------------------------ 0.4.05 外阴分瓣
+const VulvaFlaps := preload("res://scripts/body/vulva_flaps.gd")
+var vulva = null
+
+
+func _build_vulva_flaps() -> void:
+	var vg = meta.get("vagina", null)
+	if not (vg is Dictionary):
+		return
+	var vs: Array = vg["vulva_skin"]
+	var op: Array = vg["opening"]
+	var vp := Vector3(vs[0], vs[1], vs[2])
+	var best: MeshInstance3D = null
+	var bn := 0
+	for mi in skin_meshes:
+		var m := (mi as MeshInstance3D).mesh
+		if m == null or m.get_surface_count() < 1:
+			continue
+		var pos: PackedVector3Array = m.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+		var n := 0
+		for p in pos:
+			if absf(p.x) < 0.017 and absf(p.y - vp.y) < 0.01 and p.z > 0.03 and p.z < 0.08:
+				n += 1
+		if n > bn:
+			bn = n
+			best = mi
+	if best == null:
+		return
+	var vf = VulvaFlaps.new()
+	if vf.build(best, vp, Vector3(op[0], op[1], op[2])):
+		vulva = vf
+		vf.flaps_mi.add_to_group("vulva_flaps")
+		print("organs: vulva flaps faces=", vf.removed_faces, " slit verts=", vf.slit_verts)
+	else:
+		push_warning("organs: vulva flap split failed")
+
+
+## 外阴拨开（0 = 合拢，1 = 完全拨开）。为之后的拨开工具准备的接口。
+func set_vulva_spread(amount: float) -> void:
+	if vulva:
+		vulva.set_spread(amount)
+
+
+func vulva_spread() -> float:
+	return vulva.spread() if vulva else 0.0
+
+
+func vulva_flaps():
+	return vulva
 
 
 # ------------------------------------------------------------------ public API
@@ -718,6 +778,50 @@ func apply_ballistic_hit(origin: Vector3, dir: Vector3, par: Dictionary = {}, pr
 	return info
 
 
+
+func _surgery() -> Node:
+	var host := get_parent()
+	if host and host.has_method("get_surgery"):
+		return host.call("get_surgery")
+	return null
+
+
+func navel_blush_weight(ab: Vector3) -> float:
+	if navel_blush <= 0.001:
+		return 0.0
+	var r := Vector2(ab.x, ab.y).length()
+	var k := 1.0 - smoothstep(0.016, 0.068, r)
+	k *= smoothstep(-0.025, 0.008, ab.z)
+	return clampf(navel_blush * k, 0.0, 1.0)
+
+
+func _apply_puncture_hole(world_p: Vector3, world_dir: Vector3, radius: float) -> bool:
+	var surg := _surgery()
+	if surg == null or not surg.has_method("apply_puncture_hole"):
+		return false
+	return bool(surg.call("apply_puncture_hole", world_p, world_dir, radius))
+
+
+func _pierce_navel() -> void:
+	if navel_pierced:
+		return
+	navel_pierced = true
+	navel_insert = 0.0
+	navel_live = 0.0
+	_navel_grab = false
+	_navel_deep_t = 0.0
+	var n := -_frame.basis.z
+	if n.length_squared() < 1e-8:
+		n = Vector3(0, 0, -1)
+	_apply_puncture_hole(_frame.origin, n.normalized(), NAVEL_PIERCE_R)
+
+
+func debug_navel_hold_at_depth(t: float, seconds: float) -> void:
+	set_interact_mode("navel")
+	navel_insert = clampf(t, 0.0, 1.0)
+	_navel_deep_t = maxf(0.0, seconds)
+
+
 func reset_interaction() -> void:
 	_drag_active = false
 	_drag_off = Vector3.ZERO
@@ -735,6 +839,11 @@ func reset_interaction() -> void:
 	navel_insert = 0.0
 	navel_live = 0.0
 	_navel_grab = false
+	navel_blush = 0.0
+	navel_pierced = false
+	_navel_deep_t = 0.0
+	_blade_entry_cut = false
+	_blade_exit_cut = false
 
 
 func is_dragging() -> bool:
@@ -973,6 +1082,8 @@ func debug_snapshot() -> Dictionary:
 		"wounds": tools.wounds.size(),
 		"damage": tools.damage.size(),
 		"navel_insert": navel_insert,
+		"navel_blush": navel_blush,
+		"navel_pierced": navel_pierced,
 		"navel_live": navel_live,
 		"navel_plane_z": _navel_plane_z,
 		"fist_colon_open": _rod_tip_s + (0.01 if _rod_reach_s > 0.02 else 0.0),
@@ -1051,8 +1162,25 @@ func _step_navel(dt: float) -> void:
 	elif not play:
 		_navel_thrust_phase = 0.0
 		_navel_stir_phase = 0.0
+	if navel_pierced:
+		play = false
+		t = 0.0
+		sx = 0.0
+		sy = 0.0
+		_navel_grab = false
 	navel_live = t if play else 0.0
 	navel_stir_off = Vector2(sx, sy)
+	var want_blush := 0.0
+	if play and navel_live > 0.08:
+		want_blush = smoothstep(0.08, 0.55, navel_live)
+	var blush_k := 5.0 if want_blush > navel_blush else 1.7
+	navel_blush += (want_blush - navel_blush) * (1.0 - exp(-blush_k * dt))
+	if play and not navel_pierced and navel_live >= 0.98:
+		_navel_deep_t += dt
+		if _navel_deep_t >= NAVEL_PIERCE_HOLD:
+			_pierce_navel()
+	else:
+		_navel_deep_t = 0.0
 	if secondary != null and play and navel_live > NAVEL_CONTACT_T:
 		var u1: float = navel_insert_morph(navel_live, navel_depth_ratio)["u"]
 		secondary.set("breath_boost", maxf(float(secondary.get("breath_boost")), u1 * 0.4))
@@ -1070,6 +1198,14 @@ func _step_tools(dt: float) -> void:
 		if _waves.size() > 4:
 			_waves.pop_front()
 		_gut_exc = minf(0.35, _gut_exc + 0.12)
+		if not _blade_entry_cut:
+			_blade_entry_cut = _apply_puncture_hole(_frame * tools.entry, (_frame.basis * tools.blade_dir).normalized(), 0.016 if tools.bayonet_kind == "long" else 0.018)
+	if tools.punctured and not _blade_exit_cut and bool(tools.get("_back_spawned")):
+		var ex: Variant = tools.get("_exit")
+		if ex is Dictionary and not (ex as Dictionary).is_empty() and (ex as Dictionary).has("p"):
+			var ep: Vector3 = (ex as Dictionary)["p"]
+			var en: Vector3 = (ex as Dictionary).get("n", Vector3(0, 0, -1))
+			_blade_exit_cut = _apply_puncture_hole(_frame * ep, (_frame.basis * en).normalized(), 0.014)
 	if tools.auto_released:
 		tools.auto_released = false
 	var h := 0.0
@@ -1378,9 +1514,10 @@ func _push_uniforms() -> void:
 	var nD := clampf(float(nm["depth"]), 0.0, 1.0) * 0.092
 	var ncap := minf(nhy * 0.85, nD * 0.38)
 	for m in _skin_mats:
-		m.set_shader_parameter("navel_on", 1.0 if n_on else 0.0)
+		m.set_shader_parameter("navel_on", 1.0 if (n_on and not navel_pierced) else 0.0)
 		m.set_shader_parameter("navel_m", Vector4(nhx, nhy, nD, ncap))
 		m.set_shader_parameter("navel_s", Vector2(clampf(float(nm["squeeze"]), 0.0, 1.0), _navel_plane_z))
+		m.set_shader_parameter("navel_blush", navel_blush)
 	var fb := tools.fist_bulge_params()
 	var fpar := Vector4(tools.fist_bulge, tools.fist_spread, tools.fist_rise, tools.fist_lever)
 	for m in _skin_mats:
