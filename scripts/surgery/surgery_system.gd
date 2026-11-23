@@ -4115,6 +4115,7 @@ func _update_guts(dt: float) -> void:
 		fy = host.global_position.y
 	if is_on_exam_bed():
 		fy = maxf(fy, _catch_top_y())
+	_carry_ropes(host)
 	# 0.4.04：系膜锚点 = 创缘一圈往创口中心收 20%、再往腹腔内 1cm（肠袢挂在创口周围）。
 	var na0 := Vector3.ZERO
 	for gp0 in _gut_pulls:
@@ -4160,6 +4161,40 @@ func _update_guts(dt: float) -> void:
 		if rr != null and is_instance_valid(rr) and bool(rr.call("retract_done")):
 			_remove_gut_pull(i)
 			gut_putbacks_done += 1
+
+
+## 0.4.08：坐在载具里时外露肠管在载具局部坐标系里模拟（每帧随载体刚体搬运 + 重力随载体转），
+## 加速 / 转弯 / 高速都不会甩、拖尾或拉爆；不在载具里时（步行、检查床）完全不变。
+var _carrier_prev: Transform3D = Transform3D.IDENTITY
+var _carrier_b0: Basis = Basis.IDENTITY
+var _carrier_has: bool = false
+var carrier_carries: int = 0
+
+
+func _carry_ropes(host: Node) -> void:
+	var cx: Variant = host.call("vehicle_carrier") if host and host.has_method("vehicle_carrier") else null
+	var grav := Vector3(0.0, -9.8, 0.0)
+	if cx is Transform3D:
+		var c: Transform3D = cx
+		c.basis = c.basis.orthonormalized()
+		if not _carrier_has:
+			_carrier_has = true
+			_carrier_prev = c
+			_carrier_b0 = c.basis
+		var d := c * _carrier_prev.affine_inverse()
+		_carrier_prev = c
+		grav = (c.basis * _carrier_b0.inverse()) * grav
+		for gp in _gut_pulls:
+			var rope: Node = (gp as Dictionary)["rope"]
+			if rope and is_instance_valid(rope):
+				rope.call("carry", d)
+		carrier_carries += 1
+	else:
+		_carrier_has = false
+	for gp2 in _gut_pulls:
+		var r2: Node = (gp2 as Dictionary)["rope"]
+		if r2 and is_instance_valid(r2):
+			r2.set("gravity", grav)
 
 
 func _gut_inner_world(i: int, j: int, fr: Transform3D) -> Vector3:

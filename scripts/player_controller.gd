@@ -815,7 +815,7 @@ func _body_interp_reset() -> void:
 	if occupancy != "":
 		return
 	if _body and _body_interp_ready:
-		_body.position = _body_rest_pos
+		_body.position = _body_rest_pos + _fp_body_off
 
 
 func _body_interp_apply() -> void:
@@ -833,7 +833,19 @@ func _body_interp_apply() -> void:
 	var off := _base_origin() - global_position
 	if not off.is_finite() or off.length() > 1.0:
 		off = Vector3.ZERO
-	_body.position = _body_rest_pos + global_transform.basis.inverse() * off
+	# 0.4.08：保留第一人称的「身体后退」偏移（_fp_body_off）。0.4.07 的插值写回把它每个渲染帧
+	# 冲掉 → 奔跑时身体回到眼点下方，相机切进自己的脖子（validate 的 fp clip）。
+	_body.position = _body_rest_pos + _fp_body_off + global_transform.basis.inverse() * off
+
+
+## 0.4.08：坐在跑车 / 战斗机里时返回载具（插值后）的世界变换，乳摇与外露肠管据此在载具局部系里模拟；否则 null。
+func vehicle_carrier() -> Variant:
+	if occupancy != "car" and occupancy != "plane":
+		return null
+	var vs0: Node = get_parent().get("vehicle_system") if get_parent() else null
+	if vs0 == null or not vs0.has_method("seat_carrier_xf"):
+		return null
+	return vs0.call("seat_carrier_xf")
 
 
 ## 自检：身体渲染偏移（米）与镜头插值偏移之差，应为 0。
@@ -841,7 +853,7 @@ func debug_body_interp_error() -> float:
 	if _body == null:
 		return 99.0
 	var want := _base_origin() - global_position
-	var got := (_body.global_position - global_position) - global_transform.basis * _body_rest_pos
+	var got := (_body.global_position - global_position) - global_transform.basis * (_body_rest_pos + _fp_body_off)
 	return got.distance_to(want)
 
 
@@ -849,7 +861,7 @@ func debug_body_interp_error() -> float:
 func debug_body_render_error() -> float:
 	if _body == null:
 		return 99.0
-	var want := _base_origin() + global_transform.basis * _body_rest_pos
+	var want := _base_origin() + global_transform.basis * (_body_rest_pos + _fp_body_off)
 	# Player 与 Body 都不走引擎插值 → 渲染变换就是 global_transform（若 Player 走插值，这里会再叠一层插值偏移）。
 	var got := _body.global_position
 	if physics_interpolation_mode != Node.PHYSICS_INTERPOLATION_MODE_OFF and is_physics_interpolated_and_enabled():
@@ -1536,6 +1548,12 @@ func _process(delta: float) -> void:
 		if occupancy == "exam_bed" and play_mode == GameMode.DISPLAY:
 			_update_tp_camera(delta)
 			_push_view_spin(delta)
+		elif occupancy == "car" or occupancy == "plane":
+			# 0.4.08：驾驶坐姿在渲染帧里按载具「插值后」的变换摆放，且在本节点（-10）里先于
+			# 子节点（脏器 / 手术肠管）执行 → 身体与载具网格每帧刚性同步，不再闪烁 / 拖影。
+			var vs0: Node = get_parent().get("vehicle_system") if get_parent() else null
+			if vs0 and vs0.has_method("seat_process"):
+				vs0.call("seat_process", delta)
 		return
 	# 在面板上松开按键时收不到 release → 以实际按键状态为准。
 	if _rmb_down and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
@@ -2741,6 +2759,7 @@ func _update_fp_eye(delta: float, moving: bool, sprinting: bool, airborne: bool)
 		_loco_back = 0.0
 		_jump_eye_u = 0.0
 		_fp_eye_init = false
+		_fp_body_off = Vector3.ZERO
 		_body.position = Vector3.ZERO
 		return
 	if airborne:
@@ -2754,7 +2773,8 @@ func _update_fp_eye(delta: float, moving: bool, sprinting: bool, airborne: bool)
 		back = FP_BACK_WALK
 	_loco_back += (back - _loco_back) * (1.0 - exp(-10.0 * delta))
 	var fwd := _body.transform.basis.z  # 网格 +Z = 面朝方向
-	_body.position = -Vector3(fwd.x, 0.0, fwd.z).normalized() * _loco_back
+	_fp_body_off = -Vector3(fwd.x, 0.0, fwd.z).normalized() * _loco_back
+	_body.position = _body_rest_pos + _fp_body_off
 	var want := _fp_eye_target(moving, sprinting)
 	if not _fp_eye_init:
 		_fp_eye_smooth = want
@@ -2762,6 +2782,44 @@ func _update_fp_eye(delta: float, moving: bool, sprinting: bool, airborne: bool)
 	var err := _fp_eye_smooth.distance_to(want)
 	var k := 1.0 - exp(-(22.0 if (err > 0.28 or is_stance_blending()) else 12.0) * delta)
 	_fp_eye_smooth = _fp_eye_smooth.lerp(want, k)
+	_fp_eye_smooth += _fp_neck_clear_push(_fp_eye_smooth)
+
+
+## 0.4.08：奔跑 / 跳跃时动画把脖子往前带，眼点必须始终在脖子（C_Neck_a）前方 FP_NECK_CLEAR，
+## 否则近裁面会切进自己的脖子。只沿身体水平朝向前推，不改高度；平时（已在前方）不起作用。
+const FP_NECK_CLEAR := 0.085
+const FP_HEAD_CLEAR := 0.075
+var fp_neck_push: float = 0.0
+var _fp_body_off := Vector3.ZERO
+
+
+func _fp_neck_clear_push(eye_local: Vector3) -> Vector3:
+	var skel := get_skeleton()
+	if skel == null:
+		return Vector3.ZERO
+	var ni := skel.find_bone("C_Neck_a")
+	var hi := skel.find_bone("C_Head_a")
+	if ni < 0:
+		return Vector3.ZERO
+	var fwd := _body.global_transform.basis.z
+	fwd = Vector3(fwd.x, 0.0, fwd.z)
+	if fwd.length_squared() < 1e-6:
+		return Vector3.ZERO
+	fwd = fwd.normalized()
+	var base := global_position - Vector3(0.0, _step_smooth, 0.0)
+	var eye_w := base + eye_local
+	var neck := skel.global_transform * skel.get_bone_global_pose(ni).origin
+	var need := FP_NECK_CLEAR - (eye_w - neck).dot(fwd)
+	if hi >= 0:
+		var head := skel.global_transform * skel.get_bone_global_pose(hi).origin
+		var hd := eye_w - head
+		var ahead := hd.dot(fwd)
+		var lateral := (hd - fwd * ahead).length()
+		if lateral < FP_HEAD_CLEAR:
+			var want_ahead := sqrt(maxf(0.0, FP_HEAD_CLEAR * FP_HEAD_CLEAR - lateral * lateral))
+			need = maxf(need, want_ahead - ahead)
+	fp_neck_push = maxf(0.0, need)
+	return fwd * fp_neck_push
 
 
 func _fp_eye_pivot_pos() -> Vector3:

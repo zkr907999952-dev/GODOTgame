@@ -45,6 +45,14 @@ var _sides: Array = []  # Array[Dictionary]
 var _acc: float = 0.0
 var _inited: bool = false
 var _pending_impulse: Vector3 = Vector3.ZERO
+## 0.4.08：坐在载具里时由 player_controller 每帧写入载具（插值后）的世界变换。
+## 有载体时每帧先把质点状态随载体做刚体搬运（= 在载具局部坐标系里积分），
+## 重力也随载体转动 → 载具的加速 / 刹车 / 转弯 / 翻滚不会甩动乳房；下车置 null，步行行为完全不变。
+var carrier: Variant = null
+var _carrier_prev: Transform3D = Transform3D.IDENTITY
+var _carrier_b0: Basis = Basis.IDENTITY
+var _carrier_has: bool = false
+var _gravity: Vector3 = GRAVITY
 
 
 func setup(skel: Skeleton3D) -> bool:
@@ -141,7 +149,8 @@ func _anchor_world(s: Dictionary) -> Vector3:
 func _equilibrium_offset(fs: float) -> Vector3:
 	# 弹簧静止点抬高 g/k，使静止时质点只下垂 static_sag：失重时会上浮 g/k（再被限幅）。
 	var wv := TAU * freq_vert * fs
-	return Vector3(0.0, -static_sag, 0.0) - GRAVITY / (wv * wv)
+	# 0.4.08：坐在载具里重力随载体转动（_gravity），平衡点同步转动 → 载具倾斜 / 翻滚时相对身体不变。
+	return _gravity.normalized() * static_sag - _gravity / (wv * wv)
 
 
 func update(delta: float) -> void:
@@ -169,6 +178,7 @@ func update(delta: float) -> void:
 			_add_impulse(_pending_impulse)
 			_pending_impulse = Vector3.ZERO
 	var dt := clampf(delta, 0.0, 0.1)
+	_apply_carrier()
 	_update_view_offset(dt)
 	_acc += dt
 	var steps := int(floor(_acc / SUBSTEP))
@@ -194,6 +204,32 @@ func update(delta: float) -> void:
 		_apply(s, a1)
 
 
+func _apply_carrier() -> void:
+	if not (carrier is Transform3D):
+		_carrier_has = false
+		_gravity = GRAVITY
+		return
+	var cx: Transform3D = carrier
+	cx.basis = cx.basis.orthonormalized()
+	if not _carrier_has:
+		_carrier_has = true
+		_carrier_prev = cx
+		_carrier_b0 = cx.basis
+	var d := cx * _carrier_prev.affine_inverse()
+	_carrier_prev = cx
+	for s in _sides:
+		s["p"] = d * (s["p"] as Vector3)
+		s["a_prev"] = d * (s["a_prev"] as Vector3)
+		s["v"] = d.basis * (s["v"] as Vector3)
+		s["tp"] = d.basis * (s["tp"] as Vector3)
+		s["tv"] = d.basis * (s["tv"] as Vector3)
+	_gravity = (cx.basis * _carrier_b0.inverse()) * GRAVITY
+
+
+func is_carried() -> bool:
+	return _carrier_has
+
+
 func _integrate(s: Dictionary, a0: Vector3, a1: Vector3, steps: int) -> void:
 	var fs: float = s["fscale"]
 	var wv := TAU * freq_vert * fs
@@ -217,7 +253,7 @@ func _integrate(s: Dictionary, a0: Vector3, a1: Vector3, steps: int) -> void:
 		var x := p - (a + eq)
 		var rv := v - va
 		var f := Vector3(-kh * x.x - ch * rv.x, -kv * x.y - cv * rv.y, -kh * x.z - ch * rv.z)
-		var acc := f + GRAVITY
+		var acc := f + _gravity
 		v += acc * SUBSTEP
 		p += v * SUBSTEP
 		# 乳尖：被主体的加速度甩动（相对坐标），自身高频回弹

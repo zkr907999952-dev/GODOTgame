@@ -37,6 +37,8 @@ var mes_root: Vector3 = Vector3.ZERO
 var fed_len: float = 0.06
 var max_len: float = 0.9
 var floor_y: float = -1e9
+## 0.4.08：载具里随载体转动的重力（在载具局部坐标系里积分，见 carry）。
+var gravity: Vector3 = GRAVITY
 var capsules: Array = []
 ## 皮肤采样（世界坐标）
 var skin_p: PackedVector3Array = PackedVector3Array()
@@ -148,6 +150,16 @@ func _grow() -> void:
 		_grow_side = 1 - side
 
 
+## 0.4.08：把所有质点（当前 + 上一帧）随载体刚体搬运，载具运动不再产生惯性 / 拉长。
+func carry(xf: Transform3D) -> void:
+	for i in _p.size():
+		_p[i] = xf * _p[i]
+	for i in _q.size():
+		_q[i] = xf * _q[i]
+	if hold_index >= 0:
+		hold_pos = xf * hold_pos
+
+
 func step(dt: float) -> void:
 	if dt <= 0.0:
 		return
@@ -170,7 +182,7 @@ func step(dt: float) -> void:
 		if v.length_squared() > vmax * vmax:
 			v = v.normalized() * vmax
 		_q[i] = cur
-		_p[i] = cur + v + GRAVITY * dt * dt
+		_p[i] = cur + v + gravity * dt * dt
 	var mes_len := mesentery_length()
 	_update_radii()
 	capsule_pushes = 0

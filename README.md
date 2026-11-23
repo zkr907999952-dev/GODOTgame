@@ -13,6 +13,17 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 正式签名密钥和导出说明在 [`android/signing/README.md`](android/signing/README.md)，凭据在 `android/signing/credentials.env`。从 0.2.22 起使用这张新证书；若设备上已安装 0.2.6–0.2.14（旧正式证书），需先卸载再安装。
 
 
+## 0.4.08
+
+- 载具里身体刚性跟座位：原来坐姿只在物理帧按载具「未插值」变换摆放，而载具网格按插值渲染 → 行驶中身体与车身每帧错位（60 m/s 时约 0.8 m），出现闪烁 / 拖影。现在每个渲染帧按 `get_global_transform_interpolated()` 摆放（`VehicleSystem.seat_process`，在 Player 的 `_process` 里、先于脏器 / 手术子节点执行），实测髋部相对车身漂移 ≤0.1 mm。
+- 载具惯性：乳摇（`breast_physics.gd` 的 `carrier`）与外露肠管（`gut_rope.gd` 的 `carry()`）在载具局部系里模拟：每帧把粒子状态随载具刚性搬运、重力随载具旋转，平衡位置也用旋转后的重力。上车 / 下车时复位；步行时 `carrier = null`，行为不变。
+- 第一人称奔跑不再切进脖子：0.4.07 的身体插值写回每个渲染帧把第一人称「身体后退」偏移（`_loco_back`）冲掉，奔跑时身体回到眼点下方。现在偏移保留（`_fp_body_off`），另加兜底：眼点始终在 `C_Neck_a` 前方 ≥8.5 cm、离 `C_Head_a` ≥7.5 cm。`validate_headless` 通过（奔跑 / 跳跃最近 neck_ahead 202 mm）。驾驶座舱第一人称同样在脖子前方（跑车 226 mm / 战斗机 235 mm）。
+- 外阴 / 阴道 / 子宫连接：去掉阴道口处的封闭圆盘（Object_30），阴道略向背侧弯（`CANAL_BOW`）避开膀胱；外阴皮瓣裂隙边缘到阴道口内衬之间补一圈前庭网格（`VulvaVestibule`，同骨骼蒙皮），补上前联合处的皮肤小洞。`v0408_check` 校验宫颈间隙、开口对齐、法线 / 绕序、与膀胱 / 皮肤的距离、裂隙看不到体内。
+- 子宫前移 12 mm（`tools/bake_organs.py` 的 `UTERUS_MOVE`），阴道重新接到宫颈；膀胱不动；与膀胱、腹壁不相交。
+- 输卵管接子宫角（`connect_tubes`，在前移之后烘焙）：子宫壁在角部开一个圆口（半径 5 mm，边缘贴回原表面并松弛），管根 8 个顶点落到口内一圈、沉入表面约 1 mm，根部 14 mm 内平滑过渡，口与管根之间补一圈圆角三角 → 子宫 + 两条输卵管是一张闭合、绕序一致的曲面，子宫腔与管腔相通。接口信息写入 `organs_meta.json` 的 `tubes`。
+- 检查床「动作」按钮（开始手术右侧，手机 / 电脑都可点）：可扩展动作列表（`scripts/vehicles/bed_actions.gd` 的 `ACTIONS`）。第一项「掰开小穴」：双手 IK 伸到外阴，食指 / 中指落在左右大阴唇上，手到位后把 `set_vulva_spread` 推到 1；再点一次或选「停止」先合拢再收手。手腕在小腹皮肤上方、离大腿骨轴 ≥7.5 cm。
+- 版本 0.4.08 / 51。自检：`scripts/tests/v0408_check.gd`（`V0408_ONLY=model|uterus|tubes|seat|inertia|rope|fp|action`）；截图：`scripts/tests/v0408_shots.gd`（`SHOT_MODE=action`）。
+
 ## 0.4.07
 
 - 肚脐：未手术、未切到肚脐时保持原本的凹陷外观；切割用腹网仍是压平拓扑（防粘连），只有刀口 / 弹孔进入肚脐 3.5 cm 范围时才换成压平面。复原身体后凹陷恢复。

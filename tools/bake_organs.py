@@ -46,9 +46,11 @@ GUT_SCALE_Y = 0.94
 GUT_CAVITY = (-0.17, 0.15)
 UTERUS_TOP_DY = -0.098
 # 0.4.05：用户蓝线——子宫（连卵巢 / 输卵管 / 韧带）上移、后移；膀胱不动。
-UTERUS_MOVE = (0.0, 0.03, -0.012)
+UTERUS_MOVE = (0.0, 0.03, 0.0)
 # 阴道通道外口：外阴皮肤（身体中线最低处）往体内收 7mm（外口一圈不穿出皮肤）
 VULVA_INSET = 0.007
+# 0.4.08：子宫前移 12mm 后，通道中段向背侧弓起（米），保证与膀胱的间距。
+CANAL_BOW = 0.0045
 XRAY_Y = (-0.205, 0.15)
 ORGAN_BONES = ["C_Hip_a", "C_Spine_a", "C_Spine_b", "C_Spine_c", "C_Spine_d"]
 
@@ -370,6 +372,244 @@ def vulva_point(T, navel):
     return v
 
 
+def canal_mouth_loop(vc, P, top, ub, lb):
+    """内层黏膜（平均半径最小的一层）外口端的开放边界，按绕轴角度排序。"""
+    best = None
+    for p in vc:
+        me = p.obj.data
+        q = P[p.name]
+        t = (q - top) @ ub
+        r = np.linalg.norm(q - top - np.outer(t, ub), axis=1)
+        cnt = {}
+        for poly in me.polygons:
+            vs = list(poly.vertices)
+            for i in range(len(vs)):
+                e = tuple(sorted((vs[i], vs[(i + 1) % len(vs)])))
+                cnt[e] = cnt.get(e, 0) + 1
+        bv = sorted({v for e, c in cnt.items() if c == 1 for v in e})
+        bv = [v for v in bv if t[v] > lb * 0.85]
+        if len(bv) >= 6 and (best is None or r.mean() < best[0]):
+            best = (r.mean(), q[bv])
+    if best is None:
+        return []
+    L = best[1]
+    c = L.mean(0)
+    e1 = np.cross(ub, [1.0, 0.0, 0.0]); e1 /= np.linalg.norm(e1)
+    e2 = np.cross(ub, e1)
+    ang = np.arctan2((L - c) @ e2, (L - c) @ e1)
+    return L[np.argsort(ang)].tolist()
+
+
+# ---------------------------------------------------------------- 0.4.08 输卵管接子宫角
+TUBE_BLEND = 0.014      # 输卵管根部向子宫角过渡的长度（米）
+TUBE_HOLE_K = 1.18      # 子宫角开口半径 = 管根半径 × K（轻微喇叭口）
+TUBE_SINK = 0.0009      # 管根落在子宫表面内侧的深度
+TUBE_BASE_K = 0.8       # 管根圆半径 / 开口半径
+TUBES_INFO = None
+
+
+def _bm_loops(bm):
+    """bmesh 边界边按连通分组，返回有序顶点环列表。"""
+    be = [e for e in bm.edges if e.is_boundary]
+    adj = {}
+    for e in be:
+        a, b = e.verts
+        adj.setdefault(a, []).append(b)
+        adj.setdefault(b, []).append(a)
+    seen = set()
+    loops = []
+    for s in adj:
+        if s in seen:
+            continue
+        ring = [s]
+        seen.add(s)
+        prev, cur = None, s
+        while True:
+            nxt = [v for v in adj[cur] if v is not prev and v not in seen]
+            if not nxt:
+                break
+            prev, cur = cur, nxt[0]
+            ring.append(cur)
+            seen.add(cur)
+        loops.append(ring)
+    return loops
+
+
+def connect_tubes(parts):
+    """输卵管根部（8 顶点小开口）接到子宫角：子宫壁按管根开一个口，管根顶点沿角度落到开口边缘上，
+    根部 TUBE_BLEND 内平滑过渡（不改管的其余部分），开口边与管根之间用拉链三角补满 → 无缝、管腔与子宫腔连通。"""
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+    global TUBES_INFO
+    TUBES_INFO = []
+    ut = named(parts, "uterus")
+    tubes = named(parts, "trompe")
+    if not ut or not tubes:
+        return
+    uo = ut[0].obj
+    for tp in tubes:
+        ubm = bmesh.new(); ubm.from_mesh(uo.data)
+        bmesh.ops.remove_doubles(ubm, verts=ubm.verts, dist=1e-6)
+        ubm.verts.ensure_lookup_table(); ubm.faces.ensure_lookup_table()
+        ucen = sum((v.co for v in ubm.verts), Vector()) / len(ubm.verts)
+        tbm = bmesh.new(); tbm.from_mesh(tp.obj.data)
+        bmesh.ops.remove_doubles(tbm, verts=tbm.verts, dist=1e-6)
+        tbm.verts.ensure_lookup_table()
+        loops = _bm_loops(tbm)
+        def rad(r):
+            c = sum((v.co for v in r), Vector()) / len(r)
+            return sum((v.co - c).length for v in r) / len(r), c
+        loops.sort(key=lambda r: rad(r)[0])
+        base = loops[0]
+        r0, c0 = rad(base)
+        near = [v.co for v in tbm.verts if 0.003 < (v.co - c0).length < 0.009]
+        ax = (sum(near, Vector()) / max(len(near), 1) - c0).normalized()   # 管根 → 管内
+        bvh = BVHTree.FromBMesh(ubm)
+        s, n, fi, _ = bvh.find_nearest(c0)
+        n = n.normalized()
+        if (s - ucen).dot(n) < 0:
+            n = -n
+        # 子宫角开口：删掉开口半径内（只取靠管根这一侧）的子宫面
+        R = r0 * TUBE_HOLE_K
+        # 从最近面出发洪泛（只在半径 R 内）→ 开口是一块圆盘，边界是一条简单环
+        seed = ubm.faces[fi]
+        kill_set = {seed}; st = [seed]
+        while st:
+            f = st.pop()
+            for e in f.edges:
+                for g in e.link_faces:
+                    if g not in kill_set and (g.calc_center_median() - s).length < R:
+                        kill_set.add(g); st.append(g)
+        kill = list(kill_set)
+        bmesh.ops.delete(ubm, geom=kill, context="FACES_ONLY")
+        ubm.verts.ensure_lookup_table()
+        hl = _bm_loops(ubm)
+        hl.sort(key=lambda r: (sum((v.co for v in r), Vector()) / len(r) - s).length)
+        hole = hl[0]
+        hc = sum((v.co for v in hole), Vector()) / len(hole)
+        # 两个环在各自平面里按角度对齐（同一参考方向）
+        ref = n.cross(Vector((0, 0, 1)))
+        if ref.length < 1e-6:
+            ref = n.cross(Vector((1, 0, 0)))
+        ref.normalize()
+        def ang(p, c, nn):
+            d = p - c; d = d - nn * d.dot(nn)
+            r1 = ref - nn * ref.dot(nn); r1.normalize(); r2 = nn.cross(r1)
+            return math.atan2(d.dot(r2), d.dot(r1))
+        # 环保持拓扑顺序（不能按角度重排，否则边对不上）：统一成绕 n 逆时针，从最小角开始，角度展开成单调
+        def orient(ring, c):
+            a = [ang(v.co, c, n) for v in ring]
+            tot = sum(((a[(i + 1) % len(a)] - a[i] + math.pi) % (2 * math.pi)) - math.pi for i in range(len(a)))
+            if tot < 0:
+                ring = ring[::-1]; a = a[::-1]
+            k0 = min(range(len(a)), key=lambda i: a[i])
+            ring = ring[k0:] + ring[:k0]; a = a[k0:] + a[:k0]
+            out = [a[0]]
+            for i in range(1, len(a)):
+                d = ((a[i] - a[i - 1] + math.pi) % (2 * math.pi)) - math.pi
+                out.append(out[-1] + d)
+            # 开口边缘可能有小的回折：角度取单调包络，并压在 [a0, a0 + 2π) 内
+            for i in range(1, len(out)):
+                out[i] = min(max(out[i], out[i - 1] + 1e-4), a[0] + 2 * math.pi - 1e-4 * (len(out) - i))
+            return ring, out
+        hole, hole_a = orient(hole, hc)
+        base, base_a = orient(base, c0)
+        # 开口边缘整理成表面上的一个圆（等角分布，贴回原子宫表面），周围一圈顶点松弛 → 无锯齿
+        r1 = ref - n * ref.dot(n); r1.normalize(); r2 = n.cross(r1)
+        m_h = len(hole)
+        hole_a = [hole_a[0] + 2 * math.pi * i / m_h for i in range(m_h)]
+        for v, a in zip(hole, hole_a):
+            q = s + (r1 * math.cos(a) + r2 * math.sin(a)) * R
+            v.co = bvh.find_nearest(q)[0]
+        hset = set(hole)
+        ring = [v for v in ubm.verts if v not in hset and (v.co - s).length < R * 2.4 and v.link_faces]
+        for _it in range(4):
+            newp = {}
+            for v in ring:
+                nbv = [e.other_vert(v).co for e in v.link_edges]
+                if nbv:
+                    newp[v] = v.co.lerp(sum(nbv, Vector()) / len(nbv), 0.5)
+            for v, q in newp.items():
+                v.co = bvh.find_nearest(q)[0]
+        hc = s
+        hp = [v.co.copy() for v in hole]
+        def on_hole(a):
+            # 管根：开口圆内侧一圈（半径 TUBE_BASE_K·R），沉到表面下 TUBE_SINK → 拉链成一圈向管口内收的圆角
+            q = s + (r1 * math.cos(a) + r2 * math.sin(a)) * R * TUBE_BASE_K
+            return bvh.find_nearest(q)[0] - n * TUBE_SINK
+        disp = [on_hole(a) - v.co for v, a in zip(base, base_a)]
+        # 管根附近顶点：按角度取相邻两根部顶点的位移插值，沿管轴 TUBE_BLEND 内平滑衰减
+        bset = set(base)
+        for v in tbm.verts:
+            t = (v.co - c0).dot(ax)
+            if v in bset:
+                continue
+            if t > TUBE_BLEND or (v.co - c0).length > TUBE_BLEND + r0 * 2:
+                continue
+            a = base_a[0] + ((ang(v.co, c0, n) - base_a[0]) % (2 * math.pi))
+            k = len(base)
+            j = 0
+            while j < k and base_a[j] < a:
+                j += 1
+            i0 = (j - 1) % k; i1 = j % k
+            a0 = base_a[i0]; a1 = base_a[i1]
+            span = (a1 - a0) % (2 * math.pi) or 2 * math.pi
+            f = ((a - a0) % (2 * math.pi)) / span
+            d = disp[i0].lerp(disp[i1], f)
+            u = max(0.0, min(1.0, 1.0 - t / TUBE_BLEND))
+            w = u * u * (3 - 2 * u)
+            v.co += d * w
+        for v, d in zip(base, disp):
+            v.co += d
+        # 拉链：开口折线（子宫顶点）与管根（复制进子宫网格的新顶点）之间补三角。
+        # 绕序按相邻面定：与子宫开口边、管根边的已有方向相反 → 合起来是一张一致朝外的曲面。
+        nb = [ubm.verts.new(v.co.copy()) for v in base]
+        ubm.verts.ensure_lookup_table()
+        def edge_dir(bm_a, bm_b):
+            e = next((e for e in bm_a.link_edges if e.other_vert(bm_a) is bm_b), None)
+            if e is None or not e.link_loops:
+                return 0
+            lp = e.link_loops[0]
+            return 1 if lp.vert is bm_a else -1
+        na, nbn = len(hole), len(base)
+        hdir = [edge_dir(hole[i], hole[(i + 1) % na]) for i in range(na)]
+        bdir = [edge_dir(base[i], base[(i + 1) % nbn]) for i in range(nbn)]
+        A = hole_a + [hole_a[0] + 2 * math.pi]
+        B = base_a + [base_a[0] + 2 * math.pi]
+        ia = ib = 0
+        tris = []
+        while ia < na or ib < nbn:
+            if ib >= nbn or (ia < na and A[ia + 1] <= B[ib + 1]):
+                a0, a1, b0 = hole[ia], hole[(ia + 1) % na], nb[ib % nbn]
+                tris.append((a1, a0, b0) if hdir[ia] >= 0 else (a0, a1, b0))
+                ia += 1
+            else:
+                b0, b1, a0 = nb[ib], nb[(ib + 1) % nbn], hole[ia % na]
+                tris.append((b1, b0, a0) if bdir[ib] >= 0 else (b0, b1, a0))
+                ib += 1
+        made = 0
+        for t3 in tris:
+            if len(set(t3)) < 3:
+                continue
+            try:
+                f = ubm.faces.new(t3)
+            except ValueError:
+                continue
+            f.smooth = True
+            made += 1
+        base_pts = [list(v.co) for v in nb]
+        ubm.to_mesh(uo.data); uo.data.update(); ubm.free()
+        tbm.to_mesh(tp.obj.data); tp.obj.data.update(); tbm.free()
+        TUBES_INFO.append({"name": tp.name,
+                           "horn": b2t(np.array([list(s)]))[0].tolist(),
+                           "normal": b2t(np.array([list(n)]))[0].tolist(),
+                           "axis": b2t(np.array([list(ax)]))[0].tolist(),
+                           "base_radius": float(r0), "hole_radius": float(R),
+                           "base_loop": b2t(np.array(base_pts)).tolist(),
+                           "zipper_tris": made})
+        print("tube", tp.name, "r0 %.4f hole verts %d zipper %d" % (r0, len(hole), made))
+
+
 def place_pelvis(parts, navel, T=None):
     import re
     # 只按物体名 + 材质判断（父节点名 vulve.002 下的 'vagin' 材质是阴道通道，保留）
@@ -436,6 +676,26 @@ def place_pelvis(parts, navel, T=None):
             q = (P[p.name] - top) @ R.T
             q = q + (k - 1.0) * np.outer(q @ ub, ub)
             P[p.name] = top + q
+        # 0.4.08：子宫前移后通道中段贴近膀胱 → 通道中段向后（背侧）弓起 CANAL_BOW，两端（宫颈 / 外口）不动。
+        back = np.array([0.0, 0.0, -1.0]); back = back - (back @ ub) * ub; back /= np.linalg.norm(back)
+        for p in vc:
+            q = P[p.name]
+            t = np.clip(((q - top) @ ub) / lb, 0.0, 1.0)
+            P[p.name] = q + np.outer(CANAL_BOW * np.sin(np.pi * t) ** 1.5, back)
+        # 0.4.08：去掉外口处封住管腔的薄盘（Object_30 那片，沿轴向厚度 < 3mm），让阴道口真正敞开；
+        # 记录内层黏膜（法线朝内那层）外口的一圈边界，运行时前庭（vulva_flaps）从皮肤裂隙接到这一圈。
+        drop = []
+        for p in vc:
+            tt = (P[p.name] - top) @ ub
+            if tt.max() - tt.min() < 0.003 and tt.min() > lb * 0.8:
+                drop.append(p)
+        for p in drop:
+            vc.remove(p)
+            parts.remove(p)
+            bpy.data.objects.remove(p.obj, do_unlink=True)
+            del P[p.name]
+        print("vagina: dropped mouth discs", len(drop))
+        mouth_loop = canal_mouth_loop(vc, P, top, ub, lb)
         # 外口附近：通道顶点必须在皮肤上方（体内），按水平 3mm 内最近的皮肤点比较高度
         Vn = np.concatenate([P[p.name] for p in vc])
         low = Vn[Vn[:, 1] < tgt[1] + 0.012]
@@ -449,6 +709,7 @@ def place_pelvis(parts, navel, T=None):
         VAGINA_INFO_CLEAR = worst
         print("vagina opening clearance above skin %.4f" % worst)
         VAGINA_INFO = {"cervix": top.tolist(), "opening": tgt.tolist(), "vulva_skin": vul.tolist(),
+                       "axis": ub.tolist(), "bow": CANAL_BOW, "mouth_loop": mouth_loop,
                        "length": float(lb), "stretch": float(k),
                        "skin_clearance": float(VAGINA_INFO_CLEAR),
                        "tilt_deg": float(np.degrees(np.arccos(np.clip(-ub[1], -1, 1))))}
@@ -673,6 +934,7 @@ def main():
     # ---- pelvis
     pparts = import_parts(PELVIS_GLB, weld=False)
     pparts, umin, umax = place_pelvis(pparts, navel, T)
+    connect_tubes(pparts)
     print("uterus box", umin, umax)
     bladder_pos = [get_pos(p) for p in named(pparts, "vessie|bladder")]
     if bladder_pos:
@@ -766,6 +1028,7 @@ def main():
         "uterus": {"min": umin.tolist(), "max": umax.tolist()},
         "uterus_move": list(UTERUS_MOVE),
         "vagina": VAGINA_INFO,
+        "tubes": TUBES_INFO,
         # web attachXray(yX0 - navel.y, yX1 - navel.y, 0.12, skinZ - 0.01 - navel.z)
         "xray": {"y0": XRAY_Y[0], "y1": XRAY_Y[1], "x_max": 0.12, "z_front": -0.01},
         "profile": {"y": prof[0].tolist(), "half_x": prof[1].tolist(), "z_front": prof[2].tolist(), "z_back": prof[3].tolist()},

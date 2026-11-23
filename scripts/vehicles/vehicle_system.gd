@@ -9,6 +9,9 @@ extends Node3D
 class_name VehicleSystem
 
 const SeatPose := preload("res://scripts/vehicles/seat_pose.gd")
+const BedActionsScript := preload("res://scripts/vehicles/bed_actions.gd")
+## 0.4.08：检查床动作（HUD「动作」按钮的列表 + 程序化姿势）
+var bed_actions = BedActionsScript.new()
 const CAR_SCENE := "res://scenes/vehicles/car.tscn"
 const PLANE_SCENE := "res://scenes/vehicles/plane.tscn"
 const BED_SCENE := "res://scenes/vehicles/exam_bed.tscn"
@@ -1123,6 +1126,8 @@ func release_occupancy() -> void:
 
 func _finish_exit(dest: Vector3, restore_collision: bool) -> bool:
 	var v := occupied
+	if bed_actions.busy() and player:
+		bed_actions.reset(player.call("get_organs") if player.has_method("get_organs") else null)
 	if v and v.has_method("on_exit"):
 		v.call("on_exit")
 	_end_seat()
@@ -1611,6 +1616,10 @@ func _apply_exam_pose(delta: float = 0.016) -> void:
 		var sl: Vector3 = bed.stirrup_l_global() + left * calf_out + feet * foot_along + bed_up * 0.052
 		var sr: Vector3 = bed.stirrup_r_global() - left * calf_out + feet * foot_along + bed_up * 0.052
 		ExamPose.apply(skel, sl, sr, bed.backrest_angle, al, ar, feet, bed_up)
+		# 0.4.08：检查床动作（如「掰开小穴」）覆盖手臂 / 手，并驱动外阴开度。
+		var organs: Node = player.call("get_organs") if player.has_method("get_organs") else null
+		bed_actions.step(delta, organs)
+		bed_actions.apply_pose(skel, organs)
 		# Alive: subtle chest / belly breath after the static pose, before
 		# head-follow, so it does not fight IK or the waist flex. Skip this
 		# in observation mode — that path calls update() after set_gaze_target.
@@ -1817,6 +1826,15 @@ func _begin_seat(v: Node, kind: String) -> void:
 	if body:
 		body.visible = true
 	_apply_seat_pose()
+	# 0.4.08：上车是一次瞬移（站姿 → 坐姿），乳摇从坐姿重新开始，不要被这一下甩起来。
+	_reset_breasts()
+
+
+func _reset_breasts() -> void:
+	var sec: Object = player.call("get_secondary") if player and player.has_method("get_secondary") else null
+	var br: Object = sec.get("breasts") if sec else null
+	if br and br.has_method("reset"):
+		br.call("reset")
 
 
 func _end_seat() -> void:
@@ -1826,6 +1844,11 @@ func _end_seat() -> void:
 	var skel: Skeleton3D = player.call("get_skeleton") if player and player.has_method("get_skeleton") else null
 	if skel:
 		SeatPose.clear(skel)
+	var sec: Object = player.call("get_secondary") if player and player.has_method("get_secondary") else null
+	var br: Object = sec.get("breasts") if sec else null
+	if br:
+		br.set("carrier", null)
+		br.call("reset")
 	var hb: Node = player.get("_hitboxes") if player else null
 	if hb and _seat_hitboxes_were and not bool(player.call("is_dead")):
 		hb.call("set_enabled", true)
@@ -1869,6 +1892,55 @@ func _apply_seat_pose() -> void:
 		body.global_position += vb * Vector3(0.0, 0.0, -seat_shift)
 		skel.force_update_transform()
 	SeatPose.apply_hands(skel, xf * _seat_hand_l, xf * _seat_hand_r)
+
+
+## 0.4.08：检查床动作接口（HUD 用）。只有玩家自己躺在检查床上时可用。
+func bed_actions_available() -> bool:
+	return occupied != null and is_instance_valid(occupied) and kind_of(occupied) == "exam_bed" and player != null and not bool(player.call("is_dead"))
+
+
+func bed_action_list() -> Array:
+	return bed_actions.list() if bed_actions_available() else []
+
+
+func toggle_bed_action(id: String) -> bool:
+	if not bed_actions_available():
+		return false
+	return bed_actions.toggle(id)
+
+
+func stop_bed_action() -> void:
+	bed_actions.stop()
+
+
+## 0.4.08：渲染帧入口（Player._process 调用，先于脏器 / 手术子节点）。
+## 按载具插值后的变换重摆坐姿，乳摇在载具局部系里积分（载具加速度不再输入）。
+func seat_process(delta: float) -> void:
+	if seat_kind == "" or occupied == null or not is_instance_valid(occupied) or player == null:
+		return
+	if debug_seat_physics_only:
+		return
+	_apply_seat_pose()
+	var sec: Object = player.call("get_secondary") if player.has_method("get_secondary") else null
+	var br: Object = sec.get("breasts") if sec else null
+	if br:
+		br.set("carrier", null if debug_world_frame_jiggle else _vehicle_visual_xf(occupied))
+		br.call("update", delta)
+	seat_frames += 1
+
+
+var seat_frames: int = 0
+## 校验用：true = 乳摇按旧方式在世界坐标系里积分（对照组）
+var debug_world_frame_jiggle: bool = false
+## 校验用：true = 只在物理帧摆坐姿（0.4.07 行为，对照组）
+var debug_seat_physics_only: bool = false
+
+
+## 载具（插值后）世界变换；不在驾驶位时 null。
+func seat_carrier_xf() -> Variant:
+	if seat_kind == "" or occupied == null or not is_instance_valid(occupied):
+		return null
+	return _vehicle_visual_xf(occupied)
 
 
 ## 第一人称座舱视点（载具局部）：随驾驶员身体一起前移。

@@ -221,11 +221,14 @@ func _build_vulva_flaps() -> void:
 			best = mi
 	if best == null:
 		return
+	var ml := PackedVector3Array()
+	for q in (vg.get("mouth_loop", []) as Array):
+		ml.append(Vector3(q[0], q[1], q[2]))
 	var vf = VulvaFlaps.new()
-	if vf.build(best, vp, Vector3(op[0], op[1], op[2])):
+	if vf.build(best, vp, Vector3(op[0], op[1], op[2]), ml):
 		vulva = vf
 		vf.flaps_mi.add_to_group("vulva_flaps")
-		print("organs: vulva flaps faces=", vf.removed_faces, " slit verts=", vf.slit_verts)
+		print("organs: vulva flaps faces=", vf.removed_faces, " slit verts=", vf.slit_verts, " rim=", vf.rim_size(), " vestibule tris=", vf.vest_tris, " holes filled=", vf.holes_filled)
 	else:
 		push_warning("organs: vulva flap split failed")
 

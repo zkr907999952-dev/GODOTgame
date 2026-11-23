@@ -208,11 +208,11 @@ func _check_organs_0405() -> void:
 	_ok(rig != null, "organ rig present")
 	var meta: Dictionary = rig.get("meta")
 	var mv: Array = meta.get("uterus_move", [])
-	_ok(mv.size() == 3 and is_equal_approx(float(mv[1]), 0.03) and is_equal_approx(float(mv[2]), -0.012), "uterus moved up 30 mm and back 12 mm (%s)" % [mv])
+	_ok(mv.size() == 3 and is_equal_approx(float(mv[1]), 0.03) and (is_equal_approx(float(mv[2]), -0.012) or is_equal_approx(float(mv[2]), 0.0)), "uterus moved up 30 mm (0.4.08: back-shift undone, 12 mm forward again) (%s)" % [mv])
 	var ut := _box(_organ_verts("uterus"))
 	var bl := _box(_organ_verts("vessie"))
 	# 0.4.04 的位置：子宫 y 0.9031..0.9623、z 0.0162..0.0714；膀胱 y 0.8791..0.9271、z 0.0475..0.0836
-	_ok(absf(ut.position.y - 0.9331) < 0.002 and absf(ut.position.z - 0.0042) < 0.002, "uterus box now y %.4f.. z %.4f.. (was 0.9031 / 0.0162)" % [ut.position.y, ut.position.z])
+	_ok(absf(ut.position.y - 0.9331) < 0.002 and (absf(ut.position.z - 0.0042) < 0.002 or absf(ut.position.z - (0.0042 + float(mv[2]) + 0.012)) < 0.002), "uterus box now y %.4f.. z %.4f.. (was 0.9031 / 0.0162)" % [ut.position.y, ut.position.z])
 	_ok(absf(bl.position.y - 0.8791) < 0.001 and absf(bl.end.z - 0.0836) < 0.001, "bladder unchanged (y %.4f, z max %.4f)" % [bl.position.y, bl.end.z])
 	var GV := PackedVector3Array()
 	for mi in rig.get("organ_meshes"):

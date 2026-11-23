@@ -2759,6 +2759,7 @@ func _process(_delta: float) -> void:
 	_refresh_world_hp(_delta)
 	_refresh_corpse_drag_btn()
 	_refresh_possess_aim(_delta)
+	_refresh_bed_actions()
 	# 模式由任何途径改变（Tab / 按钮 / 脚本）都刷新状态栏
 	if _player and "play_mode" in _player and int(_player.play_mode) != _last_mode:
 		_last_mode = int(_player.play_mode)
@@ -3809,7 +3810,130 @@ func _surgery() -> Node:
 	return null
 
 
+# ------------------------------------------------------------------ 0.4.08 检查床「动作」
+var _btn_bed_action: Button
+var _bed_action_panel: PanelContainer
+var _bed_action_box: VBoxContainer
+var _bed_action_sig: String = ""
+var debug_bed_action_visible: bool = false
+
+
+func _build_bed_action_ui(root: Control) -> void:
+	_btn_bed_action = _make_chrome_button("动作")
+	_btn_bed_action.name = "BedActionButton"
+	_btn_bed_action.visible = false
+	_btn_bed_action.pressed.connect(_on_bed_action_button)
+	root.add_child(_btn_bed_action)
+	_bed_action_panel = PanelContainer.new()
+	_bed_action_panel.name = "BedActionPanel"
+	_style_panel(_bed_action_panel)
+	_bed_action_panel.visible = false
+	_bed_action_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	_bed_action_box = VBoxContainer.new()
+	_bed_action_box.add_theme_constant_override("separation", 8)
+	_bed_action_panel.add_child(_bed_action_box)
+	root.add_child(_bed_action_panel)
+
+
+func _bed_vs() -> Node:
+	if _vehicle_system:
+		return _vehicle_system
+	var g := _game()
+	return g.get("vehicle_system") if g else null
+
+
+func _on_bed_action_button() -> void:
+	if _bed_action_panel == null:
+		return
+	_bed_action_panel.visible = not _bed_action_panel.visible
+	_bed_action_sig = ""
+	_refresh_bed_actions()
+
+
+func _on_bed_action_pick(id: String) -> void:
+	var vs := _bed_vs()
+	if vs == null:
+		return
+	if id == "__stop":
+		vs.call("stop_bed_action")
+	else:
+		vs.call("toggle_bed_action", id)
+	_bed_action_panel.visible = false
+	_bed_action_sig = ""
+	_refresh_bed_actions()
+
+
+## 测试 / 截图用：等同在列表里点一下。
+func debug_run_bed_action(id: String) -> void:
+	_on_bed_action_pick(id)
+
+
+func debug_bed_action_labels() -> PackedStringArray:
+	var out := PackedStringArray()
+	if _bed_action_box:
+		for c in _bed_action_box.get_children():
+			if c is Button:
+				out.append((c as Button).text)
+	return out
+
+
+func _refresh_bed_actions() -> void:
+	if _btn_bed_action == null:
+		return
+	var vs := _bed_vs()
+	var s := _surgery()
+	var surgery_on := s != null and bool(s.call("is_active"))
+	var avail := vs != null and vs.has_method("bed_actions_available") and bool(vs.call("bed_actions_available")) and not is_map_open()
+	var show := avail and not surgery_on
+	debug_bed_action_visible = show
+	_btn_bed_action.visible = show
+	if not show:
+		_bed_action_panel.visible = false
+		return
+	var sl := _safe.x + 16.0
+	var st := _safe.y + 16.0
+	var enter_w := 120.0 if touch_ui else 100.0
+	if _btn_surgery_enter and _btn_surgery_enter.visible:
+		enter_w = maxf(enter_w, _btn_surgery_enter.size.x)
+	_btn_bed_action.custom_minimum_size = Vector2(110, 40) if touch_ui else Vector2(88, 32)
+	_btn_bed_action.position = Vector2(sl + enter_w + 8.0, st + 56.0)
+	var bs: Object = vs.get("bed_actions")
+	var busy := bs != null and bool(bs.call("busy"))
+	var act := str(bs.get("active_id")) if bs else ""
+	_btn_bed_action.text = ("动作 · 进行中" if act != "" else "动作 ▾")
+	_style_button(_btn_bed_action, _bed_action_panel.visible or act != "")
+	if not _bed_action_panel.visible:
+		return
+	var items: Array = vs.call("bed_action_list")
+	var sig := "%s|%s|%s" % [act, str(busy), str(touch_ui)]
+	if sig != _bed_action_sig:
+		_bed_action_sig = sig
+		for c in _bed_action_box.get_children():
+			c.queue_free()
+		var title := Label.new()
+		title.text = "检查床动作"
+		title.add_theme_font_size_override("font_size", 14)
+		title.modulate = Color(1, 1, 1, 0.7)
+		_bed_action_box.add_child(title)
+		for it in items:
+			var d: Dictionary = it
+			var b := _make_chrome_button(str(d["stop_label"]) if bool(d["active"]) else str(d["label"]))
+			b.custom_minimum_size = Vector2(180, 48) if touch_ui else Vector2(150, 34)
+			b.add_theme_font_size_override("font_size", 17 if touch_ui else 15)
+			_style_button(b, bool(d["active"]))
+			b.pressed.connect(_on_bed_action_pick.bind(str(d["id"])))
+			_bed_action_box.add_child(b)
+		if busy:
+			var stop := _make_chrome_button("停止")
+			stop.custom_minimum_size = Vector2(180, 48) if touch_ui else Vector2(150, 34)
+			stop.add_theme_font_size_override("font_size", 17 if touch_ui else 15)
+			stop.pressed.connect(_on_bed_action_pick.bind("__stop"))
+			_bed_action_box.add_child(stop)
+	_bed_action_panel.position = _btn_bed_action.position + Vector2(0.0, _btn_bed_action.size.y + 6.0)
+
+
 func _build_surgery_ui(root: Control) -> void:
+	_build_bed_action_ui(root)
 	_btn_surgery_enter = _make_chrome_button("开始手术")
 	_btn_surgery_enter.name = "SurgeryEnterButton"
 	_btn_surgery_enter.visible = false
