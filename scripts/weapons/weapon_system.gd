@@ -286,6 +286,26 @@ func holster() -> void:
 	select("")
 
 
+## 0.4.07 附身：立即放下手中的枪（不播收枪动画），返回 {id, xf, scene} 供分身保留持枪外观。
+func possession_release() -> Dictionary:
+	var out := {}
+	if current != "" and state != "holstered" and gun != null and is_instance_valid(gun):
+		var w: WeaponDef = cur_def()
+		out = {"id": current, "xf": (gun as Node3D).global_transform, "scene": w.scene if w else null}
+	if current != "" or gun != null:
+		_unload_weapon()
+	current = ""
+	pending = ""
+	state = "holstered"
+	ads = false
+	trigger = false
+	_ik_w = 0.0
+	if view:
+		view.visible = false
+	weapon_changed.emit("")
+	return out
+
+
 ## 数字键：第 i 把（0 起）；当前武器再按 = 收枪
 func select_slot(i: int) -> void:
 	if i < 0 or i >= defs.size():

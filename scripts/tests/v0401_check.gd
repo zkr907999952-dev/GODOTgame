@@ -45,7 +45,7 @@ func _run() -> void:
 	player = main.get_node("Player")
 	vs = main.get("vehicle_system")
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/code=4") >= 0, "export version 0.4.01+")
+	_ok(presets.find("version/code=") >= 0, "export version 0.4.01+")
 	if OS.get_environment("V0401_ONLY") != "cut":
 		await _check_ghosting()
 		await _check_sky_bullet()

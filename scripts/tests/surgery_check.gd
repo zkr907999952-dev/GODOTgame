@@ -9,8 +9,8 @@ extends SceneTree
 ##     --rendering-method gl_compatibility --rendering-driver opengl3 \
 ##     -s res://scripts/tests/surgery_check.gd
 
-const VERSION_NAME := "0.4.06"
-const VERSION_CODE := 49
+const VERSION_NAME := "0.4.07"
+const VERSION_CODE := 50
 const Geom := preload("res://scripts/surgery/surgery_geom.gd")
 
 var fails := 0

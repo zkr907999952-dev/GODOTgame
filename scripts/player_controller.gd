@@ -704,6 +704,81 @@ func get_camera() -> Camera3D:
 	return _camera
 
 
+## 0.4.07 附身：当前身体的全部「随身体走」的节点（网格骨架 + 走跑 + 脏器 + 手术 + 布娃娃 + 受击 + 命中盒）。
+func rig_nodes() -> Dictionary:
+	return {"body": _body, "loco": _loco, "organs": _organs, "surgery": _surgery,
+		"ragdoll": _ragdoll, "hit_react": _hit_react, "hitboxes": _hitboxes}
+
+
+## 交出身体前：去掉第一人称专用的头部图层 / 只投影副本，让它作为分身被正常看见。
+func release_rig_visuals() -> void:
+	for px in _fp_shadow_proxies:
+		if is_instance_valid(px):
+			px.queue_free()
+	_fp_shadow_proxies.clear()
+	if _body:
+		for mi in _body.find_children("*", "MeshInstance3D", true, false):
+			var m := mi as MeshInstance3D
+			if m and m.layers == FP_HEAD_LAYER:
+				m.layers = 1 | CHAR_LIGHT_LAYER
+	if _hitboxes:
+		for hb in _hitboxes.call("bodies"):
+			if is_instance_valid(hb):
+				remove_collision_exception_with(hb)
+
+
+## 接管新身体（节点已由 Possession 挂到本节点下）。
+func adopt_rig(r: Dictionary) -> void:
+	_body = r["body"]
+	_loco = r["loco"]
+	_organs = r["organs"]
+	_surgery = r["surgery"]
+	_ragdoll = r["ragdoll"]
+	_hit_react = r["hit_react"]
+	_hitboxes = r["hitboxes"]
+	var skel := _find_skeleton(_body)
+	if _surgery:
+		_surgery.set("player", self)
+	if _ragdoll:
+		_ragdoll.set("_host", self)
+	if _hit_react:
+		_hit_react.set("_host", self)
+	if _hitboxes:
+		_hitboxes.set("host", self)
+		for hb in _hitboxes.call("bodies"):
+			if is_instance_valid(hb):
+				(hb as Node).set_meta("hitbox_host", self)
+				add_collision_exception_with(hb)
+	if _weapons:
+		_weapons.set("skeleton", skel)
+		_weapons.set("_ik_w", 0.0)
+	if _corpse_drag:
+		_corpse_drag.call("setup", self, skel)
+	if _loco:
+		_loco.set("frozen", false)
+		_loco.set("weapon_ik", false)
+	var sec := get_secondary()
+	if sec:
+		sec.set("corpse_mode", false)
+	if _organs:
+		_organs.set("frozen", false)
+	_getup = null
+	_body.position = Vector3.ZERO
+	_body.rotation = Vector3(0.0, _body_logic_yaw + BODY_YAW_OFFSET, 0.0)
+	_body.visible = true
+	_body_rest_pos = Vector3.ZERO
+	_body_interp_ready = false
+	_apply_fp_mesh_visibility()
+
+
+## 附身后立即换姿态（不受头顶空间检查之外的限制）。
+func force_stance(st: String) -> void:
+	if st == "" or st == _stance:
+		return
+	if not _set_stance(st):
+		_set_stance("crouch" if st == "prone" else "stand")
+
+
 func fp_view_transform() -> Transform3D:
 	# 第一人称视线变换，观察视角下也按 yaw/pitch/眼位构造，不用环绕相机。
 	# 尸体拖拽的持握点跟这条视线走，转视角才会把尸体拉起来。
@@ -2622,6 +2697,27 @@ const FP_BACK_IDLE := 0.02
 const FP_BACK_WALK := 0.06
 const FP_BACK_SPRINT := 0.18
 var _loco_back: float = 0.0
+## 0.4.07：实际位移 / 期望位移（平滑），撞墙时趋近 0；用于走跑姿态回落。
+var move_ratio: float = 1.0
+const RUN_KEEP_RATIO := 0.55
+const MOVE_RATIO_FALL := 3.0  # 回落较慢（约 0.3 s）
+const MOVE_RATIO_RISE := 10.0
+
+
+func _update_move_ratio(pos_before: Vector3, want_speed: float, wish_len: float, delta: float) -> void:
+	if delta <= 0.0:
+		return
+	var d := global_position - pos_before
+	var actual := Vector2(d.x, d.z).length() / delta
+	var target := 1.0
+	if wish_len > 1e-3 and want_speed > 0.25:
+		target = clampf(actual / want_speed, 0.0, 1.0)
+	var rate := MOVE_RATIO_FALL if target < move_ratio else MOVE_RATIO_RISE
+	move_ratio += (target - move_ratio) * (1.0 - exp(-rate * delta))
+
+
+func debug_move_ratio() -> float:
+	return move_ratio
 var _jump_eye_u: float = 0.0
 var _fp_eye_smooth: Vector3 = Vector3(0.0, 1.58, -0.2)
 var _fp_eye_init: bool = false
@@ -2931,7 +3027,10 @@ func _physics_process(delta: float) -> void:
 
 	if on_floor and velocity.y <= 0.0:
 		_try_step_up(Vector3(velocity.x, 0.0, velocity.z) * delta)
+	var _want_hv := Vector2(velocity.x, velocity.z).length()
+	var _pos_before := global_position
 	move_and_slide()
+	_update_move_ratio(_pos_before, _want_hv, wish_len, delta)
 	_apply_ledge_support(jumped)
 	_was_grounded = is_on_floor() or _ledge_support
 	_stomp_ragdolls(delta)
@@ -2971,6 +3070,10 @@ func _physics_process(delta: float) -> void:
 			fwd = clampf(local_in.z, -1.0, 1.0)
 			side = clampf(-local_in.x, -1.0, 1.0)
 			mag = clampf(input_dir.length(), 0.0, 1.0)
+			# 0.4.07：撞墙时实际位移很小 → 按实际速度缓慢退回走路/待机（即使一直按 Shift）。
+			mag *= move_ratio
+		if sprinting and on_floor and move_ratio < RUN_KEEP_RATIO:
+			sprinting = false
 		var airborne := not on_floor
 		if airborne and str(_loco.get("current_clip")) != "jump":
 			_loco.set("phase", 0.28)

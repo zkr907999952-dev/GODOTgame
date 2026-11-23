@@ -15,7 +15,7 @@ func _run() -> void:
 	vs = main.get("vehicle_system")
 	hud = main.get_node("HUD")
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok((presets.find("version/name=\"0.4.05\"") >= 0 or presets.find("version/name=\"0.4.06\"") >= 0) and (presets.find("version/code=48") >= 0 or presets.find("version/code=49") >= 0), "export version 0.4.05+ / 48+")
+	_ok(presets.get_slice("version/code=", 1).get_slice("\n", 0).to_int() >= 48, "export version 0.4.05+ / 48+")
 	var only := OS.get_environment("V0405_ONLY")
 	if only == "" or only == "organs":
 		await _check_organs_0405()

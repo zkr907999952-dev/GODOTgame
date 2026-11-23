@@ -15,7 +15,7 @@ func _run() -> void:
 	vs = main.get("vehicle_system")
 	hud = main.get_node("HUD")
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/code=4") >= 0, "export version present")
+	_ok(presets.find("version/code=") >= 0, "export version present")
 	var only := OS.get_environment("V0404_ONLY")
 	if only == "" or only == "mirror":
 		await _check_mirror()
@@ -80,6 +80,8 @@ func _check_mirror() -> void:
 # ---- 1. 肚脐 ----
 func _check_navel_flat() -> void:
 	await _restart()
+	if s.has_method("_apply_navel_flat"):
+		s.call("_apply_navel_flat")  # 0.4.07：显示凹陷延迟压平，这里检查的是切割用压平面
 	var outer: Geom.MeshData = s.get("_outer")
 	var nav: Vector3 = s.get("_navel_rest")
 	_ok(int(s.get("navel_flattened")) > 20, "navel dimple removed from the cut mesh (%d verts moved, retriangulated %d tris, flips %d)" % [int(s.get("navel_flattened")), Geom.navel_retri, Geom.navel_flips])

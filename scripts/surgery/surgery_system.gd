@@ -1009,6 +1009,7 @@ func set_tool(t: String) -> void:
 			cancel_stroke()
 		tool = ""
 		_show_scalpel(false)
+		_drop_preview_on_tool_leave()
 		tool_changed.emit(tool)
 		return
 	# 拿取与手术刀一样随时可切换，不必先切开或先剥皮瓣。
@@ -1019,11 +1020,23 @@ func set_tool(t: String) -> void:
 	tool = t
 	if tool != "scalpel":
 		_show_scalpel(false)
+		_drop_preview_on_tool_leave()
 	if tool != "retractor":
 		_hide_retractor_ghost()
 		if _retr_selected >= 0:
 			select_retractor(-1)
 	tool_changed.emit(tool)
+
+
+func _drop_preview_on_tool_leave() -> void:
+	## 0.4.07：取消选择手术刀（切到其它工具或取消选择）时关闭并清空切口预览。
+	if _cut_anim:
+		return
+	var had := _cut_preview or (_dash != null and _dash.visible)
+	_clear_cut_preview()
+	path_points = PackedVector3Array()
+	if had:
+		preview_changed.emit()
 
 
 func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
@@ -1917,6 +1930,8 @@ func _commit_path(path: PackedVector3Array, force_closed: bool = false) -> bool:
 	# 0.3.9：先把上一刀的外翻并入 rest，再在外皮上嵌入路径；内壁是 twin，所有拆分按同一插值同步（不再 IDW 近似）。
 	_bake_evert()
 	_ensure_twin()
+	if _navel_flatten_if_near(work, closed):
+		work = _project_path_to_flat_navel(work)
 	var ids := Geom.embed_path(_outer, work)
 	if ids.size() < 2:
 		push_warning("surgery: path embed failed")
@@ -2126,6 +2141,174 @@ func apply_puncture_hole(world_p: Vector3, world_dir: Vector3, radius: float = 0
 	return _punch_bullet_hole_world(world_p, d, r)
 
 
+## 0.4.07：肚脐凹陷延迟压平。entries: [凹陷位置, 压平位移, 压平法线]
+var _navel_dimple: Array = []
+var navel_flat_applied: bool = false
+const NAVEL_FLAT_NEAR := 0.035
+
+
+func navel_dimple_vert_count() -> int:
+	return _navel_dimple.size()
+
+
+func navel_dimple_depth() -> float:
+	## 当前腹网上肚脐中心附近最低点相对压平面的深度（米，正 = 凹陷）。
+	if _outer == null:
+		return 0.0
+	var best := 0.0
+	for e in _navel_dimple:
+		best = maxf(best, (e[1] as Vector3).z)
+	return 0.0 if navel_flat_applied else best
+
+
+func _capture_navel_dimple(pre_pos: PackedVector3Array, pre_nrm: PackedVector3Array, pre_idx: PackedInt32Array) -> void:
+	_navel_dimple = []
+	if navel_flattened <= 0 or _outer == null:
+		navel_flat_applied = true
+		return
+	var c := _navel_rest
+	var tris := PackedInt32Array()
+	for f in pre_idx.size() / 3:
+		for k in 3:
+			var q := pre_pos[pre_idx[f * 3 + k]]
+			if Vector2(q.x - c.x, q.y - c.y).length() < 0.034:
+				tris.append(f)
+				break
+	for i in _outer.vert_count():
+		var p := _outer.pos[i]
+		var r := Vector2(p.x - c.x, p.y - c.y).length()
+		if r > 0.026:
+			continue
+		var best_z := -1e9
+		var best_n := Vector3.ZERO
+		var xy := Vector2(p.x, p.y)
+		for f in tris:
+			var a := pre_pos[pre_idx[f * 3]]
+			var b := pre_pos[pre_idx[f * 3 + 1]]
+			var cc := pre_pos[pre_idx[f * 3 + 2]]
+			var v0 := Vector2(b.x - a.x, b.y - a.y)
+			var v1 := Vector2(cc.x - a.x, cc.y - a.y)
+			var v2 := xy - Vector2(a.x, a.y)
+			var den := v0.x * v1.y - v1.x * v0.y
+			if absf(den) < 1e-14:
+				continue
+			var w1 := (v2.x * v1.y - v1.x * v2.y) / den
+			var w2 := (v0.x * v2.y - v2.x * v0.y) / den
+			var w0 := 1.0 - w1 - w2
+			if w0 < -1e-5 or w1 < -1e-5 or w2 < -1e-5:
+				continue
+			var z := a.z * w0 + b.z * w1 + cc.z * w2
+			if z > best_z:
+				best_z = z
+				var n0 := pre_nrm[pre_idx[f * 3]] if pre_nrm.size() == pre_pos.size() else Vector3.BACK
+				var n1 := pre_nrm[pre_idx[f * 3 + 1]] if pre_nrm.size() == pre_pos.size() else Vector3.BACK
+				var n2 := pre_nrm[pre_idx[f * 3 + 2]] if pre_nrm.size() == pre_pos.size() else Vector3.BACK
+				best_n = (n0 * w0 + n1 * w1 + n2 * w2).normalized()
+		if best_z < -1e8 or absf(best_z - p.z) < 1e-6:
+			continue
+		var dimpled := Vector3(p.x, p.y, best_z)
+		_navel_dimple.append([dimpled, p - dimpled, _outer.nrm[i]])
+		_outer.pos[i] = dimpled
+		if best_n.length_squared() > 0.5:
+			_outer.nrm[i] = best_n
+	navel_flat_applied = _navel_dimple.is_empty()
+
+
+func _navel_flatten_if_near(path: PackedVector3Array, closed: bool, extra: float = 0.0) -> bool:
+	## 刀口（或弹孔环）进入肚脐附近时才把显示凹陷换回压平的切割面。
+	if navel_flat_applied or _navel_dimple.is_empty() or _outer == null or path.is_empty():
+		return false
+	var c := Vector2(_navel_rest.x, _navel_rest.y)
+	var dmin := 1e9
+	var poly := PackedVector2Array()
+	for i in path.size():
+		var a := Vector2(path[i].x, path[i].y)
+		poly.append(a)
+		var j := i + 1
+		if j >= path.size():
+			if not closed:
+				dmin = minf(dmin, c.distance_to(a))
+				break
+			j = 0
+		var b := Vector2(path[j].x, path[j].y)
+		dmin = minf(dmin, c.distance_to(Geometry2D.get_closest_point_to_segment(c, a, b)))
+	var near := dmin - extra < NAVEL_FLAT_NEAR
+	if not near and closed and poly.size() >= 3 and Geometry2D.is_point_in_polygon(c, poly):
+		near = true
+	if not near:
+		return false
+	_apply_navel_flat()
+	return true
+
+
+func _project_path_to_flat_navel(path: PackedVector3Array) -> PackedVector3Array:
+	## 预览是在凹陷显示面上画的；压平后把肚脐附近的路径点按 XY 投回压平的切割面（与 0.4.04 起的切割面一致）。
+	var out := path.duplicate()
+	var c := _navel_rest
+	var tris := PackedInt32Array()
+	for f in _outer.face_count():
+		var q := _outer.pos[_outer.idx[f * 3]]
+		if Vector2(q.x - c.x, q.y - c.y).length() < 0.034:
+			tris.append(f)
+	for i in out.size():
+		var p := out[i]
+		if Vector2(p.x - c.x, p.y - c.y).length() > 0.03:
+			continue
+		var xy := Vector2(p.x, p.y)
+		var best := 1e9
+		var bz := p.z
+		for f in tris:
+			var a := _outer.pos[_outer.idx[f * 3]]
+			var b := _outer.pos[_outer.idx[f * 3 + 1]]
+			var cc := _outer.pos[_outer.idx[f * 3 + 2]]
+			var v0 := Vector2(b.x - a.x, b.y - a.y)
+			var v1 := Vector2(cc.x - a.x, cc.y - a.y)
+			var v2 := xy - Vector2(a.x, a.y)
+			var den := v0.x * v1.y - v1.x * v0.y
+			if absf(den) < 1e-14:
+				continue
+			var w1 := (v2.x * v1.y - v1.x * v2.y) / den
+			var w2 := (v0.x * v2.y - v2.x * v0.y) / den
+			var w0 := 1.0 - w1 - w2
+			if w0 < -1e-4 or w1 < -1e-4 or w2 < -1e-4:
+				continue
+			var z := a.z * w0 + b.z * w1 + cc.z * w2
+			if absf(z - p.z) < best:
+				best = absf(z - p.z)
+				bz = z
+		out[i] = Vector3(p.x, p.y, bz)
+	return out
+
+
+func _apply_navel_flat() -> void:
+	if navel_flat_applied:
+		return
+	navel_flat_applied = true
+	for md in [_outer, _outer_rest, _outer_evert]:
+		if md == null:
+			continue
+		var m: Geom.MeshData = md
+		for i in m.vert_count():
+			var p := m.pos[i]
+			if Vector2(p.x - _navel_rest.x, p.y - _navel_rest.y).length() > 0.027:
+				continue
+			var bi := -1
+			var bd := 0.0015 * 0.0015
+			for k in _navel_dimple.size():
+				var d2 := p.distance_squared_to(_navel_dimple[k][0] as Vector3)
+				if d2 < bd:
+					bd = d2
+					bi = k
+			if bi < 0:
+				continue
+			m.pos[i] = p + (_navel_dimple[bi][1] as Vector3)
+			if m.nrm.size() == m.vert_count():
+				m.nrm[i] = _navel_dimple[bi][2]
+	_posed_dirty = true
+	_posed_cache = PackedVector3Array()
+	_rebuild_surgical_meshes(_outer, _inner, _wall_md)
+
+
 func _bake_if_needed() -> bool:
 	if _baked and _outer != null and _surgical_mi != null:
 		return true
@@ -2142,12 +2325,18 @@ func _bake_if_needed() -> bool:
 	_outer = extracted["abdomen"]
 	_rest = extracted["rest"]
 	# 0.4.04：切割用的腹网（以及由它生成的内壁）去掉肚脐凹陷，彻底避免肚脐处切线嵌入 / 拆分出错面、粘连。
+	var pre_pos := _outer.pos.duplicate()
+	var pre_nrm := _outer.nrm.duplicate()
+	var pre_idx := _outer.idx.duplicate()
 	navel_flattened = Geom.flatten_navel(_outer, _navel_rest)
+	navel_flat_applied = false
 	_band_edge = _boundary_vert_keys(_outer)
 	var organ_z := _organ_front_z()
 	_organ_z = organ_z
 	_inner = Geom.make_cavity(_outer, thickness, organ_z, _navel_rest)
 	_outer.twin = _inner
+	# 0.4.07：切割拓扑已压平（防粘连），但在刀口真正碰到肚脐前，显示位置仍还原原始凹陷。
+	_capture_navel_dimple(pre_pos, pre_nrm, pre_idx)
 	_lumbar_z = Geom.lumbar_exterior_z(_rest, _navel_rest)
 	var back_z := minf(_guts_min.z - 0.006, organ_z - 0.055)
 	var wrap_skin := _wrap_skin_md()
@@ -5855,6 +6044,11 @@ func _step_pull_spring(dt: float) -> void:
 	_apply_pull_uniforms()
 
 
+func bullet_hole_radius(energy: float) -> float:
+	## 0.4.07：特写弹孔贯穿的柱状孔更小（原 1.0–2.0 cm → 0.6–1.2 cm）。
+	return clampf(0.006 + energy * 0.005, 0.006, 0.012)
+
+
 func apply_bullet_hit(info: Dictionary, par: Dictionary = {}) -> Dictionary:
 	## 由 OrganRig.apply_ballistic_hit 调用：在手术腹网上打出柱状弹孔，并去掉圆心皮瓣。
 	var out := {"entry": false, "exit": false, "tris": 0}
@@ -5881,7 +6075,7 @@ func apply_bullet_hit(info: Dictionary, par: Dictionary = {}) -> Dictionary:
 			dir = Vector3(0, 0, -1)
 	var energy := float(par.get("energy", 0.5))
 	# 特写镜头离体表约 0.4m，通道要够大、够深才看得出柱状内壁。
-	var radius := clampf(0.010 + energy * 0.008, 0.010, 0.020)
+	var radius := bullet_hole_radius(energy)
 	if bullet_holes < MAX_BULLET_HOLES:
 		var entry: Variant = info.get("entry")
 		if entry is Vector3:
@@ -5952,6 +6146,7 @@ func _closest_mesh_hit_world(world_p: Vector3) -> Variant:
 func _punch_bullet_hole_bind(center: Vector3, axis: Vector3, radius: float) -> bool:
 	if _outer == null or _inner == null:
 		return false
+	_navel_flatten_if_near(PackedVector3Array([center]), false, radius)
 	var path := Geom.circle_path_on_mesh(_outer, center, axis, radius, BULLET_SIDES)
 	if path.size() < 5:
 		return false

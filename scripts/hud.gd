@@ -71,6 +71,14 @@ var _fist_box: VBoxContainer
 var _blade_box: VBoxContainer
 var _navel_box: VBoxContainer
 var _clone_status: Label
+## 0.4.07 附身：分身清单 + 附身 / 复原按钮 + 第一人称准星「附身」按钮
+var _clone_list: VBoxContainer
+var _clone_rows: Dictionary = {}  # clone instance_id -> Button
+var _btn_possess: Button
+var _btn_clone_restore: Button
+var _possess_aim_btn: Button
+var _clone_list_t: float = 0.0
+var debug_possess_aim_visible: bool = false
 var _tool_depth_sl: Array = []
 var _focus_buttons: Dictionary = {}
 var _zoom_slider: HSlider
@@ -446,6 +454,16 @@ func _build_health_ui(root: Control) -> void:
 	_drag_btn.pressed.connect(_on_corpse_drag_pressed)
 	_style_button(_drag_btn, false)
 	root.add_child(_drag_btn)
+
+	_possess_aim_btn = Button.new()
+	_possess_aim_btn.name = "PossessAimButton"
+	_possess_aim_btn.text = "附身"
+	_possess_aim_btn.visible = false
+	_possess_aim_btn.focus_mode = Control.FOCUS_NONE
+	_possess_aim_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_possess_aim_btn.pressed.connect(_on_possess_aim_pressed)
+	_style_button(_possess_aim_btn, true)
+	root.add_child(_possess_aim_btn)
 
 	_refresh_player_hp()
 
@@ -1985,6 +2003,22 @@ func _build_clone_box(v: VBoxContainer) -> void:
 	_clone_status.add_theme_color_override("font_color", Color(0.8, 0.85, 0.9))
 	_clone_status.text = "分身站在视线所指的位置，面朝你；最多 %d 个。" % 8
 	v.add_child(_clone_status)
+	var cap := Label.new()
+	cap.text = "分身清单（点选 → 模型描边高亮）"
+	cap.add_theme_font_size_override("font_size", 12)
+	cap.add_theme_color_override("font_color", Color(0.75, 0.85, 0.95))
+	v.add_child(cap)
+	_clone_list = VBoxContainer.new()
+	_clone_list.name = "CloneList"
+	_clone_list.add_theme_constant_override("separation", 3)
+	v.add_child(_clone_list)
+	var g2 := GridContainer.new()
+	g2.columns = 2
+	g2.add_theme_constant_override("h_separation", 6)
+	v.add_child(g2)
+	_btn_possess = _small_button(g2, "附身", _on_possess_selected)
+	_btn_clone_restore = _small_button(g2, "复原", _on_restore_selected_clone)
+	_refresh_clone_list(true)
 
 
 func _on_spawn_clone() -> void:
@@ -1997,6 +2031,117 @@ func _on_clear_clones() -> void:
 	var g := _game()
 	if g and g.has_method("clear_clones"):
 		set_clone_message(str(g.call("clear_clones")))
+
+
+func _possession() -> Node:
+	var g := _game()
+	return g.get("possession") if g else null
+
+
+func _refresh_clone_list(force: bool = false) -> void:
+	if _clone_list == null:
+		return
+	var pz := _possession()
+	if pz == null:
+		return
+	var cl: Array = pz.call("clones")
+	var ids := {}
+	for c in cl:
+		ids[c.get_instance_id()] = c
+	var changed := force or ids.size() != _clone_rows.size()
+	if not changed:
+		for k in ids.keys():
+			if not _clone_rows.has(k):
+				changed = true
+				break
+	if changed:
+		for ch in _clone_list.get_children():
+			ch.queue_free()
+		_clone_rows.clear()
+		if cl.is_empty():
+			var none := Label.new()
+			none.text = "（还没有分身）"
+			none.add_theme_font_size_override("font_size", 12)
+			_clone_list.add_child(none)
+		for c in cl:
+			var b := Button.new()
+			b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+			b.custom_minimum_size = Vector2(210, 44 if touch_ui else 28)
+			b.add_theme_font_size_override("font_size", 12)
+			b.focus_mode = Control.FOCUS_NONE
+			b.clip_text = true
+			var cref: Node = c
+			b.pressed.connect(func(): _on_clone_row_pressed(cref))
+			_clone_list.add_child(b)
+			_clone_rows[c.get_instance_id()] = b
+	var sel: Node = pz.get("selected")
+	for k in _clone_rows.keys():
+		var c2: Node = ids.get(k)
+		var b2: Button = _clone_rows[k]
+		if c2 == null or b2 == null:
+			continue
+		b2.text = str(pz.call("clone_line", c2))
+		_style_button(b2, c2 == sel)
+	var has_sel := sel != null and is_instance_valid(sel)
+	if _btn_possess:
+		_btn_possess.disabled = not (has_sel and bool(pz.call("can_possess", sel)))
+	if _btn_clone_restore:
+		_btn_clone_restore.disabled = not has_sel
+
+
+func _on_clone_row_pressed(c: Node) -> void:
+	var pz := _possession()
+	if pz == null:
+		return
+	pz.call("select", null if pz.get("selected") == c else c)
+	_refresh_clone_list()
+	var sel: Node = pz.get("selected")
+	if sel:
+		set_clone_message("已选中 %s（%s）" % [str(pz.call("clone_label", sel)), str(pz.call("clone_status", sel))])
+
+
+func _on_possess_selected() -> void:
+	var pz := _possession()
+	if pz:
+		set_clone_message(str(pz.call("possess_selected")))
+		_refresh_clone_list(true)
+		_sync_from_systems()
+
+
+func _on_restore_selected_clone() -> void:
+	var pz := _possession()
+	if pz:
+		set_clone_message(str(pz.call("restore_selected")))
+		_refresh_clone_list()
+
+
+func _on_possess_aim_pressed() -> void:
+	var pz := _possession()
+	if pz:
+		set_clone_message(str(pz.call("possess_aimed")))
+		_sync_from_systems()
+
+
+func _refresh_possess_aim(delta: float) -> void:
+	if _possess_aim_btn == null:
+		return
+	var pz := _possession()
+	var show := pz != null and pz.get("aimed") != null and not is_panel_open()
+	debug_possess_aim_visible = show
+	_possess_aim_btn.visible = show
+	_possess_aim_btn.mouse_filter = Control.MOUSE_FILTER_STOP if show else Control.MOUSE_FILTER_IGNORE
+	if show:
+		_possess_aim_btn.text = "附身" if touch_ui else "附身 (P)"
+		var vp := get_viewport().get_visible_rect().size
+		var sz := Vector2(120, 52) if touch_ui else Vector2(96, 34)
+		_possess_aim_btn.custom_minimum_size = sz
+		_possess_aim_btn.size = sz
+		_possess_aim_btn.position = Vector2(vp.x * 0.5 - sz.x * 0.5, vp.y * 0.5 + 44.0)
+	if _panel_interact and _panel_interact.visible:
+		_clone_list_t -= delta
+		if _clone_list_t <= 0.0:
+			_clone_list_t = 0.4
+			_refresh_clone_list()
 
 
 func set_clone_message(msg: String) -> void:
@@ -2234,6 +2379,8 @@ func _toggle_panel(id: PanelId) -> void:
 		_touchify(_panel_map, touch_ui)
 	if id == PanelId.VEHICLE:
 		_touchify(_panel_vehicle, touch_ui)
+	if id == PanelId.INTERACT:
+		_refresh_clone_list(true)
 	_set_mouse_for_ui(true)
 	_apply_layout()
 	_sync_from_systems()
@@ -2611,6 +2758,7 @@ func _process(_delta: float) -> void:
 	_refresh_player_hp()
 	_refresh_world_hp(_delta)
 	_refresh_corpse_drag_btn()
+	_refresh_possess_aim(_delta)
 	# 模式由任何途径改变（Tab / 按钮 / 脚本）都刷新状态栏
 	if _player and "play_mode" in _player and int(_player.play_mode) != _last_mode:
 		_last_mode = int(_player.play_mode)

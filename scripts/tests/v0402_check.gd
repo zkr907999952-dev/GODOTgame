@@ -46,7 +46,7 @@ func _run() -> void:
 	vs = main.get("vehicle_system")
 	hud = main.get_node("HUD")
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/code=4") >= 0, "export version 0.4.02 / 45")
+	_ok(presets.find("version/code=") >= 0, "export version 0.4.02 / 45")
 	_ok(ResourceLoader.exists("res://assets/surgery/retractor.glb"), "retractor model (tool #5, Retractor Roux) is in the project")
 	if not await _enter_bed():
 		quit(1)

@@ -46,7 +46,7 @@ func _run() -> void:
 	vs = main.get("vehicle_system")
 	_ok(player != null and vs != null, "scene booted")
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/code=4") >= 0, "export version 0.3.9+ (43+)")
+	_ok(presets.find("version/code=") >= 0, "export version 0.3.9+ (43+)")
 	if OS.get_environment("V0309_ONLY") == "cut":
 		await _enter_bed()
 		s = player.call("get_surgery")

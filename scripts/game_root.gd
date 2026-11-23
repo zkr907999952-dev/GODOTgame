@@ -13,6 +13,7 @@ const GameSettingsScript = preload("res://scripts/game_settings.gd")
 const BulletCamScript = preload("res://scripts/weapons/bullet_cam.gd")
 const CollisionDebugScript = preload("res://scripts/collision_debug.gd")
 const VehicleSystemScript = preload("res://scripts/vehicles/vehicle_system.gd")
+const PossessionScript = preload("res://scripts/possession.gd")
 ## 分身上限（每个分身 = 一套蒙皮网格 + 脏器 + 物理；共享网格 / 贴图资源）
 const CLONE_MAX := 8
 
@@ -54,7 +55,7 @@ const KEYMAP := {
 		KEY_9: "dance_clear", KEY_0: "dance_clear",
 	},
 	"display": {KEY_F: "focus", KEY_E: "corpse_drag"},
-	"control": {KEY_Z: "prone", KEY_G: "holster", KEY_Q: "weapon_wheel", KEY_E: "corpse_drag",
+	"control": {KEY_Z: "prone", KEY_G: "holster", KEY_Q: "weapon_wheel", KEY_E: "corpse_drag", KEY_P: "possess_aim",
 		KEY_1: "weapon_slot", KEY_2: "weapon_slot", KEY_3: "weapon_slot", KEY_4: "weapon_slot", KEY_5: "weapon_slot",
 		KEY_6: "weapon_slot", KEY_7: "weapon_slot", KEY_8: "weapon_slot", KEY_9: "weapon_slot"},
 	## 俯视地图打开时只响应这两个
@@ -70,6 +71,7 @@ var collision_debug: Node
 var settings: Node
 var bullet_cam: Node
 var vehicle_system: Node
+var possession: Node
 var _player_col_layer: int = 2
 var _player_col_mask: int = 3
 
@@ -132,6 +134,11 @@ func _ready() -> void:
 	vehicle_system.call("setup", self, _player)
 	if _hud and _hud.has_method("setup_vehicles"):
 		_hud.call("setup_vehicles", vehicle_system)
+	possession = PossessionScript.new()
+	possession.name = "Possession"
+	possession.process_priority = 30
+	add_child(possession)
+	possession.call("setup", self, _player)
 	# City mesh collisions + default vehicles load during init, not on the
 	# first map open (that hitch is what 0.2.31 is fixing).
 	if _city and _city.has_method("ensure_collisions"):
@@ -206,7 +213,7 @@ func action_for_key(key: int, mode: String = "") -> String:
 	if a == "":
 		a = str(KEYMAP["common"].get(key, ""))
 	# While driving / on the exam bed, don't steal Q (yaw) or G (holster) from the vehicle.
-	if in_veh and a in ["weapon_wheel", "holster", "weapon_slot", "prone"]:
+	if in_veh and a in ["weapon_wheel", "holster", "weapon_slot", "prone", "possess_aim"]:
 		return ""
 	# 检查床上，或靠近已躺在检查床上的分身时，T 进入 / 退出手术模式。
 	if key == KEY_T and can_toggle_surgery():
@@ -332,6 +339,10 @@ func run_action(action: String, key: int = 0) -> void:
 		"vehicle_gear":
 			if vehicle_system and vehicle_system.has_method("toggle_occupied_gear"):
 				vehicle_system.call("toggle_occupied_gear")
+		"possess_aim":
+			# 0.4.07：第一人称准星对准分身时按 P 立即附身（与屏幕上的「附身」按钮相同）。
+			if possession and possession.get("aimed") != null:
+				_hud.call("set_clone_message", str(possession.call("possess_aimed")))
 	_hud.call("sync")
 
 

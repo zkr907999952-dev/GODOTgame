@@ -8,6 +8,7 @@ extends Node3D
 ##   clear_all()      — remove everything except the occupied vehicle (if any)
 class_name VehicleSystem
 
+const SeatPose := preload("res://scripts/vehicles/seat_pose.gd")
 const CAR_SCENE := "res://scenes/vehicles/car.tscn"
 const PLANE_SCENE := "res://scenes/vehicles/plane.tscn"
 const BED_SCENE := "res://scenes/vehicles/exam_bed.tscn"
@@ -1091,7 +1092,8 @@ func try_enter() -> bool:
 		vehicle_look_mode = "yaw"
 		_reset_vehicle_cam()
 		_sync_vehicle_look_from_heading()
-		_hide_player_body(true)
+		# 0.4.07：不再隐藏身体，坐到驾驶位（坐姿 + 手握方向盘 / 操纵杆）。
+		_begin_seat(v, k)
 		if k == "car":
 			_begin_board_anim(1)
 	occupancy_changed.emit(v)
@@ -1123,6 +1125,7 @@ func _finish_exit(dest: Vector3, restore_collision: bool) -> bool:
 	var v := occupied
 	if v and v.has_method("on_exit"):
 		v.call("on_exit")
+	_end_seat()
 	_hide_player_body(false)
 	_restore_standing(dest)
 	if restore_collision:
@@ -1532,6 +1535,7 @@ func _process_occupied(delta: float) -> void:
 		return
 	_drive_input(delta)
 	_attach_player_to_vehicle()
+	_apply_seat_pose()
 	_vehicle_camera(delta)
 
 
@@ -1769,6 +1773,129 @@ func _exam_look_basis(look_dir: Vector3, yaw: float, pitch: float) -> Basis:
 	return Basis(right, up, -fwd).orthonormalized()
 
 
+# ------------------------------------------------------------------ 0.4.07 驾驶坐姿
+
+var seat_kind: String = ""
+var _seat_hand_l: Vector3 = Vector3.ZERO  # 载具局部
+var _seat_hand_r: Vector3 = Vector3.ZERO
+var _seat_hitboxes_were: bool = true
+var seat_shift: float = 0.0
+const SEAT_REACH := 0.40  # 肩到手心可达距离（米）
+const SEAT_SHIFT_MAX := 0.5
+## 眼点相对座舱视点的微调（载具局部：x 右，y 上，z 后）。头略低、略靠后，第三人称不穿模、第一人称视角不变。
+const SEAT_EYE_TRIM := {"car": Vector3(0.0, -0.03, 0.05), "plane": Vector3(0.0, -0.04, 0.06)}
+
+
+func _begin_seat(v: Node, kind: String) -> void:
+	seat_kind = kind
+	var xf := _vehicle_visual_xf(v)
+	var inv := xf.affine_inverse()
+	var eye_l: Vector3 = v.call("cockpit_offset") if v.has_method("cockpit_offset") else Vector3(0, 1.0, 0)
+	var vis: Variant = v.get("visuals")
+	var grip: Variant = null
+	if vis != null and vis is Object:
+		var sw: Dictionary = (vis as Object).get("steer_wheel") if (vis as Object).get("steer_wheel") != null else {}
+		var obj: Node3D = sw.get("obj") as Node3D if not sw.is_empty() else null
+		if obj and is_instance_valid(obj):
+			var wa := VehicleCommon.world_aabb(obj)
+			if wa.size != Vector3.ZERO:
+				grip = inv * wa.get_center()
+	if kind == "plane":
+		# 右手握操纵杆顶端，左手放在左侧油门杆。
+		var stick: Vector3 = grip if grip != null else eye_l + Vector3(0.12, -0.42, -0.42)
+		_seat_hand_r = stick + Vector3(0.0, 0.06, 0.02)
+		_seat_hand_l = eye_l + Vector3(-0.26, -0.40, -0.30)
+	else:
+		var wheel: Vector3 = grip if grip != null else eye_l + Vector3(0.0, -0.30, -0.45)
+		_seat_hand_l = wheel + Vector3(-0.16, 0.03, 0.03)
+		_seat_hand_r = wheel + Vector3(0.16, 0.03, 0.03)
+	var hb: Node = player.get("_hitboxes") if player else null
+	if hb:
+		_seat_hitboxes_were = true
+		hb.call("set_enabled", false)
+	var body: Node3D = player.get_node_or_null("Body") if player else null
+	if body:
+		body.visible = true
+	_apply_seat_pose()
+
+
+func _end_seat() -> void:
+	if seat_kind == "":
+		return
+	seat_kind = ""
+	var skel: Skeleton3D = player.call("get_skeleton") if player and player.has_method("get_skeleton") else null
+	if skel:
+		SeatPose.clear(skel)
+	var hb: Node = player.get("_hitboxes") if player else null
+	if hb and _seat_hitboxes_were and not bool(player.call("is_dead")):
+		hb.call("set_enabled", true)
+	if player and player.has_method("_apply_fp_mesh_visibility"):
+		player.call("_apply_fp_mesh_visibility")
+
+
+## 每帧：Body 跟随载具姿态坐到驾驶位，眼点对齐座舱视点，手到方向盘 / 操纵杆。
+func _apply_seat_pose() -> void:
+	if seat_kind == "" or occupied == null or player == null:
+		return
+	var body: Node3D = player.get_node_or_null("Body")
+	var skel: Skeleton3D = player.call("get_skeleton") if player.has_method("get_skeleton") else null
+	if body == null or skel == null:
+		return
+	var xf := _vehicle_visual_xf(occupied)
+	var vb := xf.basis.orthonormalized()
+	var d: Dictionary = SeatPose.def_of(seat_kind)
+	SeatPose.apply_body(skel, seat_kind)
+	# 网格前方 = Body +Z；载具机头 = -Z → 绕 Y 转 180°，再绕身体左右轴后仰。
+	var b := vb * Basis(Vector3.UP, PI) * Basis(Vector3.RIGHT, -float(d["recline"]))
+	body.global_transform = Transform3D(b, xf.origin)
+	skel.force_update_transform()
+	var eye_l: Vector3 = occupied.call("cockpit_offset") if occupied.has_method("cockpit_offset") else Vector3(0, 1.0, 0)
+	var want: Vector3 = xf * (eye_l + (SEAT_EYE_TRIM.get(seat_kind, Vector3.ZERO) as Vector3))
+	var eye: Vector3 = ExamPose.eye_world(skel).origin
+	body.global_position += want - eye
+	skel.force_update_transform()
+	# 座舱视点按成年人测得，角色手臂较短：整体沿机头方向前移到手够得着方向盘 / 操纵杆（第一人称视点随之前移）。
+	var inv := xf.affine_inverse()
+	var t := 0.0
+	for pair in [["L_UpperArm_a", _seat_hand_l], ["R_UpperArm_a", _seat_hand_r]]:
+		var sh: Vector3 = inv * SeatPose.bone_world(skel, str(pair[0]))
+		var dd: Vector3 = (pair[1] as Vector3) - sh
+		var df := -dd.z
+		var disc := df * df - dd.length_squared() + SEAT_REACH * SEAT_REACH
+		var tt := df - sqrt(disc) if disc >= 0.0 else df
+		t = maxf(t, tt)
+	seat_shift = clampf(t, 0.0, SEAT_SHIFT_MAX)
+	if seat_shift > 0.0:
+		body.global_position += vb * Vector3(0.0, 0.0, -seat_shift)
+		skel.force_update_transform()
+	SeatPose.apply_hands(skel, xf * _seat_hand_l, xf * _seat_hand_r)
+
+
+## 第一人称座舱视点（载具局部）：随驾驶员身体一起前移。
+func seat_eye_offset(base: Vector3) -> Vector3:
+	if seat_kind == "":
+		return base
+	return base + Vector3(0.0, 0.0, -seat_shift)
+
+
+func debug_seat_state() -> Dictionary:
+	if seat_kind == "" or player == null:
+		return {}
+	var skel: Skeleton3D = player.call("get_skeleton")
+	var xf := _vehicle_visual_xf(occupied)
+	var inv := xf.affine_inverse()
+	var out := {"kind": seat_kind, "visible": (player.get_node("Body") as Node3D).visible}
+	for n in ["C_Hip_a", "L_Foreleg_a", "L_Foot_a", "C_Head_a", "L_Hand_a", "R_Hand_a"]:
+		out[n] = inv * SeatPose.bone_world(skel, n)
+	out["eye"] = inv * ExamPose.eye_world(skel).origin
+	out["cockpit"] = occupied.call("cockpit_offset") if occupied.has_method("cockpit_offset") else Vector3.ZERO
+	out["eye_target"] = seat_eye_offset(out["cockpit"]) + (SEAT_EYE_TRIM.get(seat_kind, Vector3.ZERO) as Vector3)
+	out["shift"] = seat_shift
+	out["hand_l_target"] = _seat_hand_l
+	out["hand_r_target"] = _seat_hand_r
+	return out
+
+
 func _attach_player_to_vehicle() -> void:
 	if occupied == null or player == null:
 		return
@@ -1915,9 +2042,11 @@ func _vehicle_camera(delta: float) -> void:
 		# offset (observe drag). Default look is along the visual nose
 		# (-Z), so pitch/roll/yaw of the vehicle are followed 1:1.
 		var eye_off: Vector3 = occupied.call("cockpit_offset") if occupied.has_method("cockpit_offset") else Vector3(0, 1.2, 0)
+		eye_off = seat_eye_offset(eye_off)
 		var eye: Vector3 = xf * eye_off
 		var look: Basis = xf.basis.orthonormalized() * Basis.from_euler(Vector3(_orbit_pitch, _orbit_yaw, 0.0))
 		_apply_vehicle_cam_xform(pivot, cam, Transform3D(look, eye), just_ready)
+		cam.cull_mask &= ~(1 << 18)  # 座舱第一人称：不渲染自己的头 / 头发
 		cam.fov = float(player.get("fp_fov"))
 		cam.near = 0.08
 		cam.current = true
@@ -1926,6 +2055,7 @@ func _vehicle_camera(delta: float) -> void:
 	# follow and for drag-to-orbit. For the plane, the camera follows the
 	# nose attitude (with a little lag on hard turns) and rolls with the
 	# airframe — a hardcore fighter view, not a horizon-locked inertia cam.
+	cam.cull_mask |= (1 << 18)  # 第三人称看得到驾驶员的头
 	var dist := (8.5 if k == "car" else 16.0) * clampf(_cam_dist, CAM_DIST_MIN, CAM_DIST_MAX)
 	var height := 2.4 if k == "car" else 4.6
 	var look_y_off := 1.2 if k == "car" else 1.8

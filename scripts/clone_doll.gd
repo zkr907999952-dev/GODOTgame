@@ -102,6 +102,94 @@ func _ready() -> void:
 	organs.call("set_interact_mode", organs.get("interact_mode"))
 
 
+## 0.4.07 附身：分身的持枪外观（离开持枪的身体时保留），以及与本体交换的身体节点。
+var held_weapon: String = ""
+var _held_visual: Node3D = null
+const MAX_HP := 100.0
+
+
+func rig_nodes() -> Dictionary:
+	return {"body": body, "loco": loco, "organs": organs, "surgery": surgery,
+		"ragdoll": ragdoll, "hit_react": hit_react, "hitboxes": hitboxes}
+
+
+func adopt_rig(r: Dictionary) -> void:
+	body = r["body"]
+	loco = r["loco"]
+	organs = r["organs"]
+	surgery = r["surgery"]
+	ragdoll = r["ragdoll"]
+	hit_react = r["hit_react"]
+	hitboxes = r["hitboxes"]
+	skeleton = _find_skeleton(body)
+	if surgery:
+		surgery.set("player", self)
+	if ragdoll:
+		ragdoll.set("_host", self)
+	if hit_react:
+		hit_react.set("_host", self)
+	if hitboxes:
+		hitboxes.set("host", self)
+		for hb in hitboxes.call("bodies"):
+			if is_instance_valid(hb):
+				(hb as Node).set_meta("hitbox_host", self)
+		hitboxes.call("set_enabled", _map_visible and not is_dead())
+	_getup = null
+	body.position = Vector3.ZERO
+	body.rotation = Vector3.ZERO
+	body.visible = true
+	if loco:
+		loco.set("frozen", false)
+		loco.set("weapon_ik", false)
+	var sec := get_secondary()
+	if sec:
+		sec.set("corpse_mode", false)
+	if organs:
+		organs.set("frozen", false)
+
+
+func get_stance() -> String:
+	return str(loco.get("mode")) if loco else "stand"
+
+
+func set_stance(st: String) -> void:
+	if loco:
+		loco.call("set_mode", st if st in ["stand", "crouch", "prone"] else "stand")
+
+
+## 留下手里那把枪的外观：挂在右手骨骼上，身体姿态冻结在持枪那一刻。
+func hold_weapon_visual(id: String, scene: PackedScene, xf: Transform3D) -> void:
+	drop_weapon_visual()
+	held_weapon = id
+	if scene == null or skeleton == null:
+		return
+	var att := BoneAttachment3D.new()
+	att.name = "HeldWeapon"
+	att.bone_name = "R_Hand_a"
+	skeleton.add_child(att)
+	var gun := scene.instantiate() as Node3D
+	if gun:
+		att.add_child(gun)
+		gun.global_transform = xf
+	_held_visual = att
+	if loco:
+		loco.set("frozen", true)
+
+
+func drop_weapon_visual() -> String:
+	var id := held_weapon
+	held_weapon = ""
+	if _held_visual and is_instance_valid(_held_visual):
+		_held_visual.queue_free()
+	_held_visual = null
+	if loco and not is_on_exam_bed() and not is_dead():
+		loco.set("frozen", false)
+	var sec := get_secondary()
+	if sec and not is_dead():
+		sec.set("corpse_mode", false)
+	return id
+
+
 func get_organs() -> Node:
 	return organs
 

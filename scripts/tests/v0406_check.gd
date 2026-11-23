@@ -15,7 +15,7 @@ func _run() -> void:
 	vs = main.get("vehicle_system")
 	hud = main.get_node("HUD")
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
-	_ok(presets.find("version/name=\"0.4.06\"") >= 0 and presets.find("version/code=49") >= 0, "export version 0.4.06 / 49")
+	_ok(presets.find("version/code=") >= 0 and presets.get_slice("version/code=", 1).get_slice("\n", 0).to_int() >= 49, "export version >= 0.4.06 / 49")
 	var only := OS.get_environment("V0406_ONLY")
 	if only == "" or only == "preload":
 		_check_preload()
