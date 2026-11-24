@@ -308,3 +308,23 @@ float ball_hurt(vec3 l) {
 }
 
 
+
+// 0.4.11：子宫脱出时阴道沿通道轴拉伸，宫颈端跟到柔体子宫颈。
+uniform float canal_stretch_on = 0.0;
+uniform vec3 canal_os_rest = vec3(0.0);
+uniform vec3 canal_os_now = vec3(0.0);
+uniform vec3 canal_open_rest = vec3(0.0);
+
+vec3 canal_stretch(vec3 p) {
+	if (canal_stretch_on <= 1e-5) return vec3(0.0);
+	vec3 axis = canal_os_rest - canal_open_rest;
+	float len2 = dot(axis, axis);
+	if (len2 < 1e-8) return vec3(0.0);
+	float t = clamp(dot(p - canal_open_rest, axis) / len2, 0.0, 1.0);
+	t = t * t * (3.0 - 2.0 * t);
+	vec3 mid = canal_open_rest + axis * (dot(p - canal_open_rest, axis) / len2);
+	float rad = length(p - mid);
+	float rw = 1.0 - smoothstep(0.018, 0.038, rad);
+	if (rw <= 1e-5) return vec3(0.0);
+	return (canal_os_now - canal_os_rest) * t * rw * canal_stretch_on;
+}

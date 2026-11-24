@@ -141,6 +141,8 @@ void vertex() {
 		off += belly * 0.62;
 		off += speculum_offset(l + off);
 	}
+	// 0.4.11：阴道宫颈端跟随脱出的柔体子宫颈（未脱出时 canal_stretch_on=0）。
+	off += canal_stretch(l + off);
 	vec3 off_w = ab_dir_to_world(off);
 	wp += off_w;
 	VERTEX += inverse(mat3(MODEL_MATRIX)) * off_w;

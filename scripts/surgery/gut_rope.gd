@@ -29,6 +29,37 @@ const PERI_BULGE := 0.25
 const GUT_CELL := 0.03
 const SELF_GAP := 2           # 同一根肠子相隔多于 2 个质点才互相碰撞
 
+## 0.4.11：实例参数（默认 = 小肠）。大肠 / 输卵管链用 apply_profile 覆盖。
+var radius: float = RADIUS
+var damp: float = DAMP
+var seg: float = SEG
+var min_pts: int = MIN_PTS
+var max_pts: int = MAX_PTS
+var k_in: int = K_IN
+var mes_every: int = MES_EVERY
+var profile_id: String = "small"
+
+func apply_profile(p: Dictionary) -> void:
+	if p.has("radius"):
+		radius = float(p["radius"])
+	if p.has("damp"):
+		damp = float(p["damp"])
+	if p.has("seg"):
+		seg = float(p["seg"])
+	if p.has("min_pts"):
+		min_pts = int(p["min_pts"])
+	if p.has("max_pts"):
+		max_pts = int(p["max_pts"])
+	if p.has("k_in"):
+		k_in = int(p["k_in"])
+	if p.has("mes_every"):
+		mes_every = int(p["mes_every"])
+	if p.has("profile"):
+		profile_id = str(p["profile"])
+	elif p.has("profile_id"):
+		profile_id = str(p["profile_id"])
+
+
 var anchor_a: Vector3 = Vector3.ZERO
 var anchor_b: Vector3 = Vector3.ZERO
 var exit_a: Vector3 = Vector3.ZERO
@@ -109,11 +140,11 @@ func segment_rest() -> float:
 
 
 func outside_range() -> Vector2i:
-	return Vector2i(K_IN + 1, _p.size() - 2 - K_IN)
+	return Vector2i(k_in + 1, _p.size() - 2 - k_in)
 
 
 func _want_pts() -> int:
-	return clampi(int(ceil(fed_len / SEG)) + 1, MIN_PTS, MAX_PTS)
+	return clampi(int(ceil(fed_len / seg)) + 1, min_pts, max_pts)
 
 
 func _init_chain() -> void:
@@ -139,7 +170,7 @@ func _grow() -> void:
 	while _p.size() < want:
 		var side := _grow_side
 		var n := _p.size()
-		var at := K_IN + 1 if side == 0 else n - 1 - K_IN
+		var at := k_in + 1 if side == 0 else n - 1 - k_in
 		at = clampi(at, 1, n - 1)
 		var src: Vector3 = (_p[at - 1] + _p[at]) * 0.5
 		_p.insert(at, src)
@@ -177,7 +208,7 @@ func step(dt: float) -> void:
 	_build_grid()
 	for i in range(1, n - 1):
 		var cur := _p[i]
-		var v := (cur - _q[i]) * DAMP
+		var v := (cur - _q[i]) * damp
 		var vmax := MAX_SPEED * dt
 		if v.length_squared() > vmax * vmax:
 			v = v.normalized() * vmax
@@ -208,7 +239,7 @@ func step(dt: float) -> void:
 			_p[i] = a + corr * (wa / ws)
 			_p[i + 1] = b - corr * (wb / ws)
 		var cnt := 0
-		for im in range(K_IN + MES_EVERY, n - 1 - K_IN, MES_EVERY):
+		for im in range(k_in + mes_every, n - 1 - k_in, mes_every):
 			cnt += 1
 			if _fixed(im):
 				continue
@@ -284,9 +315,9 @@ func retract_done() -> bool:
 ## 缩回：从两侧出口处交替去掉一节（与 _grow 相反）。
 func _shrink() -> void:
 	var want := _want_pts()
-	while _p.size() > want and _p.size() > MIN_PTS:
+	while _p.size() > want and _p.size() > min_pts:
 		var n := _p.size()
-		var at := K_IN + 1 if _shrink_side == 0 else n - 2 - K_IN
+		var at := k_in + 1 if _shrink_side == 0 else n - 2 - k_in
 		at = clampi(at, 1, n - 2)
 		_p.remove_at(at)
 		_q.remove_at(at)
@@ -352,7 +383,7 @@ func _update_radii() -> void:
 
 func _base_rad(i: int, n: int) -> float:
 	var u := float(i) / float(maxi(n - 1, 1))
-	return RADIUS * (0.75 + 0.25 * minf(1.0, sin(PI * u) * 4.0))
+	return radius * (0.75 + 0.25 * minf(1.0, sin(PI * u) * 4.0))
 
 
 static func _lobe(frac: float, width: float) -> float:
@@ -377,7 +408,7 @@ static func pulse(along: float, clk: Vector3, amp: float, waves: float, segk: fl
 
 
 func radius_at(i: int) -> float:
-	return _rad[i] if i >= 0 and i < _rad.size() else RADIUS
+	return _rad[i] if i >= 0 and i < _rad.size() else radius
 
 
 func radii() -> PackedFloat32Array:
@@ -426,7 +457,7 @@ func _collide_guts() -> void:
 		var orr: PackedFloat32Array = o[1]
 		for j in op.size():
 			var q := op[j]
-			var rj: float = orr[j] if j < orr.size() else RADIUS
+			var rj: float = orr[j] if j < orr.size() else radius
 			for i in n:
 				if _fixed(i):
 					continue
@@ -456,20 +487,20 @@ func min_gut_clearance() -> float:
 		for o in others:
 			var op: PackedVector3Array = o[0]
 			var orr: PackedFloat32Array = o[1]
-			for j in range(K_IN + 1, op.size() - K_IN - 1):
-				best = minf(best, _p[i].distance_to(op[j]) - radius_at(i) - (orr[j] if j < orr.size() else RADIUS))
+			for j in range(k_in + 1, op.size() - k_in - 1):
+				best = minf(best, _p[i].distance_to(op[j]) - radius_at(i) - (orr[j] if j < orr.size() else radius))
 	return best
 
 
 func _fixed(i: int) -> bool:
 	var n := _p.size()
-	return i <= K_IN or i >= n - 1 - K_IN or i == hold_index
+	return i <= k_in or i >= n - 1 - k_in or i == hold_index
 
 
 func _pin_channel() -> void:
 	var n := _p.size()
-	for k in K_IN + 1:
-		var t := float(k) / float(K_IN)
+	for k in k_in + 1:
+		var t := float(k) / float(k_in)
 		_p[k] = anchor_a.lerp(exit_a, t)
 		_p[n - 1 - k] = anchor_b.lerp(exit_b, t)
 		_q[k] = _p[k]
@@ -560,7 +591,7 @@ func _build_mesh() -> void:
 	cust.resize(nv * 4)
 	var prev_n := Vector3.ZERO
 	var s := 0.0
-	var circ := TAU * RADIUS
+	var circ := TAU * radius
 	for i in n:
 		if i > 0:
 			s += _p[i].distance_to(_p[i - 1])
@@ -576,7 +607,7 @@ func _build_mesh() -> void:
 		prev_n = nn
 		var bn := t.cross(nn)
 		var u := float(i) / float(n - 1)
-		var rad := RADIUS * (0.75 + 0.25 * minf(1.0, sin(PI * u) * 4.0))
+		var rad := radius * (0.75 + 0.25 * minf(1.0, sin(PI * u) * 4.0))
 		var rad_v := rad * (1.0 + PERI_BULGE) if _mat_is_organ else rad
 		var rad_c := rad * PERI_GAIN
 		for k in SIDES + 1:

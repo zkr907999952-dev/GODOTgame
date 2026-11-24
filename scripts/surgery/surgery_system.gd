@@ -4081,6 +4081,7 @@ func _drop_faces_inside(md: Geom.MeshData, poly: PackedVector2Array) -> Geom.Mes
 
 ## ---- 0.4.01 外露肠子（链条软体） ----
 const GutRope := preload("res://scripts/surgery/gut_rope.gd")
+const SoftOrgan := preload("res://scripts/surgery/soft_organ.gd")
 const GUT_LEN_PER_M := 2.6     # 每米创口尺寸可掉出的肠子长度
 const GUT_MAX_LEN := 0.7
 const GUT_MIN_OPENING := 0.03  # 创口尺寸低于 3cm 不掉出
@@ -4151,7 +4152,7 @@ func _gut_world(i: int, j: int) -> Vector3:
 func _update_guts(dt: float) -> void:
 	_update_forceps_anim(dt)
 	if _outer == null or _skel == null or not cut_open:
-		if not _gut_pulls.is_empty():
+		if not _gut_pulls.is_empty() or not _soft_organs.is_empty():
 			_clear_guts()
 		return
 	var sig := [_outer.get_instance_id(), _outer.vert_count(), _outer.idx.size(), flap_peeled, _hole_loops.size()]
@@ -4162,6 +4163,7 @@ func _update_guts(dt: float) -> void:
 		for gp in _gut_pulls:
 			_gut_rebind_pull(gp as Dictionary)
 	if _gut_pulls.is_empty():
+		_update_soft_organs(dt)
 		return
 	var fr: Transform3D = _organs.call("abdomen_frame") if _organs and _organs.has_method("abdomen_frame") else Transform3D.IDENTITY
 	var rim := _gut_rim_world()
@@ -4224,6 +4226,7 @@ func _update_guts(dt: float) -> void:
 		if rr != null and is_instance_valid(rr) and bool(rr.call("retract_done")):
 			_remove_gut_pull(i)
 			gut_putbacks_done += 1
+	_update_soft_organs(dt)
 
 
 ## 0.4.08：坐在载具里时外露肠管在载具局部坐标系里模拟（每帧随载体刚体搬运 + 重力随载体转），
@@ -4251,6 +4254,10 @@ func _carry_ropes(host: Node) -> void:
 			var rope: Node = (gp as Dictionary)["rope"]
 			if rope and is_instance_valid(rope):
 				rope.call("carry", d)
+		for sk in _soft_organs.keys():
+			var so: Node = _soft_organs[sk]
+			if so and is_instance_valid(so) and so.has_method("carry"):
+				so.call("carry", d)
 		carrier_carries += 1
 	else:
 		_carrier_has = false
@@ -4258,6 +4265,10 @@ func _carry_ropes(host: Node) -> void:
 		var r2: Node = (gp2 as Dictionary)["rope"]
 		if r2 and is_instance_valid(r2):
 			r2.set("gravity", grav)
+	for sk2 in _soft_organs.keys():
+		var so2: Node = _soft_organs[sk2]
+		if so2 and is_instance_valid(so2):
+			so2.set("gravity", grav)
 
 
 func _gut_inner_world(i: int, j: int, fr: Transform3D) -> Vector3:
@@ -4357,6 +4368,10 @@ func _clear_guts() -> void:
 	_gut_skin_n = PackedVector3Array()
 	_fc_active = false
 	_fc_pull = -1
+	_fc_kind = "gut"
+	_fc_soft_kind = ""
+	_fc_tube_side = -1
+	_clear_soft_organs()
 	if _forceps_node and is_instance_valid(_forceps_node):
 		_forceps_node.visible = false
 
@@ -4380,7 +4395,22 @@ const GUT_MAX_PULLS := 4
 ## 0.4.05：手术钳子选项「扯出」/「放回」。放回：把肠袢拖到它的创口锚点附近松手，约 1 秒内一节节缩回体内。
 const PUTBACK_RADIUS := 0.045
 const PUTBACK_TIME := 1.0
+## 0.4.11：大肠（单点、更粗更短、更大阻尼）与子宫 / 膀胱五档柔体脱出。
+const COLON_PULL_MAX := 0.36
+const COLON_RADIUS := 0.0168
+const COLON_SEG := 0.040
+const COLON_DAMP := 0.88
+const COLON_MIN_PTS := 5
+const COLON_MAX_PTS := 18
+const COLON_MES_EVERY := 5
+const COLON_TILE_ALBEDO := "res://assets/organs/colon_tile_albedo.png"
+const COLON_TILE_NORMAL := "res://assets/organs/colon_tile_normal.png"
+const ORGAN_CHARGE_RATE := 0.32
+const ORGAN_PUTBACK_RATE := 0.85
+const TUBE_CHAIN_LEVEL := 4
+const UTERUS_SPECULUM_HINT := "请先取出阴道扩张器，再扯出子宫。"
 signal forceps_mode_changed(mode: String)
+signal surgery_hint(text: String)
 var forceps_mode: String = "pull"
 var gut_putbacks: int = 0
 var gut_putbacks_done: int = 0
@@ -4434,6 +4464,12 @@ var _fc_target := 1.0
 var _fc_hide_t := 0.0
 var forceps_clamps: int = 0
 var gut_update_usec: int = 0
+var _soft_organs: Dictionary = {}   # "uterus" / "bladder" -> SoftOrgan
+var _fc_kind: String = "gut"        # gut | soft | tube
+var _fc_soft_kind: String = ""
+var _fc_tube_side: int = -1
+var extraction_hint: String = ""
+var organ_putbacks: int = 0
 
 
 func gut_pull_count() -> int:
@@ -4672,7 +4708,10 @@ func _ray_cavity_hit(origin: Vector3, dir: Vector3) -> Variant:
 func _begin_forceps(origin: Vector3, dir: Vector3) -> bool:
 	_fc_active = false
 	_fc_pull = -1
-	# 1. 已扯出的肠袢：直接夹住重新拖动
+	_fc_kind = "gut"
+	_fc_soft_kind = ""
+	_fc_tube_side = -1
+	# 1a. 已扯出的肠袢 / 大肠：直接夹住重新拖动
 	var best_d := _gut_pick_dist()
 	var bi := -1
 	var bp := -1
@@ -4687,21 +4726,88 @@ func _begin_forceps(origin: Vector3, dir: Vector3) -> bool:
 			best_d = float(pk[1])
 			bi = i
 			bp = int(pk[0])
+	# 1b. 已脱出的柔体器官 / 悬链输卵管
+	var soft_best := best_d
+	var soft_kind := ""
+	var soft_idx := -1
+	var tube_side := -1
+	for k in _soft_organs.keys():
+		var so: Node = _soft_organs[k]
+		if so == null or not is_instance_valid(so) or not bool(so.call("is_extracted")):
+			continue
+		if bool(so.get("retracting")):
+			continue
+		var pk2: Array = so.call("ray_pick", origin, dir)
+		if int(pk2[0]) >= 0 and float(pk2[1]) < soft_best:
+			soft_best = float(pk2[1])
+			soft_kind = str(k)
+			soft_idx = int(pk2[0])
+			tube_side = -1
+		var ts: int = int(so.call("ray_pick_adnexa", origin, dir))
+		if ts >= 0:
+			# 输卵管 / 卵巢命中：优先于更远的宫体命中
+			soft_kind = str(k)
+			soft_idx = -1
+			tube_side = ts
+			soft_best = minf(soft_best, best_d)
+	if tube_side >= 0 and soft_kind != "":
+		var so2: Node = _soft_organs[soft_kind]
+		# 未到 4 档时提前夹住 → 该侧立即进入悬链
+		so2.call("detach_adnexa", tube_side)
+		if bool(so2.call("chain_hold", tube_side, origin, dir)):
+			_fc_kind = "tube"
+			_fc_soft_kind = soft_kind
+			_fc_tube_side = tube_side
+			var rope_t: Node = null
+			for r in so2.call("chain_ropes"):
+				if int(r.get("hold_index")) >= 0:
+					rope_t = r
+					break
+			_fc_last = rope_t.get("hold_pos") if rope_t else _fc_last
+			_start_forceps_grip(-1, dir)
+			return true
+	if soft_kind != "" and soft_idx >= 0 and (bi < 0 or soft_best <= best_d):
+		var so3: Node = _soft_organs[soft_kind]
+		var cage: PackedVector3Array = so3.get("_p")
+		var hp: Vector3 = cage[soft_idx] if soft_idx < cage.size() else so3.call("fundus_world")
+		so3.call("hold_particle", soft_idx, hp)
+		_fc_last = hp
+		_fc_kind = "soft"
+		_fc_soft_kind = soft_kind
+		_start_forceps_grip(-1, dir)
+		return true
 	if bi >= 0:
 		var r2: Node = (_gut_pulls[bi] as Dictionary)["rope"]
 		var pts: PackedVector3Array = r2.call("points")
 		r2.set("hold_index", bp)
 		r2.set("hold_pos", pts[bp])
 		_fc_last = pts[bp]
+		_fc_kind = "gut"
 		_start_forceps_grip(bi, dir)
 		return true
-	# 2. 腹腔内的肠子：从这里扯出新的一段肠袢（「放回」模式下不扯新的）
-	if forceps_mode == "putback" or _gut_pulls.size() >= GUT_MAX_PULLS:
+	# 2. 从创口点选对应器官，扯出新的一段 / 开始五档脱出（「放回」模式下不新扯）
+	if forceps_mode == "putback":
 		return false
 	var hv: Variant = _ray_cavity_hit(origin, dir)
 	if hv == null:
 		return false
 	var hit: Vector3 = hv
+	var pick := {}
+	if _organs and _organs.has_method("ray_pick_viscera"):
+		pick = _organs.call("ray_pick_viscera", origin, dir)
+	var kind := str(pick.get("kind", "")) if not pick.is_empty() else ""
+	if kind in ["uterus", "uterus_cavity", "tube", "ovary"]:
+		var side := int(pick.get("side", -1))
+		if not _start_soft_extract("uterus", origin, dir, side if kind in ["tube", "ovary"] else -1):
+			return false
+		return true
+	if kind == "bladder":
+		return _start_soft_extract("bladder", origin, dir, -1)
+	if kind == "colon":
+		return _start_colon_pull(hit, dir)
+	# 默认：小肠（兼容原来「点进创口即扯小肠」）
+	if _small_gut_count() >= GUT_MAX_PULLS:
+		return false
 	var g := _new_gut_pull(hit)
 	if g.is_empty():
 		return false
@@ -4715,6 +4821,7 @@ func _begin_forceps(origin: Vector3, dir: Vector3) -> bool:
 	rope3.set("hold_index", clampi(n / 2, orr.x, maxi(orr.x, orr.y)))
 	rope3.set("hold_pos", (rope3.call("points") as PackedVector3Array)[int(rope3.get("hold_index"))])
 	_fc_last = rope3.get("hold_pos")
+	_fc_kind = "gut"
 	_start_forceps_grip(_gut_pulls.size() - 1, dir)
 	return true
 
@@ -4787,17 +4894,29 @@ func _new_gut_pull(hit: Vector3) -> Dictionary:
 		rope.call("use_organ_material", gm)
 	rope.set("max_len", GUT_PULL_MAX)
 	rope.set("fed_len", 0.05)
-	return {"rope": rope, "vid": best, "bind": _outer.pos[best], "off_ab": inv_b * (anc - iw), "spread_ab": (inv_b * tg).normalized(), "in_ab": (inv_b * in_w).normalized()}
+	return {"rope": rope, "vid": best, "kind": "small", "bind": _outer.pos[best], "off_ab": inv_b * (anc - iw), "spread_ab": (inv_b * tg).normalized(), "in_ab": (inv_b * in_w).normalized()}
 
 
 func _drag_forceps(origin: Vector3, dir: Vector3) -> void:
-	if not _fc_active or _fc_pull < 0 or _fc_pull >= _gut_pulls.size():
+	if not _fc_active:
+		return
+	var tip := _grab_plane_hit(origin, dir, _fc_last)
+	_fc_last = tip
+	if _fc_kind == "soft":
+		var so := _soft_node(_fc_soft_kind)
+		if so:
+			so.call("hold_particle", int(so.get("hold_index")), tip)
+		return
+	if _fc_kind == "tube":
+		var so2 := _soft_node(_fc_soft_kind)
+		if so2:
+			so2.call("chain_drag", _fc_tube_side, tip)
+		return
+	if _fc_pull < 0 or _fc_pull >= _gut_pulls.size():
 		return
 	var rope: Node = (_gut_pulls[_fc_pull] as Dictionary)["rope"]
 	if rope == null or not is_instance_valid(rope):
 		return
-	var tip := _grab_plane_hit(origin, dir, _fc_last)
-	_fc_last = tip
 	_forceps_hold(rope, tip)
 
 
@@ -4814,29 +4933,49 @@ func _forceps_hold(rope: Node, tip: Vector3) -> void:
 	var fa := float(hi) / float(n - 1)
 	var fb := 1.0 - fa
 	var need := maxf((aa.distance_to(ea) * 1.0 + ea.distance_to(tip)) / maxf(fa, 0.05), (ab.distance_to(eb) + eb.distance_to(tip)) / maxf(fb, 0.05)) * 1.03
+	var cap := float(rope.get("max_len"))
+	if cap <= 1e-6:
+		cap = GUT_PULL_MAX
 	var fed := float(rope.get("fed_len"))
 	if need > fed:
-		fed = minf(need, GUT_PULL_MAX)
+		fed = minf(need, cap)
 		rope.set("fed_len", fed)
-	if need > GUT_PULL_MAX:
+	if need > cap:
 		var em := (ea + eb) * 0.5
-		var reach := maxf(minf(GUT_PULL_MAX * fa - aa.distance_to(ea), GUT_PULL_MAX * fb - ab.distance_to(eb)) / 1.03, 0.01)
+		var reach := maxf(minf(cap * fa - aa.distance_to(ea), cap * fb - ab.distance_to(eb)) / 1.03, 0.01)
 		if tip.distance_to(em) > reach:
 			tip = em + (tip - em).normalized() * reach
 	rope.set("hold_pos", tip)
 
 
 func _end_forceps() -> void:
-	if _fc_pull >= 0 and _fc_pull < _gut_pulls.size():
+	if _fc_kind == "soft":
+		var so := _soft_node(_fc_soft_kind)
+		if so:
+			so.call("release_hold")
+			if forceps_mode == "putback":
+				so.call("start_putback")
+				organ_putbacks += 1
+	elif _fc_kind == "tube":
+		var so2 := _soft_node(_fc_soft_kind)
+		if so2:
+			so2.call("chain_release", _fc_tube_side)
+			if forceps_mode == "putback":
+				so2.call("start_putback")
+				organ_putbacks += 1
+	elif _fc_pull >= 0 and _fc_pull < _gut_pulls.size():
 		var rope: Node = (_gut_pulls[_fc_pull] as Dictionary)["rope"]
 		if rope and is_instance_valid(rope):
-			var hp: Vector3 = rope.get("hold_pos")
+			var hp2: Vector3 = rope.get("hold_pos")
 			rope.set("hold_index", -1)
-			if forceps_mode == "putback" and hp.distance_to(gut_wound_anchor(rope)) <= PUTBACK_RADIUS:
+			if forceps_mode == "putback" and hp2.distance_to(gut_wound_anchor(rope)) <= PUTBACK_RADIUS:
 				rope.call("start_retract", PUTBACK_TIME)
 				gut_putbacks += 1
 	_fc_active = false
 	_fc_pull = -1
+	_fc_kind = "gut"
+	_fc_soft_kind = ""
+	_fc_tube_side = -1
 	stroke_active = false
 	_fc_target = 0.0   # 松开：钳口张开后收起
 	_fc_hide_t = 0.3
@@ -4848,13 +4987,496 @@ func debug_forceps_begin(origin: Vector3, dir: Vector3) -> bool:
 
 
 func debug_forceps_drag_to(tip: Vector3) -> void:
-	if _fc_active and _fc_pull >= 0 and _fc_pull < _gut_pulls.size():
-		_fc_last = tip
+	if not _fc_active:
+		return
+	_fc_last = tip
+	if _fc_kind == "soft":
+		var so := _soft_node(_fc_soft_kind)
+		if so:
+			so.call("hold_particle", int(so.get("hold_index")), tip)
+		return
+	if _fc_kind == "tube":
+		var so2 := _soft_node(_fc_soft_kind)
+		if so2:
+			so2.call("chain_drag", _fc_tube_side, tip)
+		return
+	if _fc_pull >= 0 and _fc_pull < _gut_pulls.size():
 		_forceps_hold((_gut_pulls[_fc_pull] as Dictionary)["rope"], tip)
 
 
 func debug_forceps_end() -> void:
 	_end_forceps()
+
+
+
+## ---- 0.4.11 大肠 / 子宫 / 膀胱脱出 ---------------------------------------
+
+func _small_gut_count() -> int:
+	var n := 0
+	for gp in _gut_pulls:
+		if str((gp as Dictionary).get("kind", "small")) != "colon":
+			n += 1
+	return n
+
+
+func colon_pull_count() -> int:
+	var n := 0
+	for gp in _gut_pulls:
+		if str((gp as Dictionary).get("kind", "")) == "colon":
+			n += 1
+	return n
+
+
+func colon_ropes() -> Array:
+	var out: Array = []
+	for gp in _gut_pulls:
+		if str((gp as Dictionary).get("kind", "")) == "colon":
+			out.append((gp as Dictionary)["rope"])
+	return out
+
+
+func _colon_organ_material() -> ShaderMaterial:
+	if _organs == null:
+		return null
+	var mats = _organs.get("_organ_mats")
+	if not (mats is Array):
+		return null
+	var src: ShaderMaterial = null
+	for m in mats:
+		var sm := m as ShaderMaterial
+		if sm == null or not bool(sm.get_shader_parameter("is_gut")):
+			continue
+		var tex = sm.get_shader_parameter("albedo_tex")
+		if tex is Texture2D and str((tex as Texture2D).resource_path).find("colon") >= 0:
+			src = sm
+			break
+	if src == null:
+		# 回退：复制小肠材质再换贴图
+		for m2 in mats:
+			var sm2 := m2 as ShaderMaterial
+			if sm2 and bool(sm2.get_shader_parameter("is_gut")):
+				src = sm2
+				break
+	if src == null:
+		return null
+	var dup := src.duplicate() as ShaderMaterial
+	dup.set_shader_parameter("strike_k", 0.3)
+	if ResourceLoader.exists(COLON_TILE_ALBEDO):
+		dup.set_shader_parameter("albedo_tex", load(COLON_TILE_ALBEDO))
+	if ResourceLoader.exists(COLON_TILE_NORMAL):
+		dup.set_shader_parameter("normal_tex", load(COLON_TILE_NORMAL))
+	dup.set_meta("exposed_gut", true)
+	dup.set_meta("colon_rope", true)
+	(mats as Array).append(dup)
+	if _organs.has_method("register_deform_material"):
+		_organs.call("register_deform_material", dup, false)
+	return dup
+
+
+func _start_colon_pull(hit: Vector3, dir: Vector3) -> bool:
+	# 只能有一个大肠扯出点：已有则夹住已有的，不新建。
+	if colon_pull_count() > 0:
+		for i in _gut_pulls.size():
+			if str((_gut_pulls[i] as Dictionary).get("kind", "")) != "colon":
+				continue
+			var rope0: Node = (_gut_pulls[i] as Dictionary)["rope"]
+			if rope0 == null or not is_instance_valid(rope0) or bool(rope0.get("retracting")):
+				continue
+			var pts0: PackedVector3Array = rope0.call("points")
+			var hi := int(pts0.size() / 2)
+			if pts0.size() > 0:
+				rope0.set("hold_index", hi)
+				rope0.set("hold_pos", pts0[hi])
+				_fc_last = pts0[hi]
+			_fc_kind = "gut"
+			_start_forceps_grip(i, dir)
+			return true
+		return false
+	var g := _new_gut_pull(hit)
+	if g.is_empty():
+		return false
+	var rope: Node = g["rope"]
+	rope.name = "PulledColon"
+	rope.call("apply_profile", {
+		"profile": "colon",
+		"radius": COLON_RADIUS,
+		"seg": COLON_SEG,
+		"damp": COLON_DAMP,
+		"min_pts": COLON_MIN_PTS,
+		"max_pts": COLON_MAX_PTS,
+		"mes_every": COLON_MES_EVERY,
+	})
+	rope.set("max_len", COLON_PULL_MAX)
+	rope.set("fed_len", 0.06)
+	var cm := _colon_organ_material()
+	if cm:
+		rope.call("use_organ_material", cm)
+	g["kind"] = "colon"
+	_gut_pulls.append(g)
+	gut_rope = rope
+	_update_guts(0.0)
+	rope.call("step", 1.0 / 60.0)
+	var n := int(rope.call("point_count"))
+	var orr := rope.call("outside_range") as Vector2i
+	rope.set("hold_index", clampi(n / 2, orr.x, maxi(orr.x, orr.y)))
+	rope.set("hold_pos", (rope.call("points") as PackedVector3Array)[int(rope.get("hold_index"))])
+	_fc_last = rope.get("hold_pos")
+	_fc_kind = "gut"
+	_start_forceps_grip(_gut_pulls.size() - 1, dir)
+	return true
+
+
+func _soft_node(kind: String) -> Node:
+	if not _soft_organs.has(kind):
+		return null
+	var n: Node = _soft_organs[kind]
+	if n == null or not is_instance_valid(n):
+		return null
+	return n
+
+
+func _wound_center_world() -> Vector3:
+	var rim := _gut_rim_world()
+	if rim.is_empty():
+		return _navel_rest
+	var c := Vector3.ZERO
+	for q in rim:
+		c += q
+	return c / float(rim.size())
+
+
+func _cavity_outward() -> Vector3:
+	if _organs:
+		var fr: Transform3D = _organs.call("abdomen_frame")
+		# 腹前方向（创口朝外）
+		var fwd: Vector3 = fr.basis.z.normalized()
+		if fwd.length_squared() > 1e-8:
+			return fwd
+	return Vector3(0, 0, 1)
+
+
+func _clear_soft_organs() -> void:
+	for k in _soft_organs.keys():
+		var so: Node = _soft_organs[k]
+		if so and is_instance_valid(so):
+			so.call("force_reset")
+			so.queue_free()
+	_soft_organs.clear()
+	if _organs and _organs.has_method("clear_canal_stretch"):
+		_organs.call("clear_canal_stretch")
+	if _organs and _organs.has_method("set_kind_visible"):
+		for k2 in ["uterus", "uterus_cavity", "bladder", "tube", "ovary"]:
+			_organs.call("set_kind_visible", k2, true)
+	extraction_hint = ""
+
+
+func _ensure_soft(kind: String) -> Node:
+	var existing := _soft_node(kind)
+	if existing:
+		return existing
+	if _organs == null:
+		return null
+	var so: Node = SoftOrgan.new()
+	so.name = "Soft" + kind.capitalize()
+	so.add_to_group(CAMERA_IGNORE_GROUP)
+	add_child(so)
+	var fr: Transform3D = _organs.call("abdomen_frame")
+	var navel: Vector3 = _organs.get("_navel_rest")
+	var main_meshes: Array = []
+	var hide_meshes: Array = []
+	var adnex: Array = []
+	if kind == "uterus":
+		main_meshes = _organs.call("viscera_meshes", "uterus")
+		hide_meshes = main_meshes.duplicate()
+		for m in _organs.call("viscera_meshes", "uterus_cavity"):
+			hide_meshes.append(m)
+		for k3 in ["tube", "ovary"]:
+			for m2 in _organs.call("viscera_meshes", k3):
+				adnex.append(m2)
+	else:
+		main_meshes = _organs.call("viscera_meshes", "bladder")
+		hide_meshes = main_meshes.duplicate()
+	var cervix_rest := navel
+	var fundus_rest := navel
+	var horns: Array = [navel, navel]
+	if kind == "uterus":
+		var canal: Dictionary = _organs.call("vagina_canal")
+		if not canal.is_empty():
+			cervix_rest = (canal["cervix_ab"] as Vector3) + navel
+		var meta: Dictionary = _organs.get("meta")
+		if meta.has("uterus"):
+			var mn: Array = meta["uterus"]["min"]
+			var mx: Array = meta["uterus"]["max"]
+			var a := Vector3(float(mn[0]), float(mn[1]), float(mn[2]))
+			var b := Vector3(float(mx[0]), float(mx[1]), float(mx[2]))
+			# 宫底：沿宫颈→上/前方向最远的角
+			fundus_rest = Vector3((a.x + b.x) * 0.5, b.y, b.z)
+		if meta.has("tubes") and meta["tubes"] is Array:
+			var tb: Array = meta["tubes"]
+			for i in mini(2, tb.size()):
+				var h: Array = (tb[i] as Dictionary).get("horn", [])
+				if h.size() >= 3:
+					horns[i] = Vector3(float(h[0]), float(h[1]), float(h[2]))
+	else:
+		# 膀胱：锚在较低 / 靠后的一端，底在对侧
+		var box_mn := Vector3(INF, INF, INF)
+		var box_mx := Vector3(-INF, -INF, -INF)
+		for mi in main_meshes:
+			if mi == null or (mi as MeshInstance3D).mesh == null:
+				continue
+			var P: PackedVector3Array = (mi as MeshInstance3D).mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+			for p3 in P:
+				box_mn = box_mn.min(p3)
+				box_mx = box_mx.max(p3)
+		if box_mn.x < INF:
+			cervix_rest = Vector3((box_mn.x + box_mx.x) * 0.5, box_mn.y, box_mn.z)
+			fundus_rest = Vector3((box_mn.x + box_mx.x) * 0.5, box_mx.y, box_mx.z)
+	so.call("setup", kind, fr, navel, main_meshes, adnex, cervix_rest, fundus_rest, horns)
+	# 子宫还要把内膜腔体一起隐藏。
+	if kind == "uterus":
+		var extra: Array = []
+		for cm in _organs.call("viscera_meshes", "uterus_cavity"):
+			extra.append(cm)
+		if not extra.is_empty() and so.has_method("add_hide_meshes"):
+			so.call("add_hide_meshes", extra)
+	_soft_organs[kind] = so
+	return so
+
+
+func _start_soft_extract(kind: String, origin: Vector3, dir: Vector3, early_side: int) -> bool:
+	extraction_hint = ""
+	if kind == "uterus" and speculum and speculum.has_method("is_present") and bool(speculum.call("is_present")):
+		extraction_hint = UTERUS_SPECULUM_HINT
+		surgery_hint.emit(extraction_hint)
+		return false
+	var so := _ensure_soft(kind)
+	if so == null:
+		return false
+	var fr: Transform3D = _organs.call("abdomen_frame") if _organs else Transform3D.IDENTITY
+	so.call("begin_extract", fr, _wound_center_world(), _cavity_outward())
+	if _organs and _organs.has_method("set_kind_visible"):
+		if kind == "uterus":
+			_organs.call("set_kind_visible", "uterus", false)
+			_organs.call("set_kind_visible", "uterus_cavity", false)
+			_organs.call("set_kind_visible", "tube", false)
+			_organs.call("set_kind_visible", "ovary", false)
+			for mi in _organs.get("organ_meshes"):
+				var m := mi as MeshInstance3D
+				if m and (bool(m.get_meta("is_cavity", false)) or str(m.get_meta("organ_kind", "")) == "uterus"):
+					m.visible = false
+		else:
+			_organs.call("set_kind_visible", kind, false)
+	if early_side >= 0 and kind == "uterus":
+		so.call("detach_adnexa", early_side)
+		if bool(so.call("chain_hold", early_side, origin, dir)):
+			_fc_kind = "tube"
+			_fc_soft_kind = kind
+			_fc_tube_side = early_side
+			_fc_last = _fc_last
+			_start_forceps_grip(-1, dir)
+			return true
+	# 夹住露出的柔体
+	var pk: Array = so.call("ray_pick", origin, dir)
+	var idx := int(pk[0])
+	var cage: PackedVector3Array = so.get("_p")
+	if idx < 0 and not cage.is_empty():
+		idx = cage.size() - 1
+	var hp: Vector3 = cage[idx] if idx >= 0 and idx < cage.size() else so.call("fundus_world")
+	so.call("hold_particle", idx, hp)
+	_fc_last = hp
+	_fc_kind = "soft"
+	_fc_soft_kind = kind
+	_start_forceps_grip(-1, dir)
+	return true
+
+
+func _update_soft_organs(dt: float) -> void:
+	if _soft_organs.is_empty():
+		return
+	var fr: Transform3D = _organs.call("abdomen_frame") if _organs else Transform3D.IDENTITY
+	var wound := _wound_center_world()
+	var out := _cavity_outward()
+	var fy := -1e9
+	var host := get_parent() as Node3D
+	if host:
+		fy = host.global_position.y
+	if has_method("is_on_exam_bed") and is_on_exam_bed() and has_method("_catch_top_y"):
+		fy = maxf(fy, _catch_top_y())
+	var caps := _gut_capsules()
+	var sk: Array = [_gut_skin_p, _gut_skin_n]
+	for k in _soft_organs.keys():
+		var so: Node = _soft_organs[k]
+		if so == null or not is_instance_valid(so):
+			continue
+		so.set("floor_y", fy)
+		so.set("capsules", caps)
+		so.set("skin_p", sk[0])
+		so.set("skin_n", sk[1])
+		# 夹住并向外拉时缓慢加档
+		if _fc_active and _fc_kind == "soft" and _fc_soft_kind == str(k) and dt > 0.0 and forceps_mode != "putback":
+			var hp: Vector3 = so.get("hold_pos")
+			var strength := clampf((hp - wound).dot(out) / 0.07, 0.0, 1.25)
+			so.call("add_charge", strength, dt)
+		elif _fc_active and _fc_kind == "soft" and _fc_soft_kind == str(k) and dt > 0.0 and forceps_mode == "putback":
+			# 放回模式夹住：反向降低档位
+			var ch := float(so.get("extract_charge"))
+			so.set("extract_charge", maxf(0.0, ch - ORGAN_PUTBACK_RATE * dt))
+		var was_out := bool(so.call("is_extracted"))
+		so.call("step", dt, fr, wound, out)
+		var now_out := bool(so.call("is_extracted"))
+		if str(k) == "uterus" and now_out and _organs and _organs.has_method("set_canal_stretch"):
+			_organs.call("set_canal_stretch", so.call("cervix_world"), 1.0)
+		elif str(k) == "uterus" and _organs and _organs.has_method("clear_canal_stretch") and not now_out:
+			_organs.call("clear_canal_stretch")
+		if was_out and not now_out and _organs and _organs.has_method("set_kind_visible"):
+			if str(k) == "uterus":
+				_organs.call("set_kind_visible", "uterus", true)
+				_organs.call("set_kind_visible", "uterus_cavity", true)
+				_organs.call("set_kind_visible", "tube", true)
+				_organs.call("set_kind_visible", "ovary", true)
+			else:
+				_organs.call("set_kind_visible", str(k), true)
+
+
+func has_extracted_organs() -> bool:
+	if colon_pull_count() > 0:
+		return true
+	for k in _soft_organs.keys():
+		var so: Node = _soft_organs[k]
+		if so and is_instance_valid(so) and bool(so.call("is_extracted")):
+			return true
+	return false
+
+
+func soft_organ(kind: String) -> Node:
+	return _soft_node(kind)
+
+
+func extract_level(kind: String) -> int:
+	var so := _soft_node(kind)
+	return int(so.call("level")) if so else 0
+
+
+func extract_charge(kind: String) -> float:
+	var so := _soft_node(kind)
+	return float(so.get("extract_charge")) if so else 0.0
+
+
+func organ_source_hidden(kind: String) -> bool:
+	if _organs == null:
+		var so0 := _soft_node(kind)
+		return bool(so0.call("original_hidden")) if so0 else false
+	var any := false
+	for mi in _organs.get("organ_meshes"):
+		var m := mi as MeshInstance3D
+		if m == null:
+			continue
+		var k := str(m.get_meta("organ_kind", ""))
+		var is_src := k == kind
+		if kind == "uterus":
+			is_src = k == "uterus" or k == "uterus_cavity" or bool(m.get_meta("is_cavity", false))
+		if not is_src:
+			continue
+		any = true
+		if m.visible:
+			return false
+	if any:
+		return true
+	var so := _soft_node(kind)
+	return bool(so.call("original_hidden")) if so else false
+
+
+func tube_chain_active(side: int) -> bool:
+	var so := _soft_node("uterus")
+	return bool(so.call("tube_chain_active", side)) if so else false
+
+
+func get_extraction_hint() -> String:
+	return extraction_hint
+
+
+func cervix_world() -> Vector3:
+	var so := _soft_node("uterus")
+	return so.call("cervix_world") if so else Vector3.ZERO
+
+
+func debug_pick_viscera(origin: Vector3, dir: Vector3) -> String:
+	if _organs == null or not _organs.has_method("ray_pick_viscera"):
+		return ""
+	var hit: Dictionary = _organs.call("ray_pick_viscera", origin, dir)
+	return str(hit.get("kind", "")) if not hit.is_empty() else ""
+
+
+func debug_begin_extract(kind: String) -> bool:
+	if not cut_open:
+		return false
+	kind = kind.strip_edges()
+	var dir := -_cavity_outward()
+	var origin := _wound_center_world() - dir * 0.08
+	if kind == "colon":
+		return _start_colon_pull(_wound_center_world(), dir)
+	if kind == "uterus" or kind == "bladder":
+		return _start_soft_extract(kind, origin, dir, -1)
+	if kind == "tube" or kind == "ovary":
+		return _start_soft_extract("uterus", origin, dir, 0)
+	if kind == "small" or kind == "small_intestine":
+		if _small_gut_count() >= GUT_MAX_PULLS:
+			return false
+		var g := _new_gut_pull(_wound_center_world())
+		if g.is_empty():
+			return false
+		_gut_pulls.append(g)
+		gut_rope = g["rope"]
+		_fc_kind = "gut"
+		_start_forceps_grip(_gut_pulls.size() - 1, dir)
+		return true
+	return false
+
+
+func debug_add_extract_charge(kind: String, strength: float, dt: float) -> void:
+	var so := _soft_node(kind)
+	if so:
+		if so.has_method("release_hold"):
+			so.call("release_hold")
+		so.call("add_charge", strength, dt)
+		# 立即步进一次让位置跟上档位
+		if _organs:
+			so.call("step", minf(dt, 1.0 / 30.0), _organs.call("abdomen_frame"), _wound_center_world(), _cavity_outward())
+			if kind == "uterus" and _organs.has_method("set_canal_stretch") and bool(so.call("is_extracted")):
+				_organs.call("set_canal_stretch", so.call("cervix_world"), 1.0)
+
+
+func debug_putback_organ(kind: String) -> bool:
+	if kind == "colon":
+		for gp in _gut_pulls:
+			if str((gp as Dictionary).get("kind", "")) != "colon":
+				continue
+			var rope: Node = (gp as Dictionary)["rope"]
+			if rope and is_instance_valid(rope):
+				rope.call("start_retract", PUTBACK_TIME)
+				gut_putbacks += 1
+				return true
+		return false
+	var so := _soft_node(kind)
+	if so and bool(so.call("is_extracted")):
+		so.call("start_putback")
+		organ_putbacks += 1
+		return true
+	return false
+
+
+func debug_grab_adnexa(side: int) -> bool:
+	var so := _soft_node("uterus")
+	if so == null or not bool(so.call("is_extracted")):
+		# 若子宫尚未脱出，视为从创口夹到了输卵管：先开始脱出再拆悬链
+		if not cut_open:
+			return false
+		if not _start_soft_extract("uterus", _wound_center_world() + Vector3(0, 0.08, 0), Vector3(0, -1, 0), side):
+			return false
+		so = _soft_node("uterus")
+	if so == null:
+		return false
+	return bool(so.call("detach_adnexa", side))
 
 
 ## ---- 0.4.02 拉钩（Roux 双头拉钩，手术工具包 5 号） ----

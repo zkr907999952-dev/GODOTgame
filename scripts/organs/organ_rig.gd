@@ -74,6 +74,12 @@ var _gut_aabb: AABB = AABB()
 var _uterus_aabb: AABB = AABB()
 ## 阴道扩张器形变（ab-local uniforms；w<=0 关闭）
 var _spec_o: Vector4 = Vector4.ZERO
+## 0.4.11：阴道跟随脱出子宫颈的拉伸参数（ab-local）。
+var _canal_stretch_on: float = 0.0
+var _hidden_kinds: Dictionary = {}
+var _canal_os_rest: Vector3 = Vector3.ZERO
+var _canal_os_now: Vector3 = Vector3.ZERO
+var _canal_open_rest: Vector3 = Vector3.ZERO
 var _spec_d: Vector4 = Vector4.ZERO
 var _spec_u: Vector4 = Vector4.ZERO
 var _spec_m: Vector4 = Vector4.ZERO
@@ -330,6 +336,199 @@ func vagina_canal() -> Dictionary:
 	return out
 
 
+## 0.4.11：按网格名 / 材质把脏器分成可点选的种类。
+func _classify_organ(matname: String, mname: String, is_gut: bool, tex_id: int, is_uter: bool, is_cavity: bool) -> String:
+	var ln := (str(matname) + " " + str(mname)).to_lower()
+	if is_cavity or ln.find("endometr") >= 0:
+		return "uterus_cavity"
+	if is_uter or (ln.find("uterus") >= 0 and ln.find("cavity") < 0 and ln.find("endometr") < 0):
+		return "uterus"
+	if ln.find("vessie") >= 0 or ln.find("bladder") >= 0:
+		return "bladder"
+	if ln.find("trompe") >= 0 or ln.find("fallopian") >= 0 or (ln.find("tube") >= 0 and ln.find("gut") < 0):
+		return "tube"
+	if ln.find("ovaire") >= 0 or ln.find("ovary") >= 0:
+		return "ovary"
+	if ln.find("vagin") >= 0:
+		return "vagina"
+	if is_gut:
+		if tex_id == 0 or ln.find("tjock") >= 0 or ln.find("colon") >= 0:
+			return "colon"
+		return "small_intestine"
+	return "other"
+
+
+func viscera_meshes(kind: String) -> Array:
+	var out: Array = []
+	for mi in organ_meshes:
+		if str(mi.get_meta("organ_kind", "")) == kind:
+			out.append(mi)
+	return out
+
+
+func set_kind_visible(kind: String, vis: bool) -> void:
+	if vis:
+		_hidden_kinds.erase(kind)
+	else:
+		_hidden_kinds[kind] = true
+	_apply_organ_visibility()
+
+
+func _apply_organ_visibility() -> void:
+	for mi in organ_meshes:
+		var k := str(mi.get_meta("organ_kind", ""))
+		var hide := _hidden_kinds.has(k)
+		if k == "uterus_cavity" and _hidden_kinds.has("uterus"):
+			hide = true
+		if bool(mi.get_meta("is_cavity", false)) and _hidden_kinds.has("uterus"):
+			hide = true
+		mi.visible = show_organs and not hide
+
+
+func kinds_hidden(kind: String) -> bool:
+	var any := false
+	for mi in viscera_meshes(kind):
+		any = true
+		if (mi as MeshInstance3D).visible:
+			return false
+	return any
+
+
+func set_canal_stretch(os_now_world: Vector3, amount: float) -> void:
+	_update_frame()
+	var canal := vagina_canal()
+	if canal.is_empty():
+		_canal_stretch_on = 0.0
+		return
+	_canal_open_rest = canal["opening_ab"]
+	_canal_os_rest = canal["cervix_ab"]
+	_canal_os_now = _frame.affine_inverse() * os_now_world
+	_canal_stretch_on = clampf(amount, 0.0, 1.0)
+	# 立即写入，不等下一帧 _push_uniforms（手术步进可能在之后）。
+	for m in _all_mats:
+		if m == null:
+			continue
+		m.set_shader_parameter("canal_stretch_on", _canal_stretch_on)
+		m.set_shader_parameter("canal_os_rest", _canal_os_rest)
+		m.set_shader_parameter("canal_os_now", _canal_os_now)
+		m.set_shader_parameter("canal_open_rest", _canal_open_rest)
+
+
+func clear_canal_stretch() -> void:
+	_canal_stretch_on = 0.0
+	for m in _all_mats:
+		if m:
+			m.set_shader_parameter("canal_stretch_on", 0.0)
+
+
+func canal_stretch_amount() -> float:
+	return _canal_stretch_on
+
+
+func canal_os_now_world() -> Vector3:
+	_update_frame()
+	return _frame * _canal_os_now
+
+
+## 与着色器 canal_stretch 相同的腹部局部位移，方便自检。
+func canal_deform_ab(p_ab: Vector3) -> Vector3:
+	if _canal_stretch_on <= 1e-5:
+		return p_ab
+	var axis := _canal_os_rest - _canal_open_rest
+	var len2 := axis.length_squared()
+	if len2 < 1e-8:
+		return p_ab
+	var tt := clampf((p_ab - _canal_open_rest).dot(axis) / len2, 0.0, 1.0)
+	tt = tt * tt * (3.0 - 2.0 * tt)
+	var mid := _canal_open_rest + axis * ((p_ab - _canal_open_rest).dot(axis) / len2)
+	var rad := p_ab.distance_to(mid)
+	var rw := 1.0 - smoothstep(0.018, 0.038, rad)
+	if rw <= 1e-5:
+		return p_ab
+	return p_ab + (_canal_os_now - _canal_os_rest) * tt * rw * _canal_stretch_on
+
+
+## 射线点选腹腔脏器（腹部局部网格）。返回 {kind, side, point, mesh, dist} 或空。
+func ray_pick_viscera(origin: Vector3, dir: Vector3, kinds: PackedStringArray = PackedStringArray()) -> Dictionary:
+	_update_frame()
+	var d := dir.normalized()
+	var inv := _frame.affine_inverse()
+	var o_ab: Vector3 = inv * origin
+	var d_ab: Vector3 = (inv.basis * d).normalized()
+	var best_t := 1e9
+	var hit := {}
+	var filter := {}
+	for k in kinds:
+		filter[str(k)] = true
+	for mi in organ_meshes:
+		var mesh_i := mi as MeshInstance3D
+		if mesh_i == null or mesh_i.mesh == null or not mesh_i.visible:
+			continue
+		var kind := str(mesh_i.get_meta("organ_kind", ""))
+		if kind == "" or kind == "other" or kind == "uterus_cavity":
+			continue
+		if not filter.is_empty() and not filter.has(kind):
+			continue
+		var arr: Array = mesh_i.mesh.surface_get_arrays(0)
+		var P: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var I: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+		# AABB in ab-local
+		var mn := Vector3(INF, INF, INF)
+		var mx := Vector3(-INF, -INF, -INF)
+		var Pab := PackedVector3Array()
+		Pab.resize(P.size())
+		for i in P.size():
+			var l: Vector3 = P[i] - _navel_rest
+			Pab[i] = l
+			mn = mn.min(l)
+			mx = mx.max(l)
+		var box := AABB(mn, mx - mn).grow(0.004)
+		if not _seg_aabb(o_ab, d_ab, 2.0, box):
+			continue
+		var t_hit := -1.0
+		if I.is_empty():
+			# no index: fan? skip expensive, use AABB entry
+			continue
+		for f in range(0, I.size() - 2, 3):
+			var a: Vector3 = Pab[I[f]]
+			var b: Vector3 = Pab[I[f + 1]]
+			var c: Vector3 = Pab[I[f + 2]]
+			var tt := _ray_triangle(o_ab, d_ab, a, b, c)
+			if tt >= 0.0 and tt < t_hit or (t_hit < 0.0 and tt >= 0.0):
+				t_hit = tt
+		if t_hit >= 0.0 and t_hit < best_t:
+			best_t = t_hit
+			hit = {
+				"kind": kind,
+				"side": int(mesh_i.get_meta("organ_side", -1)),
+				"point": origin + d * t_hit,
+				"point_ab": o_ab + d_ab * t_hit,
+				"mesh": mesh_i,
+				"dist": t_hit,
+			}
+	return hit
+
+
+func _ray_triangle(o: Vector3, d: Vector3, a: Vector3, b: Vector3, c: Vector3) -> float:
+	var e1 := b - a
+	var e2 := c - a
+	var p := d.cross(e2)
+	var det := e1.dot(p)
+	if absf(det) < 1e-10:
+		return -1.0
+	var inv := 1.0 / det
+	var tvec := o - a
+	var u := tvec.dot(p) * inv
+	if u < 0.0 or u > 1.0:
+		return -1.0
+	var q := tvec.cross(e1)
+	var v := d.dot(q) * inv
+	if v < 0.0 or u + v > 1.0:
+		return -1.0
+	var tt := e2.dot(q) * inv
+	return tt if tt >= 0.0 else -1.0
+
+
 ## 与着色器 drag_offset 相同的腹部局部软位移，用来让插入器械跟着拖拽走。
 func soft_offset_ab(p: Vector3) -> Vector3:
 	var d := p - _drag_grab
@@ -427,8 +626,7 @@ func has_xray_sphere() -> bool:
 
 func set_show_organs(on: bool) -> void:
 	show_organs = on
-	for mi in organ_meshes:
-		mi.visible = on
+	_apply_organ_visibility()
 
 
 func set_interact_mode(m: String) -> void:
@@ -1202,8 +1400,7 @@ func step(delta: float) -> void:
 		return
 	var dt := minf(delta, 0.05)
 	if frozen:
-		for mi in organ_meshes:
-			mi.visible = show_organs
+		_apply_organ_visibility()
 		_update_frame()
 		_push_uniforms()
 		_update_fx()
@@ -1219,8 +1416,7 @@ func step(delta: float) -> void:
 	_step_drag(dt)
 	_step_tools(dt)
 	_step_navel(dt)
-	for mi in organ_meshes:
-		mi.visible = show_organs
+	_apply_organ_visibility()
 	_update_frame()
 	_push_uniforms()
 	_update_fx()
@@ -1591,6 +1787,10 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("spec_d", _spec_d)
 		m.set_shader_parameter("spec_u", _spec_u)
 		m.set_shader_parameter("spec_m", _spec_m)
+		m.set_shader_parameter("canal_stretch_on", _canal_stretch_on)
+		m.set_shader_parameter("canal_os_rest", _canal_os_rest)
+		m.set_shader_parameter("canal_os_now", _canal_os_now)
+		m.set_shader_parameter("canal_open_rest", _canal_open_rest)
 	var sq := tools.squeeze_target()
 	for m in _all_mats:
 		if sq.is_empty():
@@ -2137,6 +2337,15 @@ func _build_organs() -> bool:
 		mi.set_meta("organ_material", matname)
 		mi.set_meta("is_uterus", bool(mat.get_shader_parameter("is_uterus")))
 		mi.set_meta("is_cavity", (str(matname) + " " + str(mname)).to_lower().find("endometr") >= 0)
+		var kind := _classify_organ(matname, mname, is_gut, tex_id, is_uter, bool(mi.get_meta("is_cavity")))
+		mi.set_meta("organ_kind", kind)
+		if kind == "tube" or kind == "ovary":
+			var va_s: PackedVector3Array = e["mesh"].surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+			var cx := 0.0
+			for pv in va_s:
+				cx += pv.x
+			cx /= float(maxi(va_s.size(), 1))
+			mi.set_meta("organ_side", 0 if cx >= 0.0 else 1)
 		_skel.add_child(mi)
 		mi.skeleton = mi.get_path_to(_skel)
 		organ_meshes.append(mi)
