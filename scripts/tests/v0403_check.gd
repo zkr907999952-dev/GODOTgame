@@ -149,6 +149,27 @@ func _hole_center() -> Vector3:
 	return c / float(maxi(rim.size(), 1))
 
 
+func _aim_cavity_gut(origin: Vector3, dir: Vector3) -> Array:
+	# 创口中心射线常先擦到小肠再在 90mm 穿透窗内命中子宫（盆腔优先）。
+	# 本测试要的是夹肠，所以只在肠网格上取瞄准点。
+	var o := origin
+	var d := dir.normalized()
+	var rig: Node = s.get("_organs")
+	if rig != null and rig.has_method("ray_pick_viscera"):
+		var hit: Dictionary = rig.call("ray_pick_viscera", o, d, PackedStringArray(["small_intestine", "colon"]))
+		if not hit.is_empty():
+			var pt: Vector3 = hit["point"]
+			o = pt + Vector3(0.0, 0.3, 0.0)
+			d = (pt - o).normalized()
+	return [o, d]
+
+
+func _begin_cavity_gut(origin: Vector3, dir: Vector3) -> bool:
+	var aim := _aim_cavity_gut(origin, dir)
+	var kinds := PackedStringArray(["small_intestine", "colon"])
+	return bool(s.call("debug_forceps_begin_kind", aim[0], aim[1], kinds)) and int(s.call("gut_pull_count")) > 0
+
+
 func _check_forceps() -> void:
 	await _restart()
 	var btn: Button = hud.get("_btn_tool_forceps")
@@ -173,7 +194,7 @@ func _check_forceps() -> void:
 	# 点在皮肤上（离创口很远）不会夹出肠子
 	var far := hc + Vector3(0.12, 0, 0)
 	_ok(not bool(s.call("debug_forceps_begin", far + Vector3(0, 0.3, 0), Vector3.DOWN)), "clicking intact skin far from the wound grabs nothing")
-	_ok(bool(s.call("debug_forceps_begin", o, d)), "forceps clamp the intestine inside the open cavity")
+	_ok(_begin_cavity_gut(o, d), "forceps clamp the intestine inside the open cavity")
 	await _frames(1)
 	var ang0 := float(s.call("forceps_jaw_angle"))
 	var fn: Node3D = s.call("forceps_node")

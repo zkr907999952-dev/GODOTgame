@@ -100,10 +100,17 @@ float lobe(float frac, float width) {
 uniform vec3 peri_clock = vec3(0.0);
 // 被扯出后隐藏对应长度的体内肠管。xy = along 中心 / 半宽，z = 强度（0 关闭）。
 uniform vec4 gut_eat[4];
+// 子宫渐进物理化：沿宫颈→宫底的 along 大于 cut 的静态网格隐藏，交给柔体。
+uniform float uterus_phys_on = 0.0;
+uniform float uterus_phys_cut = 2.0;
+uniform vec3 uterus_phys_origin = vec3(0.0);
+uniform vec3 uterus_phys_axis = vec3(0.0, 1.0, 0.0);
+uniform float uterus_phys_blend = 0.01;
 // 肠道伤痕（网页 GutHealth 掉血变红）：xyz = ab-local，w = 程度
 uniform vec4 dmg[12];
 varying vec3 v_l0;
 varying float v_eat;
+varying float v_phys_hide;
 
 float pulse(float along, vec3 clk, float amp) {
 	float n = max(0.2, peri_waves);
@@ -136,6 +143,7 @@ float gut_eat_k(float along) {
 
 void vertex() {
 	v_eat = 0.0;
+	v_phys_hide = 0.0;
 	if (is_gut && peri_on > 0.0) {
 		float k = pulse(CUSTOM0.x, peri_clock, peri_amp) * peri_on;
 		VERTEX -= CUSTOM0.yzw * k;
@@ -149,6 +157,11 @@ void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
 	v_l0 = l;
+	if (uterus_phys_on > 0.5) {
+		float al = dot(l - uterus_phys_origin, uterus_phys_axis);
+		float bl = max(uterus_phys_blend, 1e-4);
+		v_phys_hide = smoothstep(uterus_phys_cut - bl, uterus_phys_cut + bl * 0.15, al);
+	}
 	vec3 off = strike_offset(l) * strike_k + drag_offset(l) * organ_soft + dent_offset(l) * organ_soft + ball_tear(l) + jello_offset(l);
 	// 腹部鼓包/搅动时，肠子和其它脏器跟着体表一起走（对照网页 FistPlay.deformColon + 肚皮 fist_offset）。
 	// 以前只在 contain 里当边界，脏器不会随腹部鼓起或左右搅动。
@@ -183,6 +196,9 @@ void vertex() {
 
 void fragment() {
 	if (v_eat > 0.62) {
+		discard;
+	}
+	if (v_phys_hide > 0.62) {
 		discard;
 	}
 	vec3 c = base_color.rgb;

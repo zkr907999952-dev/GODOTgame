@@ -1082,6 +1082,10 @@ func set_tool(t: String) -> void:
 		_hide_retractor_ghost()
 		if _retr_selected >= 0:
 			select_retractor(-1)
+	if tool != "forceps":
+		_clear_forceps_preview()
+		if _fc_active:
+			_end_forceps()
 	if tool == "speculum" and speculum:
 		speculum.begin_insert()
 	tool_changed.emit(tool)
@@ -1106,7 +1110,7 @@ func begin_stroke(origin: Vector3, dir: Vector3) -> bool:
 	if tool == "retractor":
 		return _begin_retractor(origin, dir)
 	if tool == "forceps":
-		return _begin_forceps(origin, dir)
+		return _begin_forceps_pointer(origin, dir)
 	if tool == "speculum":
 		if speculum and speculum.is_ready() and speculum.hits_ray(origin, dir):
 			return speculum.request_remove()
@@ -1221,6 +1225,8 @@ func cancel_stroke() -> void:
 	_drag_pending = false
 	if _fc_active:
 		_end_forceps()
+	_fc_pressing = false
+	_fc_press_t = 0.0
 	_retr_placing = false
 	if _grab_active:
 		_end_grab(false)
@@ -1240,8 +1246,16 @@ func cancel_stroke() -> void:
 func end_stroke() -> void:
 	if _drag_pending:
 		_flush_pending_drag()
+	if _fc_pressing and not _fc_active:
+		# 手机短点：只留下名称 / 标记，不夹、不扯出。
+		_fc_pressing = false
+		_fc_press_t = 0.0
+		stroke_active = false
+		return
 	if _fc_active:
 		_end_forceps()
+		_fc_pressing = false
+		_fc_press_t = 0.0
 		return
 	if _grab_active:
 		_end_grab(true)
@@ -4352,14 +4366,23 @@ func _gut_capsules() -> Array:
 	return out
 
 
+var _gut_hide_sig: Array = []
+var gut_hide_usec: int = 0
+
+
 func _sync_gut_hide() -> void:
 	if _organs == null or not _organs.has_method("set_gut_eaten"):
 		return
+	var t0 := Time.get_ticks_usec()
 	if _gut_pulls.is_empty():
-		if _organs.has_method("clear_gut_eaten"):
-			_organs.call("clear_gut_eaten")
+		if not _gut_hide_sig.is_empty():
+			if _organs.has_method("clear_gut_eaten"):
+				_organs.call("clear_gut_eaten")
+			_gut_hide_sig = []
+		gut_hide_usec = Time.get_ticks_usec() - t0
 		return
 	var by := {"colon": [], "small_intestine": []}
+	var sig: Array = []
 	for gp in _gut_pulls:
 		var g: Dictionary = gp
 		var k := "colon" if str(g.get("kind", "")) == "colon" else "small_intestine"
@@ -4368,14 +4391,22 @@ func _sync_gut_hide() -> void:
 			continue
 		var fed := float(rope.get("fed_len"))
 		var plen := float(_organs.call("gut_path_length", k)) if _organs.has_method("gut_path_length") else 0.6
-		var half := clampf((fed * 0.55) / maxf(plen, 0.08), 0.01, 0.48)
-		var hit: Vector3 = g.get("hit", Vector3.INF)
-		if hit == Vector3.INF:
-			hit = _gut_pull_anchor(g, _organs.call("abdomen_frame") if _organs.has_method("abdomen_frame") else Transform3D.IDENTITY)
-		var along := float(_organs.call("gut_along_near", k, hit)) if _organs.has_method("gut_along_near") else 0.5
-		(by[k] as Array).append(Vector4(along, half, 1.0, 0.0))
+		if not g.has("along") or not (g["along"] is float):
+			var hit: Vector3 = g.get("hit", Vector3.INF)
+			if hit == Vector3.INF:
+				hit = _gut_pull_anchor(g, _organs.call("abdomen_frame") if _organs.has_method("abdomen_frame") else Transform3D.IDENTITY)
+			g["along"] = float(_organs.call("gut_along_near", k, hit)) if _organs.has_method("gut_along_near") else 0.5
+		var along := float(g["along"])
+		var win: Vector4 = _organs.call("gut_hide_window", along, fed, plen) if _organs.has_method("gut_hide_window") else Vector4(along, clampf(fed / maxf(plen, 0.08) * 0.5, 0.0, 0.5), 1.0, 0.0)
+		(by[k] as Array).append(win)
+		sig.append([k, snapped(fed, 0.002), snapped(along, 0.01), snapped(win.x, 0.01), snapped(win.y, 0.01)])
+	if sig == _gut_hide_sig:
+		gut_hide_usec = Time.get_ticks_usec() - t0
+		return
+	_gut_hide_sig = sig
 	_organs.call("set_gut_eaten", "colon", by["colon"])
 	_organs.call("set_gut_eaten", "small_intestine", by["small_intestine"])
+	gut_hide_usec = Time.get_ticks_usec() - t0
 
 
 func _clear_guts() -> void:
@@ -4433,7 +4464,7 @@ const PUTBACK_RADIUS := 0.045
 const PUTBACK_TIME := 1.0
 ## 0.4.11：大肠（单点、更粗更短、更大阻尼）与子宫 / 膀胱五档柔体脱出。
 const COLON_PULL_MAX := 0.36
-const COLON_RADIUS := 0.0168
+const COLON_RADIUS := 0.0148
 const COLON_SEG := 0.040
 const COLON_DAMP := 0.88
 const COLON_MIN_PTS := 5
@@ -4498,6 +4529,14 @@ var _fc_last := Vector3.ZERO
 var _fc_anim := 1.0       # 0 = 张开，1 = 夹紧
 var _fc_target := 1.0
 var _fc_hide_t := 0.0
+var _fc_preview_valid := false
+var _fc_preview_pt := Vector3.ZERO
+var _fc_pressing := false
+var _fc_press_t := 0.0
+var _fc_press_origin := Vector3.ZERO
+var _fc_press_dir := Vector3.DOWN
+var _fc_marker: MeshInstance3D = null
+const FORCEPS_LONGPRESS := 1.0
 var forceps_clamps: int = 0
 var gut_update_usec: int = 0
 var _soft_organs: Dictionary = {}   # "uterus" / "bladder" -> SoftOrgan
@@ -4754,20 +4793,49 @@ func _place_forceps(tip: Vector3, dir: Vector3) -> void:
 
 
 func _update_forceps_anim(dt: float) -> void:
+	# 手机长按计时不依赖钳子模型是否已创建。
+	if _fc_pressing and not _fc_active and touch_pick:
+		_fc_press_t += dt
+		if _fc_press_t + 1e-4 >= FORCEPS_LONGPRESS:
+			_begin_forceps(_fc_press_origin, _fc_press_dir)
+	if not _fc_active and _fc_preview_valid and tool == "forceps":
+		_fc_target = 0.0
+		_fc_hide_t = 0.3
+		_place_forceps(_fc_preview_pt, _preview_forceps_dir())
 	if _forceps_node == null or not is_instance_valid(_forceps_node):
 		return
 	_fc_anim = move_toward(_fc_anim, _fc_target, dt / 0.14)
 	_set_forceps_jaw(forceps_jaw_angle())
-	if not _fc_active and _forceps_node.visible:
+	if not _fc_active and _forceps_node.visible and not (_fc_preview_valid and tool == "forceps"):
 		_fc_hide_t -= dt
 		if _fc_hide_t <= 0.0:
 			_forceps_node.visible = false
-	if _fc_active and _fc_pull >= 0 and _fc_pull < _gut_pulls.size():
+			_hide_forceps_marker()
+	if _fc_active and _fc_kind == "gut" and _fc_pull >= 0 and _fc_pull < _gut_pulls.size():
 		var rope: Node3D = (_gut_pulls[_fc_pull] as Dictionary)["rope"]
 		if rope and is_instance_valid(rope):
 			var cam := get_viewport().get_camera_3d() if is_inside_tree() and get_viewport() else null
 			var d: Vector3 = (rope.get("hold_pos") - cam.global_position) if cam else Vector3.FORWARD
 			_place_forceps(rope.get("hold_pos"), d)
+	elif _fc_active and _fc_kind == "soft":
+		var so_f := _soft_node(_fc_soft_kind)
+		if so_f:
+			var hp: Vector3 = so_f.get("hold_pos")
+			_fc_last = hp
+			var cam2 := get_viewport().get_camera_3d() if is_inside_tree() and get_viewport() else null
+			var d2: Vector3 = (hp - cam2.global_position) if cam2 else Vector3.FORWARD
+			_place_forceps(hp, d2)
+	elif _fc_active and _fc_kind == "tube":
+		var so_t := _soft_node(_fc_soft_kind)
+		if so_t:
+			for r in so_t.call("chain_ropes"):
+				if r and int(r.get("hold_index")) >= 0:
+					var hpt: Vector3 = r.get("hold_pos")
+					_fc_last = hpt
+					var cam3 := get_viewport().get_camera_3d() if is_inside_tree() and get_viewport() else null
+					var d3: Vector3 = (hpt - cam3.global_position) if cam3 else Vector3.FORWARD
+					_place_forceps(hpt, d3)
+					break
 
 
 ## 射线与腹腔（器官椭球）的交点，且必须穿过开放创口（前面没有完整皮肤挡着）。
@@ -4818,7 +4886,190 @@ func _ray_cavity_hit(origin: Vector3, dir: Vector3) -> Variant:
 	return hit
 
 
-func _begin_forceps(origin: Vector3, dir: Vector3) -> bool:
+func _begin_forceps_pointer(origin: Vector3, dir: Vector3) -> bool:
+	_hover_forceps(origin, dir)
+	_preview_forceps(origin, dir)
+	if touch_pick:
+		# 手机：点一下只显示名称和标记，满 1 秒长按才夹住拖拽。
+		if not _fc_preview_valid and hovered_organ == "":
+			return false
+		_fc_pressing = true
+		_fc_press_t = 0.0
+		_fc_press_origin = origin
+		_fc_press_dir = dir
+		_show_forceps_marker(_fc_preview_pt if _fc_preview_valid else _fc_last)
+		stroke_active = true
+		return true
+	# 电脑：按住左键立即夹住并拖拽。
+	return _begin_forceps(origin, dir)
+
+
+func _preview_forceps_dir() -> Vector3:
+	if is_inside_tree() and get_viewport():
+		var cam := get_viewport().get_camera_3d()
+		if cam:
+			var d: Vector3 = _fc_preview_pt - cam.global_position
+			if d.length_squared() > 1e-8:
+				return d.normalized()
+	return Vector3.FORWARD
+
+
+func _forceps_aim_point(origin: Vector3, dir: Vector3) -> Variant:
+	var d := dir.normalized()
+	var best_p := Vector3.INF
+	var best := _gut_pick_dist()
+	for i in _gut_pulls.size():
+		var rope: Node = (_gut_pulls[i] as Dictionary).get("rope")
+		if rope == null or not is_instance_valid(rope) or bool(rope.get("retracting")):
+			continue
+		var pk: Array = rope.call("ray_pick", origin, d)
+		if int(pk[0]) >= 0 and float(pk[1]) < best:
+			best = float(pk[1])
+			var pts: PackedVector3Array = rope.call("points")
+			var hi := int(pk[0])
+			best_p = pts[hi] if hi >= 0 and hi < pts.size() else origin + d * 0.2
+	for k in _soft_organs.keys():
+		var so: Node = _soft_organs[k]
+		if so == null or not is_instance_valid(so) or not bool(so.call("is_extracted")):
+			continue
+		if so.has_method("ray_pick_adnexa"):
+			var ts: int = int(so.call("ray_pick_adnexa", origin, d))
+			if ts >= 0:
+				best_p = so.call("horn_world", ts) if so.has_method("horn_world") else so.call("fundus_world")
+				best = 0.0
+		var pk2: Array = so.call("ray_pick", origin, d)
+		if int(pk2[0]) >= 0 and float(pk2[1]) < best:
+			best = float(pk2[1])
+			var cage: PackedVector3Array = so.get("_p")
+			var idx := int(pk2[0])
+			best_p = cage[idx] if idx >= 0 and idx < cage.size() else so.call("fundus_world")
+	if _organs and _organs.has_method("ray_pick_viscera"):
+		var pick: Dictionary = _organs.call("ray_pick_viscera", origin, d)
+		if not pick.is_empty() and pick.has("point"):
+			var dist := origin.distance_to(pick["point"])
+			# 脏器命中优先于「只是更近的绳」已经记录的情况：若还没有点，直接用。
+			if best_p == Vector3.INF or dist < origin.distance_to(best_p) + 0.01:
+				best_p = pick["point"]
+	if best_p != Vector3.INF:
+		return best_p
+	var cav = _ray_cavity_hit(origin, d)
+	if cav != null:
+		return cav
+	return null
+
+
+func _preview_forceps(origin: Vector3, dir: Vector3) -> void:
+	var pt = _forceps_aim_point(origin, dir)
+	if pt == null:
+		return
+	_fc_preview_valid = true
+	_fc_preview_pt = pt
+	_fc_target = 0.0
+	_place_forceps(pt, dir)
+	if touch_pick:
+		_show_forceps_marker(pt)
+
+
+func _show_forceps_marker(pt: Vector3) -> void:
+	if _fc_marker == null or not is_instance_valid(_fc_marker):
+		_fc_marker = MeshInstance3D.new()
+		_fc_marker.name = "ForcepsGrabMarker"
+		_fc_marker.top_level = true
+		_fc_marker.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_fc_marker.add_to_group(CAMERA_IGNORE_GROUP)
+		var sm := SphereMesh.new()
+		sm.radius = 0.0055
+		sm.height = 0.011
+		sm.radial_segments = 10
+		sm.rings = 6
+		_fc_marker.mesh = sm
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(1.0, 0.92, 0.35)
+		mat.emission_enabled = true
+		mat.emission = Color(1.0, 0.85, 0.2)
+		mat.emission_energy_multiplier = 1.4
+		_fc_marker.material_override = mat
+		add_child(_fc_marker)
+	_fc_marker.global_position = pt
+	_fc_marker.visible = true
+
+
+func _hide_forceps_marker() -> void:
+	if _fc_marker and is_instance_valid(_fc_marker):
+		_fc_marker.visible = false
+
+
+func _clear_forceps_preview() -> void:
+	_fc_preview_valid = false
+	_fc_pressing = false
+	_fc_press_t = 0.0
+	_hide_forceps_marker()
+	if not _fc_active and _forceps_node and is_instance_valid(_forceps_node):
+		_fc_hide_t = 0.0
+		_forceps_node.visible = false
+
+
+func forceps_longpress_seconds() -> float:
+	return FORCEPS_LONGPRESS
+
+
+func is_forceps_clamped() -> bool:
+	return _fc_active
+
+
+func has_forceps_preview() -> bool:
+	return _fc_preview_valid
+
+
+func forceps_preview_point() -> Vector3:
+	return _fc_preview_pt
+
+
+func forceps_press_time() -> float:
+	return _fc_press_t
+
+
+func debug_forceps_preview(origin: Vector3, dir: Vector3) -> String:
+	set_touch_pick(false)
+	_hover_forceps(origin, dir)
+	_preview_forceps(origin, dir)
+	return str(call("get_organ_target_label"))
+
+
+func debug_forceps_touch_begin(origin: Vector3, dir: Vector3) -> bool:
+	set_touch_pick(true)
+	return _begin_forceps_pointer(origin, dir)
+
+
+func debug_forceps_tick(dt: float) -> void:
+	_update_forceps_anim(dt)
+	if _fc_active:
+		_update_guts(dt)
+
+
+func physical_fraction(kind: String = "uterus") -> float:
+	var so := _soft_node(kind)
+	if so and so.has_method("physical_fraction"):
+		return float(so.call("physical_fraction"))
+	return 0.0
+
+
+func soft_size_ratio(kind: String = "uterus") -> float:
+	var so := _soft_node(kind)
+	if so and so.has_method("physical_size_ratio"):
+		return float(so.call("physical_size_ratio"))
+	return 1.0
+
+
+func soft_mesh_quality(kind: String = "uterus") -> Dictionary:
+	var so := _soft_node(kind)
+	if so and so.has_method("debug_mesh_quality"):
+		return so.call("debug_mesh_quality")
+	return {}
+
+
+func _begin_forceps(origin: Vector3, dir: Vector3, kinds: PackedStringArray = PackedStringArray()) -> bool:
 	_fc_active = false
 	_fc_pull = -1
 	_fc_kind = "gut"
@@ -4840,7 +5091,8 @@ func _begin_forceps(origin: Vector3, dir: Vector3) -> bool:
 			bi = i
 			bp = int(pk[0])
 	# 1b. 已脱出的柔体器官 / 悬链输卵管
-	var soft_best := best_d
+	# 宫体笼子半径常大于肠绳点半径，允许稍宽的夹取容差。
+	var soft_best := maxf(best_d, 0.022)
 	var soft_kind := ""
 	var soft_idx := -1
 	var tube_side := -1
@@ -4907,7 +5159,7 @@ func _begin_forceps(origin: Vector3, dir: Vector3) -> bool:
 	var hit: Vector3 = hv
 	var pick := {}
 	if _organs and _organs.has_method("ray_pick_viscera"):
-		pick = _organs.call("ray_pick_viscera", origin, dir)
+		pick = _organs.call("ray_pick_viscera", origin, dir, kinds)
 	var kind := str(pick.get("kind", "")) if not pick.is_empty() else ""
 	if kind in ["uterus", "uterus_cavity", "tube", "ovary"]:
 		var side := int(pick.get("side", -1))
@@ -5106,7 +5358,13 @@ func _end_forceps() -> void:
 
 ## 测试：按世界坐标模拟手术钳点击 / 拖动 / 松开。
 func debug_forceps_begin(origin: Vector3, dir: Vector3) -> bool:
+	set_touch_pick(false)
 	return _begin_forceps(origin, dir)
+
+
+func debug_forceps_begin_kind(origin: Vector3, dir: Vector3, kinds: PackedStringArray) -> bool:
+	set_touch_pick(false)
+	return _begin_forceps(origin, dir, kinds)
 
 
 func debug_forceps_drag_to(tip: Vector3) -> void:
@@ -5287,6 +5545,8 @@ func _clear_soft_organs() -> void:
 	_soft_organs.clear()
 	if _organs and _organs.has_method("clear_canal_stretch"):
 		_organs.call("clear_canal_stretch")
+	if _organs and _organs.has_method("clear_uterus_phys_cut"):
+		_organs.call("clear_uterus_phys_cut")
 	if _organs and _organs.has_method("set_kind_visible"):
 		for k2 in ["uterus", "uterus_cavity", "bladder", "tube", "ovary"]:
 			_organs.call("set_kind_visible", k2, true)
@@ -5379,14 +5639,10 @@ func _start_soft_extract(kind: String, origin: Vector3, dir: Vector3, early_side
 	so.call("begin_extract", fr, _wound_center_world(), _cavity_outward())
 	if _organs and _organs.has_method("set_kind_visible"):
 		if kind == "uterus":
-			_organs.call("set_kind_visible", "uterus", false)
-			_organs.call("set_kind_visible", "uterus_cavity", false)
+			# 子宫 / 内膜用着色器按物理化比例裁切，不再整体隐藏。
 			_organs.call("set_kind_visible", "tube", false)
 			_organs.call("set_kind_visible", "ovary", false)
-			for mi in _organs.get("organ_meshes"):
-				var m := mi as MeshInstance3D
-				if m and (bool(m.get_meta("is_cavity", false)) or str(m.get_meta("organ_kind", "")) == "uterus"):
-					m.visible = false
+			_apply_uterus_phys_cut(so)
 		else:
 			_organs.call("set_kind_visible", kind, false)
 	if early_side >= 0 and kind == "uterus":
@@ -5411,6 +5667,19 @@ func _start_soft_extract(kind: String, origin: Vector3, dir: Vector3, early_side
 	_fc_soft_kind = kind
 	_start_forceps_grip(-1, dir)
 	return true
+
+
+func _apply_uterus_phys_cut(so: Node) -> void:
+	if so == null or _organs == null or not _organs.has_method("set_uterus_phys_cut"):
+		return
+	if not bool(so.call("is_extracted")):
+		_organs.call("clear_uterus_phys_cut")
+		return
+	var cut := float(so.call("physical_cut"))
+	var origin: Vector3 = so.get("_cervix_ab")
+	var axis: Vector3 = so.get("_axis_ab")
+	var cut_m := cut * maxf(float(so.get("_rest_len")), 0.03)
+	_organs.call("set_uterus_phys_cut", cut_m, origin, axis, true, 0.007)
 
 
 func _update_soft_organs(dt: float) -> void:
@@ -5447,10 +5716,37 @@ func _update_soft_organs(dt: float) -> void:
 		var was_out := bool(so.call("is_extracted"))
 		so.call("step", dt, fr, wound, out)
 		var now_out := bool(so.call("is_extracted"))
-		if str(k) == "uterus" and now_out and _organs and _organs.has_method("set_canal_stretch"):
-			_organs.call("set_canal_stretch", so.call("cervix_world"), 1.0)
-		elif str(k) == "uterus" and _organs and _organs.has_method("clear_canal_stretch") and not now_out:
-			_organs.call("clear_canal_stretch")
+		if str(k) == "uterus" and now_out:
+			_apply_uterus_phys_cut(so)
+			# 阴道始终接到当前宫颈，但只有宫颈真的离开原位才拉伸（脱出不再靠阴道上升）。
+			if _organs and _organs.has_method("set_canal_stretch"):
+				var cx: Vector3 = so.call("cervix_world")
+				var rest_cx: Vector3 = fr * so.get("_cervix_ab")
+				if cx.distance_to(rest_cx) > 0.007:
+					_organs.call("set_canal_stretch", cx, 1.0)
+				elif _organs.has_method("clear_canal_stretch"):
+					_organs.call("clear_canal_stretch")
+		elif str(k) == "uterus" and _organs:
+			if _organs.has_method("clear_canal_stretch") and not now_out:
+				_organs.call("clear_canal_stretch")
+			if _organs.has_method("clear_uterus_phys_cut") and not now_out:
+				_organs.call("clear_uterus_phys_cut")
+		if _fc_active and _fc_kind == "soft" and _fc_soft_kind == str(k):
+			var hp2: Vector3 = so.get("hold_pos")
+			_fc_last = hp2
+			var cam := get_viewport().get_camera_3d() if is_inside_tree() and get_viewport() else null
+			var d2: Vector3 = (hp2 - cam.global_position) if cam else out
+			_place_forceps(hp2, d2)
+		elif _fc_active and _fc_kind == "tube" and _fc_soft_kind == str(k):
+			var rps: Array = so.call("chain_ropes") if so.has_method("chain_ropes") else []
+			for r in rps:
+				if r and int(r.get("hold_index")) >= 0:
+					var hpt: Vector3 = r.get("hold_pos")
+					_fc_last = hpt
+					var cam2 := get_viewport().get_camera_3d() if is_inside_tree() and get_viewport() else null
+					var d3: Vector3 = (hpt - cam2.global_position) if cam2 else out
+					_place_forceps(hpt, d3)
+					break
 		if was_out and not now_out and _organs and _organs.has_method("set_kind_visible"):
 			if str(k) == "uterus":
 				_organs.call("set_kind_visible", "uterus", true)
@@ -5485,7 +5781,18 @@ func extract_charge(kind: String) -> float:
 	return float(so.get("extract_charge")) if so else 0.0
 
 
+func ovary_at_chain_end(side: int) -> bool:
+	var so := _soft_node("uterus")
+	return bool(so.call("ovary_at_chain_end", side)) if so and so.has_method("ovary_at_chain_end") else false
+
+
+func chain_is_straight(side: int) -> bool:
+	var so := _soft_node("uterus")
+	return bool(so.call("chain_is_straight", side)) if so and so.has_method("chain_is_straight") else false
+
+
 func organ_source_hidden(kind: String) -> bool:
+
 	if _organs == null:
 		var so0 := _soft_node(kind)
 		return bool(so0.call("original_hidden")) if so0 else false
@@ -5786,6 +6093,8 @@ func hover_tool(origin: Vector3, dir: Vector3) -> void:
 	if tool == "forceps":
 		_hide_retractor_ghost()
 		_hover_forceps(origin, dir)
+		if not _fc_active:
+			_preview_forceps(origin, dir)
 		return
 	if tool != "retractor":
 		_hide_retractor_ghost()

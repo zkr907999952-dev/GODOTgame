@@ -351,7 +351,7 @@ func _check_forceps_modes() -> void:
 	_ok(bp != null and bb != null and bp.text == "扯出" and bb.text == "放回" and bp.visible and bb.visible, "HUD shows 「扯出」/「放回」 for the forceps")
 	_ok(str(s.get("forceps_mode")) == "pull" and bp.button_pressed and not bb.button_pressed, "default forceps mode is 扯出")
 	var hc := _hole_center()
-	_ok(bool(s.call("debug_forceps_begin", hc + Vector3(0, 0.3, 0), Vector3.DOWN)), "扯出: clamp gut in the cavity")
+	_ok(_begin_cavity_gut(hc + Vector3(0, 0.3, 0), Vector3.DOWN), "扯出: clamp gut in the cavity")
 	await _frames(14)
 	var rope: Node = (s.call("gut_ropes") as Array)[0]
 	var tip0: Vector3 = rope.get("hold_pos")
@@ -390,7 +390,9 @@ func _check_forceps_modes() -> void:
 	_ok(str(s.get("forceps_mode")) == "putback" and bb.button_pressed and not bp.button_pressed, "「放回」 button switches the forceps mode")
 	var n_before := int(s.call("gut_pull_count"))
 	var in_hc := _hole_center()
-	var got_new := bool(s.call("debug_forceps_begin", in_hc + Vector3(0.008, 0.3, 0.0), Vector3.DOWN)) and int(s.call("gut_pull_count")) > n_before
+	var aim2 := _aim_cavity_gut(in_hc + Vector3(0.008, 0.3, 0.0), Vector3.DOWN)
+	var kinds := PackedStringArray(["small_intestine", "colon"])
+	var got_new := bool(s.call("debug_forceps_begin_kind", aim2[0], aim2[1], kinds)) and int(s.call("gut_pull_count")) > n_before
 	if bool(s.get("_fc_active")):
 		s.call("debug_forceps_end")
 	_ok(not got_new, "放回 mode never pulls a new loop out")

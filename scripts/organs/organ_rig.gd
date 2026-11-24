@@ -87,6 +87,12 @@ var _spec_m: Vector4 = Vector4.ZERO
 var _spec_spread: float = 0.0
 ## Cached rest-space canal (opening / cervix / axis), fitted once.
 var _canal_rest: Dictionary = {}
+var _gut_along_cache: Dictionary = {}
+var _uterus_phys_on: float = 0.0
+var _uterus_phys_cut: float = 2.0
+var _uterus_phys_origin: Vector3 = Vector3.ZERO
+var _uterus_phys_axis: Vector3 = Vector3(0, 1, 0)
+var _uterus_phys_blend: float = 0.007
 
 # 拳交脏器软体（弹簧）：杆参数与子宫位移滞后于拳头
 var _rod_reach_s: float = 0.0
@@ -345,14 +351,8 @@ func _fit_vagina_canal_rest() -> Dictionary:
 	var cx: Array = vg.get("cervix", [])
 	if op.size() < 3 or cx.size() < 3:
 		return out
-	var opening := Vector3(float(op[0]), float(op[1]), float(op[2]))
+	var opening := _introitus_rest()
 	var cervix := Vector3(float(cx[0]), float(cx[1]), float(cx[2]))
-	# 可见外口：外阴皮肤开口（vulva.opening / meta.opening），不要用更深的 mouth_loop，
-	# 否则轴向往后延伸会偏到阴唇裂隙前方，器械看起来没有从阴道插入。
-	if vulva != null:
-		var vo: Vector3 = vulva.opening
-		if vo.length_squared() > 1e-8:
-			opening = vo
 	# 宫颈端：优先接到子宫内腔口（os_center），保证通道止于宫颈。
 	if meta.has("uterus_cavity") and meta["uterus_cavity"] is Dictionary:
 		var os = meta["uterus_cavity"].get("os_center", [])
@@ -380,15 +380,75 @@ func _fit_vagina_canal_rest() -> Dictionary:
 	return out
 
 
-## 玩家看见的阴道外口（世界坐标）：皮瓣开口，其次通道入口。
+## 可见阴道外口（绑定空间）：不要用外阴皮肤最低点（四联/会阴端，靠近肛门、偏「低」）。
+## 优先用阴道通道外口圈（mouth_loop）偏前的一半中心，保证在肛门前方、对准真正的阴道口。
+func introitus_rest() -> Vector3:
+	return _introitus_rest()
+
+
+func _introitus_rest() -> Vector3:
+	var fallback := Vector3.ZERO
+	if meta.has("vagina") and meta["vagina"] is Dictionary:
+		var op = (meta["vagina"] as Dictionary).get("opening", [])
+		if op is Array and op.size() >= 3:
+			fallback = Vector3(float(op[0]), float(op[1]), float(op[2]))
+	var mouth: PackedVector3Array = PackedVector3Array()
+	if meta.has("vagina") and meta["vagina"] is Dictionary:
+		var ml = (meta["vagina"] as Dictionary).get("mouth_loop", [])
+		if ml is Array:
+			for q in ml:
+				if q is Array and q.size() >= 3:
+					mouth.append(Vector3(float(q[0]), float(q[1]), float(q[2])))
+				elif q is Vector3:
+					mouth.append(q)
+	if mouth.size() >= 3:
+		var zs: Array = []
+		for p in mouth:
+			zs.append(p.z)
+		zs.sort()
+		var med := float(zs[zs.size() / 2])
+		var acc := Vector3.ZERO
+		var n := 0
+		for p2 in mouth:
+			if p2.z >= med - 1e-6:
+				acc += p2
+				n += 1
+		var c: Vector3 = acc / float(maxi(n, 1)) if n > 0 else _mean3(mouth)
+		# 必须明显在肛门前方（+Z）。
+		if c.z > ANUS_REST.z + 0.020:
+			return c
+		if _mean3(mouth).z > ANUS_REST.z + 0.020:
+			return _mean3(mouth)
+	if fallback.z > ANUS_REST.z + 0.020:
+		# 再把最低点往前推到外口圈最前端附近。
+		if mouth.size() >= 1:
+			var ant := mouth[0]
+			for p3 in mouth:
+				if p3.z > ant.z:
+					ant = p3
+			return fallback.lerp(ant, 0.85)
+		return fallback
+	if vulva != null and vulva.opening.length_squared() > 1e-8 and vulva.opening.z > ANUS_REST.z + 0.025:
+		return vulva.opening
+	return fallback if fallback.length_squared() > 1e-8 else ANUS_REST + Vector3(0, -0.01, 0.06)
+
+
+func _mean3(pts: PackedVector3Array) -> Vector3:
+	var a := Vector3.ZERO
+	for p in pts:
+		a += p
+	return a / float(maxi(pts.size(), 1))
+
+
+func anus_world() -> Vector3:
+	_update_frame()
+	return _frame * (ANUS_REST - _navel_rest)
+
+
+## 玩家看见的阴道外口（世界坐标）：通道外口偏前中心，不是外阴最低点。
 func visible_introitus_world() -> Vector3:
 	_update_frame()
-	if vulva != null:
-		return _frame * (vulva.opening - _navel_rest)
-	var d := vagina_canal()
-	if not d.is_empty():
-		return d["opening_world"]
-	return Vector3.ZERO
+	return _frame * (_introitus_rest() - _navel_rest)
 
 
 ## 0.4.11：按网格名 / 材质把脏器分成可点选的种类。
@@ -478,6 +538,43 @@ func clear_canal_stretch() -> void:
 
 func canal_stretch_amount() -> float:
 	return _canal_stretch_on
+
+
+func set_uterus_phys_cut(cut_m: float, origin_ab: Vector3, axis_ab: Vector3, on: bool, blend_m: float = 0.007) -> void:
+	_uterus_phys_on = 1.0 if on else 0.0
+	_uterus_phys_cut = cut_m
+	_uterus_phys_origin = origin_ab
+	var ax := axis_ab
+	if ax.length_squared() < 1e-10:
+		ax = Vector3(0, 1, 0)
+	else:
+		ax = ax.normalized()
+	_uterus_phys_axis = ax
+	_uterus_phys_blend = maxf(blend_m, 0.003)
+	_apply_uterus_phys_cut()
+
+
+func clear_uterus_phys_cut() -> void:
+	_uterus_phys_on = 0.0
+	_uterus_phys_cut = 2.0
+	_apply_uterus_phys_cut()
+
+
+func _apply_uterus_phys_cut() -> void:
+	for mi in organ_meshes:
+		var mat := mi.material_override as ShaderMaterial if mi else null
+		if mat == null:
+			continue
+		var kind := str(mi.get_meta("organ_kind", ""))
+		var is_ut := kind == "uterus" or kind == "uterus_cavity" or bool(mi.get_meta("is_cavity", false))
+		if is_ut:
+			mat.set_shader_parameter("uterus_phys_on", _uterus_phys_on)
+			mat.set_shader_parameter("uterus_phys_cut", _uterus_phys_cut)
+			mat.set_shader_parameter("uterus_phys_origin", _uterus_phys_origin)
+			mat.set_shader_parameter("uterus_phys_axis", _uterus_phys_axis)
+			mat.set_shader_parameter("uterus_phys_blend", _uterus_phys_blend)
+		else:
+			mat.set_shader_parameter("uterus_phys_on", 0.0)
 
 
 func canal_os_now_world() -> Vector3:
@@ -668,7 +765,75 @@ func gut_path_length(kind: String) -> float:
 	return acc
 
 
+func _ensure_gut_along_cache(kind: String) -> Dictionary:
+	if _gut_along_cache.has(kind):
+		return _gut_along_cache[kind]
+	var P := PackedVector3Array()
+	var A := PackedFloat32Array()
+	for mi in viscera_meshes(kind):
+		if mi == null or mi.mesh == null:
+			continue
+		var arr: Array = mi.mesh.surface_get_arrays(0)
+		var V: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var C: PackedFloat32Array = arr[Mesh.ARRAY_CUSTOM0] if arr[Mesh.ARRAY_CUSTOM0] != null else PackedFloat32Array()
+		if C.is_empty():
+			continue
+		var stride := 4 if C.size() >= V.size() * 4 else 1
+		# 每 4 个顶点采样一次，足够定位 along，避免每帧拷整网。
+		var step := 4
+		var i := 0
+		while i < V.size():
+			P.append(V[i])
+			A.append(C[i * stride])
+			i += step
+	var rec := {"p": P, "a": A}
+	_gut_along_cache[kind] = rec
+	return rec
+
+
+func clear_gut_along_cache() -> void:
+	_gut_along_cache.clear()
+
+
+## 从距扯出点最远的体内肠管一端开始隐藏，随 fed_len 向扯出点推进。放回时窗口缩小即反向恢复。
+## 返回 Vector4(center, half_width, strength, 0)。
+func gut_hide_window(along_hit: float, fed_len: float, path_len: float) -> Vector4:
+	var plen := maxf(path_len, 0.08)
+	var w := clampf(fed_len / plen, 0.0, 1.0)
+	if w <= 1e-5:
+		return Vector4(0.0, 0.0, 0.0, 0.0)
+	var hit := clampf(along_hit, 0.0, 1.0)
+	# 路径两端 0 / 1，取离扯出点更远的那一端先消失。
+	var far := 1.0 if hit <= 0.5 else 0.0
+	var center := 0.0
+	var half := w * 0.5
+	if far > 0.5:
+		center = 1.0 - half
+	else:
+		center = half
+	return Vector4(center, half, 1.0, 0.0)
+
+
 func gut_along_near(kind: String, world_pt: Vector3) -> float:
+	_update_frame()
+	var p_rest: Vector3 = (_frame.affine_inverse() * world_pt) + _navel_rest
+	var rec: Dictionary = _ensure_gut_along_cache(kind)
+	var P: PackedVector3Array = rec["p"]
+	var A: PackedFloat32Array = rec["a"]
+	if P.is_empty():
+		return 0.5
+	var best_d := 1e9
+	var best_a := 0.5
+	for i in P.size():
+		var d := P[i].distance_squared_to(p_rest)
+		if d < best_d:
+			best_d = d
+			best_a = A[i]
+	return clampf(best_a, 0.0, 1.0)
+
+
+## 旧路径：每帧 surface_get_arrays 全网格扫描，仅用于性能对比。
+func gut_along_near_uncached(kind: String, world_pt: Vector3) -> float:
 	_update_frame()
 	var p_rest: Vector3 = (_frame.affine_inverse() * world_pt) + _navel_rest
 	var best_d := 1e9
@@ -1986,6 +2151,7 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("canal_os_rest", _canal_os_rest)
 		m.set_shader_parameter("canal_os_now", _canal_os_now)
 		m.set_shader_parameter("canal_open_rest", _canal_open_rest)
+	_apply_uterus_phys_cut()
 	var sq := tools.squeeze_target()
 	for m in _all_mats:
 		if sq.is_empty():

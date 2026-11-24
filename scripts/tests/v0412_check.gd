@@ -73,14 +73,19 @@ func _check_canal_and_cervix() -> void:
 			var os_ab := Vector3(float(os[0]), float(os[1]), float(os[2])) - navel
 			var dmm := c.distance_to(os_ab) * 1000.0
 			_ok(dmm < 2.0, "canal cervix sits at the UterusCavity os (%.2f mm)" % dmm)
-	if d.has("opening_rest") and meta is Dictionary and meta.has("vagina"):
-		var op = meta["vagina"].get("opening", [])
-		if op is Array and op.size() >= 3:
-			var vis := Vector3(float(op[0]), float(op[1]), float(op[2]))
-			if rig.vulva:
-				vis = rig.vulva.opening
-			var omm := (d["opening_rest"] as Vector3).distance_to(vis) * 1000.0
-			_ok(omm < 3.0, "canal opening matches the visible vulva introitus (%.2f mm)" % omm)
+	if d.has("opening_rest"):
+		var vis: Vector3 = rig.call("introitus_rest") if rig.has_method("introitus_rest") else d["opening_rest"]
+		var omm := (d["opening_rest"] as Vector3).distance_to(vis) * 1000.0
+		_ok(omm < 3.0, "canal opening matches the visible (anterior) introitus (%.2f mm)" % omm)
+		var anus: Vector3 = rig.get("ANUS_REST") if rig.get("ANUS_REST") != null else Vector3(0.0, 0.8969, -0.0021)
+		var opening_rest: Vector3 = d["opening_rest"]
+		_ok(opening_rest.z > anus.z + 0.025, "introitus is anterior of the anus (dz=%.1f mm)" % ((opening_rest.z - anus.z) * 1000.0))
+		var fourchette := vis
+		if meta is Dictionary and meta.has("vagina"):
+			var op = meta["vagina"].get("opening", [])
+			if op is Array and op.size() >= 3:
+				fourchette = Vector3(float(op[0]), float(op[1]), float(op[2]))
+		_ok(opening_rest.z >= fourchette.z - 0.001, "introitus is not behind the fourchette / lowest vulva point")
 
 
 func _check_rectum_local() -> void:

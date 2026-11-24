@@ -9,7 +9,7 @@ extends MeshInstance3D
 ## - 材质：小肠 organ 材质（无缝平铺贴图），CUSTOM0 = 沿管坐标 + 径向，与体内同一蠕动时钟。
 
 const SIDES := 10
-const RADIUS := 0.0105
+const RADIUS := 0.0076
 const ITER := 6
 const GRAVITY := Vector3(0, -9.8, 0)
 const DAMP := 0.96             # 0.4.05：加阻尼（原 0.985），防抖动
@@ -38,6 +38,8 @@ var max_pts: int = MAX_PTS
 var k_in: int = K_IN
 var mes_every: int = MES_EVERY
 var profile_id: String = "small"
+## 输卵管等：单锚点直线悬链，末端自由（卵巢挂在尽头），不是两端锚住的袢。
+var open_chain: bool = false
 
 func apply_profile(p: Dictionary) -> void:
 	if p.has("radius"):
@@ -58,6 +60,10 @@ func apply_profile(p: Dictionary) -> void:
 		profile_id = str(p["profile"])
 	elif p.has("profile_id"):
 		profile_id = str(p["profile_id"])
+	if p.has("open_chain"):
+		open_chain = bool(p["open_chain"])
+	elif profile_id == "adnexa":
+		open_chain = true
 
 
 var anchor_a: Vector3 = Vector3.ZERO
@@ -140,6 +146,8 @@ func segment_rest() -> float:
 
 
 func outside_range() -> Vector2i:
+	if open_chain:
+		return Vector2i(k_in + 1, maxi(_p.size() - 1, k_in + 1))
 	return Vector2i(k_in + 1, _p.size() - 2 - k_in)
 
 
@@ -151,14 +159,31 @@ func _init_chain() -> void:
 	var n := _want_pts()
 	_p.resize(n)
 	_q.resize(n)
+	if open_chain:
+		var tip := exit_a
+		if tip.distance_to(anchor_a) < 0.004:
+			tip = anchor_a + Vector3(0, 0, 0.04)
+		var dir := tip - anchor_a
+		if dir.length_squared() < 1e-8:
+			dir = Vector3(0, 0, 1)
+		else:
+			dir = dir.normalized()
+		var length := maxf(fed_len, float(n - 1) * seg)
+		for i in n:
+			var u := float(i) / float(maxi(n - 1, 1))
+			var p: Vector3 = anchor_a.lerp(anchor_a + dir * length, u)
+			_p[i] = p
+			_q[i] = p
+		_inited = true
+		return
 	var mid := (exit_a + exit_b) * 0.5
 	for i in n:
-		var t := float(i) / float(n - 1)
+		var u := float(i) / float(n - 1)
 		var p: Vector3
-		if t < 0.5:
-			p = anchor_a.lerp(mid, t * 2.0)
+		if u < 0.5:
+			p = anchor_a.lerp(mid, u * 2.0)
 		else:
-			p = mid.lerp(anchor_b, t * 2.0 - 1.0)
+			p = mid.lerp(anchor_b, u * 2.0 - 1.0)
 		_p[i] = p
 		_q[i] = p
 	_inited = true
@@ -168,6 +193,15 @@ func _init_chain() -> void:
 func _grow() -> void:
 	var want := _want_pts()
 	while _p.size() < want:
+		if open_chain:
+			var n0 := _p.size()
+			var tip: Vector3 = _p[n0 - 1]
+			var prev: Vector3 = _p[n0 - 2] if n0 > 1 else tip
+			var ext := tip * 2.0 - prev
+			_p.append(ext)
+			_q.append(ext)
+			_mes_ai.clear()
+			continue
 		var side := _grow_side
 		var n := _p.size()
 		var at := k_in + 1 if side == 0 else n - 1 - k_in
@@ -221,7 +255,8 @@ func step(dt: float) -> void:
 	mesentery_count = 0
 	for _it in ITER:
 		_pin_channel()
-		if hold_index > 0 and hold_index < n - 1:
+		var hold_ok := hold_index > 0 and ((hold_index < n - 1) if not open_chain else (hold_index < n))
+		if hold_ok:
 			_p[hold_index] = hold_pos
 		for i in n - 1:
 			var a := _p[i]
@@ -494,15 +529,24 @@ func min_gut_clearance() -> float:
 
 func _fixed(i: int) -> bool:
 	var n := _p.size()
+	if open_chain:
+		return i <= k_in or i == hold_index
 	return i <= k_in or i >= n - 1 - k_in or i == hold_index
 
 
 func _pin_channel() -> void:
 	var n := _p.size()
+	if open_chain:
+		# 只有宫角一端钉住，末端（卵巢）自由下垂。
+		for k in k_in + 1:
+			var u := float(k) / float(maxi(k_in, 1))
+			_p[k] = anchor_a.lerp(exit_a, u)
+			_q[k] = _p[k]
+		return
 	for k in k_in + 1:
-		var t := float(k) / float(k_in)
-		_p[k] = anchor_a.lerp(exit_a, t)
-		_p[n - 1 - k] = anchor_b.lerp(exit_b, t)
+		var u := float(k) / float(k_in)
+		_p[k] = anchor_a.lerp(exit_a, u)
+		_p[n - 1 - k] = anchor_b.lerp(exit_b, u)
 		_q[k] = _p[k]
 		_q[n - 1 - k] = _p[n - 1 - k]
 
