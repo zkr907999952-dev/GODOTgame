@@ -10,7 +10,7 @@ uniform float roughness_v = 0.50;
 void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
-	vec3 off = strike_offset(l) + drag_offset(l) + dent_offset(l);
+	vec3 off = strike_offset(l) + drag_offset(l) + dent_offset(l) + speculum_offset(l);
 	vec3 off_w = ab_dir_to_world(off);
 	VERTEX += inverse(mat3(MODEL_MATRIX)) * off_w;
 }

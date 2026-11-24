@@ -34,6 +34,11 @@ var _btn_tool_forceps: Button
 var _btn_retr_remove: Button
 var _btn_fc_pull: Button
 var _btn_fc_back: Button
+var _btn_tool_speculum: Button
+var _btn_spec_remove: Button
+var _speculum_box: VBoxContainer
+var _speculum_slider: HSlider
+var _speculum_value: Label
 var _btn_cut_straight: Button
 var _btn_cut_ring: Button
 var _btn_cut_confirm: Button
@@ -3799,6 +3804,8 @@ func _bind_surgery() -> void:
 		s.connect("forceps_mode_changed", _on_forceps_mode_changed)
 	if s.has_signal("retractor_selection_changed") and not s.is_connected("retractor_selection_changed", _refresh_surgery_ui):
 		s.connect("retractor_selection_changed", _refresh_surgery_ui)
+	if s.has_signal("speculum_changed") and not s.is_connected("speculum_changed", _refresh_surgery_ui):
+		s.connect("speculum_changed", _refresh_surgery_ui)
 	_refresh_surgery_ui()
 
 
@@ -4102,6 +4109,19 @@ func _build_surgery_ui(root: Control) -> void:
 	_btn_tool_forceps.pressed.connect(func(): _on_surgery_tool_picked("forceps"))
 	_surgery_bar.add_child(_btn_tool_forceps)
 
+	# 0.4.09：阴道扩张器（库斯科式，插入后用滑条开合）。
+	_btn_tool_speculum = _make_chrome_button("阴道扩张器")
+	_btn_tool_speculum.name = "SurgerySpeculumButton"
+	_btn_tool_speculum.toggle_mode = true
+	_btn_tool_speculum.pressed.connect(func(): _on_surgery_tool_picked("speculum"))
+	_surgery_bar.add_child(_btn_tool_speculum)
+
+	_btn_spec_remove = _make_chrome_button("取出扩张器")
+	_btn_spec_remove.name = "SurgeryRemoveSpeculumButton"
+	_btn_spec_remove.visible = false
+	_btn_spec_remove.pressed.connect(_on_remove_speculum_pressed)
+	_surgery_bar.add_child(_btn_spec_remove)
+
 	# 0.4.04：选中的拉钩可移除（手机上没有 Delete / 右键）。
 	_btn_retr_remove = _make_chrome_button("移除拉钩")
 	_btn_retr_remove.name = "SurgeryRemoveRetractorButton"
@@ -4150,6 +4170,31 @@ func _build_surgery_ui(root: Control) -> void:
 	_btn_cut_confirm = _make_chrome_button("切割")
 	_btn_cut_confirm.pressed.connect(_on_surgery_confirm_cut)
 	_surgery_cut_bar.add_child(_btn_cut_confirm)
+
+	_speculum_box = VBoxContainer.new()
+	_speculum_box.name = "SpeculumOpenBox"
+	_speculum_box.visible = false
+	_speculum_box.add_theme_constant_override("separation", 4)
+	_speculum_box.mouse_filter = Control.MOUSE_FILTER_STOP
+	var sl_row := HBoxContainer.new()
+	var sl_lab := Label.new()
+	sl_lab.text = "开合角度"
+	sl_lab.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	sl_row.add_child(sl_lab)
+	_speculum_value = Label.new()
+	_speculum_value.text = "0°"
+	_speculum_value.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	sl_row.add_child(_speculum_value)
+	_speculum_box.add_child(sl_row)
+	_speculum_slider = HSlider.new()
+	_speculum_slider.min_value = 0.0
+	_speculum_slider.max_value = 40.0
+	_speculum_slider.step = 0.5
+	_speculum_slider.value = 0.0
+	_speculum_slider.custom_minimum_size = Vector2(240, 22)
+	_speculum_slider.value_changed.connect(_on_speculum_angle)
+	_speculum_box.add_child(_speculum_slider)
+	root.add_child(_speculum_box)
 
 
 func _on_surgery_cut_mode(mode: String) -> void:
@@ -4292,7 +4337,7 @@ func _refresh_surgery_ui() -> void:
 		_surgery_bar.visible = active
 		_surgery_bar.position = Vector2(sl, st + 48.0)
 		if touch_ui:
-			for b in [_btn_tool_scalpel, _btn_tool_grab, _btn_tool_retractor, _btn_tool_forceps, _btn_retr_remove, _btn_fc_pull, _btn_fc_back]:
+			for b in [_btn_tool_scalpel, _btn_tool_grab, _btn_tool_retractor, _btn_tool_forceps, _btn_tool_speculum, _btn_spec_remove, _btn_retr_remove, _btn_fc_pull, _btn_fc_back]:
 				if b:
 					b.custom_minimum_size = Vector2(maxf(b.custom_minimum_size.x, 80.0), 48.0)
 					b.add_theme_font_size_override("font_size", 16)
@@ -4313,6 +4358,27 @@ func _refresh_surgery_ui() -> void:
 		if _btn_tool_forceps:
 			_btn_tool_forceps.set_pressed_no_signal(tool == "forceps")
 			_style_button(_btn_tool_forceps, tool == "forceps")
+		if _btn_tool_speculum:
+			_btn_tool_speculum.set_pressed_no_signal(tool == "speculum")
+			_style_button(_btn_tool_speculum, tool == "speculum")
+		var spec_in := s != null and s.has_method("is_speculum_present") and bool(s.call("is_speculum_present"))
+		var spec_ready := s != null and s.has_method("is_speculum_inserted") and bool(s.call("is_speculum_inserted"))
+		if _btn_spec_remove:
+			_btn_spec_remove.visible = tool == "speculum" and spec_in
+		if _speculum_box:
+			_speculum_box.visible = tool == "speculum" and spec_ready
+			var bar_y := st + (104.0 if touch_ui else 92.0)
+			if _surgery_cut_bar and _surgery_cut_bar.visible:
+				bar_y += 56.0 if touch_ui else 44.0
+			_speculum_box.position = Vector2(sl, bar_y)
+			if touch_ui and _speculum_slider:
+				_speculum_slider.custom_minimum_size = Vector2(280, 32)
+			if spec_ready and _speculum_slider and s.has_method("speculum_angle"):
+				var ang := float(s.call("speculum_angle"))
+				if absf(_speculum_slider.value - ang) > 0.25:
+					_speculum_slider.set_value_no_signal(ang)
+				if _speculum_value:
+					_speculum_value.text = "%.0f°" % ang
 		var fm := str(s.get("forceps_mode")) if s != null and s.get("forceps_mode") != null else "pull"
 		for pair in [[_btn_fc_pull, "pull"], [_btn_fc_back, "putback"]]:
 			var b: Button = pair[0]
@@ -4344,6 +4410,10 @@ func _refresh_surgery_ui() -> void:
 	else:
 		if _surgery_cut_bar:
 			_surgery_cut_bar.visible = false
+		if _speculum_box:
+			_speculum_box.visible = false
+		if _btn_spec_remove:
+			_btn_spec_remove.visible = false
 
 
 func _on_remove_retractor_pressed() -> void:
@@ -4351,6 +4421,21 @@ func _on_remove_retractor_pressed() -> void:
 	if s and s.has_method("remove_selected_retractor"):
 		s.call("remove_selected_retractor")
 	_refresh_surgery_ui()
+
+
+func _on_remove_speculum_pressed() -> void:
+	var s := _surgery()
+	if s and s.has_method("request_remove_speculum"):
+		s.call("request_remove_speculum")
+	_refresh_surgery_ui()
+
+
+func _on_speculum_angle(v: float) -> void:
+	var s := _surgery()
+	if s and s.has_method("set_speculum_angle"):
+		s.call("set_speculum_angle", v)
+	if _speculum_value:
+		_speculum_value.text = "%.0f°" % v
 
 
 func _on_forceps_mode(m: String) -> void:

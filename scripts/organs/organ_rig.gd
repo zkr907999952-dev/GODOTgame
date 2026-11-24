@@ -72,6 +72,12 @@ var _jello: Dictionary = {}
 var _ball_travel: float = 99.0
 var _gut_aabb: AABB = AABB()
 var _uterus_aabb: AABB = AABB()
+## 阴道扩张器形变（ab-local uniforms；w<=0 关闭）
+var _spec_o: Vector4 = Vector4.ZERO
+var _spec_d: Vector4 = Vector4.ZERO
+var _spec_u: Vector4 = Vector4.ZERO
+var _spec_m: Vector4 = Vector4.ZERO
+var _spec_spread: float = 0.0
 
 # 拳交脏器软体（弹簧）：杆参数与子宫位移滞后于拳头
 var _rod_reach_s: float = 0.0
@@ -238,7 +244,7 @@ func _build_vulva_flaps() -> void:
 ## 外阴拨开（0 = 合拢，1 = 完全拨开）。为之后的拨开工具准备的接口。
 func set_vulva_spread(amount: float) -> void:
 	if vulva:
-		vulva.set_spread(amount)
+		vulva.set_spread(maxf(amount, _spec_spread))
 
 
 func vulva_spread() -> float:
@@ -247,6 +253,89 @@ func vulva_spread() -> float:
 
 func vulva_flaps():
 	return vulva
+
+
+func set_speculum_deform(origin_ab: Vector3, axis_ab: Vector3, up_ab: Vector3, depth: float, half_gap: float, mixv: float, half_closed: float = 0.004, half_width: float = 0.016) -> void:
+	if depth <= 1e-5 or mixv <= 1e-5:
+		clear_speculum_deform()
+		return
+	var ax := axis_ab
+	if ax.length_squared() < 1e-8:
+		clear_speculum_deform()
+		return
+	ax = ax.normalized()
+	var up := up_ab - ax * up_ab.dot(ax)
+	if up.length_squared() < 1e-8:
+		up = Vector3(0, 0, 1)
+		up = up - ax * up.dot(ax)
+	if up.length_squared() < 1e-8:
+		clear_speculum_deform()
+		return
+	up = up.normalized()
+	_spec_o = Vector4(origin_ab.x, origin_ab.y, origin_ab.z, depth)
+	_spec_d = Vector4(ax.x, ax.y, ax.z, maxf(half_gap, 0.002))
+	_spec_u = Vector4(up.x, up.y, up.z, maxf(half_width, 0.006))
+	_spec_m = Vector4(clampf(mixv, 0.0, 1.0), maxf(half_closed, 0.002), 0.0, 0.0)
+	# 闭合也略微拨开入口；开到最大时完全拨开。其它系统调用 set_vulva_spread(0) 时不会压过它。
+	_spec_spread = clampf(0.18 + clampf((half_gap - half_closed) / 0.036, 0.0, 1.0) * 0.82, 0.0, 1.0) * clampf(mixv, 0.0, 1.0)
+	if vulva:
+		vulva.set_spread(maxf(vulva.spread(), _spec_spread))
+
+
+func clear_speculum_deform() -> void:
+	_spec_o = Vector4.ZERO
+	_spec_d = Vector4.ZERO
+	_spec_u = Vector4.ZERO
+	_spec_m = Vector4.ZERO
+	var keep := _spec_spread
+	_spec_spread = 0.0
+	if vulva and absf(vulva.spread() - keep) < 0.03:
+		vulva.set_spread(0.0)
+
+
+## 阴道开口 / 宫颈 / 轴（朝宫颈），同时给腹部局部和世界坐标。
+func vagina_canal() -> Dictionary:
+	var out := {}
+	if meta.is_empty() or not meta.has("vagina"):
+		return out
+	var vg = meta["vagina"]
+	if not (vg is Dictionary):
+		return out
+	var op: Array = vg.get("opening", [])
+	var cx: Array = vg.get("cervix", [])
+	if op.size() < 3 or cx.size() < 3:
+		return out
+	var opening := Vector3(float(op[0]), float(op[1]), float(op[2]))
+	var cervix := Vector3(float(cx[0]), float(cx[1]), float(cx[2]))
+	var opening_ab := opening - _navel_rest
+	var cervix_ab := cervix - _navel_rest
+	var axis := cervix_ab - opening_ab
+	var length := axis.length()
+	if length < 1e-4:
+		return out
+	axis /= length
+	# 开合方向：矢状面内、朝向腹部前方（耻骨侧叶片）。
+	var up := Vector3.RIGHT.cross(axis)
+	if up.length_squared() < 1e-6:
+		up = Vector3(0, 0, 1) - axis * axis.z
+	up = up.normalized()
+	_update_frame()
+	out["opening_ab"] = opening_ab
+	out["cervix_ab"] = cervix_ab
+	out["axis_ab"] = axis
+	out["up_ab"] = up
+	out["length"] = length
+	out["opening_world"] = _frame * opening_ab
+	out["cervix_world"] = _frame * cervix_ab
+	return out
+
+
+## 与着色器 drag_offset 相同的腹部局部软位移，用来让插入器械跟着拖拽走。
+func soft_offset_ab(p: Vector3) -> Vector3:
+	var d := p - _drag_grab
+	var s := 0.16 * 0.5
+	var w := exp(-d.dot(d) / (2.0 * s * s))
+	return _drag_off * w
 
 
 # ------------------------------------------------------------------ public API
@@ -1498,6 +1587,10 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("jello_a", ja)
 		m.set_shader_parameter("jello_b", jb)
 		m.set_shader_parameter("jello_p", jp)
+		m.set_shader_parameter("spec_o", _spec_o)
+		m.set_shader_parameter("spec_d", _spec_d)
+		m.set_shader_parameter("spec_u", _spec_u)
+		m.set_shader_parameter("spec_m", _spec_m)
 	var sq := tools.squeeze_target()
 	for m in _all_mats:
 		if sq.is_empty():
