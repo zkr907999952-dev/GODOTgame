@@ -965,6 +965,20 @@ func pointer_variants(p: Vector2) -> Array[Vector2]:
 
 
 ## 屏幕点 → 世界射线（捕获鼠标时用屏幕中心）
+func _hover_surgery_tool() -> void:
+	var s := active_surgery()
+	if s == null or not bool(s.call("is_active")) or not s.has_method("hover_tool"):
+		return
+	var tool := str(s.call("current_tool"))
+	if tool != "retractor" and tool != "forceps":
+		return
+	var screen := Vector2.ZERO
+	if get_viewport():
+		screen = _interact_point(get_viewport().get_mouse_position())
+	var ray: Array = _screen_ray(screen)
+	s.call("hover_tool", ray[0], ray[1])
+
+
 func _screen_ray(screen: Vector2) -> Array:
 	var p := to_camera_pixel(screen)
 	if _ptr_mode >= 0:
@@ -1140,7 +1154,7 @@ func _try_begin_surgery_touch(screen: Vector2, surg: Node) -> bool:
 			_interact_screen = screen
 			return true
 		# 拉钩没有命中时仍更新幽灵预览（手指没有鼠标悬停）
-		if str(surg.call("current_tool")) == "retractor" and surg.has_method("hover_tool"):
+		if str(surg.call("current_tool")) in ["retractor", "forceps"] and surg.has_method("hover_tool"):
 			surg.call("hover_tool", origin, dir)
 		return false
 	for p in pointer_variants(screen):
@@ -1571,6 +1585,7 @@ func _process(delta: float) -> void:
 			var vs0: Node = get_parent().get("vehicle_system") if get_parent() else null
 			if vs0 and vs0.has_method("seat_process"):
 				vs0.call("seat_process", delta)
+		_hover_surgery_tool()
 		return
 	# 在面板上松开按键时收不到 release → 以实际按键状态为准。
 	if _rmb_down and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
@@ -2467,7 +2482,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		# 0.4.02：拉钩工具悬停在切口边缘时显示放置预览。
 		var hs := active_surgery()
-		if hs and bool(hs.call("is_active")) and str(hs.call("current_tool")) == "retractor" and hs.has_method("hover_tool"):
+		if hs and bool(hs.call("is_active")) and str(hs.call("current_tool")) in ["retractor", "forceps"] and hs.has_method("hover_tool"):
 			var hr: Array = _screen_ray(mm.position)
 			hs.call("hover_tool", hr[0], hr[1])
 		# 手术选了工具后锁定环绕/转视角，指针只留给切割 / 拿取。

@@ -347,20 +347,12 @@ func _fit_vagina_canal_rest() -> Dictionary:
 		return out
 	var opening := Vector3(float(op[0]), float(op[1]), float(op[2]))
 	var cervix := Vector3(float(cx[0]), float(cx[1]), float(cx[2]))
-	# 外口：阴道口黏膜圈中心比 meta.opening 更贴近真实入口。
-	var loop = vg.get("mouth_loop", [])
-	if loop is Array and loop.size() >= 6:
-		var acc := Vector3.ZERO
-		var n := 0
-		for p in loop:
-			if p is Array and p.size() >= 3:
-				acc += Vector3(float(p[0]), float(p[1]), float(p[2]))
-				n += 1
-			elif p is Vector3:
-				acc += p
-				n += 1
-		if n >= 6:
-			opening = acc / float(n)
+	# 可见外口：外阴皮肤开口（vulva.opening / meta.opening），不要用更深的 mouth_loop，
+	# 否则轴向往后延伸会偏到阴唇裂隙前方，器械看起来没有从阴道插入。
+	if vulva != null:
+		var vo: Vector3 = vulva.opening
+		if vo.length_squared() > 1e-8:
+			opening = vo
 	# 宫颈端：优先接到子宫内腔口（os_center），保证通道止于宫颈。
 	if meta.has("uterus_cavity") and meta["uterus_cavity"] is Dictionary:
 		var os = meta["uterus_cavity"].get("os_center", [])
@@ -386,6 +378,17 @@ func _fit_vagina_canal_rest() -> Dictionary:
 	out["opening_rest"] = opening
 	out["cervix_rest"] = cervix
 	return out
+
+
+## 玩家看见的阴道外口（世界坐标）：皮瓣开口，其次通道入口。
+func visible_introitus_world() -> Vector3:
+	_update_frame()
+	if vulva != null:
+		return _frame * (vulva.opening - _navel_rest)
+	var d := vagina_canal()
+	if not d.is_empty():
+		return d["opening_world"]
+	return Vector3.ZERO
 
 
 ## 0.4.11：按网格名 / 材质把脏器分成可点选的种类。
@@ -500,31 +503,42 @@ func canal_deform_ab(p_ab: Vector3) -> Vector3:
 	return p_ab + (_canal_os_now - _canal_os_rest) * tt * rw * _canal_stretch_on
 
 
+## 小肠排在子宫 / 输卵管 / 卵巢 / 膀胱之后：射线先擦到前方小肠袢时，仍可选中后方的盆腔器官。
+## 大肠与小肠同优先级，点到谁选谁——大肠经常在小肠后方，若也穿透优先则几乎点不到小肠。
+const VISCERA_THROUGH := 0.090
+
+func _viscera_priority(kind: String) -> int:
+	if kind == "uterus" or kind == "uterus_cavity" or kind == "tube" or kind == "ovary" or kind == "bladder":
+		return 2
+	if kind == "colon" or kind == "small_intestine":
+		return 1
+	return 0
+
+
 ## 射线点选腹腔脏器（腹部局部网格）。返回 {kind, side, point, mesh, dist} 或空。
+## 小肠必须真正点到其网格才会返回；点到其它器官时小肠不得挡在前面。
 func ray_pick_viscera(origin: Vector3, dir: Vector3, kinds: PackedStringArray = PackedStringArray()) -> Dictionary:
 	_update_frame()
 	var d := dir.normalized()
 	var inv := _frame.affine_inverse()
 	var o_ab: Vector3 = inv * origin
 	var d_ab: Vector3 = (inv.basis * d).normalized()
-	var best_t := 1e9
-	var hit := {}
 	var filter := {}
 	for k in kinds:
 		filter[str(k)] = true
+	var by_kind := {}
 	for mi in organ_meshes:
 		var mesh_i := mi as MeshInstance3D
 		if mesh_i == null or mesh_i.mesh == null or not mesh_i.visible:
 			continue
 		var kind := str(mesh_i.get_meta("organ_kind", ""))
-		if kind == "" or kind == "other" or kind == "uterus_cavity":
+		if kind == "" or kind == "other" or kind == "uterus_cavity" or kind == "vagina":
 			continue
 		if not filter.is_empty() and not filter.has(kind):
 			continue
 		var arr: Array = mesh_i.mesh.surface_get_arrays(0)
 		var P: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
 		var I: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
-		# AABB in ab-local
 		var mn := Vector3(INF, INF, INF)
 		var mx := Vector3(-INF, -INF, -INF)
 		var Pab := PackedVector3Array()
@@ -539,26 +553,155 @@ func ray_pick_viscera(origin: Vector3, dir: Vector3, kinds: PackedStringArray = 
 			continue
 		var t_hit := -1.0
 		if I.is_empty():
-			# no index: fan? skip expensive, use AABB entry
 			continue
 		for f in range(0, I.size() - 2, 3):
 			var a: Vector3 = Pab[I[f]]
 			var b: Vector3 = Pab[I[f + 1]]
 			var c: Vector3 = Pab[I[f + 2]]
 			var tt := _ray_triangle(o_ab, d_ab, a, b, c)
-			if tt >= 0.0 and tt < t_hit or (t_hit < 0.0 and tt >= 0.0):
+			if tt >= 0.0 and (t_hit < 0.0 or tt < t_hit):
 				t_hit = tt
-		if t_hit >= 0.0 and t_hit < best_t:
-			best_t = t_hit
-			hit = {
-				"kind": kind,
-				"side": int(mesh_i.get_meta("organ_side", -1)),
-				"point": origin + d * t_hit,
-				"point_ab": o_ab + d_ab * t_hit,
-				"mesh": mesh_i,
-				"dist": t_hit,
-			}
-	return hit
+		if t_hit < 0.0:
+			continue
+		var rec := {
+			"kind": kind,
+			"side": int(mesh_i.get_meta("organ_side", -1)),
+			"point": origin + d * t_hit,
+			"point_ab": o_ab + d_ab * t_hit,
+			"mesh": mesh_i,
+			"dist": t_hit,
+		}
+		if not by_kind.has(kind) or t_hit < float((by_kind[kind] as Dictionary)["dist"]):
+			by_kind[kind] = rec
+	if by_kind.is_empty():
+		return {}
+	var first_t := 1e9
+	for k in by_kind.keys():
+		first_t = minf(first_t, float((by_kind[k] as Dictionary)["dist"]))
+	var best := {}
+	var best_pr := -1
+	var best_t := 1e9
+	for k in by_kind.keys():
+		var rec2: Dictionary = by_kind[k]
+		var tt: float = rec2["dist"]
+		if tt > first_t + VISCERA_THROUGH:
+			continue
+		var pr := _viscera_priority(str(k))
+		if pr > best_pr or (pr == best_pr and tt < best_t):
+			best_pr = pr
+			best_t = tt
+			best = rec2
+	return best
+
+
+## kind -> PackedVector4Array（最多 4 个窗口：x=along 中心，y=半宽，z=强度）
+var _gut_eat: Dictionary = {}
+var _gut_path_len: Dictionary = {}
+
+
+func set_gut_eaten(kind: String, windows: Array) -> void:
+	var arr := PackedVector4Array()
+	arr.resize(4)
+	for i in mini(windows.size(), 4):
+		var w = windows[i]
+		if w is Vector4:
+			arr[i] = w
+		elif w is Vector3:
+			arr[i] = Vector4(w.x, w.y, w.z, 0.0)
+		elif w is Vector2:
+			arr[i] = Vector4(w.x, w.y, 1.0, 0.0)
+	_gut_eat[kind] = arr
+	_apply_gut_eat()
+
+
+func clear_gut_eaten(kind: String = "") -> void:
+	if kind == "":
+		_gut_eat.clear()
+	else:
+		_gut_eat.erase(kind)
+	_apply_gut_eat()
+
+
+func gut_eaten_windows(kind: String) -> PackedVector4Array:
+	if _gut_eat.has(kind):
+		return _gut_eat[kind]
+	return PackedVector4Array()
+
+
+func gut_path_length(kind: String) -> float:
+	if _gut_path_len.has(kind):
+		return float(_gut_path_len[kind])
+	var acc := 0.0
+	var prev := Vector3.INF
+	# 沿 CUSTOM0.x 分箱求中心线长度。
+	var bins := {}
+	for mi in viscera_meshes(kind):
+		if mi == null or mi.mesh == null:
+			continue
+		var arr: Array = mi.mesh.surface_get_arrays(0)
+		var P: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var C: PackedFloat32Array = arr[Mesh.ARRAY_CUSTOM0] if arr[Mesh.ARRAY_CUSTOM0] != null else PackedFloat32Array()
+		if C.is_empty():
+			continue
+		# CUSTOM0 is RGBA float: 4 floats per vert
+		var stride := 4 if C.size() >= P.size() * 4 else 1
+		for i in P.size():
+			var along := C[i * stride]
+			var b := int(floor(clampf(along, 0.0, 0.9999) * 24.0))
+			if not bins.has(b):
+				bins[b] = [Vector3.ZERO, 0]
+			bins[b][0] += P[i]
+			bins[b][1] += 1
+	var keys: Array = bins.keys()
+	keys.sort()
+	for b in keys:
+		var rec: Array = bins[b]
+		if int(rec[1]) < 3:
+			continue
+		var c: Vector3 = rec[0] / float(rec[1])
+		if prev != Vector3.INF:
+			acc += c.distance_to(prev)
+		prev = c
+	if acc < 0.05:
+		acc = 0.80 if kind == "small_intestine" else 0.55
+	_gut_path_len[kind] = acc
+	return acc
+
+
+func gut_along_near(kind: String, world_pt: Vector3) -> float:
+	_update_frame()
+	var p_rest: Vector3 = (_frame.affine_inverse() * world_pt) + _navel_rest
+	var best_d := 1e9
+	var best_a := 0.5
+	for mi in viscera_meshes(kind):
+		if mi == null or mi.mesh == null:
+			continue
+		var arr: Array = mi.mesh.surface_get_arrays(0)
+		var P: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var C: PackedFloat32Array = arr[Mesh.ARRAY_CUSTOM0] if arr[Mesh.ARRAY_CUSTOM0] != null else PackedFloat32Array()
+		if C.is_empty():
+			continue
+		var stride := 4 if C.size() >= P.size() * 4 else 1
+		for i in range(0, P.size(), 2):
+			var d := P[i].distance_squared_to(p_rest)
+			if d < best_d:
+				best_d = d
+				best_a = C[i * stride]
+	return clampf(best_a, 0.0, 1.0)
+
+
+func _apply_gut_eat() -> void:
+	var empty := PackedVector4Array()
+	empty.resize(4)
+	for mi in organ_meshes:
+		var mat := mi.material_override as ShaderMaterial if mi else null
+		if mat == null:
+			continue
+		var kind := str(mi.get_meta("organ_kind", ""))
+		if kind == "colon" or kind == "small_intestine":
+			mat.set_shader_parameter("gut_eat", _gut_eat[kind] if _gut_eat.has(kind) else empty)
+		else:
+			mat.set_shader_parameter("gut_eat", empty)
 
 
 func _ray_triangle(o: Vector3, d: Vector3, a: Vector3, b: Vector3, c: Vector3) -> float:
@@ -1911,6 +2054,7 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("peri_waves", peri_waves)
 		m.set_shader_parameter("peri_clock", _peri_clock)
 		m.set_shader_parameter("peri_seg", peri_seg)
+		# gut_eat is applied per-mesh in _apply_gut_eat()
 		m.set_shader_parameter("rod_a", ra)
 		m.set_shader_parameter("rod_d", rd)
 		m.set_shader_parameter("rod_m", rm)
@@ -1919,6 +2063,7 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("uter_off", _uter_off)
 		m.set_shader_parameter("uter_rot", Vector4(_uter_tilt_ax.x, _uter_tilt_ax.y, _uter_tilt_ax.z, _uter_tilt))
 		m.set_shader_parameter("uter_sq", Vector4(_uter_sq_ax.x, _uter_sq_ax.y, _uter_sq_ax.z, _uter_sq))
+	_apply_gut_eat()
 	if _light:
 		_light.global_position = _frame.origin - b.z * 0.04
 		_light.light_energy = (0.05 + xr * 0.06) * 8.0 if (show_organs and xr > 0.08) else 0.0

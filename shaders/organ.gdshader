@@ -98,9 +98,12 @@ float lobe(float frac, float width) {
 // clk = 脚本里按速度积分的三个时钟：∫(0.03+0.2s)dt、∫(0.45+0.9s)dt、∫(0.25+0.5s)dt
 // （速度滑条实时调整时相位连续，不会跳变）
 uniform vec3 peri_clock = vec3(0.0);
+// 被扯出后隐藏对应长度的体内肠管。xy = along 中心 / 半宽，z = 强度（0 关闭）。
+uniform vec4 gut_eat[4];
 // 肠道伤痕（网页 GutHealth 掉血变红）：xyz = ab-local，w = 程度
 uniform vec4 dmg[12];
 varying vec3 v_l0;
+varying float v_eat;
 
 float pulse(float along, vec3 clk, float amp) {
 	float n = max(0.2, peri_waves);
@@ -117,10 +120,31 @@ float pulse(float along, vec3 clk, float amp) {
 	return shape * (0.16 + amp * 0.42);
 }
 
+float gut_eat_k(float along) {
+	float eat = 0.0;
+	for (int i = 0; i < 4; i++) {
+		float w = gut_eat[i].y;
+		float s = gut_eat[i].z;
+		if (s > 0.0 && w > 1e-6) {
+			float d = abs(along - gut_eat[i].x);
+			float k = 1.0 - smoothstep(w * 0.50, w, d);
+			eat = max(eat, k * clamp(s, 0.0, 1.0));
+		}
+	}
+	return eat;
+}
+
 void vertex() {
+	v_eat = 0.0;
 	if (is_gut && peri_on > 0.0) {
 		float k = pulse(CUSTOM0.x, peri_clock, peri_amp) * peri_on;
 		VERTEX -= CUSTOM0.yzw * k;
+	}
+	if (is_gut) {
+		float eat = gut_eat_k(CUSTOM0.x);
+		v_eat = eat;
+		// 半径收到中线，被扯出的那段从体内模型上消失。
+		VERTEX -= CUSTOM0.yzw * eat;
 	}
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
@@ -158,6 +182,9 @@ void vertex() {
 }
 
 void fragment() {
+	if (v_eat > 0.62) {
+		discard;
+	}
 	vec3 c = base_color.rgb;
 	if (use_tex) {
 		c = texture(albedo_tex, UV).rgb * base_color.rgb;
