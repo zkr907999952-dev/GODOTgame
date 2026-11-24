@@ -4,7 +4,7 @@ extends RefCounted
 
 const MeshFactory := preload("res://scripts/surgery/speculum_mesh.gd")
 
-const MAX_ANGLE := 40.0
+const MAX_ANGLE := 24.0
 const INSERT_SEC := 0.55
 const CLOSE_SEC := 0.32
 const WITHDRAW_SEC := 0.45

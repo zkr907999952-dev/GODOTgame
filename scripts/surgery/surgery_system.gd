@@ -244,6 +244,10 @@ func set_speculum_angle(deg: float) -> void:
 		speculum.set_opening_angle(deg)
 
 
+func speculum_max_angle() -> float:
+	return float(speculum.max_angle()) if speculum else 24.0
+
+
 func request_remove_speculum() -> bool:
 	return speculum.request_remove() if speculum else false
 
@@ -4163,6 +4167,7 @@ func _update_guts(dt: float) -> void:
 		for gp in _gut_pulls:
 			_gut_rebind_pull(gp as Dictionary)
 	if _gut_pulls.is_empty():
+		_sync_gut_hide()
 		_update_soft_organs(dt)
 		return
 	var fr: Transform3D = _organs.call("abdomen_frame") if _organs and _organs.has_method("abdomen_frame") else Transform3D.IDENTITY
@@ -4226,6 +4231,7 @@ func _update_guts(dt: float) -> void:
 		if rr != null and is_instance_valid(rr) and bool(rr.call("retract_done")):
 			_remove_gut_pull(i)
 			gut_putbacks_done += 1
+	_sync_gut_hide()
 	_update_soft_organs(dt)
 
 
@@ -4346,6 +4352,32 @@ func _gut_capsules() -> Array:
 	return out
 
 
+func _sync_gut_hide() -> void:
+	if _organs == null or not _organs.has_method("set_gut_eaten"):
+		return
+	if _gut_pulls.is_empty():
+		if _organs.has_method("clear_gut_eaten"):
+			_organs.call("clear_gut_eaten")
+		return
+	var by := {"colon": [], "small_intestine": []}
+	for gp in _gut_pulls:
+		var g: Dictionary = gp
+		var k := "colon" if str(g.get("kind", "")) == "colon" else "small_intestine"
+		var rope: Node = g.get("rope")
+		if rope == null or not is_instance_valid(rope):
+			continue
+		var fed := float(rope.get("fed_len"))
+		var plen := float(_organs.call("gut_path_length", k)) if _organs.has_method("gut_path_length") else 0.6
+		var half := clampf((fed * 0.55) / maxf(plen, 0.08), 0.01, 0.48)
+		var hit: Vector3 = g.get("hit", Vector3.INF)
+		if hit == Vector3.INF:
+			hit = _gut_pull_anchor(g, _organs.call("abdomen_frame") if _organs.has_method("abdomen_frame") else Transform3D.IDENTITY)
+		var along := float(_organs.call("gut_along_near", k, hit)) if _organs.has_method("gut_along_near") else 0.5
+		(by[k] as Array).append(Vector4(along, half, 1.0, 0.0))
+	_organs.call("set_gut_eaten", "colon", by["colon"])
+	_organs.call("set_gut_eaten", "small_intestine", by["small_intestine"])
+
+
 func _clear_guts() -> void:
 	for gp in _gut_pulls:
 		var rope: Node = (gp as Dictionary).get("rope")
@@ -4372,6 +4404,10 @@ func _clear_guts() -> void:
 	_fc_soft_kind = ""
 	_fc_tube_side = -1
 	_clear_soft_organs()
+	if _organs and _organs.has_method("clear_gut_eaten"):
+		_organs.call("clear_gut_eaten")
+	_set_selected_organ("")
+	_set_hovered_organ("")
 	if _forceps_node and is_instance_valid(_forceps_node):
 		_forceps_node.visible = false
 
@@ -4470,6 +4506,83 @@ var _fc_soft_kind: String = ""
 var _fc_tube_side: int = -1
 var extraction_hint: String = ""
 var organ_putbacks: int = 0
+var hovered_organ: String = ""
+var selected_organ: String = ""
+signal organ_target_changed(label: String)
+
+
+func organ_display_name(kind: String) -> String:
+	match kind:
+		"uterus", "uterus_cavity":
+			return "子宫"
+		"tube":
+			return "输卵管"
+		"ovary":
+			return "卵巢"
+		"small_intestine", "small":
+			return "小肠"
+		"colon":
+			return "大肠"
+		"bladder":
+			return "膀胱"
+		_:
+			return ""
+
+
+func get_organ_target_label() -> String:
+	var k := selected_organ if selected_organ != "" else hovered_organ
+	var cn := organ_display_name(k)
+	return cn
+
+
+func _set_hovered_organ(kind: String) -> void:
+	if hovered_organ == kind:
+		return
+	hovered_organ = kind
+	organ_target_changed.emit(get_organ_target_label())
+
+
+func _set_selected_organ(kind: String) -> void:
+	if selected_organ != kind:
+		selected_organ = kind
+		var cn := organ_display_name(kind)
+		if cn != "":
+			extraction_hint = "选中：%s" % cn
+			surgery_hint.emit(extraction_hint)
+		organ_target_changed.emit(get_organ_target_label())
+
+
+func _hover_forceps(origin: Vector3, dir: Vector3) -> void:
+	if not cut_open:
+		_set_hovered_organ(selected_organ)
+		return
+	# 已扯出的肠袢 / 柔体优先
+	var kind := ""
+	var best := _gut_pick_dist()
+	for i in _gut_pulls.size():
+		var rope: Node = (_gut_pulls[i] as Dictionary).get("rope")
+		if rope == null or not is_instance_valid(rope) or bool(rope.get("retracting")):
+			continue
+		var pk: Array = rope.call("ray_pick", origin, dir)
+		if int(pk[0]) >= 0 and float(pk[1]) < best:
+			best = float(pk[1])
+			kind = "colon" if str((_gut_pulls[i] as Dictionary).get("kind", "")) == "colon" else "small_intestine"
+	for k in _soft_organs.keys():
+		var so: Node = _soft_organs[k]
+		if so == null or not is_instance_valid(so) or not bool(so.call("is_extracted")):
+			continue
+		var ts: int = int(so.call("ray_pick_adnexa", origin, dir)) if so.has_method("ray_pick_adnexa") else -1
+		if ts >= 0:
+			kind = "tube"
+			break
+		var pk2: Array = so.call("ray_pick", origin, dir)
+		if int(pk2[0]) >= 0 and float(pk2[1]) < best:
+			best = float(pk2[1])
+			kind = str(k)
+	if kind == "" and _organs and _organs.has_method("ray_pick_viscera"):
+		var pick: Dictionary = _organs.call("ray_pick_viscera", origin, dir)
+		kind = str(pick.get("kind", "")) if not pick.is_empty() else ""
+	_set_hovered_organ(kind)
 
 
 func gut_pull_count() -> int:
@@ -4800,30 +4913,40 @@ func _begin_forceps(origin: Vector3, dir: Vector3) -> bool:
 		var side := int(pick.get("side", -1))
 		if not _start_soft_extract("uterus", origin, dir, side if kind in ["tube", "ovary"] else -1):
 			return false
+		_set_selected_organ("tube" if kind == "tube" else ("ovary" if kind == "ovary" else "uterus"))
 		return true
 	if kind == "bladder":
-		return _start_soft_extract("bladder", origin, dir, -1)
+		if _start_soft_extract("bladder", origin, dir, -1):
+			_set_selected_organ("bladder")
+			return true
+		return false
 	if kind == "colon":
-		return _start_colon_pull(hit, dir)
-	# 默认：小肠（兼容原来「点进创口即扯小肠」）
-	if _small_gut_count() >= GUT_MAX_PULLS:
+		if _start_colon_pull(hit, dir):
+			_set_selected_organ("colon")
+			return true
 		return false
-	var g := _new_gut_pull(hit)
-	if g.is_empty():
-		return false
-	_gut_pulls.append(g)
-	gut_rope = g["rope"]
-	var rope3: Node = g["rope"]
-	_update_guts(0.0)
-	rope3.call("step", 1.0 / 60.0)
-	var n := int(rope3.call("point_count"))
-	var orr := rope3.call("outside_range") as Vector2i
-	rope3.set("hold_index", clampi(n / 2, orr.x, maxi(orr.x, orr.y)))
-	rope3.set("hold_pos", (rope3.call("points") as PackedVector3Array)[int(rope3.get("hold_index"))])
-	_fc_last = rope3.get("hold_pos")
-	_fc_kind = "gut"
-	_start_forceps_grip(_gut_pulls.size() - 1, dir)
-	return true
+	# 只有真正点到小肠网格才扯小肠，空创口 / 点到其它器官不再回退成小肠。
+	if kind == "small_intestine":
+		if _small_gut_count() >= GUT_MAX_PULLS:
+			return false
+		var g := _new_gut_pull(hit)
+		if g.is_empty():
+			return false
+		_gut_pulls.append(g)
+		gut_rope = g["rope"]
+		var rope3: Node = g["rope"]
+		_update_guts(0.0)
+		rope3.call("step", 1.0 / 60.0)
+		var n := int(rope3.call("point_count"))
+		var orr := rope3.call("outside_range") as Vector2i
+		rope3.set("hold_index", clampi(n / 2, orr.x, maxi(orr.x, orr.y)))
+		rope3.set("hold_pos", (rope3.call("points") as PackedVector3Array)[int(rope3.get("hold_index"))])
+		_fc_last = rope3.get("hold_pos")
+		_fc_kind = "gut"
+		_start_forceps_grip(_gut_pulls.size() - 1, dir)
+		_set_selected_organ("small_intestine")
+		return true
+	return false
 
 
 func _start_forceps_grip(pi: int, dir: Vector3) -> void:
@@ -4894,7 +5017,7 @@ func _new_gut_pull(hit: Vector3) -> Dictionary:
 		rope.call("use_organ_material", gm)
 	rope.set("max_len", GUT_PULL_MAX)
 	rope.set("fed_len", 0.05)
-	return {"rope": rope, "vid": best, "kind": "small", "bind": _outer.pos[best], "off_ab": inv_b * (anc - iw), "spread_ab": (inv_b * tg).normalized(), "in_ab": (inv_b * in_w).normalized()}
+	return {"rope": rope, "vid": best, "kind": "small", "hit": hit, "bind": _outer.pos[best], "off_ab": inv_b * (anc - iw), "spread_ab": (inv_b * tg).normalized(), "in_ab": (inv_b * in_w).normalized()}
 
 
 func _drag_forceps(origin: Vector3, dir: Vector3) -> void:
@@ -5413,13 +5536,18 @@ func debug_begin_extract(kind: String) -> bool:
 	kind = kind.strip_edges()
 	var dir := -_cavity_outward()
 	var origin := _wound_center_world() - dir * 0.08
+	var ok := false
+	var sel := kind
 	if kind == "colon":
-		return _start_colon_pull(_wound_center_world(), dir)
-	if kind == "uterus" or kind == "bladder":
-		return _start_soft_extract(kind, origin, dir, -1)
-	if kind == "tube" or kind == "ovary":
-		return _start_soft_extract("uterus", origin, dir, 0)
-	if kind == "small" or kind == "small_intestine":
+		ok = _start_colon_pull(_wound_center_world(), dir)
+		sel = "colon"
+	elif kind == "uterus" or kind == "bladder":
+		ok = _start_soft_extract(kind, origin, dir, -1)
+		sel = kind
+	elif kind == "tube" or kind == "ovary":
+		ok = _start_soft_extract("uterus", origin, dir, 0)
+		sel = kind
+	elif kind == "small" or kind == "small_intestine":
 		if _small_gut_count() >= GUT_MAX_PULLS:
 			return false
 		var g := _new_gut_pull(_wound_center_world())
@@ -5429,8 +5557,11 @@ func debug_begin_extract(kind: String) -> bool:
 		gut_rope = g["rope"]
 		_fc_kind = "gut"
 		_start_forceps_grip(_gut_pulls.size() - 1, dir)
-		return true
-	return false
+		ok = true
+		sel = "small_intestine"
+	if ok:
+		_set_selected_organ(sel)
+	return ok
 
 
 func debug_add_extract_charge(kind: String, strength: float, dt: float) -> void:
@@ -5648,8 +5779,17 @@ func _retractor_xf(vid: int, out_bind: Vector3, extra_off: Vector3 = Vector3.ZER
 
 
 func hover_tool(origin: Vector3, dir: Vector3) -> void:
-	if not active or tool != "retractor":
+	if not active:
 		_hide_retractor_ghost()
+		_set_hovered_organ("")
+		return
+	if tool == "forceps":
+		_hide_retractor_ghost()
+		_hover_forceps(origin, dir)
+		return
+	if tool != "retractor":
+		_hide_retractor_ghost()
+		_set_hovered_organ("")
 		return
 	var vid := _pick_lip_vertex(origin, dir)
 	if vid < 0:

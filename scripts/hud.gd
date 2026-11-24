@@ -39,6 +39,9 @@ var _btn_spec_remove: Button
 var _speculum_box: VBoxContainer
 var _speculum_slider: HSlider
 var _speculum_value: Label
+var _organ_target_label: Label
+var _surgery_hint_label: Label
+var _surgery_hint_t: float = 0.0
 var _btn_cut_straight: Button
 var _btn_cut_ring: Button
 var _btn_cut_confirm: Button
@@ -2757,6 +2760,12 @@ func _draw_reticle() -> void:
 
 
 func _process(_delta: float) -> void:
+	if _surgery_hint_t > 0.0:
+		_surgery_hint_t = maxf(0.0, _surgery_hint_t - _delta)
+		if _surgery_hint_label:
+			_surgery_hint_label.modulate.a = clampf(_surgery_hint_t / 0.4, 0.0, 1.0) if _surgery_hint_t < 0.4 else 1.0
+			if _surgery_hint_t <= 0.0:
+				_surgery_hint_label.visible = false
 	if _reticle:
 		_reticle.queue_redraw()
 	if _wui:
@@ -3806,6 +3815,10 @@ func _bind_surgery() -> void:
 		s.connect("retractor_selection_changed", _refresh_surgery_ui)
 	if s.has_signal("speculum_changed") and not s.is_connected("speculum_changed", _refresh_surgery_ui):
 		s.connect("speculum_changed", _refresh_surgery_ui)
+	if s.has_signal("organ_target_changed") and not s.is_connected("organ_target_changed", _on_organ_target_changed):
+		s.connect("organ_target_changed", _on_organ_target_changed)
+	if s.has_signal("surgery_hint") and not s.is_connected("surgery_hint", _on_surgery_hint):
+		s.connect("surgery_hint", _on_surgery_hint)
 	_refresh_surgery_ui()
 
 
@@ -4188,13 +4201,33 @@ func _build_surgery_ui(root: Control) -> void:
 	_speculum_box.add_child(sl_row)
 	_speculum_slider = HSlider.new()
 	_speculum_slider.min_value = 0.0
-	_speculum_slider.max_value = 40.0
+	_speculum_slider.max_value = 24.0
 	_speculum_slider.step = 0.5
 	_speculum_slider.value = 0.0
 	_speculum_slider.custom_minimum_size = Vector2(240, 22)
 	_speculum_slider.value_changed.connect(_on_speculum_angle)
 	_speculum_box.add_child(_speculum_slider)
 	root.add_child(_speculum_box)
+
+	_organ_target_label = Label.new()
+	_organ_target_label.name = "SurgeryOrganTarget"
+	_organ_target_label.visible = false
+	_organ_target_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_organ_target_label.add_theme_font_size_override("font_size", 18)
+	_organ_target_label.add_theme_color_override("font_color", Color(0.96, 0.93, 0.82))
+	_organ_target_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
+	_organ_target_label.add_theme_constant_override("outline_size", 4)
+	root.add_child(_organ_target_label)
+	_surgery_hint_label = Label.new()
+	_surgery_hint_label.name = "SurgeryHintToast"
+	_surgery_hint_label.visible = false
+	_surgery_hint_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_surgery_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_surgery_hint_label.add_theme_font_size_override("font_size", 16)
+	_surgery_hint_label.add_theme_color_override("font_color", Color(1.0, 0.93, 0.75))
+	_surgery_hint_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
+	_surgery_hint_label.add_theme_constant_override("outline_size", 4)
+	root.add_child(_surgery_hint_label)
 
 
 func _on_surgery_cut_mode(mode: String) -> void:
@@ -4386,6 +4419,7 @@ func _refresh_surgery_ui() -> void:
 				b.visible = tool == "forceps"
 				b.set_pressed_no_signal(fm == pair[1])
 				_style_button(b, fm == pair[1])
+		_sync_organ_target_label(s, tool, sl, st, touch_ui, v)
 		if _btn_retr_remove:
 			_btn_retr_remove.visible = s != null and s.has_method("selected_retractor") and int(s.call("selected_retractor")) >= 0
 		if _surgery_cut_bar:
@@ -4414,6 +4448,42 @@ func _refresh_surgery_ui() -> void:
 			_speculum_box.visible = false
 		if _btn_spec_remove:
 			_btn_spec_remove.visible = false
+		if _organ_target_label:
+			_organ_target_label.visible = false
+
+
+func _sync_organ_target_label(s: Node, tool: String, sl: float, st: float, touch_ui: bool, v: Vector2) -> void:
+	if _organ_target_label == null:
+		return
+	var show := tool == "forceps" and s != null
+	_organ_target_label.visible = show
+	if not show:
+		return
+	var text := ""
+	if s.has_method("get_organ_target_label"):
+		text = str(s.call("get_organ_target_label"))
+	_organ_target_label.text = ("选中：%s" % text) if text != "" else "选中：—"
+	_organ_target_label.add_theme_font_size_override("font_size", 20 if touch_ui else 16)
+	var bar_y := st + (104.0 if touch_ui else 92.0)
+	if _btn_fc_pull and _btn_fc_pull.visible:
+		bar_y += 56.0 if touch_ui else 44.0
+	_organ_target_label.position = Vector2(sl, bar_y)
+	if _surgery_hint_label and _surgery_hint_label.visible:
+		_surgery_hint_label.position = Vector2(v.x * 0.5 - 180.0, st + 48.0)
+		_surgery_hint_label.custom_minimum_size = Vector2(360, 0)
+
+
+func _on_organ_target_changed(_label: String) -> void:
+	_refresh_surgery_ui()
+
+
+func _on_surgery_hint(text: String) -> void:
+	if _surgery_hint_label == null:
+		return
+	_surgery_hint_label.text = text
+	_surgery_hint_label.visible = text != ""
+	_surgery_hint_t = 3.2 if text != "" else 0.0
+	_refresh_surgery_ui()
 
 
 func _on_remove_retractor_pressed() -> void:

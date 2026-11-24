@@ -74,18 +74,13 @@ func _check_canal_and_cervix() -> void:
 			var dmm := c.distance_to(os_ab) * 1000.0
 			_ok(dmm < 2.0, "canal cervix sits at the UterusCavity os (%.2f mm)" % dmm)
 	if d.has("opening_rest") and meta is Dictionary and meta.has("vagina"):
-		var loop = meta["vagina"].get("mouth_loop", [])
-		if loop is Array and loop.size() >= 6:
-			var acc := Vector3.ZERO
-			var n := 0
-			for p in loop:
-				if p is Array and p.size() >= 3:
-					acc += Vector3(float(p[0]), float(p[1]), float(p[2]))
-					n += 1
-			if n >= 6:
-				var mouth: Vector3 = acc / float(n)
-				var omm := (d["opening_rest"] as Vector3).distance_to(mouth) * 1000.0
-				_ok(omm < 2.0, "canal opening matches the vaginal mouth loop (%.2f mm)" % omm)
+		var op = meta["vagina"].get("opening", [])
+		if op is Array and op.size() >= 3:
+			var vis := Vector3(float(op[0]), float(op[1]), float(op[2]))
+			if rig.vulva:
+				vis = rig.vulva.opening
+			var omm := (d["opening_rest"] as Vector3).distance_to(vis) * 1000.0
+			_ok(omm < 3.0, "canal opening matches the visible vulva introitus (%.2f mm)" % omm)
 
 
 func _check_rectum_local() -> void:
@@ -156,7 +151,7 @@ func _check_opening_axis() -> void:
 	var du0 := (mu0 - n.global_position).dot(ant)
 	var dl0 := (ml0 - n.global_position).dot(ant)
 	_ok(du0 > dl0, "closed: upper blade is already anterior of the lower (U=%.1f L=%.1f mm)" % [du0 * 1000.0, dl0 * 1000.0])
-	s.call("set_speculum_angle", 32.0)
+	s.call("set_speculum_angle", 22.0)
 	await _frames(3)
 	var mu1 := _mid_blade_world(ujaw)
 	var ml1 := _mid_blade_world(ljaw)
@@ -225,6 +220,16 @@ func _check_insert_labia_and_walls() -> void:
 	_ok(tip.distance_to(cervix) < 0.018, "blade tip is at the canal end / cervix (%.1f mm)" % (tip.distance_to(cervix) * 1000.0))
 	# 尖端应在外口的宫颈一侧，而不是还停在体外。
 	_ok((tip - opening).dot(ax_w) > 0.03, "the tip is inside the canal, past the introitus")
+	var vis_w: Vector3 = rig.call("visible_introitus_world") if rig.has_method("visible_introitus_world") else opening
+	# 叶片轴线到可见外口中心的距离（点到线段）。
+	var hpos := n.global_position
+	var seg := tip - hpos
+	var slen := seg.length()
+	var u := 0.0 if slen < 1e-6 else clampf((vis_w - hpos).dot(seg) / (slen * slen), 0.0, 1.0)
+	var closest := hpos + seg * u
+	var miss := closest.distance_to(vis_w) * 1000.0
+	_ok(miss < 8.0, "blade shaft goes through the visible introitus (miss=%.1f mm)" % miss)
+	_ok(absf(float(s.call("speculum_max_angle")) if s.has_method("speculum_max_angle") else 24.0) <= 25.0, "max opening is reduced so the blades cannot over-clip")
 	var spread0 := float(rig.call("vulva_spread"))
 	_ok(spread0 > 0.7, "labia spread on closed insertion (%.2f)" % spread0)
 	var ext0 := Vector2.ZERO
@@ -232,7 +237,7 @@ func _check_insert_labia_and_walls() -> void:
 		ext0 = rig.vulva.call("introitus_half_extents")
 		_ok(ext0.x >= 0.014 and ext0.y >= 0.011, "introitus fits the closed blades (hx=%.1f hy=%.1f mm)" % [ext0.x * 1000.0, ext0.y * 1000.0])
 	var gap0: float = rig.get("_spec_d").w
-	s.call("set_speculum_angle", 40.0)
+	s.call("set_speculum_angle", 24.0)
 	await _frames(3)
 	var spread1 := float(rig.call("vulva_spread"))
 	_ok(absf(spread1 - spread0) < 0.08, "slider does not change labia spread (%.2f -> %.2f)" % [spread0, spread1])

@@ -45,18 +45,15 @@ func _run() -> void:
 func _check_colon_tile() -> void:
 	_ok(ResourceLoader.exists("res://assets/organs/colon_tile_albedo.png"), "seamless colon albedo tile exists")
 	_ok(ResourceLoader.exists("res://assets/organs/colon_tile_normal.png"), "seamless colon normal tile exists")
-	var tex: Texture2D = load("res://assets/organs/colon_tile_albedo.png")
-	_ok(tex != null, "colon tile albedo loads")
-	if tex == null:
+	var img := Image.new()
+	var raw: PackedByteArray = FileAccess.get_file_as_bytes("res://assets/organs/colon_tile_albedo.png")
+	_ok(not raw.is_empty(), "colon tile albedo loads")
+	if raw.is_empty():
 		return
-	var img: Image = tex.get_image()
-	if img == null:
-		# CompressedTexture may need a raw load
-		img = Image.new()
-		img.load("res://assets/organs/colon_tile_albedo.png")
-	if img and img.is_compressed():
-		img.decompress()
-	_ok(img != null and img.get_width() >= 64, "colon tile is a readable image")
+	var err := img.load_png_from_buffer(raw)
+	_ok(err == OK and img.get_width() >= 64, "colon tile is a readable source PNG")
+	if err != OK:
+		return
 	if img == null:
 		return
 	var w := img.get_width()
@@ -70,6 +67,16 @@ func _check_colon_tile() -> void:
 		n += 1
 	de /= float(maxi(n, 1))
 	_ok(de < 0.06, "colon tile is horizontally seamless (edge Δ=%.4f)" % de)
+	# 只取大肠本体质感，不要掺进图集底色或其他器官贴图。
+	var acc := Color(0, 0, 0, 0)
+	var n2 := 0
+	for y in range(0, h, 3):
+		for x in range(0, w, 3):
+			acc += img.get_pixel(x, y)
+			n2 += 1
+	acc /= float(maxi(n2, 1))
+	# 大肠本体质感偏红棕（G/B 明显低于图集米色底）。
+	_ok(acc.r > 0.55 and acc.g < 0.55 and acc.b < 0.50 and acc.g < acc.r - 0.12, "colon tile colour is colon flesh, not atlas paper or a mixed organ tint (mean=%.3f,%.3f,%.3f)" % [acc.r, acc.g, acc.b])
 
 
 func _open_wound() -> void:

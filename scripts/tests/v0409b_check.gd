@@ -136,9 +136,9 @@ func _check_insert_open() -> void:
 	var box: Control = hud.get("_speculum_box")
 	var sl: Slider = hud.get("_speculum_slider")
 	_ok(box != null and box.visible and sl != null, "opening slider is shown while the tool is active and inserted")
-	s.call("set_speculum_angle", 32.0)
+	s.call("set_speculum_angle", 22.0)
 	await _frames(3)
-	_ok(absf(float(s.call("speculum_angle")) - 32.0) < 0.3, "slider/API sets opening to 32° (got %.1f)" % float(s.call("speculum_angle")))
+	_ok(absf(float(s.call("speculum_angle")) - 22.0) < 0.3, "slider/API sets opening to 22° (got %.1f)" % float(s.call("speculum_angle")))
 	if n:
 		var ujaw2 := n.get_node_or_null("UpperJaw") as Node3D
 		var ljaw2 := n.get_node_or_null("LowerJaw") as Node3D
@@ -160,7 +160,7 @@ func _check_persist_and_follow() -> void:
 	if not bool(s.call("is_speculum_inserted")):
 		s.call("set_tool", "speculum")
 		s.call("debug_finish_speculum_anim")
-		s.call("set_speculum_angle", 32.0)
+		s.call("set_speculum_angle", 22.0)
 		await _frames(2)
 	var n: Node3D = s.call("speculum_node")
 	var p0 := n.global_position if n else Vector3.ZERO
