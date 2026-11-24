@@ -150,21 +150,20 @@ func _check_guts_and_hide() -> void:
 		if v.z > 0.5:
 			got = v
 			break
-	_ok(got.z > 0.5 and got.y > 0.02, "a hide window is active (center=%.2f half=%.2f)" % [got.x, got.y])
+	_ok(got.z > 0.5 and got.y - got.x > 0.04, "a hide window is active (lo=%.2f hi=%.2f)" % [got.x, got.y])
 	var far := 1.0 if along <= 0.5 else 0.0
-	# far=1 时窗口上沿 = center+half；far=0 时窗口下沿 = center-half。
-	var covers_far := absf(got.x + (got.y if far > 0.5 else -got.y) - far) < 0.08
-	_ok(covers_far, "hide window starts at the far end (along_hit=%.2f center=%.2f half=%.2f far=%.0f)" % [along, got.x, got.y, far])
-	# 多扯一些，窗口向扯出点推进（半宽变大）
-	var half0 := got.y
+	var covers_far := (got.y > 0.92) if far > 0.5 else (got.x < 0.08)
+	_ok(covers_far, "hide window starts at the far end (along_hit=%.2f lo=%.2f hi=%.2f far=%.0f)" % [along, got.x, got.y, far])
+	# 多扯一些，窗口向扯出点推进（区间变宽）
+	var width0 := got.y - got.x
 	rope.set("fed_len", minf(fed + 0.12, 0.36))
 	s.call("_sync_gut_hide")
 	var win2: PackedVector4Array = rig.call("gut_eaten_windows", "colon")
-	var half1 := 0.0
+	var width1 := 0.0
 	for v2 in win2:
 		if v2.z > 0.5:
-			half1 = v2.y
-	_ok(half1 > half0 + 0.01, "hiding grows toward the pull point as more is pulled (half %.3f -> %.3f)" % [half0, half1])
+			width1 = v2.y - v2.x
+	_ok(width1 > width0 + 0.01, "hiding grows toward the pull point as more is pulled (width %.3f -> %.3f)" % [width0, width1])
 	# 小肠体内隐藏更慢，同样扯出长度不会那么快把肚子掏空。
 	_ok(absf(float(s.call("si_hide_rate")) - 0.35) < 0.001, "SI hide rate is reduced to 0.35")
 	var w_si: Vector4 = rig.call("gut_hide_window", along, fed, plen, 0.35)
@@ -178,8 +177,42 @@ func _check_guts_and_hide() -> void:
 	var left := 0.0
 	for v3 in win3:
 		if v3.z > 0.5:
-			left = maxf(left, v3.y)
-	_ok(left <= 0.001, "put-back reverses the hide (left half=%.3f)" % left)
+			left = maxf(left, v3.y - v3.x)
+	_ok(left <= 0.001, "put-back reverses the hide (left width=%.3f)" % left)
+	s.call("restore_body")
+	s.call("enter_surgery")
+	await _frames(2)
+	# 小肠多点扯出：第二次隐藏必须叠加在已有隐藏上，已藏的肠段不得重新出现。
+	await _open_wound()
+	_ok(bool(s.call("debug_begin_si_along", 0.22, 0.55)), "first SI pull at along 0.22")
+	s.call("_sync_gut_hide")
+	var mask_a: PackedFloat32Array = s.call("debug_gut_hide_mask", "small_intestine", 48)
+	var amt_a := float(s.call("debug_gut_hide_amount", "small_intestine", 48))
+	_ok(amt_a > 0.04, "first SI pull hides a stretch of in-body gut (amount=%.3f)" % amt_a)
+	_ok(bool(s.call("debug_begin_si_along", 0.82, 0.08)), "second SI pull at along 0.82 starts smaller")
+	s.call("_sync_gut_hide")
+	var mask_b: PackedFloat32Array = s.call("debug_gut_hide_mask", "small_intestine", 48)
+	var amt_b := float(s.call("debug_gut_hide_amount", "small_intestine", 48))
+	var regress := 0.0
+	var nmask := mini(mask_a.size(), mask_b.size())
+	for hi in nmask:
+		regress = maxf(regress, mask_a[hi] - mask_b[hi])
+	_ok(regress < 0.08, "second SI pull does not un-hide earlier gut (max regress=%.3f)" % regress)
+	_ok(amt_b + 1e-4 >= amt_a, "total hidden only increases after a second SI pull (%.3f -> %.3f)" % [amt_a, amt_b])
+	# 再拉长第二段，隐藏继续只增不减
+	var pulls: Array = s.get("_gut_pulls")
+	if pulls.size() >= 2:
+		var r_b: Node = (pulls[1] as Dictionary).get("rope")
+		if r_b:
+			r_b.set("fed_len", 0.45)
+	s.call("_sync_gut_hide")
+	var mask_c: PackedFloat32Array = s.call("debug_gut_hide_mask", "small_intestine", 48)
+	var amt_c := float(s.call("debug_gut_hide_amount", "small_intestine", 48))
+	var regress2 := 0.0
+	for hi2 in mini(mask_b.size(), mask_c.size()):
+		regress2 = maxf(regress2, mask_b[hi2] - mask_c[hi2])
+	_ok(regress2 < 0.08, "growing the second pull still keeps prior hide (max regress=%.3f)" % regress2)
+	_ok(amt_c + 1e-4 >= amt_b, "hidden length keeps growing (%.3f -> %.3f)" % [amt_b, amt_c])
 	s.call("restore_body")
 	s.call("enter_surgery")
 	await _frames(2)
@@ -204,8 +237,10 @@ func _check_uterus_quality_and_phys() -> void:
 	var wound: Vector3 = s.call("_wound_center_world")
 	var outv: Vector3 = s.call("_cavity_outward") if s.has_method("_cavity_outward") else Vector3.UP
 	outv = outv.normalized()
+	var rest_f1: Vector3 = so.call("rest_fundus_world") if so.has_method("rest_fundus_world") else so.call("fundus_world")
+	var spawn_off := (so.call("fundus_world") as Vector3).distance_to(rest_f1)
+	_ok(spawn_off < 0.012, "level 1 fundus starts at the original uterus (offset %.1f mm)" % (spawn_off * 1000.0))
 	var peek1 := (so.call("fundus_world") as Vector3 - wound).dot(outv)
-	_ok(peek1 > 0.004, "level 1 fundus extends out of the wound (%.1f mm)" % (peek1 * 1000.0))
 	# L1 卵巢还在体内，不能从腹壁「卡出去」。
 	if s.has_method("ovary_contained"):
 		_ok(bool(s.call("ovary_contained", 0)) and bool(s.call("ovary_contained", 1)), "ovaries stay inside the body at level 1")
@@ -232,6 +267,11 @@ func _check_uterus_quality_and_phys() -> void:
 	var intro: Vector3 = rig_u.call("visible_introitus_world") if rig_u.has_method("visible_introitus_world") else wound
 	var past_intro := (so.call("fundus_world") as Vector3).distance_to(intro)
 	_ok(past_intro > 0.03, "at L5 the fundus is well outside the introitus (%.1f mm away)" % (past_intro * 1000.0))
+	# 形状稳定、位置不下垂到创口上方漂浮。
+	var edge5 := float(so.call("max_edge_ratio")) if so.has_method("max_edge_ratio") else 1.0
+	_ok(edge5 < 1.30, "soft uterus edges stay un-torn after a long pull (max ratio=%.2f)" % edge5)
+	var c5: Vector3 = so.call("centroid_world") if so.has_method("centroid_world") else so.call("fundus_world")
+	_ok(c5.y <= wound.y + 0.04, "at L5 the uterus hangs at the wound, not floating high (centroid y-wound=%.1f mm)" % ((c5.y - wound.y) * 1000.0))
 	# 钳子夹住子宫拖拽时钳子跟住夹点。瞄准宫底环上的一个笼点，而不是环心。
 	var fund: Vector3 = so.call("fundus_world")
 	var cage: PackedVector3Array = so.get("_p")
@@ -251,6 +291,8 @@ func _check_uterus_quality_and_phys() -> void:
 	if fn:
 		var tip: Vector3 = fn.global_transform.origin + fn.global_transform.basis.z * 0.042
 		_ok(tip.distance_to(hp1) < 0.02, "forceps tip follows the uterus grip point (%.1f mm)" % (tip.distance_to(hp1) * 1000.0))
+	var edge_drag := float(so.call("max_edge_ratio")) if so.has_method("max_edge_ratio") else 1.0
+	_ok(edge_drag < 1.30, "soft uterus stays un-torn after a forceps drag (max ratio=%.2f)" % edge_drag)
 	s.call("debug_forceps_end")
 	# 直悬链、卵巢在尽头
 	_ok(bool(s.call("tube_chain_active", 0)) and bool(s.call("tube_chain_active", 1)), "both adnexa are chains at level 5")

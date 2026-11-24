@@ -204,7 +204,7 @@ func _check_uterus() -> void:
 	_ok(so != null and bool(so.visible), "a physics soft-body uterus is created")
 	var frac1 := float(s.call("physical_fraction", "uterus")) if s.has_method("physical_fraction") else float(so.call("physical_fraction"))
 	_ok(frac1 > 0.95, "level 1 already physicalizes the whole uterus (frac=%.2f)" % frac1)
-	# 1 档：整颗柔体，原网格隐藏；宫底伸出创口。
+	# 1 档：整颗柔体，原网格隐藏；位置仍在体内原子宫处，不能一出现就跳高。
 	var still_vis2 := 0
 	for mi2 in _organ_rig().get("organ_meshes"):
 		var m2 := mi2 as MeshInstance3D
@@ -213,10 +213,12 @@ func _check_uterus() -> void:
 	_ok(still_vis2 == 0, "the original uterus mesh is hidden once extraction starts")
 	var fr: Transform3D = _organ_rig().call("abdomen_frame")
 	var fund1: Vector3 = so.call("fundus_world")
+	var rest_f: Vector3 = so.call("rest_fundus_world") if so.has_method("rest_fundus_world") else (fr * so.get("_fundus_ab"))
+	var spawn_off := fund1.distance_to(rest_f)
+	_ok(spawn_off < 0.012, "level 1 fundus stays at the in-body rest position (offset %.1f mm)" % (spawn_off * 1000.0))
 	var wound: Vector3 = s.call("_wound_center_world")
 	var out1: Vector3 = s.call("_cavity_outward") if s.has_method("_cavity_outward") else Vector3.UP
 	var peek1 := (fund1 - wound).dot(out1.normalized())
-	_ok(peek1 > 0.004, "level 1 fundus peeks out of the wound (%.1f mm)" % (peek1 * 1000.0))
 	_ok(float(so.get("DAMP")) <= 0.72, "uterus physics damping is raised (DAMP=%.2f)" % float(so.get("DAMP")))
 	# 缓慢升档：0.4 秒满强度大约 +0.13 档，仍停在 1 档附近
 	var c0 := float(s.call("extract_charge", "uterus"))

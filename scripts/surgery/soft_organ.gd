@@ -7,7 +7,7 @@ extends MeshInstance3D
 
 const RINGS := 6
 const SIDES := 8
-const ITER := 4
+const ITER := 8
 const DAMP := 0.68
 const GRAVITY := Vector3(0, -9.8, 0)
 const CHARGE_RATE := 0.32          # 满强度每秒约 0.32 档，从 1 到 5 约 12.5 秒
@@ -15,11 +15,14 @@ const PUTBACK_RATE := 0.85
 const TUBE_LEVEL := 4
 const PEEK_OUT := 0.018
 const LEVELS := 5
-const PIN_IN := 0.82
-const PIN_OUT := 0.16
-const SPRING_K := 0.45
-const MAX_SPEED := 1.4
-const PHYS_SCALE := 1.16          # 物理化部分相对原尺寸放大（缝合面保持 1.0）
+const PIN_IN := 0.78
+const PIN_OUT := 0.08
+const SPRING_K := 0.62
+const MAX_SPEED := 1.2
+const PHYS_SCALE := 1.04          # 轻微放大，绕当前宫颈，避免旧宫颈中心把网格撕开
+const MAX_STRETCH := 1.18
+const SHAPE_BETA := 0.32
+const BEND_K := 0.28
 const PHYS_FRAC_L1 := 0.20
 
 const GutRope := preload("res://scripts/surgery/gut_rope.gd")
@@ -308,6 +311,12 @@ func _build_springs() -> void:
 				_springs.append([i, k, _rest_ab[i].distance_to(_rest_ab[k])])
 				var k2 := (r + 1) * SIDES + ((s + 1) % SIDES)
 				_springs.append([i, k2, _rest_ab[i].distance_to(_rest_ab[k2])])
+			# 弯曲弹簧：隔环 / 隔柱，抑制尖角撕裂。
+			if r + 2 < RINGS:
+				var k3 := (r + 2) * SIDES + s
+				_springs.append([i, k3, _rest_ab[i].distance_to(_rest_ab[k3])])
+			var js := r * SIDES + ((s + 2) % SIDES)
+			_springs.append([i, js, _rest_ab[i].distance_to(_rest_ab[js])])
 
 
 func _bind_visual(rest: PackedVector3Array, bind_i: PackedInt32Array, bind_w: PackedVector3Array) -> void:
@@ -429,7 +438,8 @@ func _init_particles() -> void:
 	var n := _rest_ab.size()
 	_p.resize(n)
 	_q.resize(n)
-	var xf := _kinematic_xf(maxf(extract_charge, 1.0) if organ_active else 1.0)
+	# 出生必须落在体内原子宫位置，不能一出现就跳到创口上方。
+	var xf := _kinematic_xf(1.0)
 	for i in n:
 		var pw: Vector3 = xf * _rest_ab[i]
 		_p[i] = pw
@@ -772,38 +782,67 @@ func _place_chain(side: int, dt: float) -> void:
 					ov.look_at(tip + tan.normalized(), up)
 
 
+func _extract_u(charge_v: float) -> float:
+	if charge_v <= 1.0:
+		return 0.0
+	return clampf((charge_v - 1.0) / 4.0, 0.0, 1.0)
+
+
+func rest_cervix_world() -> Vector3:
+	return _frame * _cervix_ab
+
+
+func rest_fundus_world() -> Vector3:
+	return _frame * _fundus_ab
+
+
+func centroid_world() -> Vector3:
+	if _p.is_empty():
+		return _frame * ((_cervix_ab + _fundus_ab) * 0.5)
+	var s := Vector3.ZERO
+	for p in _p:
+		s += p
+	return s / float(_p.size())
+
+
+func max_edge_ratio() -> float:
+	var m := 1.0
+	for sp in _springs:
+		var i: int = sp[0]
+		var j: int = sp[1]
+		var rest: float = maxf(float(sp[2]), 1e-6)
+		if i < 0 or j < 0 or i >= _p.size() or j >= _p.size():
+			continue
+		m = maxf(m, _p[i].distance_to(_p[j]) / rest)
+	return m
+
+
 func _kinematic_xf(charge_v: float) -> Transform3D:
-	# 1 档：宫底刚出创口 PEEK_OUT，刚体形状保持。
-	# 5 档：宫颈在创口，长轴沿 outward，整体露出。
+	# L1 = 体内原位（不跳到创口）。L5 = 宫颈到创口，长轴略向外并朝重力下垂，不竖直顶在创口上方。
+	var u := _extract_u(charge_v)
 	var cervix_w: Vector3 = _frame * _cervix_ab
 	var fundus_w: Vector3 = _frame * _fundus_ab
 	var axis_rest := fundus_w - cervix_w
 	if axis_rest.length_squared() < 1e-8:
 		axis_rest = _frame.basis * _axis_ab
-	var rest_len := maxf(axis_rest.length(), _rest_len)
 	axis_rest = axis_rest.normalized()
-	var wound_out := wound_center + outward * PEEK_OUT
-	# L1：平移使宫底到创口外一点点
-	var fund_l1 := wound_out
-	var cerv_l1 := fund_l1 - axis_rest * rest_len
-	# L5：宫颈在创口内侧，宫底沿 outward 伸出
-	var cerv_l5 := wound_center - outward * 0.006
-	var fund_l5 := cerv_l5 + outward * rest_len
-	var u := 0.0
-	if charge_v <= 1.0:
-		u = 0.0
-	else:
-		u = clampf((charge_v - 1.0) / 4.0, 0.0, 1.0)
-	if charge_v <= 0.0:
-		# 尚未脱出：就是静止姿态
+	if u <= 1e-5:
 		return Transform3D(_frame.basis, _frame.origin)
-	var c_tgt := cerv_l1.lerp(cerv_l5, u)
-	var f_tgt := fund_l1.lerp(fund_l5, u)
-	var axis_now := f_tgt - c_tgt
+	var down := gravity
+	if down.length_squared() < 1e-8:
+		down = Vector3.DOWN
+	else:
+		down = down.normalized()
+	var hang := (outward * 0.28 + down * 0.72)
+	if hang.length_squared() < 1e-8:
+		hang = down
+	hang = hang.normalized()
+	var axis_now: Vector3 = axis_rest.slerp(hang, u)
 	if axis_now.length_squared() < 1e-8:
-		axis_now = outward
+		axis_now = hang
 	else:
 		axis_now = axis_now.normalized()
+	var c_tgt: Vector3 = cervix_w.lerp(wound_center - outward * 0.006, u)
 	var R := _align_basis(axis_rest, axis_now) * _frame.basis
 	return Transform3D(R, c_tgt - R * _cervix_ab)
 
@@ -988,7 +1027,8 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 	_maybe_auto_chain()
 	var xf := _kinematic_xf(extract_charge)
 	var n := _p.size()
-	# 整颗子宫都是柔体，钉向运动学目标：档位越高越往创口外滑。
+	var u := _extract_u(extract_charge)
+	# 重力作用在整颗器官上；宫颈环钉在目标上，宫底随重力下垂，不再把体外点强钉在创口上方。
 	for i in n:
 		if i == hold_index:
 			_q[i] = _p[i]
@@ -999,40 +1039,40 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 		var sp := v.length()
 		if sp > MAX_SPEED * dt:
 			v = v * ((MAX_SPEED * dt) / maxf(sp, 1e-8))
-		var tgt: Vector3 = xf * _rest_ab[i]
-		var outside := (cur - wound_center).dot(outward) > -0.004
-		if outside:
-			v += gravity * dt * dt
+		var ring := i / SIDES
+		var at_cervix := kind == "uterus" and ring <= 1
+		if not at_cervix:
+			v += gravity * dt * dt * (0.35 + 0.65 * u)
 		_q[i] = cur
 		_p[i] = cur + v
-		var pin := PIN_OUT if outside else PIN_IN
-		if kind == "uterus" and i < SIDES:
-			pin = maxf(pin, 0.72)
+		var tgt: Vector3 = xf * _rest_ab[i]
+		var pin := PIN_OUT
+		if at_cervix:
+			pin = PIN_IN
+		elif ring <= 2:
+			pin = lerpf(0.42, 0.12, u)
+		else:
+			pin = lerpf(0.28, PIN_OUT, u)
 		_p[i] = _p[i].lerp(tgt, pin)
 		if _p[i].y < floor_y + 0.008:
 			_p[i].y = floor_y + 0.008
-	# 弹簧
-	for _it in ITER:
-		for sp2 in _springs:
-			var i: int = sp2[0]
-			var j: int = sp2[1]
-			var rest: float = sp2[2]
-			var d := _p[j] - _p[i]
-			var L := d.length()
-			if L < 1e-8:
-				continue
-			var corr := (L - rest) / L * SPRING_K
-			var locked_i := i == hold_index or (kind == "uterus" and i < SIDES)
-			var locked_j := j == hold_index or (kind == "uterus" and j < SIDES)
-			if locked_i and locked_j:
-				continue
-			if locked_i:
-				_p[j] -= d * corr
-			elif locked_j:
-				_p[i] += d * corr
-			else:
-				_p[i] += d * corr * 0.5
-				_p[j] -= d * corr * 0.5
+	# 夹住拖拽时形状匹配会和钳尖拉扯对抗，把边拉断；此时主要靠弹簧和边长限制。
+	if hold_index < 0:
+		_shape_match(xf, SHAPE_BETA)
+	var iters := ITER + (6 if hold_index >= 0 else 0)
+	for _it in iters:
+		_solve_springs(n)
+		_clamp_edges(MAX_STRETCH, n)
+		if hold_index >= 0 and hold_index < n:
+			_p[hold_index] = hold_pos
+		# 每次迭代后把宫颈轻轻拉回，避免弹簧把它拽裂。
+		if kind == "uterus":
+			for i2 in SIDES * 2:
+				if i2 == hold_index:
+					continue
+				_p[i2] = _p[i2].lerp(xf * _rest_ab[i2], 0.55)
+	for _c in 8:
+		_clamp_edges(MAX_STRETCH, n)
 		if hold_index >= 0 and hold_index < n:
 			_p[hold_index] = hold_pos
 	for side in [0, 1]:
@@ -1041,21 +1081,120 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 	_rebuild_adnex()
 
 
+func _is_locked(i: int) -> bool:
+	return i == hold_index or (kind == "uterus" and i < SIDES)
+
+
+func _solve_springs(n: int) -> void:
+	for sp2 in _springs:
+		var i: int = sp2[0]
+		var j: int = sp2[1]
+		var rest: float = sp2[2]
+		if i < 0 or j < 0 or i >= n or j >= n:
+			continue
+		var d := _p[j] - _p[i]
+		var L := d.length()
+		if L < 1e-8:
+			continue
+		var k := SPRING_K
+		# 弯曲弹簧（隔点）稍软。
+		if int(i / SIDES) + 2 == int(j / SIDES) or absi((i % SIDES) - (j % SIDES)) == 2 or absi((i % SIDES) - (j % SIDES)) == SIDES - 2:
+			k = BEND_K
+		var corr := (L - rest) / L * k
+		var locked_i := _is_locked(i)
+		var locked_j := _is_locked(j)
+		if locked_i and locked_j:
+			continue
+		if locked_i:
+			_p[j] -= d * corr
+		elif locked_j:
+			_p[i] += d * corr
+		else:
+			_p[i] += d * corr * 0.5
+			_p[j] -= d * corr * 0.5
+
+
+func _clamp_edges(max_ratio: float, n: int) -> void:
+	for sp2 in _springs:
+		var i: int = sp2[0]
+		var j: int = sp2[1]
+		var rest: float = float(sp2[2])
+		if i < 0 or j < 0 or i >= n or j >= n or rest < 1e-6:
+			continue
+		var d := _p[j] - _p[i]
+		var L := d.length()
+		var lim := rest * max_ratio
+		if L <= lim or L < 1e-8:
+			continue
+		var corr := (L - lim) / L
+		if _is_locked(i) and not _is_locked(j):
+			_p[j] -= d * corr
+		elif _is_locked(j) and not _is_locked(i):
+			_p[i] += d * corr
+		else:
+			_p[i] += d * corr * 0.5
+			_p[j] -= d * corr * 0.5
+
+
+func _polar_basis(A: Basis) -> Basis:
+	var Q := A
+	for _i in 5:
+		if absf(Q.determinant()) < 1e-10:
+			return A.orthonormalized()
+		var invt := Q.inverse().transposed()
+		Q = Basis((Q.x + invt.x) * 0.5, (Q.y + invt.y) * 0.5, (Q.z + invt.z) * 0.5)
+	return Q.orthonormalized()
+
+
+func _shape_match(xf: Transform3D, beta: float) -> void:
+	# 把笼点拉向当前运动学姿态下的静止形状，保持体积、减少撕裂。
+	if beta <= 1e-5 or _p.size() != _rest_ab.size() or _p.size() < 4:
+		return
+	var n := _p.size()
+	var c_p := Vector3.ZERO
+	var c_r := Vector3.ZERO
+	for i in n:
+		c_p += _p[i]
+		c_r += xf * _rest_ab[i]
+	c_p /= float(n)
+	c_r /= float(n)
+	var Ax := Vector3.ZERO
+	var Ay := Vector3.ZERO
+	var Az := Vector3.ZERO
+	for i in n:
+		var q: Vector3 = (xf * _rest_ab[i]) - c_r
+		var pv: Vector3 = _p[i] - c_p
+		Ax += pv * q.x
+		Ay += pv * q.y
+		Az += pv * q.z
+	var R := _polar_basis(Basis(Ax, Ay, Az))
+	for i in n:
+		if _is_locked(i):
+			continue
+		var goal: Vector3 = c_p + R * ((xf * _rest_ab[i]) - c_r)
+		_p[i] = _p[i].lerp(goal, beta)
+
+
 func _skin_deform(rest: PackedVector3Array, bind_i: PackedInt32Array, bind_w: PackedVector3Array, nrm: PackedVector3Array, along: PackedFloat32Array = PackedFloat32Array()) -> PackedVector3Array:
 	var out := PackedVector3Array()
 	out.resize(rest.size())
-	# 整颗柔体：笼点已在运动学姿态上，位移相对静止腹部框架。略放大半径以免偏小。
-	var cervix_w: Vector3 = _frame * _cervix_ab
-	var axis_w: Vector3 = (_frame.basis * _axis_ab).normalized()
+	# 用当前运动学姿态作为绑定静止位，绕活体宫颈轻微放大。不能再相对体内原宫颈缩放，否则网格被撕向上方。
+	var xf := _kinematic_xf(extract_charge if organ_active else 1.0)
+	var cervix_w: Vector3 = cervix_world() if organ_active and not _p.is_empty() else xf * _cervix_ab
+	var fund_w: Vector3 = fundus_world() if organ_active and not _p.is_empty() else xf * _fundus_ab
+	var axis_w: Vector3 = fund_w - cervix_w
+	if axis_w.length_squared() < 1e-8:
+		axis_w = xf.basis * _axis_ab
+	axis_w = axis_w.normalized()
 	for vi in rest.size():
 		var i0 := bind_i[vi * 3]
 		var i1 := bind_i[vi * 3 + 1]
 		var i2 := bind_i[vi * 3 + 2]
 		var w: Vector3 = bind_w[vi]
-		var r0: Vector3 = _frame * _rest_ab[i0]
-		var r1: Vector3 = _frame * _rest_ab[i1]
-		var r2: Vector3 = _frame * _rest_ab[i2]
-		var rest_w: Vector3 = _frame * rest[vi]
+		var r0: Vector3 = xf * _rest_ab[i0]
+		var r1: Vector3 = xf * _rest_ab[i1]
+		var r2: Vector3 = xf * _rest_ab[i2]
+		var rest_w: Vector3 = xf * rest[vi]
 		var delta := (_p[i0] - r0) * w.x + (_p[i1] - r1) * w.y + (_p[i2] - r2) * w.z
 		var pw: Vector3 = rest_w + delta
 		var rel := pw - cervix_w

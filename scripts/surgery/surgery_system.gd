@@ -4377,6 +4377,8 @@ func _gut_capsules() -> Array:
 
 var _gut_hide_sig: Array = []
 var gut_hide_usec: int = 0
+# 小肠累积隐藏区间：多点扯出只增不减，放回才收缩。
+var _gut_hide_acc: Dictionary = {"colon": [], "small_intestine": []}
 
 
 func _sync_gut_hide() -> void:
@@ -4388,6 +4390,7 @@ func _sync_gut_hide() -> void:
 			if _organs.has_method("clear_gut_eaten"):
 				_organs.call("clear_gut_eaten")
 			_gut_hide_sig = []
+			_gut_hide_acc = {"colon": [], "small_intestine": []}
 		gut_hide_usec = Time.get_ticks_usec() - t0
 		return
 	var by := {"colon": [], "small_intestine": []}
@@ -4398,6 +4401,7 @@ func _sync_gut_hide() -> void:
 		var rope: Node = g.get("rope")
 		if rope == null or not is_instance_valid(rope):
 			continue
+		var retracting := bool(rope.get("retracting"))
 		var fed := float(rope.get("fed_len"))
 		var plen := float(_organs.call("gut_path_length", k)) if _organs.has_method("gut_path_length") else 0.6
 		if not g.has("along") or not (g["along"] is float):
@@ -4408,8 +4412,52 @@ func _sync_gut_hide() -> void:
 		var along := float(g["along"])
 		var rate := SI_HIDE_RATE if k == "small_intestine" else 1.0
 		var win: Vector4 = _organs.call("gut_hide_window", along, fed, plen, rate) if _organs.has_method("gut_hide_window") else Vector4(along, clampf(fed * rate / maxf(plen, 0.08) * 0.5, 0.0, 0.5), 1.0, 0.0)
-		(by[k] as Array).append(win)
-		sig.append([k, snapped(fed, 0.002), snapped(along, 0.01), snapped(win.x, 0.01), snapped(win.y, 0.01)])
+		var cur_iv: Vector2 = _organs.call("gut_hide_interval", win) if _organs.has_method("gut_hide_interval") else Vector2(clampf(win.x - win.y, 0.0, 1.0), clampf(win.x + win.y, 0.0, 1.0))
+		var prev_iv: Vector2 = g["hide_iv"] if g.get("hide_iv") is Vector2 else Vector2(1.0, 0.0)
+		# 小肠多点扯出：在已有隐藏上累加，未放回时绝不把已藏的肠段重新显示。
+		if retracting or k != "small_intestine":
+			g["hide_iv"] = cur_iv
+		elif _organs.has_method("grow_hide_interval"):
+			g["hide_iv"] = _organs.call("grow_hide_interval", prev_iv, cur_iv)
+		else:
+			if prev_iv.y > prev_iv.x and cur_iv.y > cur_iv.x:
+				g["hide_iv"] = Vector2(minf(prev_iv.x, cur_iv.x), maxf(prev_iv.y, cur_iv.y))
+			elif cur_iv.y > cur_iv.x:
+				g["hide_iv"] = cur_iv
+			else:
+				g["hide_iv"] = prev_iv
+		sig.append([k, snapped(fed, 0.002), snapped(along, 0.01), snapped((g["hide_iv"] as Vector2).x, 0.01), snapped((g["hide_iv"] as Vector2).y, 0.01), retracting])
+	for kind2 in ["colon", "small_intestine"]:
+		var ivs: Array = []
+		var any_live := false
+		var any_retract := false
+		for gp2 in _gut_pulls:
+			var g2: Dictionary = gp2
+			var k2 := "colon" if str(g2.get("kind", "")) == "colon" else "small_intestine"
+			if k2 != kind2:
+				continue
+			var rope2: Node = g2.get("rope")
+			if rope2 == null or not is_instance_valid(rope2):
+				continue
+			any_live = true
+			if bool(rope2.get("retracting")):
+				any_retract = true
+			if g2.get("hide_iv") is Vector2:
+				ivs.append(g2["hide_iv"])
+		var acc: Array = _gut_hide_acc.get(kind2, [])
+		var merged: Array = _organs.call("merge_hide_intervals", ivs) if _organs.has_method("merge_hide_intervals") else ivs
+		if not any_live:
+			merged = []
+		elif kind2 == "small_intestine" and not any_retract:
+			var both: Array = []
+			both.append_array(acc)
+			both.append_array(merged)
+			merged = _organs.call("merge_hide_intervals", both) if _organs.has_method("merge_hide_intervals") else merged
+		_gut_hide_acc[kind2] = merged
+		if _organs.has_method("intervals_to_eat_windows"):
+			by[kind2] = _organs.call("intervals_to_eat_windows", merged)
+		else:
+			by[kind2] = merged
 	if sig == _gut_hide_sig:
 		gut_hide_usec = Time.get_ticks_usec() - t0
 		return
@@ -4449,6 +4497,8 @@ func _clear_guts() -> void:
 	_tissue_drag_prev = Vector3.ZERO
 	if _organs and _organs.has_method("clear_gut_eaten"):
 		_organs.call("clear_gut_eaten")
+	_gut_hide_acc = {"colon": [], "small_intestine": []}
+	_gut_hide_sig = []
 	_set_selected_organ("")
 	_set_hovered_organ("")
 	if _forceps_node and is_instance_valid(_forceps_node):
@@ -5159,6 +5209,26 @@ func soft_size_ratio(kind: String = "uterus") -> float:
 	return 1.0
 
 
+func max_edge_ratio(kind: String = "uterus") -> float:
+	var so := _soft_node(kind)
+	return float(so.call("max_edge_ratio")) if so and so.has_method("max_edge_ratio") else 1.0
+
+
+func rest_fundus_world(kind: String = "uterus") -> Vector3:
+	var so := _soft_node(kind)
+	return so.call("rest_fundus_world") if so and so.has_method("rest_fundus_world") else Vector3.ZERO
+
+
+func rest_cervix_world(kind: String = "uterus") -> Vector3:
+	var so := _soft_node(kind)
+	return so.call("rest_cervix_world") if so and so.has_method("rest_cervix_world") else Vector3.ZERO
+
+
+func organ_centroid_world(kind: String = "uterus") -> Vector3:
+	var so := _soft_node(kind)
+	return so.call("centroid_world") if so and so.has_method("centroid_world") else Vector3.ZERO
+
+
 func soft_mesh_quality(kind: String = "uterus") -> Dictionary:
 	var so := _soft_node(kind)
 	if so and so.has_method("debug_mesh_quality"):
@@ -5676,6 +5746,8 @@ func restore_extracted_organs() -> bool:
 	_clear_soft_organs()
 	if _organs and _organs.has_method("clear_gut_eaten"):
 		_organs.call("clear_gut_eaten")
+	_gut_hide_acc = {"colon": [], "small_intestine": []}
+	_gut_hide_sig = []
 	if _organs and _organs.has_method("clear_canal_stretch"):
 		_organs.call("clear_canal_stretch")
 	_set_selected_organ("")
@@ -5992,6 +6064,39 @@ func debug_pick_viscera(origin: Vector3, dir: Vector3) -> String:
 		return ""
 	var hit: Dictionary = _organs.call("ray_pick_viscera", origin, dir)
 	return str(hit.get("kind", "")) if not hit.is_empty() else ""
+
+
+func debug_begin_si_along(along: float, fed: float = 0.2) -> bool:
+	if not cut_open:
+		return false
+	if _small_gut_count() >= GUT_MAX_PULLS:
+		return false
+	var g := _new_gut_pull(_wound_center_world())
+	if g.is_empty():
+		return false
+	g["along"] = clampf(along, 0.0, 1.0)
+	g["kind"] = "small"
+	var rope: Node = g["rope"]
+	if rope:
+		rope.set("fed_len", maxf(fed, 0.04))
+	_gut_pulls.append(g)
+	gut_rope = g["rope"]
+	_sync_gut_hide()
+	return true
+
+
+func debug_gut_hide_mask(kind: String, steps: int = 48) -> PackedFloat32Array:
+	_sync_gut_hide()
+	if _organs and _organs.has_method("gut_hide_mask"):
+		return _organs.call("gut_hide_mask", kind, steps)
+	return PackedFloat32Array()
+
+
+func debug_gut_hide_amount(kind: String, steps: int = 48) -> float:
+	_sync_gut_hide()
+	if _organs and _organs.has_method("gut_hide_amount"):
+		return float(_organs.call("gut_hide_amount", kind, steps))
+	return 0.0
 
 
 func debug_begin_extract(kind: String) -> bool:

@@ -1084,6 +1084,91 @@ func gut_hide_window(along_hit: float, fed_len: float, path_len: float, rate: fl
 	return Vector4(center, half, 1.0, 0.0)
 
 
+func gut_hide_interval(win: Vector4) -> Vector2:
+	if win.z <= 1e-5 or win.y <= 1e-6:
+		return Vector2(1.0, 0.0)
+	return Vector2(clampf(win.x - win.y, 0.0, 1.0), clampf(win.x + win.y, 0.0, 1.0))
+
+
+func merge_hide_intervals(ivs: Array) -> Array:
+	var raw: Array = []
+	for it in ivs:
+		var v: Vector2 = it
+		if v.y - v.x > 1e-6:
+			raw.append(v)
+	if raw.is_empty():
+		return []
+	raw.sort_custom(func(a, b): return (a as Vector2).x < (b as Vector2).x)
+	var out: Array = [raw[0]]
+	for i in range(1, raw.size()):
+		var cur: Vector2 = raw[i]
+		var prev: Vector2 = out[out.size() - 1]
+		if cur.x <= prev.y + 1e-4:
+			out[out.size() - 1] = Vector2(prev.x, maxf(prev.y, cur.y))
+		else:
+			out.append(cur)
+	# 着色器最多 4 个窗口：把最近的缝合掉。
+	while out.size() > 4:
+		var best := 0
+		var gap := 1e9
+		for i2 in range(0, out.size() - 1):
+			var g: float = (out[i2 + 1] as Vector2).x - (out[i2] as Vector2).y
+			if g < gap:
+				gap = g
+				best = i2
+		var a: Vector2 = out[best]
+		var b: Vector2 = out[best + 1]
+		out[best] = Vector2(a.x, b.y)
+		out.remove_at(best + 1)
+	return out
+
+
+func intervals_to_eat_windows(ivs: Array) -> Array:
+	var wins: Array = []
+	for it in merge_hide_intervals(ivs):
+		var v: Vector2 = it
+		# xy = [lo, hi]，与着色器单侧淡出一致。
+		wins.append(Vector4(v.x, v.y, 1.0, 0.0))
+	return wins
+
+
+func grow_hide_interval(prev: Vector2, cur: Vector2) -> Vector2:
+	# 未放回时只扩大，不把已隐藏的区间缩回去。
+	if cur.y <= cur.x and prev.y <= prev.x:
+		return Vector2(1.0, 0.0)
+	if prev.y <= prev.x:
+		return cur
+	if cur.y <= cur.x:
+		return prev
+	return Vector2(minf(prev.x, cur.x), maxf(prev.y, cur.y))
+
+
+func gut_hide_mask(kind: String, steps: int = 48) -> PackedFloat32Array:
+	var n := maxi(steps, 8)
+	var out := PackedFloat32Array()
+	out.resize(n)
+	var wins: PackedVector4Array = gut_eaten_windows(kind)
+	for i in n:
+		var along := float(i) / float(n - 1)
+		var eat := 0.0
+		for w in wins:
+			if w.z > 0.0 and w.y - w.x > 1e-6:
+				var fade := maxf((w.y - w.x) * 0.16, 0.012)
+				var k_lo := 1.0 if w.x <= 0.001 else smoothstep(w.x, w.x + fade, along)
+				var k_hi := 1.0 if w.y >= 0.999 else (1.0 - smoothstep(w.y - fade, w.y, along))
+				eat = maxf(eat, k_lo * k_hi * clampf(w.z, 0.0, 1.0))
+		out[i] = eat
+	return out
+
+
+func gut_hide_amount(kind: String, steps: int = 48) -> float:
+	var mask := gut_hide_mask(kind, steps)
+	var acc := 0.0
+	for v in mask:
+		acc += v
+	return acc / float(maxi(mask.size(), 1))
+
+
 func gut_along_near(kind: String, world_pt: Vector3) -> float:
 	_update_frame()
 	var p_rest: Vector3 = (_frame.affine_inverse() * world_pt) + _navel_rest

@@ -98,7 +98,8 @@ float lobe(float frac, float width) {
 // clk = 脚本里按速度积分的三个时钟：∫(0.03+0.2s)dt、∫(0.45+0.9s)dt、∫(0.25+0.5s)dt
 // （速度滑条实时调整时相位连续，不会跳变）
 uniform vec3 peri_clock = vec3(0.0);
-// 被扯出后隐藏对应长度的体内肠管。xy = along 中心 / 半宽，z = 强度（0 关闭）。
+// 被扯出后隐藏对应长度的体内肠管。xy = along 区间 [lo, hi]，z = 强度（0 关闭）。
+// 靠路径端点的一边实心隐藏，只在朝向扯出点的内沿淡出，窗口变宽时已藏段不会重新出现。
 uniform vec4 gut_eat[4];
 // 子宫渐进物理化：沿宫颈→宫底的 along 大于 cut 的静态网格隐藏，交给柔体。
 uniform float uterus_phys_on = 0.0;
@@ -130,12 +131,14 @@ float pulse(float along, vec3 clk, float amp) {
 float gut_eat_k(float along) {
 	float eat = 0.0;
 	for (int i = 0; i < 4; i++) {
-		float w = gut_eat[i].y;
+		float lo = gut_eat[i].x;
+		float hi = gut_eat[i].y;
 		float s = gut_eat[i].z;
-		if (s > 0.0 && w > 1e-6) {
-			float d = abs(along - gut_eat[i].x);
-			float k = 1.0 - smoothstep(w * 0.50, w, d);
-			eat = max(eat, k * clamp(s, 0.0, 1.0));
+		if (s > 0.0 && hi - lo > 1e-6) {
+			float fade = max((hi - lo) * 0.16, 0.012);
+			float k_lo = lo <= 0.001 ? 1.0 : smoothstep(lo, lo + fade, along);
+			float k_hi = hi >= 0.999 ? 1.0 : (1.0 - smoothstep(hi - fade, hi, along));
+			eat = max(eat, k_lo * k_hi * clamp(s, 0.0, 1.0));
 		}
 	}
 	return eat;
