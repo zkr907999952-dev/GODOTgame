@@ -2095,7 +2095,7 @@ func _build_organs() -> bool:
 			mat.set_shader_parameter("normal_tex", tex_cache[tex_id][1])
 			var bc := Color(1, 1, 1, 1)
 			var ln0 := (str(matname) + " " + str(mname)).to_lower()
-			if ln0.find("vagin") >= 0 or ln0.find("vulva") >= 0 or ln0.find("labia") >= 0:
+			if ln0.find("vagin") >= 0 or ln0.find("vulva") >= 0 or ln0.find("labia") >= 0 or ln0.find("endometr") >= 0:
 				bc = Color(0.92, 0.84, 0.82, 1.0)
 			mat.set_shader_parameter("base_color", bc)
 			mat.set_shader_parameter("roughness", 0.48)
@@ -2103,15 +2103,15 @@ func _build_organs() -> bool:
 			# 网页 polishOrgans：无贴图时颜色向 #c4786a 靠 12%
 			var c := Color(col.r, col.g, col.b, 1.0).lerp(Color("#c4786a"), 0.12)
 			var ln := (str(matname) + " " + str(mname)).to_lower()
-			if ln.find("vagin") >= 0 or ln.find("vulva") >= 0 or ln.find("labia") >= 0:
-				# 阴道 / 外阴内壁：从过饱和红收成自然黏膜粉
+			if ln.find("vagin") >= 0 or ln.find("vulva") >= 0 or ln.find("labia") >= 0 or ln.find("endometr") >= 0:
+				# 阴道 / 外阴 / 子宫内壁：从过饱和红收成自然黏膜粉
 				c = c.lerp(Color(0.81, 0.60, 0.57), 0.55)
 			mat.set_shader_parameter("use_tex", false)
 			mat.set_shader_parameter("base_color", c)
 			mat.set_shader_parameter("roughness", 0.42)
 		mat.set_shader_parameter("strike_k", 1.0 if is_gut else 0.4)
-		var is_uter := false
-		if not is_gut and _uterus_aabb.size.length() > 1e-4:
+		var is_uter := (str(matname) + " " + str(mname)).to_lower().find("endometr") >= 0
+		if not is_uter and not is_gut and _uterus_aabb.size.length() > 1e-4:
 			var va0: PackedVector3Array = e["mesh"].surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
 			var mn := Vector3(INF, INF, INF)
 			var mx := Vector3(-INF, -INF, -INF)
@@ -2136,6 +2136,7 @@ func _build_organs() -> bool:
 		mi.set_meta("organ_group", "gut" if is_gut else "pelvis")
 		mi.set_meta("organ_material", matname)
 		mi.set_meta("is_uterus", bool(mat.get_shader_parameter("is_uterus")))
+		mi.set_meta("is_cavity", (str(matname) + " " + str(mname)).to_lower().find("endometr") >= 0)
 		_skel.add_child(mi)
 		mi.skeleton = mi.get_path_to(_skel)
 		organ_meshes.append(mi)

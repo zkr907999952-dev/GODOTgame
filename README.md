@@ -15,8 +15,9 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 
 ## 未发布（0.4.10 开发中）
 
+- 为子宫补上内壁腔体（子宫内膜，`Endometrium` / `UterusCavity`）：把原子宫网格沿宫颈—宫底旋转轴向内缩放约 2.8 mm 并让法线朝向宫腔；在子宫口切开并与现有两层阴道通道的宫颈圈拉链相接，从阴道经宫颈到宫腔是一条贯通的黏膜腔。输卵管角做了内壁袖口，管腔仍通入宫腔。黏膜色与近期外阴 / 阴道同为自然粉（约 0.81, 0.60, 0.57），走同一套脏器柔体 / `is_uterus` 变形与透视，不与外壁穿模。源数据备份在首次生成时写入 `assets/organs/organs_mesh.pre_cavity.bin`（不入库），转换脚本 `tools/build_uterus_cavity.py`。自检：`scripts/tests/v0410_check.gd`。
 - 阴道扩张器改为用户提供的两瓣 STL 实模（`assets/surgery/speculum.glb`，源文件 `assets/surgery/src/speculum_part1.stl` / `speculum_part2.stl`，转换脚本 `tools/convert_speculum_stl.py`）。Part1 为上瓣（2706 三角，销孔半径 2.00 mm），Part2 为下瓣（6054 三角，销孔半径 1.75 mm）；源单位是毫米，按 0.001 缩放到米，叶片约 11.4 cm，未减面。两瓣绕实测销孔轴开合 0–40°（上瓣负向、下瓣正向）。镀铬材质、插入/取出动画、柔体撑开、宫颈视野、换工具保持均沿用。版本号仍为 0.4.09 / 52，本提交不打包 APK。
-- 自检：`scripts/tests/v0409_check.gd`、`scripts/tests/v0409b_check.gd`（增加实模三角数与销轴转向检查）。
+- 自检：`scripts/tests/v0409_check.gd`、`scripts/tests/v0409b_check.gd`（扩张器实模）、`scripts/tests/v0410_check.gd`（子宫内腔）。
 
 ## 0.4.09
 
