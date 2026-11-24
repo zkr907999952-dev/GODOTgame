@@ -121,11 +121,12 @@ func hits_ray(origin: Vector3, dir: Vector3) -> bool:
 	if not is_present() or node == null or not node.visible:
 		return false
 	var d := dir.normalized()
-	# 叶片 + 手柄的粗胶囊：铰链附近球 + 沿插入轴一段。
+	# 叶片沿 +Z，两只手柄主要沿 −Y（库斯科式后侧握把），另有一小段在铰链后方。
 	var hinge := node.global_position
 	var tip := hinge + node.global_transform.basis.z * _depth
-	var handle := hinge - node.global_transform.basis.z * 0.09
-	return _ray_seg(origin, d, handle, tip, 0.03)
+	var handle := hinge - node.global_transform.basis.y * MeshFactory.HANDLE_LEN
+	var back := hinge - node.global_transform.basis.z * 0.055
+	return _ray_seg(origin, d, hinge, tip, 0.032) or _ray_seg(origin, d, handle, hinge, 0.028) or _ray_seg(origin, d, back, hinge, 0.028)
 
 
 func step(dt: float) -> void:

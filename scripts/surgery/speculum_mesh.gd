@@ -1,14 +1,18 @@
 extends RefCounted
-## 库斯科式阴道扩张器：上下两瓣绕中心销轴开合。白膜镀铬亮面金属。
-## 用户提供的两瓣 STL 当时未落到本机附件目录，按实拍/实尺（叶片约 10.5 cm）程序生成，铰链在销孔轴上。
+## 库斯科式阴道扩张器：上下两瓣绕实测销孔轴开合。白膜镀铬亮面金属。
+## 网格来自用户提供的两瓣 STL（assets/surgery/speculum.glb）；若资源缺失则回退到程序瓣。
+## 局部坐标系：原点 = 销轴中心，+X = 销轴，+Z = 叶尖（插入方向），+Y = 开口 / 腹侧。
 
-const BLADE_LEN := 0.105
-const BLADE_WIDTH := 0.028
+const GLB_PATH := "res://assets/surgery/speculum.glb"
+
+# 实模尺寸（米）：叶片约 11.4 cm，中段宽约 32 mm，闭合时外缘半高约 12 mm。
+const BLADE_LEN := 0.114
+const BLADE_WIDTH := 0.032
 const BLADE_THICK := 0.0022
-const CLOSED_HALF := 0.0042
-const HANDLE_LEN := 0.088
-const PIN_R := 0.0036
-const PIN_L := 0.016
+const CLOSED_HALF := 0.012
+const HANDLE_LEN := 0.089
+const PIN_R := 0.0017
+const PIN_L := 0.042
 
 static func chrome_material() -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
@@ -36,11 +40,22 @@ static func build_root() -> Node3D:
 	pin.material_override = mat
 	pin.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	root.add_child(pin)
+	var u_mesh: Mesh = null
+	var l_mesh: Mesh = null
+	var scene := _load_scene()
+	if scene:
+		u_mesh = _mesh_from(_find_named(scene, "UpperJaw"))
+		l_mesh = _mesh_from(_find_named(scene, "LowerJaw"))
+		scene.free()
+	var used_glb := u_mesh != null and l_mesh != null
+	if not used_glb:
+		u_mesh = _jaw_mesh(true)
+		l_mesh = _jaw_mesh(false)
 	var upper := Node3D.new()
 	upper.name = "UpperJaw"
 	var um := MeshInstance3D.new()
 	um.name = "Mesh"
-	um.mesh = _jaw_mesh(true)
+	um.mesh = u_mesh
 	um.material_override = mat
 	um.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	upper.add_child(um)
@@ -49,24 +64,69 @@ static func build_root() -> Node3D:
 	lower.name = "LowerJaw"
 	var lm := MeshInstance3D.new()
 	lm.name = "Mesh"
-	lm.mesh = _jaw_mesh(false)
+	lm.mesh = l_mesh
 	lm.material_override = mat
 	lm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	lower.add_child(lm)
 	root.add_child(lower)
+	root.set_meta("speculum_source", "glb" if used_glb else "procedural")
 	return root
 
 
 static func set_open_angle(root: Node3D, total_deg: float) -> void:
 	if root == null:
 		return
+	# 上瓣在 +Y，绕 +X 负向张开；下瓣在 −Y，正向张开。总开角均分。
 	var a := deg_to_rad(clampf(total_deg, 0.0, 48.0) * 0.5)
 	var u := root.get_node_or_null("UpperJaw") as Node3D
 	var l := root.get_node_or_null("LowerJaw") as Node3D
 	if u:
-		u.rotation = Vector3(a, 0.0, 0.0)
+		u.rotation = Vector3(-a, 0.0, 0.0)
 	if l:
-		l.rotation = Vector3(-a, 0.0, 0.0)
+		l.rotation = Vector3(a, 0.0, 0.0)
+
+
+static func _load_scene() -> Node3D:
+	if not FileAccess.file_exists(GLB_PATH) and not ResourceLoader.exists(GLB_PATH):
+		return null
+	# 已导入的 PackedScene（编辑器 / 导出包）。
+	if ResourceLoader.exists(GLB_PATH):
+		var res = load(GLB_PATH)
+		if res is PackedScene:
+			var inst = (res as PackedScene).instantiate()
+			if inst is Node3D:
+				return inst as Node3D
+			if inst:
+				inst.free()
+	# 无 .import 时（例如刚拉下来的 headless 自检）直接解析 glb。
+	var doc := GLTFDocument.new()
+	var state := GLTFState.new()
+	var err := doc.append_from_file(GLB_PATH, state)
+	if err != OK:
+		push_warning("speculum: failed to load %s (%s)" % [GLB_PATH, error_string(err)])
+		return null
+	var gen = doc.generate_scene(state)
+	return gen as Node3D
+
+
+static func _find_named(n: Node, nm: String) -> Node:
+	if n == null:
+		return null
+	if String(n.name) == nm:
+		return n
+	return n.find_child(nm, true, false)
+
+
+static func _mesh_from(n: Node) -> Mesh:
+	if n is MeshInstance3D:
+		var m: Mesh = (n as MeshInstance3D).mesh
+		if m:
+			return m
+	if n:
+		for c in n.get_children():
+			if c is MeshInstance3D and (c as MeshInstance3D).mesh:
+				return (c as MeshInstance3D).mesh
+	return null
 
 
 static func _pin_mesh() -> ArrayMesh:

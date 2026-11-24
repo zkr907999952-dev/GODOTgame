@@ -1,5 +1,5 @@
 extends "res://scripts/tests/v0409_check.gd"
-## 0.4.09 阴道扩张器：插入 / 开合 / 闭合取出 / 换工具保持 / 跟随身体，无 NaN。
+## 0.4.09/0.4.10 阴道扩张器：实模网格 / 插入 / 开合 / 闭合取出 / 换工具保持 / 跟随身体，无 NaN。
 ## 不钉死导出版本号。
 ##   godot --headless --path . -s res://scripts/tests/v0409b_check.gd
 
@@ -92,11 +92,18 @@ func _check_insert_open() -> void:
 			_ok(mat.metallic >= 0.99 and mat.roughness >= 0.08 and mat.roughness <= 0.15, "chrome metal: metallic=%.2f roughness=%.2f" % [mat.metallic, mat.roughness])
 		else:
 			_ok(false, "upper jaw has a StandardMaterial3D chrome override")
-		# 叶片沿局部 +Z，长度约 10–11 cm（加上柄）。
+		# 叶片沿局部 +Z，实模约 11.4 cm。
 		if mi and mi.mesh:
 			var aabb: AABB = mi.mesh.get_aabb()
 			var tip := aabb.position.z + aabb.size.z
-			_ok(tip >= 0.095 and tip <= 0.12, "blade length is ~10-11 cm (tip at %.1f cm)" % (tip * 100.0))
+			_ok(tip >= 0.095 and tip <= 0.13, "blade length is ~11.4 cm (tip at %.1f cm)" % (tip * 100.0))
+			var idx = mi.mesh.surface_get_arrays(0)[Mesh.ARRAY_INDEX]
+			_ok(idx.size() >= 2000 * 3, "upper jaw uses the real STL mesh (%d tris)" % (idx.size() / 3))
+		_ok(n.has_meta("speculum_source") and str(n.get_meta("speculum_source")) == "glb", "speculum is built from the converted STL glb")
+		var lmi := n.get_node_or_null("LowerJaw/Mesh") as MeshInstance3D
+		if lmi and lmi.mesh:
+			var lidx = lmi.mesh.surface_get_arrays(0)[Mesh.ARRAY_INDEX]
+			_ok(lidx.size() >= 5000 * 3, "lower jaw uses the real STL mesh (%d tris)" % (lidx.size() / 3))
 	var rig: Node = _rig()
 	var canal: Dictionary = rig.call("vagina_canal") if rig else {}
 	if n and not canal.is_empty():
@@ -117,7 +124,7 @@ func _check_insert_open() -> void:
 		var ujaw2 := n.get_node_or_null("UpperJaw") as Node3D
 		var ljaw2 := n.get_node_or_null("LowerJaw") as Node3D
 		if ujaw2 and ljaw2:
-			_ok(ujaw2.rotation.x > 0.15 and ljaw2.rotation.x < -0.15, "jaws rotate opposite ways around the pin (U=%.1f° L=%.1f°)" % [rad_to_deg(ujaw2.rotation.x), rad_to_deg(ljaw2.rotation.x)])
+			_ok(ujaw2.rotation.x < -0.15 and ljaw2.rotation.x > 0.15, "jaws rotate opposite ways around the pin (U=%.1f° L=%.1f°)" % [rad_to_deg(ujaw2.rotation.x), rad_to_deg(ljaw2.rotation.x)])
 		_finite_xf(n.global_transform, "open speculum transform is finite")
 	if rig:
 		_ok(float(rig.call("vulva_spread")) > 0.5, "opening the blades also spreads the vulva (%.2f)" % float(rig.call("vulva_spread")))

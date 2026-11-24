@@ -13,6 +13,11 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 正式签名密钥和导出说明在 [`android/signing/README.md`](android/signing/README.md)，凭据在 `android/signing/credentials.env`。从 0.2.22 起使用这张新证书；若设备上已安装 0.2.6–0.2.14（旧正式证书），需先卸载再安装。
 
 
+## 未发布（0.4.10 开发中）
+
+- 阴道扩张器改为用户提供的两瓣 STL 实模（`assets/surgery/speculum.glb`，源文件 `assets/surgery/src/speculum_part1.stl` / `speculum_part2.stl`，转换脚本 `tools/convert_speculum_stl.py`）。Part1 为上瓣（2706 三角，销孔半径 2.00 mm），Part2 为下瓣（6054 三角，销孔半径 1.75 mm）；源单位是毫米，按 0.001 缩放到米，叶片约 11.4 cm，未减面。两瓣绕实测销孔轴开合 0–40°（上瓣负向、下瓣正向）。镀铬材质、插入/取出动画、柔体撑开、宫颈视野、换工具保持均沿用。版本号仍为 0.4.09 / 52，本提交不打包 APK。
+- 自检：`scripts/tests/v0409_check.gd`、`scripts/tests/v0409b_check.gd`（增加实模三角数与销轴转向检查）。
+
 ## 0.4.09
 
 - 「掰开小穴」纳入可扩展的角色动作注册表：检查床以外（站立等）也能用；互动菜单新增「动作」栏（预留后续动作），检查床顶栏「动作」按钮仍仅在床上显示。

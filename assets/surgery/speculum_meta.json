@@ -1,0 +1,45 @@
+{
+  "part1": "upper jaw (Speculum_Part1)",
+  "part2": "lower jaw (Speculum_Part2)",
+  "units": "metres",
+  "source_units": "millimetres",
+  "blade_length_m": {
+    "upper": 0.1141774216839803,
+    "lower": 0.1135302519290081
+  },
+  "hinge": {
+    "part1_mm": [
+      24.75,
+      6.000020388678636,
+      62.91483272671854
+    ],
+    "part1_pin_radius_mm": 2.0,
+    "part1_pin_width_mm": 42.0,
+    "part2_mm": [
+      96.924,
+      2.556455,
+      113.520704
+    ],
+    "part2_pin_radius_mm": 1.75,
+    "part2_pin_width_mm": 40.9526
+  },
+  "mid_blade_m": {
+    "upper": [
+      0.031929222106933594,
+      0.0012517104343288531,
+      0.012564663231443361
+    ],
+    "lower": [
+      0.031704498291015626,
+      -0.011599418098270649,
+      0.0018571921859998042
+    ]
+  },
+  "scale": 0.001,
+  "decimated": false,
+  "upper_mirrored": false,
+  "open_angle_signs": {
+    "UpperJaw": -1,
+    "LowerJaw": 1
+  }
+}
