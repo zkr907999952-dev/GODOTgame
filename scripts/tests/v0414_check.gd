@@ -1,6 +1,7 @@
 extends "res://scripts/tests/v0411_check.gd"
-## 0.4.11：柔体子宫黑三角/尺寸、肠管隐藏性能与远端先藏、直悬链卵巢在尽头、
-## 渐进物理化、更细的肠管、钳子跟随、电脑按住夹拖 / 手机点选+1秒长按、扩张器前移。
+## 0.4.11：柔体子宫黑三角/尺寸、整颗物理化并按档位伸出体外、肠管隐藏性能与远端先藏、
+## 小肠隐藏变慢、直悬链卵巢在体内不穿出、更细的肠管、钳子跟随与悬停性能、
+## 电脑按住夹拖 / 手机点选+1秒长按、扩张器沿阴道中线、放回内脏、当前选择标签。
 ##   godot --headless --path . -s res://scripts/tests/v0414_check.gd
 
 
@@ -72,6 +73,23 @@ func _check_speculum_anterior() -> void:
 		var miss := (hinge + seg * u).distance_to(opening_w) * 1000.0
 		_ok(miss < 10.0, "blade shaft goes through the anterior introitus (miss=%.1f mm)" % miss)
 		_ok(opening_w.distance_to(anus) > 0.03, "insertion entry stays away from the anus (%.1f mm)" % (opening_w.distance_to(anus) * 1000.0))
+		var ax := n.global_transform.basis.z.normalized()
+		var canal_ax: Vector3 = (canal["cervix_world"] - opening_w).normalized()
+		_ok(ax.dot(canal_ax) > 0.96, "speculum axis aligns with the vagina centreline (dot=%.4f)" % ax.dot(canal_ax))
+		var line: PackedVector3Array = rig.call("vagina_centerline_world") if rig.has_method("vagina_centerline_world") else PackedVector3Array()
+		if line.size() >= 2:
+			var worst := 0.0
+			var cerv_w: Vector3 = canal["cervix_world"]
+			# 只量叶片落在通道里的一段（外口到宫颈），不要把体外铰链算进去。
+			for s_i in 5:
+				var tu := (float(s_i) + 0.5) / 5.0
+				var bp: Vector3 = opening_w.lerp(cerv_w, tu)
+				# 点到叶片轴线
+				var slen := seg.length()
+				var uu := 0.0 if slen < 1e-8 else clampf((bp - hinge).dot(seg) / (slen * slen), 0.0, 1.0)
+				var on_blade := hinge + seg * uu
+				worst = maxf(worst, on_blade.distance_to(bp))
+			_ok(worst * 1000.0 < 12.0, "blade stays near the vagina mesh centreline (max miss=%.1f mm)" % (worst * 1000.0))
 	s.call("set_tool", "scalpel")
 	await _frames(1)
 
@@ -97,6 +115,8 @@ func _check_guts_and_hide() -> void:
 		return
 	var rope: Node = crope[0]
 	_ok(is_equal_approx(float(rope.get("radius")), 0.0148), "colon is slightly thinner (radius=%.4f)" % float(rope.get("radius")))
+	_ok(int(rope.get("max_pts")) >= 24, "colon allows more pulled segments (max_pts=%d)" % int(rope.get("max_pts")))
+	_ok(float(rope.get("max_len")) >= 0.50, "colon max pull-out length is increased (%.2f m)" % float(rope.get("max_len")))
 	rope.set("fed_len", 0.18)
 	s.call("_update_guts", 0.0)
 	# 性能：缓存路径应远快于全网格扫描
@@ -145,6 +165,11 @@ func _check_guts_and_hide() -> void:
 		if v2.z > 0.5:
 			half1 = v2.y
 	_ok(half1 > half0 + 0.01, "hiding grows toward the pull point as more is pulled (half %.3f -> %.3f)" % [half0, half1])
+	# 小肠体内隐藏更慢，同样扯出长度不会那么快把肚子掏空。
+	_ok(absf(float(s.call("si_hide_rate")) - 0.35) < 0.001, "SI hide rate is reduced to 0.35")
+	var w_si: Vector4 = rig.call("gut_hide_window", along, fed, plen, 0.35)
+	var w_co: Vector4 = rig.call("gut_hide_window", along, fed, plen, 1.0)
+	_ok(w_si.y < w_co.y * 0.45 and w_si.y > 0.0, "SI hide window is much narrower than colon for the same pull (SI half=%.3f colon half=%.3f)" % [w_si.y, w_co.y])
 	# 放回反向恢复
 	_ok(bool(s.call("debug_putback_organ", "colon")), "colon put-back")
 	for i in 80:
@@ -174,17 +199,39 @@ func _check_uterus_quality_and_phys() -> void:
 	_ok(int(q.get("nan_verts", 1)) == 0 and int(q.get("nan_normals", 1)) == 0, "soft uterus has no NaN verts/normals (verts=%s nrm=%s)" % [q.get("nan_verts"), q.get("nan_normals")])
 	_ok(int(q.get("deg_faces", 1)) == 0, "soft uterus has no degenerate faces (%s)" % q.get("deg_faces"))
 	var frac1 := float(s.call("physical_fraction", "uterus"))
-	_ok(frac1 > 0.12 and frac1 < 0.35, "level 1 physical fraction is a fundus tip (%.2f)" % frac1)
+	_ok(frac1 > 0.95, "level 1 already physicalizes the whole uterus (%.2f)" % frac1)
+	_ok(float(so.get("DAMP")) <= 0.72, "uterus physics damping is raised (DAMP=%.2f)" % float(so.get("DAMP")))
+	var wound: Vector3 = s.call("_wound_center_world")
+	var outv: Vector3 = s.call("_cavity_outward") if s.has_method("_cavity_outward") else Vector3.UP
+	outv = outv.normalized()
+	var peek1 := (so.call("fundus_world") as Vector3 - wound).dot(outv)
+	_ok(peek1 > 0.004, "level 1 fundus extends out of the wound (%.1f mm)" % (peek1 * 1000.0))
+	# L1 卵巢还在体内，不能从腹壁「卡出去」。
+	if s.has_method("ovary_contained"):
+		_ok(bool(s.call("ovary_contained", 0)) and bool(s.call("ovary_contained", 1)), "ovaries stay inside the body at level 1")
 	_advance_charge("uterus", 1.0, 6.0)
 	s.call("_update_guts", 1.0 / 30.0)
-	var mid := float(s.call("physical_fraction", "uterus"))
-	_ok(mid > frac1 + 0.1, "higher level physicalizes more of the uterus (%.2f -> %.2f)" % [frac1, mid])
+	var peek_mid := (so.call("fundus_world") as Vector3 - wound).dot(outv)
+	var exp_mid := float(so.call("exposed_length"))
+	var dist_mid := (so.call("fundus_world") as Vector3).distance_to(wound)
+	_ok(peek_mid > peek1 + 0.008 or exp_mid > 0.02 or dist_mid > 0.02, "intermediate level extends the uterus farther out (%.1f -> %.1f mm)" % [peek1 * 1000.0, peek_mid * 1000.0])
 	_advance_charge("uterus", 1.0, 10.0)
 	s.call("_update_guts", 1.0 / 30.0)
 	var frac5 := float(s.call("physical_fraction", "uterus"))
-	_ok(frac5 > 0.95 and int(s.call("extract_level", "uterus")) == 5, "level 5 is fully physicalized (%.2f)" % frac5)
+	_ok(frac5 > 0.95 and int(s.call("extract_level", "uterus")) == 5, "level 5 stays fully physicalized (%.2f)" % frac5)
 	var ratio := float(s.call("soft_size_ratio", "uterus"))
 	_ok(ratio >= 0.98, "physical uterus matches or exceeds original size (ratio=%.2f)" % ratio)
+	for _i in 8:
+		s.call("_update_guts", 1.0 / 30.0)
+	var d5 := (so.call("fundus_world") as Vector3).distance_to(wound)
+	var exp5 := float(so.call("exposed_length"))
+	_ok(exp5 > exp_mid + 0.008 or d5 > dist_mid + 0.01 or int(s.call("extract_level", "uterus")) == 5 and exp5 > 0.03, "level 5 extends the uterus farther out of the body (exposed %.1f -> %.1f mm)" % [exp_mid * 1000.0, exp5 * 1000.0])
+	var cx5: Vector3 = so.call("cervix_world")
+	_ok((cx5 - wound).dot(outv) > -0.02, "at L5 the cervix has moved out toward the wound")
+	var rig_u: Node = _organ_rig()
+	var intro: Vector3 = rig_u.call("visible_introitus_world") if rig_u.has_method("visible_introitus_world") else wound
+	var past_intro := (so.call("fundus_world") as Vector3).distance_to(intro)
+	_ok(past_intro > 0.03, "at L5 the fundus is well outside the introitus (%.1f mm away)" % (past_intro * 1000.0))
 	# 钳子夹住子宫拖拽时钳子跟住夹点。瞄准宫底环上的一个笼点，而不是环心。
 	var fund: Vector3 = so.call("fundus_world")
 	var cage: PackedVector3Array = so.get("_p")
@@ -209,14 +256,48 @@ func _check_uterus_quality_and_phys() -> void:
 	_ok(bool(s.call("tube_chain_active", 0)) and bool(s.call("tube_chain_active", 1)), "both adnexa are chains at level 5")
 	_ok(bool(s.call("chain_is_straight", 0)) and bool(s.call("chain_is_straight", 1)), "each tube/ovary is a straight chain, not a loop")
 	_ok(bool(s.call("ovary_at_chain_end", 0)) and bool(s.call("ovary_at_chain_end", 1)), "ovaries sit at the far end of the chain")
+	# 互动拖拽：物理子宫和输卵管/卵巢悬链必须跟着肚子走，不能留在原地。
+	var rig_d: Node = _organ_rig()
+	var fund0: Vector3 = so.call("fundus_world")
+	var cx0: Vector3 = so.call("cervix_world")
+	var ov0: Vector3 = so.call("ovary_world", 0) if so.has_method("ovary_world") else fund0
+	var grab: Vector3 = s.call("_wound_center_world")
+	rig_d.call("begin_drag", grab)
+	rig_d.call("update_drag", grab + Vector3(0.0, 0.05, 0.05))
+	for _j in 10:
+		if rig_d.has_method("_step_drag"):
+			rig_d.call("_step_drag", 1.0 / 30.0)
+		s.call("_update_guts", 1.0 / 30.0)
+	var off_len := float(rig_d.call("drag_offset_length"))
+	var fund1: Vector3 = so.call("fundus_world")
+	var cx1: Vector3 = so.call("cervix_world")
+	var moved := fund1.distance_to(fund0)
+	_ok(off_len > 0.008, "tissue drag displaces the belly (%.1f mm)" % (off_len * 1000.0))
+	_ok(moved > off_len * 0.45, "physical uterus follows interaction drag (moved %.1f mm, belly %.1f mm)" % [moved * 1000.0, off_len * 1000.0])
+	_ok(cx1.distance_to(cx0) > off_len * 0.45, "cervix also follows the drag (%.1f mm)" % (cx1.distance_to(cx0) * 1000.0))
+	if so.has_method("ovary_world"):
+		var ov1: Vector3 = so.call("ovary_world", 0)
+		_ok(ov1.distance_to(ov0) > off_len * 0.25, "tube/ovary chain follows the dragged uterus (%.1f mm)" % (ov1.distance_to(ov0) * 1000.0))
+	rig_d.call("end_drag")
+	for _k in 8:
+		if rig_d.has_method("_step_drag"):
+			rig_d.call("_step_drag", 1.0 / 30.0)
+		s.call("_update_guts", 1.0 / 30.0)
 	s.call("restore_body")
 	s.call("enter_surgery")
 	await _frames(2)
 
 
+func _equip_forceps() -> void:
+	if s.has_method("ensure_tool"):
+		s.call("ensure_tool", "forceps")
+	elif str(s.get("tool")) != "forceps":
+		s.call("set_tool", "forceps")
+
+
 func _check_forceps_flows() -> void:
 	await _open_wound()
-	s.call("set_tool", "forceps")
+	_equip_forceps()
 	# 悬停名称，不开始扯出
 	var aim := _aim_at_kind("colon")
 	if aim.is_empty():
@@ -241,7 +322,7 @@ func _check_forceps_flows() -> void:
 	s.call("enter_surgery")
 	await _frames(2)
 	await _open_wound()
-	s.call("set_tool", "forceps")
+	_equip_forceps()
 	var aim2 := _aim_at_kind("colon")
 	if aim2.is_empty():
 		aim2 = _aim_at_kind("small_intestine")
@@ -261,4 +342,30 @@ func _check_forceps_flows() -> void:
 	_ok(bool(s.call("is_forceps_clamped")), "holding over 1 s clamps and starts the drag")
 	s.call("debug_forceps_end")
 	_ok(not bool(s.call("is_forceps_clamped")), "releasing after a long-press lets go")
+	# 悬停拾取性能：缓存路径应明显快于每次重建网格数组
+	_equip_forceps()
+	var hv := _aim_at_kind("colon")
+	if hv.is_empty():
+		hv = _aim_at_kind("small_intestine")
+	if not hv.is_empty() and s.has_method("debug_forceps_hover_profile"):
+		var slow: Dictionary = s.call("debug_forceps_hover_profile", hv[0], hv[1], 12, true)
+		var fast: Dictionary = s.call("debug_forceps_hover_profile", hv[0], hv[1], 12, false)
+		print("v0414: forceps hover uncached=%.1f us  cached=%.1f us" % [float(slow.get("us", 0)), float(fast.get("us", 0))])
+		_ok(float(fast.get("us", 9e9)) < float(slow.get("us", 1.0)) * 0.35 or float(fast.get("us", 9e9)) < 1500.0, "forceps hover is much cheaper after caching (cached=%.1f us, uncached=%.1f us)" % [float(fast.get("us", 0)), float(slow.get("us", 0))])
+		s.call("hover_tool", hv[0], hv[1])
+		var live := str(s.call("get_organ_target_label"))
+		_ok(live != "", "hover label updates in real time (got '%s')" % live)
+		var labn: Label = hud.get("_organ_target_label")
+		if labn:
+			_ok(str(labn.text).begins_with("当前选择："), "HUD prefix is 「当前选择：」 (got '%s')" % labn.text)
+	# 一键放回内脏（创口保留）
+	_ok(hud.get("_btn_surgery_putback") != null, "HUD has a 「放回内脏」 button next to 复原")
+	var had := int(s.call("colon_pull_count")) + int(s.call("gut_pull_count"))
+	if had == 0 and not aim2.is_empty() and s.has_method("debug_forceps_begin_kind"):
+		s.call("debug_forceps_begin_kind", aim2[0], aim2[1], PackedStringArray(["small_intestine", "colon"]))
+		had = int(s.call("colon_pull_count")) + int(s.call("gut_pull_count"))
+	_ok(had >= 1, "there is a pulled gut to put back")
+	_ok(bool(s.call("restore_extracted_organs")), "restore_extracted_organs runs")
+	_ok(int(s.call("colon_pull_count")) == 0 and int(s.call("gut_pull_count")) == 0, "one-tap putback clears all pulled guts")
+	_ok(int(s.call("extract_level", "uterus")) == 0, "one-tap putback resets the uterus")
 	s.call("restore_body")

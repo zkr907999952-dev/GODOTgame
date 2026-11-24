@@ -93,7 +93,10 @@ func _restart() -> void:
 	await _phys(3)
 	if not bool(s.call("is_active")):
 		s.call("enter_surgery")
-	s.call("set_tool", "scalpel")
+	if s.has_method("ensure_tool"):
+		s.call("ensure_tool", "scalpel")
+	else:
+		s.call("set_tool", "scalpel")
 	await _frames(3)
 
 

@@ -88,6 +88,10 @@ var _spec_spread: float = 0.0
 ## Cached rest-space canal (opening / cervix / axis), fitted once.
 var _canal_rest: Dictionary = {}
 var _gut_along_cache: Dictionary = {}
+var _viscera_pick_cache: Array = []
+var _viscera_pick_ready := false
+var _canal_posed: Dictionary = {}
+var _canal_posed_stamp := -1
 var _uterus_phys_on: float = 0.0
 var _uterus_phys_cut: float = 2.0
 var _uterus_phys_origin: Vector3 = Vector3.ZERO
@@ -329,11 +333,14 @@ func clear_speculum_deform() -> void:
 ## 阴道开口 / 宫颈 / 轴（朝宫颈），同时给腹部局部和世界坐标。
 ## 外口优先用 mouth_loop 中心，宫颈端对齐 UterusCavity 的 os_center，与内腔拉链和阴道拉伸兼容。
 func vagina_canal() -> Dictionary:
+	_update_frame()
+	var posed := _fit_vagina_canal_posed()
+	if not posed.is_empty():
+		return posed
 	if _canal_rest.is_empty():
 		_canal_rest = _fit_vagina_canal_rest()
 	if _canal_rest.is_empty():
 		return {}
-	_update_frame()
 	var out: Dictionary = _canal_rest.duplicate()
 	out["opening_world"] = _frame * out["opening_ab"]
 	out["cervix_world"] = _frame * out["cervix_ab"]
@@ -378,6 +385,145 @@ func _fit_vagina_canal_rest() -> Dictionary:
 	out["opening_rest"] = opening
 	out["cervix_rest"] = cervix
 	return out
+
+
+func _posed_organ_world(mi: MeshInstance3D) -> PackedVector3Array:
+	var empty := PackedVector3Array()
+	if mi == null or mi.mesh == null:
+		return empty
+	var arr: Array = mi.mesh.surface_get_arrays(0)
+	var P: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	var bones = arr[Mesh.ARRAY_BONES]
+	var wts = arr[Mesh.ARRAY_WEIGHTS]
+	var skin: Skin = mi.skin
+	var out := PackedVector3Array()
+	out.resize(P.size())
+	if _skel == null or skin == null or bones == null or wts == null or bones.size() < P.size() * 4:
+		var xf: Transform3D = mi.global_transform
+		for i in P.size():
+			out[i] = xf * P[i]
+		return out
+	var xfs: Array = []
+	xfs.resize(skin.get_bind_count())
+	var skel_xf := _skel.global_transform
+	for bi in skin.get_bind_count():
+		var bone_i := _skel.find_bone(str(skin.get_bind_name(bi)))
+		if bone_i < 0:
+			bone_i = skin.get_bind_bone(bi)
+		if bone_i >= 0 and bone_i < _skel.get_bone_count():
+			xfs[bi] = skel_xf * _skel.get_bone_global_pose(bone_i) * skin.get_bind_pose(bi)
+		else:
+			xfs[bi] = skel_xf
+	for i in P.size():
+		var acc := Vector3.ZERO
+		var wsum := 0.0
+		for k in 4:
+			var w: float = wts[i * 4 + k]
+			if w <= 1e-8:
+				continue
+			var bind_i: int = bones[i * 4 + k]
+			if bind_i >= 0 and bind_i < xfs.size():
+				acc += w * ((xfs[bind_i] as Transform3D) * P[i])
+				wsum += w
+		if wsum > 1e-8:
+			out[i] = acc / wsum
+		else:
+			out[i] = _frame * (P[i] - _navel_rest)
+	return out
+
+
+func _fit_vagina_canal_posed() -> Dictionary:
+	var stamp := Engine.get_process_frames()
+	if stamp == _canal_posed_stamp and not _canal_posed.is_empty():
+		return _canal_posed
+	_canal_posed_stamp = stamp
+	var meshes: Array = viscera_meshes("vagina")
+	var pts := PackedVector3Array()
+	for mi in meshes:
+		var world: PackedVector3Array = _posed_organ_world(mi as MeshInstance3D)
+		for p in world:
+			pts.append(p)
+	if pts.size() < 24:
+		_canal_posed = {}
+		return _canal_posed
+	if _canal_rest.is_empty():
+		_canal_rest = _fit_vagina_canal_rest()
+	# 用休息轴向把顶点分箱，质心即当前蒙皮后的通道中线（与画面上的粉管一致）。
+	var open_h: Vector3 = _frame * (_introitus_rest() - _navel_rest)
+	var cerv_h: Vector3 = open_h + Vector3(0, 0.06, -0.02)
+	if not _canal_rest.is_empty():
+		open_h = _frame * (_canal_rest["opening_ab"] as Vector3)
+		cerv_h = _frame * (_canal_rest["cervix_ab"] as Vector3)
+	var axis := cerv_h - open_h
+	if axis.length_squared() < 1e-8:
+		_canal_posed = {}
+		return _canal_posed
+	var length := axis.length()
+	axis /= length
+	var bins := 10
+	var acc: Array = []
+	var cnt: Array = []
+	acc.resize(bins)
+	cnt.resize(bins)
+	for b in bins:
+		acc[b] = Vector3.ZERO
+		cnt[b] = 0
+	for p2 in pts:
+		var t := clampf((p2 - open_h).dot(axis) / length, 0.0, 0.9999)
+		var b2 := int(floor(t * float(bins)))
+		acc[b2] += p2
+		cnt[b2] += 1
+	var line := PackedVector3Array()
+	for b3 in bins:
+		if int(cnt[b3]) >= 6:
+			line.append((acc[b3] as Vector3) / float(cnt[b3]))
+	if line.size() < 3:
+		_canal_posed = {}
+		return _canal_posed
+	var opening_w: Vector3 = line[0]
+	var cervix_w: Vector3 = line[line.size() - 1]
+	var axis_w := cervix_w - opening_w
+	var len_w := axis_w.length()
+	if len_w < 0.02:
+		_canal_posed = {}
+		return _canal_posed
+	axis_w /= len_w
+	# 宫颈端仍钉在 UterusCavity os（与宫腔拉链 / 柔体宫颈一致）；只有外口和中段跟蒙皮走。
+	if not _canal_rest.is_empty():
+		var os_w: Vector3 = _frame * (_canal_rest["cervix_ab"] as Vector3)
+		if os_w.distance_to(cervix_w) < 0.008:
+			cervix_w = os_w
+			if line.size() > 0:
+				line[line.size() - 1] = os_w
+	var opening_ab: Vector3 = _frame.affine_inverse() * opening_w
+	var cervix_ab: Vector3 = _frame.affine_inverse() * cervix_w
+	var axis_ab := (cervix_ab - opening_ab).normalized()
+	var up_ab := Vector3.RIGHT.cross(axis_ab)
+	if up_ab.length_squared() < 1e-6:
+		up_ab = Vector3(0, 0, 1) - axis_ab * axis_ab.z
+	up_ab = up_ab.normalized()
+	_canal_posed = {
+		"opening_ab": opening_ab,
+		"cervix_ab": cervix_ab,
+		"axis_ab": axis_ab,
+		"up_ab": up_ab,
+		"length": len_w,
+		"opening_world": opening_w,
+		"cervix_world": cervix_w,
+		"centerline": line,
+	}
+	return _canal_posed
+
+
+func vagina_centerline_world() -> PackedVector3Array:
+	var c := vagina_canal()
+	if c.has("centerline") and c["centerline"] is PackedVector3Array:
+		return c["centerline"]
+	var line2 := PackedVector3Array()
+	if c.has("opening_world") and c.has("cervix_world"):
+		line2.append(c["opening_world"])
+		line2.append(c["cervix_world"])
+	return line2
 
 
 ## 可见阴道外口（绑定空间）：不要用外阴皮肤最低点（四联/会阴端，靠近肛门、偏「低」）。
@@ -448,6 +594,9 @@ func anus_world() -> Vector3:
 ## 玩家看见的阴道外口（世界坐标）：通道外口偏前中心，不是外阴最低点。
 func visible_introitus_world() -> Vector3:
 	_update_frame()
+	var posed := _fit_vagina_canal_posed()
+	if not posed.is_empty() and posed.has("opening_world"):
+		return posed["opening_world"]
 	return _frame * (_introitus_rest() - _navel_rest)
 
 
@@ -614,28 +763,27 @@ func _viscera_priority(kind: String) -> int:
 
 ## 射线点选腹腔脏器（腹部局部网格）。返回 {kind, side, point, mesh, dist} 或空。
 ## 小肠必须真正点到其网格才会返回；点到其它器官时小肠不得挡在前面。
-func ray_pick_viscera(origin: Vector3, dir: Vector3, kinds: PackedStringArray = PackedStringArray()) -> Dictionary:
-	_update_frame()
-	var d := dir.normalized()
-	var inv := _frame.affine_inverse()
-	var o_ab: Vector3 = inv * origin
-	var d_ab: Vector3 = (inv.basis * d).normalized()
-	var filter := {}
-	for k in kinds:
-		filter[str(k)] = true
-	var by_kind := {}
+func clear_viscera_pick_cache() -> void:
+	_viscera_pick_ready = false
+	_viscera_pick_cache.clear()
+
+
+func _ensure_viscera_pick_cache() -> void:
+	if _viscera_pick_ready:
+		return
+	_viscera_pick_cache.clear()
 	for mi in organ_meshes:
 		var mesh_i := mi as MeshInstance3D
-		if mesh_i == null or mesh_i.mesh == null or not mesh_i.visible:
+		if mesh_i == null or mesh_i.mesh == null:
 			continue
 		var kind := str(mesh_i.get_meta("organ_kind", ""))
 		if kind == "" or kind == "other" or kind == "uterus_cavity" or kind == "vagina":
 			continue
-		if not filter.is_empty() and not filter.has(kind):
-			continue
 		var arr: Array = mesh_i.mesh.surface_get_arrays(0)
 		var P: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
 		var I: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+		if I.is_empty() or P.is_empty():
+			continue
 		var mn := Vector3(INF, INF, INF)
 		var mx := Vector3(-INF, -INF, -INF)
 		var Pab := PackedVector3Array()
@@ -645,12 +793,134 @@ func ray_pick_viscera(origin: Vector3, dir: Vector3, kinds: PackedStringArray = 
 			Pab[i] = l
 			mn = mn.min(l)
 			mx = mx.max(l)
-		var box := AABB(mn, mx - mn).grow(0.004)
+		var samples := PackedVector3Array()
+		var step := maxi(1, int(ceil(float(Pab.size()) / 500.0)))
+		var i2 := 0
+		while i2 < Pab.size():
+			samples.append(Pab[i2])
+			i2 += step
+		# 保证前后左右上下的极值点被采到，悬停瞄准最前顶点时不会落空。
+		var ex := [Pab[0], Pab[0], Pab[0], Pab[0], Pab[0], Pab[0]]
+		for p3 in Pab:
+			if p3.x < ex[0].x: ex[0] = p3
+			if p3.x > ex[1].x: ex[1] = p3
+			if p3.y < ex[2].y: ex[2] = p3
+			if p3.y > ex[3].y: ex[3] = p3
+			if p3.z < ex[4].z: ex[4] = p3
+			if p3.z > ex[5].z: ex[5] = p3
+		for e in ex:
+			samples.append(e)
+		_viscera_pick_cache.append({
+			"kind": kind,
+			"side": int(mesh_i.get_meta("organ_side", -1)),
+			"mesh": mesh_i,
+			"Pab": Pab,
+			"I": I,
+			"samples": samples,
+			"box": AABB(mn, mx - mn).grow(0.004),
+		})
+	_viscera_pick_ready = not _viscera_pick_cache.is_empty() or organ_meshes.is_empty()
+
+
+func ray_pick_viscera_uncached(origin: Vector3, dir: Vector3, kinds: PackedStringArray = PackedStringArray()) -> Dictionary:
+	clear_viscera_pick_cache()
+	return ray_pick_viscera(origin, dir, kinds)
+
+
+## 悬停用：缓存采样点对射线的接近距离，避免每帧走完全部三角形。
+func ray_pick_viscera_fast(origin: Vector3, dir: Vector3, kinds: PackedStringArray = PackedStringArray()) -> Dictionary:
+	_update_frame()
+	_ensure_viscera_pick_cache()
+	var d := dir.normalized()
+	var inv := _frame.affine_inverse()
+	var o_ab: Vector3 = inv * origin
+	var d_ab: Vector3 = (inv.basis * d).normalized()
+	var filter := {}
+	for k in kinds:
+		filter[str(k)] = true
+	var by_kind := {}
+	var rad := 0.022
+	for rec0 in _viscera_pick_cache:
+		var recd: Dictionary = rec0
+		var mesh_i: MeshInstance3D = recd["mesh"]
+		if mesh_i == null or not is_instance_valid(mesh_i) or not mesh_i.visible:
+			continue
+		var kind: String = recd["kind"]
+		if not filter.is_empty() and not filter.has(kind):
+			continue
+		var box: AABB = recd["box"]
 		if not _seg_aabb(o_ab, d_ab, 2.0, box):
 			continue
+		var samples: PackedVector3Array = recd["samples"]
 		var t_hit := -1.0
-		if I.is_empty():
+		var best_d := rad
+		for p_ab in samples:
+			var w: Vector3 = p_ab - o_ab
+			var tt := w.dot(d_ab)
+			if tt <= 0.0:
+				continue
+			var dist := (w - d_ab * tt).length()
+			if dist < best_d and (t_hit < 0.0 or tt < t_hit or dist < best_d * 0.85):
+				best_d = dist
+				t_hit = tt
+		if t_hit < 0.0:
 			continue
+		var rec := {
+			"kind": kind,
+			"side": int(recd["side"]),
+			"point": origin + d * t_hit,
+			"point_ab": o_ab + d_ab * t_hit,
+			"mesh": mesh_i,
+			"dist": t_hit,
+		}
+		if not by_kind.has(kind) or t_hit < float((by_kind[kind] as Dictionary)["dist"]):
+			by_kind[kind] = rec
+	if by_kind.is_empty():
+		return {}
+	var first_t := 1e9
+	for k2 in by_kind.keys():
+		first_t = minf(first_t, float((by_kind[k2] as Dictionary)["dist"]))
+	var best := {}
+	var best_pr := -1
+	var best_t := 1e9
+	for k3 in by_kind.keys():
+		var rec2: Dictionary = by_kind[k3]
+		var tt2: float = rec2["dist"]
+		if tt2 > first_t + VISCERA_THROUGH:
+			continue
+		var pr := _viscera_priority(str(k3))
+		if pr > best_pr or (pr == best_pr and tt2 < best_t):
+			best_pr = pr
+			best_t = tt2
+			best = rec2
+	return best
+
+
+func ray_pick_viscera(origin: Vector3, dir: Vector3, kinds: PackedStringArray = PackedStringArray()) -> Dictionary:
+	_update_frame()
+	_ensure_viscera_pick_cache()
+	var d := dir.normalized()
+	var inv := _frame.affine_inverse()
+	var o_ab: Vector3 = inv * origin
+	var d_ab: Vector3 = (inv.basis * d).normalized()
+	var filter := {}
+	for k in kinds:
+		filter[str(k)] = true
+	var by_kind := {}
+	for rec0 in _viscera_pick_cache:
+		var recd: Dictionary = rec0
+		var mesh_i: MeshInstance3D = recd["mesh"]
+		if mesh_i == null or not is_instance_valid(mesh_i) or not mesh_i.visible:
+			continue
+		var kind: String = recd["kind"]
+		if not filter.is_empty() and not filter.has(kind):
+			continue
+		var box: AABB = recd["box"]
+		if not _seg_aabb(o_ab, d_ab, 2.0, box):
+			continue
+		var Pab: PackedVector3Array = recd["Pab"]
+		var I: PackedInt32Array = recd["I"]
+		var t_hit := -1.0
 		for f in range(0, I.size() - 2, 3):
 			var a: Vector3 = Pab[I[f]]
 			var b: Vector3 = Pab[I[f + 1]]
@@ -662,7 +932,7 @@ func ray_pick_viscera(origin: Vector3, dir: Vector3, kinds: PackedStringArray = 
 			continue
 		var rec := {
 			"kind": kind,
-			"side": int(mesh_i.get_meta("organ_side", -1)),
+			"side": int(recd["side"]),
 			"point": origin + d * t_hit,
 			"point_ab": o_ab + d_ab * t_hit,
 			"mesh": mesh_i,
@@ -797,9 +1067,9 @@ func clear_gut_along_cache() -> void:
 
 ## 从距扯出点最远的体内肠管一端开始隐藏，随 fed_len 向扯出点推进。放回时窗口缩小即反向恢复。
 ## 返回 Vector4(center, half_width, strength, 0)。
-func gut_hide_window(along_hit: float, fed_len: float, path_len: float) -> Vector4:
+func gut_hide_window(along_hit: float, fed_len: float, path_len: float, rate: float = 1.0) -> Vector4:
 	var plen := maxf(path_len, 0.08)
-	var w := clampf(fed_len / plen, 0.0, 1.0)
+	var w := clampf(fed_len * maxf(rate, 0.01) / plen, 0.0, 1.0)
 	if w <= 1e-5:
 		return Vector4(0.0, 0.0, 0.0, 0.0)
 	var hit := clampf(along_hit, 0.0, 1.0)

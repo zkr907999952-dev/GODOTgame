@@ -26,6 +26,7 @@ var _btn_xray: Button
 var _btn_surgery_enter: Button
 var _btn_surgery_exit: Button
 var _btn_surgery_restore: Button
+var _btn_surgery_putback: Button
 var _btn_surgery_view: Button
 var _btn_tool_scalpel: Button
 var _btn_tool_grab: Button
@@ -4085,6 +4086,14 @@ func _build_surgery_ui(root: Control) -> void:
 	_btn_surgery_restore.pressed.connect(_on_restore_body_pressed)
 	root.add_child(_btn_surgery_restore)
 
+	# 复原旁边：只把体外内脏放回，不整身清创口。
+	_btn_surgery_putback = _make_chrome_button("放回内脏")
+	_btn_surgery_putback.name = "SurgeryPutbackOrgansButton"
+	_btn_surgery_putback.visible = false
+	_btn_surgery_putback.custom_minimum_size = Vector2(96, 32)
+	_btn_surgery_putback.pressed.connect(_on_putback_organs_pressed)
+	root.add_child(_btn_surgery_putback)
+
 	_btn_surgery_view = _make_chrome_button("切换·第一人称")
 	_btn_surgery_view.name = "SurgeryViewButton"
 	_btn_surgery_view.visible = false
@@ -4357,6 +4366,15 @@ func _refresh_surgery_ui() -> void:
 			ew = maxf(ew, _btn_surgery_exit.size.x)
 		_btn_surgery_restore.position = Vector2(sl + ew + 8.0, st)
 		_btn_surgery_restore.custom_minimum_size = Vector2(88, 40) if touch_ui else Vector2(72, 32)
+	if _btn_surgery_putback:
+		_btn_surgery_putback.visible = active
+		var rx := sl + (160.0 if touch_ui else 140.0) + 8.0
+		var rw := 88.0 if touch_ui else 72.0
+		if _btn_surgery_restore:
+			rx = _btn_surgery_restore.position.x
+			rw = maxf(_btn_surgery_restore.size.x, _btn_surgery_restore.custom_minimum_size.x)
+		_btn_surgery_putback.custom_minimum_size = Vector2(128, 40) if touch_ui else Vector2(96, 32)
+		_btn_surgery_putback.position = Vector2(rx + rw + 8.0, st)
 	if _btn_surgery_view:
 		_btn_surgery_view.visible = active
 		var first := false
@@ -4462,7 +4480,7 @@ func _sync_organ_target_label(s: Node, tool: String, sl: float, st: float, touch
 	var text := ""
 	if s.has_method("get_organ_target_label"):
 		text = str(s.call("get_organ_target_label"))
-	_organ_target_label.text = ("选中：%s" % text) if text != "" else "选中：—"
+	_organ_target_label.text = ("当前选择：%s" % text) if text != "" else "当前选择：—"
 	_organ_target_label.add_theme_font_size_override("font_size", 20 if touch_ui else 16)
 	var bar_y := st + (104.0 if touch_ui else 92.0)
 	if _btn_fc_pull and _btn_fc_pull.visible:
@@ -4473,7 +4491,18 @@ func _sync_organ_target_label(s: Node, tool: String, sl: float, st: float, touch
 		_surgery_hint_label.custom_minimum_size = Vector2(360, 0)
 
 
-func _on_organ_target_changed(_label: String) -> void:
+func _on_organ_target_changed(label: String) -> void:
+	# 只改标签，不要整页刷新（悬停每帧都会发信号）。
+	if _organ_target_label == null or not _organ_target_label.visible:
+		return
+	_organ_target_label.text = ("当前选择：%s" % label) if label != "" else "当前选择：—"
+
+
+func _on_putback_organs_pressed() -> void:
+	var s: Node = _surgery()
+	if s == null or not s.has_method("restore_extracted_organs"):
+		return
+	s.call("restore_extracted_organs")
 	_refresh_surgery_ui()
 
 

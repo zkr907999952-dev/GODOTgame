@@ -141,6 +141,15 @@ func points() -> PackedVector3Array:
 	return _p
 
 
+func set_points(pts: PackedVector3Array) -> void:
+	_p = pts.duplicate()
+	if _q.size() != _p.size():
+		_q = _p.duplicate()
+	else:
+		for i in mini(_q.size(), _p.size()):
+			_q[i] = _p[i]
+
+
 func segment_rest() -> float:
 	return fed_len / float(maxi(_p.size() - 1, 1))
 

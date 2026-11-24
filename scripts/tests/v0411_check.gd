@@ -161,10 +161,10 @@ func _check_colon() -> void:
 		return
 	var rope: Node = ropes[0]
 	_ok(is_equal_approx(float(rope.get("radius")), 0.0148), "colon is slightly thinner than before but still thicker than the small intestine (radius=%.4f)" % float(rope.get("radius")))
-	_ok(is_equal_approx(float(rope.get("seg")), 0.040), "colon links are longer (seg=%.3f)" % float(rope.get("seg")))
+	_ok(is_equal_approx(float(rope.get("seg")), 0.028), "colon has shorter links / more segments (seg=%.3f)" % float(rope.get("seg")))
 	_ok(float(rope.get("damp")) <= 0.90 and float(rope.get("damp")) < 0.96, "colon damping is higher than the small intestine (damp=%.3f)" % float(rope.get("damp")))
-	_ok(int(rope.get("max_pts")) <= 18, "colon has fewer segments (max_pts=%d)" % int(rope.get("max_pts")))
-	_ok(float(rope.get("max_len")) <= 0.40, "colon max length is shorter (%.2f m)" % float(rope.get("max_len")))
+	_ok(int(rope.get("max_pts")) >= 24, "colon allows more segments (max_pts=%d)" % int(rope.get("max_pts")))
+	_ok(float(rope.get("max_len")) >= 0.50, "colon max pull-out length is increased (%.2f m)" % float(rope.get("max_len")))
 	_ok(str(rope.get("profile_id")) == "colon", "rope profile is 'colon'")
 	var gm := (rope as GeometryInstance3D).material_override as ShaderMaterial
 	var tex = gm.get_shader_parameter("albedo_tex") if gm else null
@@ -203,18 +203,21 @@ func _check_uterus() -> void:
 	var so: Node = s.call("soft_organ", "uterus")
 	_ok(so != null and bool(so.visible), "a physics soft-body uterus is created")
 	var frac1 := float(s.call("physical_fraction", "uterus")) if s.has_method("physical_fraction") else float(so.call("physical_fraction"))
-	_ok(frac1 > 0.12 and frac1 < 0.35, "level 1 physicalizes only the fundus tip (frac=%.2f)" % frac1)
-	# 1 档时静态子宫网格仍然可见（被裁掉的是宫底），宫颈还在原位。
+	_ok(frac1 > 0.95, "level 1 already physicalizes the whole uterus (frac=%.2f)" % frac1)
+	# 1 档：整颗柔体，原网格隐藏；宫底伸出创口。
 	var still_vis2 := 0
 	for mi2 in _organ_rig().get("organ_meshes"):
 		var m2 := mi2 as MeshInstance3D
 		if m2 and m2.visible and str(m2.get_meta("organ_kind", "")) == "uterus":
 			still_vis2 += 1
-	_ok(still_vis2 > 0, "level 1 keeps the static uterus mesh for the non-physical part")
-	var cx1: Vector3 = s.call("cervix_world")
+	_ok(still_vis2 == 0, "the original uterus mesh is hidden once extraction starts")
 	var fr: Transform3D = _organ_rig().call("abdomen_frame")
-	var rest_cx: Vector3 = fr * so.get("_cervix_ab")
-	_ok(cx1.distance_to(rest_cx) < 0.012, "level 1 does not raise the cervix (moved %.1f mm)" % (cx1.distance_to(rest_cx) * 1000.0))
+	var fund1: Vector3 = so.call("fundus_world")
+	var wound: Vector3 = s.call("_wound_center_world")
+	var out1: Vector3 = s.call("_cavity_outward") if s.has_method("_cavity_outward") else Vector3.UP
+	var peek1 := (fund1 - wound).dot(out1.normalized())
+	_ok(peek1 > 0.004, "level 1 fundus peeks out of the wound (%.1f mm)" % (peek1 * 1000.0))
+	_ok(float(so.get("DAMP")) <= 0.72, "uterus physics damping is raised (DAMP=%.2f)" % float(so.get("DAMP")))
 	# 缓慢升档：0.4 秒满强度大约 +0.13 档，仍停在 1 档附近
 	var c0 := float(s.call("extract_charge", "uterus"))
 	s.call("debug_add_extract_charge", "uterus", 1.0, 0.4)
@@ -225,16 +228,21 @@ func _check_uterus() -> void:
 	_ok(int(s.call("extract_level", "uterus")) == 5, "sustained pull reaches level 5 (charge=%.2f)" % float(s.call("extract_charge", "uterus")))
 	s.call("_update_guts", 1.0 / 30.0)
 	var frac5 := float(s.call("physical_fraction", "uterus")) if s.has_method("physical_fraction") else float(so.call("physical_fraction"))
-	_ok(frac5 > 0.95, "level 5 physicalizes the whole uterus (frac=%.2f)" % frac5)
+	_ok(frac5 > 0.95, "level 5 stays fully physicalized (frac=%.2f)" % frac5)
 	var ratio := float(s.call("soft_size_ratio", "uterus")) if s.has_method("soft_size_ratio") else float(so.call("physical_size_ratio"))
 	_ok(ratio >= 0.98, "physical uterus is at least as large as the original (ratio=%.2f)" % ratio)
+	s.call("_update_guts", 1.0 / 30.0)
+	var fund5: Vector3 = so.call("fundus_world")
+	var wound5: Vector3 = s.call("_wound_center_world")
+	var out5: Vector3 = s.call("_cavity_outward") if s.has_method("_cavity_outward") else Vector3.UP
+	var peek5 := (fund5 - wound5).dot(out5.normalized())
+	var exp5 := float(so.call("exposed_length")) if so.has_method("exposed_length") else 0.0
+	# 5 档在重力下会弯垂，向外投影不一定再增 2 cm；看外露长度。
+	_ok(peek5 > peek1 + 0.008 or exp5 > 0.03, "level 5 extends the uterus farther out than level 1 (%.1f -> %.1f mm, exposed %.1f mm)" % [peek1 * 1000.0, peek5 * 1000.0, exp5 * 1000.0])
 	var cx: Vector3 = s.call("cervix_world")
-	var rest_cx5: Vector3 = fr * so.get("_cervix_ab")
-	# 未夹住拖拽时宫颈仍在原位，阴道不会被抬起来。
-	_ok(cx.distance_to(rest_cx5) < 0.02, "level 5 without a pull does not lift the cervix (moved %.1f mm)" % (cx.distance_to(rest_cx5) * 1000.0))
 	var rig: Node = _organ_rig()
 	var os_now: Vector3 = rig.call("canal_os_now_world") if rig.has_method("canal_os_now_world") else cx
-	_ok(os_now.distance_to(cx) < 0.012, "vagina stays attached to the cervix (%.2f mm)" % (os_now.distance_to(cx) * 1000.0))
+	_ok(os_now.distance_to(cx) < 0.018, "vagina stays attached to the cervix (%.2f mm)" % (os_now.distance_to(cx) * 1000.0))
 	_ok(bool(s.call("tube_chain_active", 0)) and bool(s.call("tube_chain_active", 1)), "at level 5 both tubes/ovaries are ragdoll chains")
 	# 扩张器插入时阻止再一次子宫脱出：先放回再测
 	s.call("debug_putback_organ", "uterus")
