@@ -34,6 +34,12 @@ var _hinge_p := [Vector3.ZERO, Vector3.ZERO]
 var _mat: Material
 var _spread := 0.0
 var _am: ArrayMesh
+## 扩张器插入时撑开阴道外口（与皮瓣 spread 独立）：椭圆半宽 / 半高与混合系数。
+var _intro_hx := 0.0
+var _intro_hy := 0.0
+var _intro_mix := 0.0
+var _intro_axis := Vector3(0, 1, 0)
+var _intro_up := Vector3(0, 0, 1)
 
 
 func build(dress: MeshInstance3D, vulva_point: Vector3, canal_opening: Vector3, mouth_loop: PackedVector3Array = PackedVector3Array()) -> bool:
@@ -311,6 +317,86 @@ func set_spread(amount: float) -> void:
 
 func spread() -> float:
 	return _spread
+
+
+## 扩张器在位时把前庭内圈（阴道外口）撑到能容纳闭合叶片的椭圆，与开合滑条无关。
+func set_introitus_open(half_x: float, half_y: float, mix: float, axis: Vector3 = Vector3.ZERO, up: Vector3 = Vector3.ZERO) -> void:
+	var m := clampf(mix, 0.0, 1.0)
+	var hx := maxf(half_x, 0.0)
+	var hy := maxf(half_y, 0.0)
+	var ax := axis
+	var u := up
+	if ax.length_squared() < 1e-8:
+		ax = _intro_axis
+	if u.length_squared() < 1e-8:
+		u = _intro_up
+	ax = ax.normalized()
+	u = (u - ax * u.dot(ax))
+	if u.length_squared() < 1e-8:
+		u = Vector3(0, 0, 1) - ax * ax.z
+	u = u.normalized()
+	if absf(m - _intro_mix) < 1e-4 and absf(hx - _intro_hx) < 1e-5 and absf(hy - _intro_hy) < 1e-5 and ax.dot(_intro_axis) > 0.999 and u.dot(_intro_up) > 0.999:
+		return
+	_intro_mix = m
+	_intro_hx = hx
+	_intro_hy = hy
+	_intro_axis = ax
+	_intro_up = u
+	if ok:
+		_commit_vestibule()
+
+
+## 当前外口在 side / up 平面上的半宽、半高（绑定空间，已含 introitus 撑开）。
+func introitus_half_extents() -> Vector2:
+	if _mouth_s.is_empty():
+		return Vector2.ZERO
+	var acc := Vector3.ZERO
+	for p in _mouth_s:
+		acc += _inflated_mouth_point(p)
+	var c := acc / float(_mouth_s.size())
+	var ax := _intro_axis.normalized()
+	var up := (_intro_up - ax * _intro_up.dot(ax)).normalized()
+	if up.length_squared() < 1e-8:
+		up = Vector3(0, 0, 1)
+	var side := ax.cross(up).normalized()
+	var hx := 0.0
+	var hy := 0.0
+	for p0 in _mouth_s:
+		var p := _inflated_mouth_point(p0)
+		var r := p - c
+		hx = maxf(hx, absf(r.dot(side)))
+		hy = maxf(hy, absf(r.dot(up)))
+	return Vector2(hx, hy)
+
+
+func _inflated_mouth_point(p: Vector3) -> Vector3:
+	if _intro_mix < 1e-4 or _intro_hx < 1e-5 or _intro_hy < 1e-5 or _mouth_s.is_empty():
+		return p
+	var acc := Vector3.ZERO
+	for q in _mouth_s:
+		acc += q
+	var c := acc / float(_mouth_s.size())
+	var ax := _intro_axis.normalized()
+	var up := (_intro_up - ax * _intro_up.dot(ax))
+	if up.length_squared() < 1e-8:
+		up = Vector3(0, 0, 1) - ax * ax.z
+	up = up.normalized()
+	var side := ax.cross(up)
+	if side.length_squared() < 1e-8:
+		return p
+	side = side.normalized()
+	var r := p - c
+	var x := r.dot(side)
+	var y := r.dot(up)
+	var along := r.dot(ax)
+	var e := (x * x) / maxf(_intro_hx * _intro_hx, 1e-8) + (y * y) / maxf(_intro_hy * _intro_hy, 1e-8)
+	var q := p
+	if e < 1.0 and e > 1e-8:
+		var k := 1.0 / sqrt(e)
+		q = c + side * (x * k) + up * (y * k) + ax * along
+	elif e <= 1e-8:
+		q = c + up * _intro_hy
+	return p.lerp(q, _intro_mix)
 
 
 func hinge(side: int) -> Array:
@@ -664,7 +750,7 @@ func vestibule_positions() -> PackedVector3Array:
 	for r in VEST_ROWS + 1:
 		var t := float(r) / float(VEST_ROWS)
 		for k in VEST_N:
-			var p := top[k].lerp(_mouth_s[k], t)
+			var p := top[k].lerp(_inflated_mouth_point(_mouth_s[k]), t)
 			# 中间行略向外鼓（管壁圆润，不是直锥）
 			var c := vulva.lerp(opening, t)
 			var rad := p - c - axis * (p - c).dot(axis)

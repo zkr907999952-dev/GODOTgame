@@ -106,11 +106,30 @@ func _check_insert_open() -> void:
 			_ok(lidx.size() >= 5000 * 3, "lower jaw uses the real STL mesh (%d tris)" % (lidx.size() / 3))
 	var rig: Node = _rig()
 	var canal: Dictionary = rig.call("vagina_canal") if rig else {}
+	var spread_closed := 0.0
+	var gap_closed := 0.0
 	if n and not canal.is_empty():
 		var hinge := n.global_position
 		var opening: Vector3 = canal["opening_world"]
-		var dmm := hinge.distance_to(opening) * 1000.0
-		_ok(dmm < 25.0, "hinge sits at the introitus (%.1f mm away)" % dmm)
+		var cervix_w: Vector3 = canal["cervix_world"]
+		var ax_w: Vector3 = (cervix_w - opening).normalized()
+		var z := n.global_transform.basis.z.normalized()
+		_ok(z.dot(ax_w) > 0.98, "inserted blades follow the vaginal axis (dot=%.4f)" % z.dot(ax_w))
+		var tip := hinge + z * 0.114
+		var tip_mm := tip.distance_to(cervix_w) * 1000.0
+		_ok(tip_mm < 18.0, "blade tip sits just short of the cervix (%.1f mm)" % tip_mm)
+		# 铰链在体外：叶片比阴道长，不能再要求铰链贴在外口。
+		var h_mm := hinge.distance_to(opening) * 1000.0
+		_ok(h_mm > 30.0 and h_mm < 90.0, "hinge stays outside the introitus (%.1f mm)" % h_mm)
+	if rig:
+		spread_closed = float(rig.call("vulva_spread"))
+		_ok(spread_closed > 0.7, "labia already spread when the closed speculum is inserted (%.2f)" % spread_closed)
+		var so0: Vector4 = rig.get("_spec_o")
+		gap_closed = float(rig.get("_spec_d").w)
+		_ok(so0.w > 0.03 and so0.is_finite(), "wall deform is already on after closed insertion (depth=%.1f cm)" % (so0.w * 100.0))
+		if rig.vulva and rig.vulva.has_method("introitus_half_extents"):
+			var ext0: Vector2 = rig.vulva.call("introitus_half_extents")
+			_ok(ext0.x >= 0.014 and ext0.y >= 0.011, "introitus opens enough for the closed blades (hx=%.1f hy=%.1f mm)" % [ext0.x * 1000.0, ext0.y * 1000.0])
 	# 打开滑条
 	hud.call("_refresh_surgery_ui")
 	await _frames(2)
@@ -127,9 +146,12 @@ func _check_insert_open() -> void:
 			_ok(ujaw2.rotation.x < -0.15 and ljaw2.rotation.x > 0.15, "jaws rotate opposite ways around the pin (U=%.1f° L=%.1f°)" % [rad_to_deg(ujaw2.rotation.x), rad_to_deg(ljaw2.rotation.x)])
 		_finite_xf(n.global_transform, "open speculum transform is finite")
 	if rig:
-		_ok(float(rig.call("vulva_spread")) > 0.5, "opening the blades also spreads the vulva (%.2f)" % float(rig.call("vulva_spread")))
+		var spread_open := float(rig.call("vulva_spread"))
+		_ok(absf(spread_open - spread_closed) < 0.08, "opening the slider does not change labia spread (closed=%.2f open=%.2f)" % [spread_closed, spread_open])
 		var so: Vector4 = rig.get("_spec_o")
+		var gap_open := float(rig.get("_spec_d").w)
 		_ok(so.w > 0.03 and so.is_finite(), "vaginal wall deform is driven (depth=%.1f cm)" % (so.w * 100.0))
+		_ok(gap_open > gap_closed + 0.008, "slider widens the vaginal wall gap only (%.1f -> %.1f mm)" % [gap_closed * 1000.0, gap_open * 1000.0])
 	var rem: Button = hud.get("_btn_spec_remove")
 	_ok(rem != null and rem.visible, "「取出扩张器」 is available on PC and touch")
 

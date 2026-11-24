@@ -27,6 +27,7 @@ const SKIN_DECAL_LAYER := 1 << 14  # 伤口贴花只投到躯干皮肤（Decal.c
 ## 网页 findCrotch / findAnus 在本模型上的结果（骨架静止空间）
 const CROTCH_REST := Vector3(0.0, 0.9024, 0.105)
 const ANUS_REST := Vector3(0.0, 0.8969, -0.0021)
+const SPEC_LABIA_SPREAD := 0.92
 
 # --- 公共状态（HUD 读写）
 var xray_enabled: bool = true
@@ -84,6 +85,8 @@ var _spec_d: Vector4 = Vector4.ZERO
 var _spec_u: Vector4 = Vector4.ZERO
 var _spec_m: Vector4 = Vector4.ZERO
 var _spec_spread: float = 0.0
+## Cached rest-space canal (opening / cervix / axis), fitted once.
+var _canal_rest: Dictionary = {}
 
 # 拳交脏器软体（弹簧）：杆参数与子宫位移滞后于拳头
 var _rod_reach_s: float = 0.0
@@ -263,11 +266,18 @@ func vulva_flaps():
 
 func set_speculum_deform(origin_ab: Vector3, axis_ab: Vector3, up_ab: Vector3, depth: float, half_gap: float, mixv: float, half_closed: float = 0.004, half_width: float = 0.016) -> void:
 	if depth <= 1e-5 or mixv <= 1e-5:
-		clear_speculum_deform()
+		# 叶片已完全抽出时才清壁变形；阴唇开合由 set_speculum_labia 单独管。
+		_spec_o = Vector4.ZERO
+		_spec_d = Vector4.ZERO
+		_spec_u = Vector4.ZERO
+		_spec_m = Vector4.ZERO
 		return
 	var ax := axis_ab
 	if ax.length_squared() < 1e-8:
-		clear_speculum_deform()
+		_spec_o = Vector4.ZERO
+		_spec_d = Vector4.ZERO
+		_spec_u = Vector4.ZERO
+		_spec_m = Vector4.ZERO
 		return
 	ax = ax.normalized()
 	var up := up_ab - ax * up_ab.dot(ax)
@@ -275,17 +285,25 @@ func set_speculum_deform(origin_ab: Vector3, axis_ab: Vector3, up_ab: Vector3, d
 		up = Vector3(0, 0, 1)
 		up = up - ax * up.dot(ax)
 	if up.length_squared() < 1e-8:
-		clear_speculum_deform()
+		_spec_o = Vector4.ZERO
+		_spec_d = Vector4.ZERO
+		_spec_u = Vector4.ZERO
+		_spec_m = Vector4.ZERO
 		return
 	up = up.normalized()
 	_spec_o = Vector4(origin_ab.x, origin_ab.y, origin_ab.z, depth)
 	_spec_d = Vector4(ax.x, ax.y, ax.z, maxf(half_gap, 0.002))
 	_spec_u = Vector4(up.x, up.y, up.z, maxf(half_width, 0.006))
 	_spec_m = Vector4(clampf(mixv, 0.0, 1.0), maxf(half_closed, 0.002), 0.0, 0.0)
-	# 闭合也略微拨开入口；开到最大时完全拨开。其它系统调用 set_vulva_spread(0) 时不会压过它。
-	_spec_spread = clampf(0.18 + clampf((half_gap - half_closed) / 0.036, 0.0, 1.0) * 0.82, 0.0, 1.0) * clampf(mixv, 0.0, 1.0)
-	if vulva:
-		vulva.set_spread(maxf(vulva.spread(), _spec_spread))
+
+
+func set_speculum_labia(mixv: float, half_x: float, half_y: float, axis_ab: Vector3, up_ab: Vector3) -> void:
+	_spec_spread = clampf(SPEC_LABIA_SPREAD * clampf(mixv, 0.0, 1.0), 0.0, 1.0)
+	if vulva == null:
+		return
+	if vulva.has_method("set_introitus_open"):
+		vulva.call("set_introitus_open", half_x, half_y, clampf(mixv, 0.0, 1.0), axis_ab, up_ab)
+	vulva.set_spread(maxf(vulva.spread(), _spec_spread))
 
 
 func clear_speculum_deform() -> void:
@@ -295,12 +313,28 @@ func clear_speculum_deform() -> void:
 	_spec_m = Vector4.ZERO
 	var keep := _spec_spread
 	_spec_spread = 0.0
-	if vulva and absf(vulva.spread() - keep) < 0.03:
-		vulva.set_spread(0.0)
+	if vulva:
+		if vulva.has_method("set_introitus_open"):
+			vulva.call("set_introitus_open", 0.0, 0.0, 0.0, Vector3(0, 1, 0), Vector3(0, 0, 1))
+		if absf(vulva.spread() - keep) < 0.03 or vulva.spread() <= keep + 0.02:
+			vulva.set_spread(0.0)
 
 
 ## 阴道开口 / 宫颈 / 轴（朝宫颈），同时给腹部局部和世界坐标。
+## 外口优先用 mouth_loop 中心，宫颈端对齐 UterusCavity 的 os_center，与内腔拉链和阴道拉伸兼容。
 func vagina_canal() -> Dictionary:
+	if _canal_rest.is_empty():
+		_canal_rest = _fit_vagina_canal_rest()
+	if _canal_rest.is_empty():
+		return {}
+	_update_frame()
+	var out: Dictionary = _canal_rest.duplicate()
+	out["opening_world"] = _frame * out["opening_ab"]
+	out["cervix_world"] = _frame * out["cervix_ab"]
+	return out
+
+
+func _fit_vagina_canal_rest() -> Dictionary:
 	var out := {}
 	if meta.is_empty() or not meta.has("vagina"):
 		return out
@@ -313,6 +347,25 @@ func vagina_canal() -> Dictionary:
 		return out
 	var opening := Vector3(float(op[0]), float(op[1]), float(op[2]))
 	var cervix := Vector3(float(cx[0]), float(cx[1]), float(cx[2]))
+	# 外口：阴道口黏膜圈中心比 meta.opening 更贴近真实入口。
+	var loop = vg.get("mouth_loop", [])
+	if loop is Array and loop.size() >= 6:
+		var acc := Vector3.ZERO
+		var n := 0
+		for p in loop:
+			if p is Array and p.size() >= 3:
+				acc += Vector3(float(p[0]), float(p[1]), float(p[2]))
+				n += 1
+			elif p is Vector3:
+				acc += p
+				n += 1
+		if n >= 6:
+			opening = acc / float(n)
+	# 宫颈端：优先接到子宫内腔口（os_center），保证通道止于宫颈。
+	if meta.has("uterus_cavity") and meta["uterus_cavity"] is Dictionary:
+		var os = meta["uterus_cavity"].get("os_center", [])
+		if os is Array and os.size() >= 3:
+			cervix = Vector3(float(os[0]), float(os[1]), float(os[2]))
 	var opening_ab := opening - _navel_rest
 	var cervix_ab := cervix - _navel_rest
 	var axis := cervix_ab - opening_ab
@@ -320,19 +373,18 @@ func vagina_canal() -> Dictionary:
 	if length < 1e-4:
 		return out
 	axis /= length
-	# 开合方向：矢状面内、朝向腹部前方（耻骨侧叶片）。
+	# 开合方向：矢状面内、朝向腹部前方（耻骨侧叶片，库斯科上瓣）。
 	var up := Vector3.RIGHT.cross(axis)
 	if up.length_squared() < 1e-6:
 		up = Vector3(0, 0, 1) - axis * axis.z
 	up = up.normalized()
-	_update_frame()
 	out["opening_ab"] = opening_ab
 	out["cervix_ab"] = cervix_ab
 	out["axis_ab"] = axis
 	out["up_ab"] = up
 	out["length"] = length
-	out["opening_world"] = _frame * opening_ab
-	out["cervix_world"] = _frame * cervix_ab
+	out["opening_rest"] = opening
+	out["cervix_rest"] = cervix
 	return out
 
 

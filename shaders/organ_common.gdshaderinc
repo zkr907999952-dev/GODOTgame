@@ -190,7 +190,8 @@ vec3 speculum_offset(vec3 p) {
 	if (along_w < 0.01) return vec3(0.0);
 	float along = clamp(s / max(depth, 1e-4), 0.0, 1.15);
 	float ry = mix(half_closed, half_tip, clamp(along, 0.0, 1.0)) + 0.003;
-	float rx = half_side * mix(0.42, 0.62, clamp(along, 0.0, 1.0));
+	// 外口就要容纳闭合叶片宽度；沿通道再随叶片略收。
+	float rx = half_side * mix(1.0, 0.78, clamp(along, 0.0, 1.0));
 	float xu = dot(v, side);
 	float yu = dot(v, up);
 	vec3 radial = side * xu + up * yu;

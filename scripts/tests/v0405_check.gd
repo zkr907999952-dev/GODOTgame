@@ -249,7 +249,9 @@ func _check_organs_0405() -> void:
 		for j in range(0, V2.size(), 3):
 			dmin = minf(dmin, V[i].distance_to(V2[j]))
 	_ok(dmin > 0.002, "canal clears the bladder (%.1f mm)" % (dmin * 1000.0))
-	_ok(gut.position.y > ut.position.y - 0.02, "guts not pushed below the pelvis (gut min %.3f)" % gut.position.y)
+	# 直肠远端接到肛门后，大肠 AABB 最低点会低于子宫底；不允许整包肠管掉到肛门以下。
+	var anus_y := 0.8969
+	_ok(gut.position.y > anus_y - 0.008, "guts stay at or above the anus (gut min %.3f)" % gut.position.y)
 	# 蒙皮：只绑髋 / 脊柱骨（与其它盆腔器官一样）
 	var bones_ok := true
 	var skel: Skeleton3D = rig.get("_skel")

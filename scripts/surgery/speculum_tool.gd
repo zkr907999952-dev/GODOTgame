@@ -10,6 +10,10 @@ const CLOSE_SEC := 0.32
 const WITHDRAW_SEC := 0.45
 const HINGE_OUT := 0.008
 const START_EXTRA := 0.07
+## 叶片尖端停在宫颈前方的余量。叶片比阴道长，铰链因此落在体外。
+const TIP_CLEARANCE := 0.004
+## 插入（即使闭合）时阴唇 / 外口的拨开程度，与开合滑条无关。
+const LABIA_SPREAD := 0.92
 
 var host: Node = null
 var organs: Node = null
@@ -123,7 +127,7 @@ func hits_ray(origin: Vector3, dir: Vector3) -> bool:
 	var d := dir.normalized()
 	# 叶片沿 +Z，两只手柄主要沿 −Y（库斯科式后侧握把），另有一小段在铰链后方。
 	var hinge := node.global_position
-	var tip := hinge + node.global_transform.basis.z * _depth
+	var tip := hinge + node.global_transform.basis.z * MeshFactory.BLADE_LEN
 	var handle := hinge - node.global_transform.basis.y * MeshFactory.HANDLE_LEN
 	var back := hinge - node.global_transform.basis.z * 0.055
 	return _ray_seg(origin, d, hinge, tip, 0.032) or _ray_seg(origin, d, handle, hinge, 0.028) or _ray_seg(origin, d, back, hinge, 0.028)
@@ -215,9 +219,11 @@ func _refresh_canal() -> bool:
 	_axis_ab = (d["axis_ab"] as Vector3).normalized()
 	_up_ab = (d["up_ab"] as Vector3).normalized()
 	_canal_len = float(d["length"])
-	_depth = minf(MeshFactory.BLADE_LEN * 0.92, _canal_len + 0.006)
-	_seat_ab = _open_ab - _axis_ab * HINGE_OUT
-	_start_ab = _open_ab - _axis_ab * (HINGE_OUT + START_EXTRA + _depth * 0.25)
+	# 变形深度 = 进入阴道的长度；叶片尖端停在宫颈稍前方，铰链留在体外。
+	var in_len := maxf(_canal_len - TIP_CLEARANCE, 0.03)
+	_depth = in_len
+	_seat_ab = _open_ab - _axis_ab * (MeshFactory.BLADE_LEN - in_len)
+	_start_ab = _seat_ab - _axis_ab * START_EXTRA
 	# 拖拽 / 软位移：铰链跟着开口走，避免阴部被拖走时器械留在原地。
 	if organs.has_method("soft_offset_ab"):
 		var off: Vector3 = organs.call("soft_offset_ab", _open_ab)
@@ -257,7 +263,7 @@ func _push_deform() -> void:
 	if not _present or state == "withdrawing" and _anim_t > 0.65:
 		_clear_deform()
 		return
-	# 开合角对应叶片尖端的半开距：depth * tan(half_angle)，再加上闭合厚度。
+	# 开合角只驱动阴道壁半开距：depth * tan(half_angle) + 闭合厚度。阴唇不跟滑条。
 	var half := deg_to_rad(angle * 0.5)
 	var half_gap := MeshFactory.CLOSED_HALF + _depth * tan(half)
 	var mixv := 1.0
@@ -268,8 +274,17 @@ func _push_deform() -> void:
 	var origin := _open_ab
 	if organs.has_method("soft_offset_ab"):
 		origin += organs.call("soft_offset_ab", _open_ab)
-	organs.call("set_speculum_deform", origin, _axis_ab, _up_ab, _depth, half_gap, mixv, MeshFactory.CLOSED_HALF, MeshFactory.BLADE_WIDTH * 0.55)
-	_spread_drive = clampf(0.18 + (angle / MAX_ANGLE) * 0.82, 0.0, 1.0) * mixv
+	var half_width := MeshFactory.BLADE_WIDTH * 0.5 + 0.002
+	organs.call("set_speculum_deform", origin, _axis_ab, _up_ab, _depth, half_gap, mixv, MeshFactory.CLOSED_HALF, half_width)
+	# 插入一开始（甚至还在体外接近外口时）阴唇和外口就要张开，容纳闭合叶片。
+	var labia_mix := mixv
+	if state == "inserting":
+		labia_mix = maxf(mixv, 0.75)
+	elif state == "inserted" or state == "closing":
+		labia_mix = 1.0
+	_spread_drive = LABIA_SPREAD * labia_mix
+	if organs.has_method("set_speculum_labia"):
+		organs.call("set_speculum_labia", labia_mix, half_width, MeshFactory.CLOSED_HALF + 0.002, _axis_ab, _up_ab)
 	if organs.has_method("set_vulva_spread"):
 		var want := _spread_drive
 		var p = organs.get("player") if organs != null else null
