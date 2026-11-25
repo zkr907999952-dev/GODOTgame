@@ -245,9 +245,12 @@ func _check_uterus() -> void:
 	# 5 档在重力下会弯垂，向外投影不一定再增 2 cm；看外露长度。
 	_ok(peek5 > peek1 + 0.008 or exp5 > 0.03, "level 5 extends the uterus farther out than level 1 (%.1f -> %.1f mm, exposed %.1f mm)" % [peek1 * 1000.0, peek5 * 1000.0, exp5 * 1000.0])
 	var cx: Vector3 = s.call("cervix_world")
+	# 0.4.12（t63u）：宫颈随系带经创口拉出体外，阴道顶只跟系带根部（≤2 cm），不再被拽成一根通到创口的管子。
+	if so.has_method("canal_os_world"):
+		cx = so.call("canal_os_world")
 	var rig: Node = _organ_rig()
 	var os_now: Vector3 = rig.call("canal_os_now_world") if rig.has_method("canal_os_now_world") else cx
-	_ok(os_now.distance_to(cx) < 0.018, "vagina stays attached to the cervix (%.2f mm)" % (os_now.distance_to(cx) * 1000.0))
+	_ok(os_now.distance_to(cx) < 0.018, "vagina stays attached to the uterus tether root (%.2f mm)" % (os_now.distance_to(cx) * 1000.0))
 	_ok(bool(s.call("tube_chain_active", 0)) and bool(s.call("tube_chain_active", 1)), "at level 5 both tubes/ovaries are ragdoll chains")
 	# 扩张器插入时阻止再一次子宫脱出：先放回再测
 	s.call("debug_putback_organ", "uterus")

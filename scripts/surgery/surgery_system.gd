@@ -999,6 +999,7 @@ func restore_body() -> void:
 	_outer = null
 	_inner = null
 	_rest = null
+	_navel_patch = null
 	_wall_md = null
 	_wall_parts = []
 	_ring_open_id = -1
@@ -2260,12 +2261,44 @@ func navel_dimple_depth() -> float:
 	return 0.0 if navel_flat_applied else best
 
 
-func _capture_navel_dimple(pre_pos: PackedVector3Array, pre_nrm: PackedVector3Array, pre_idx: PackedInt32Array) -> void:
+func _capture_navel_dimple(pre_pos: PackedVector3Array, pre_nrm: PackedVector3Array, pre_idx: PackedInt32Array, pre_uv: PackedVector2Array = PackedVector2Array()) -> void:
 	_navel_dimple = []
 	if navel_flattened <= 0 or _outer == null:
 		navel_flat_applied = true
 		return
 	var c := _navel_rest
+	# 0.4.12（t65u）：XY 没被移动的顶点（过渡带 / 重三角化边界环）直接逐顶点还原原始位置和法线，
+	# 而不是在重叠的坑壁三角里取最高 Z（会把坑口附近顶点放到错误的层上）。
+	# flatten_navel 只松弛 r < r_in 的顶点 XY，压缩索引时保持原顺序（新点阵顶点追加在后）：
+	# 按顺序双指针配对，同位置的重复顶点（硬边 / 接缝）也能一一对上。
+	var exact_done: Dictionary = {}
+	var pi := 0
+	for vi in _outer.vert_count():
+		var pv := _outer.pos[vi]
+		var rv := Vector2(pv.x - c.x, pv.y - c.y).length()
+		if rv < NAVEL_PATCH_R - 1e-6:
+			continue
+		var kx := _xy_key(pv)
+		var bj := -1
+		var pj := pi
+		while pj < pre_pos.size():
+			if _xy_key(pre_pos[pj]) == kx and (pj >= pre_uv.size() or vi >= _outer.uv.size() or pre_uv[pj].distance_squared_to(_outer.uv[vi]) < 1e-12):
+				bj = pj
+				break
+			pj += 1
+		if bj < 0:
+			continue
+		pi = bj + 1
+		if rv > 0.026:
+			continue
+		exact_done[vi] = true
+		var o := pre_pos[bj]
+		if o.distance_squared_to(pv) > 1e-14:
+			_navel_dimple.append([o, pv - o, _outer.nrm[vi]])
+			_outer.pos[vi] = o
+		# 压平时重算过 r < r_out + 4mm 的法线：未移动顶点也要还原原始法线。
+		if pre_nrm.size() == pre_pos.size():
+			_outer.nrm[vi] = pre_nrm[bj]
 	var tris := PackedInt32Array()
 	for f in pre_idx.size() / 3:
 		for k in 3:
@@ -2274,6 +2307,8 @@ func _capture_navel_dimple(pre_pos: PackedVector3Array, pre_nrm: PackedVector3Ar
 				tris.append(f)
 				break
 	for i in _outer.vert_count():
+		if exact_done.has(i):
+			continue
 		var p := _outer.pos[i]
 		var r := Vector2(p.x - c.x, p.y - c.y).length()
 		if r > 0.026:
@@ -2311,6 +2346,142 @@ func _capture_navel_dimple(pre_pos: PackedVector3Array, pre_nrm: PackedVector3Ar
 		if best_n.length_squared() > 0.5:
 			_outer.nrm[i] = best_n
 	navel_flat_applied = _navel_dimple.is_empty()
+
+
+## 0.4.12（t65u）：原始肚脐小片（flatten_navel 重三角化前 r < NAVEL_PATCH_R 的全部三角，原位置 / 法线 / UV / 骨骼）。
+## 刀口碰到肚脐之前，手术腹网显示时把重三角化的压平圆盘换成这片原始网格，所以进手术、复原后肚脐与原模型完全一致。
+const NAVEL_PATCH_R := 0.018
+const NAVEL_PATCH_CHECK_R := 0.03
+var _navel_patch: Geom.MeshData = null
+var _navel_keep_xy: Dictionary = {}
+
+
+static func _xy_key(p: Vector3) -> Vector2i:
+	return Vector2i(roundi(p.x * 1e7), roundi(p.y * 1e7))
+
+
+func _build_navel_patch(pre: Geom.MeshData) -> Geom.MeshData:
+	if pre == null:
+		return null
+	var c := _navel_rest
+	var patch := Geom.MeshData.new()
+	var remap: Dictionary = {}
+	# 压平只改 r < NAVEL_PATCH_R 的顶点 XY（Tutte 松弛 + 重三角化）；其余顶点 XY 不变。
+	# 记下这些未动顶点的 XY，显示时凡是用到「XY 被改过」顶点的面都换成原始面。
+	_navel_keep_xy = {}
+	for vi0 in pre.vert_count():
+		var q0 := pre.pos[vi0]
+		var r0 := Vector2(q0.x - c.x, q0.y - c.y).length()
+		if r0 >= NAVEL_PATCH_R and r0 < NAVEL_PATCH_CHECK_R + 0.004:
+			_navel_keep_xy[_xy_key(q0)] = true
+	for f in pre.face_count():
+		var ok := false
+		for k in 3:
+			var q := pre.pos[pre.idx[f * 3 + k]]
+			if Vector2(q.x - c.x, q.y - c.y).length() < NAVEL_PATCH_R:
+				ok = true
+				break
+		if not ok:
+			continue
+		var ids := [0, 0, 0]
+		for k2 in 3:
+			var vi := pre.idx[f * 3 + k2]
+			if not remap.has(vi):
+				remap[vi] = patch.copy_vert(pre, vi)
+			ids[k2] = int(remap[vi])
+		patch.add_face(ids[0], ids[1], ids[2])
+	return patch if patch.face_count() > 0 else null
+
+
+func navel_patch_faces() -> int:
+	return _navel_patch.face_count() if _navel_patch != null and not navel_flat_applied else 0
+
+
+func _navel_patch_mesh(am: ArrayMesh) -> ArrayMesh:
+	if am == null or navel_flat_applied or _navel_patch == null or am.get_surface_count() < 1:
+		return am
+	var arrays := am.surface_get_arrays(0)
+	var V: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var I: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+	if V.is_empty() or I.is_empty():
+		return am
+	var c := _navel_rest
+	var idx2 := PackedInt32Array()
+	for f in I.size() / 3:
+		var inside := false
+		for k in 3:
+			var q := V[I[f * 3 + k]]
+			if Vector2(q.x - c.x, q.y - c.y).length() < NAVEL_PATCH_CHECK_R and not _navel_keep_xy.has(_xy_key(q)):
+				inside = true
+				break
+		if not inside:
+			idx2.append_array([I[f * 3], I[f * 3 + 1], I[f * 3 + 2]])
+	var off := V.size()
+	var P := _navel_patch
+	var N: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+	var U: PackedVector2Array = arrays[Mesh.ARRAY_TEX_UV]
+	V.append_array(P.pos)
+	if N != null and N.size() == off:
+		N.append_array(P.nrm)
+		arrays[Mesh.ARRAY_NORMAL] = N
+	if U != null and U.size() == off:
+		U.append_array(P.uv)
+		arrays[Mesh.ARRAY_TEX_UV] = U
+	var C = arrays[Mesh.ARRAY_COLOR]
+	if C != null and (C as PackedColorArray).size() == off:
+		var cc: PackedColorArray = C
+		for _i in P.vert_count():
+			cc.append(Color(1, 1, 1, 1))
+		arrays[Mesh.ARRAY_COLOR] = cc
+	var B = arrays[Mesh.ARRAY_BONES]
+	var W = arrays[Mesh.ARRAY_WEIGHTS]
+	if B != null and W != null and (B as PackedInt32Array).size() == off * 4:
+		var bb: PackedInt32Array = B
+		var ww: PackedFloat32Array = W
+		bb.append_array(P.bones)
+		ww.append_array(P.weights)
+		arrays[Mesh.ARRAY_BONES] = bb
+		arrays[Mesh.ARRAY_WEIGHTS] = ww
+	arrays[Mesh.ARRAY_VERTEX] = V
+	_navel_pad_tangents(arrays, off, P)
+	for f2 in P.face_count():
+		idx2.append_array([P.idx[f2 * 3] + off, P.idx[f2 * 3 + 1] + off, P.idx[f2 * 3 + 2] + off])
+	arrays[Mesh.ARRAY_INDEX] = idx2
+	var blends: Array = []
+	for bi in am.get_blend_shape_count():
+		var ba: Array = am.surface_get_blend_shape_arrays(0)[bi]
+		var bv: PackedVector3Array = ba[Mesh.ARRAY_VERTEX]
+		if bv != null and bv.size() == off:
+			bv.append_array(P.pos)
+			ba[Mesh.ARRAY_VERTEX] = bv
+		var bn = ba[Mesh.ARRAY_NORMAL]
+		if bn != null and (bn as PackedVector3Array).size() == off:
+			var bnn: PackedVector3Array = bn
+			bnn.append_array(P.nrm)
+			ba[Mesh.ARRAY_NORMAL] = bnn
+		_navel_pad_tangents(ba, off, P)
+		blends.append(ba)
+	var out := ArrayMesh.new()
+	out.blend_shape_mode = am.blend_shape_mode
+	for bi2 in am.get_blend_shape_count():
+		out.add_blend_shape(am.get_blend_shape_name(bi2))
+	out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, blends)
+	return out
+
+
+func _navel_pad_tangents(arrays: Array, off: int, P: Geom.MeshData) -> void:
+	var tg = arrays[Mesh.ARRAY_TANGENT]
+	if tg == null or not (tg is PackedFloat32Array) or (tg as PackedFloat32Array).size() != off * 4:
+		return
+	var t: PackedFloat32Array = tg
+	for i in P.vert_count():
+		var n := P.nrm[i]
+		var tt := n.cross(Vector3.UP)
+		if tt.length_squared() < 1e-8:
+			tt = n.cross(Vector3.RIGHT)
+		tt = tt.normalized()
+		t.append_array([tt.x, tt.y, tt.z, 1.0])
+	arrays[Mesh.ARRAY_TANGENT] = t
 
 
 func _navel_flatten_if_near(path: PackedVector3Array, closed: bool, extra: float = 0.0) -> bool:
@@ -2427,7 +2598,8 @@ func _bake_if_needed() -> bool:
 	var pre_pos := _outer.pos.duplicate()
 	var pre_nrm := _outer.nrm.duplicate()
 	var pre_idx := _outer.idx.duplicate()
-	navel_flattened = Geom.flatten_navel(_outer, _navel_rest)
+	var pre_md: Geom.MeshData = _outer.clone()
+	navel_flattened = Geom.flatten_navel(_outer, _navel_rest, NAVEL_PATCH_R)
 	navel_flat_applied = false
 	_band_edge = _boundary_vert_keys(_outer)
 	var organ_z := _organ_front_z()
@@ -2435,7 +2607,8 @@ func _bake_if_needed() -> bool:
 	_inner = Geom.make_cavity(_outer, thickness, organ_z, _navel_rest)
 	_outer.twin = _inner
 	# 0.4.07：切割拓扑已压平（防粘连），但在刀口真正碰到肚脐前，显示位置仍还原原始凹陷。
-	_capture_navel_dimple(pre_pos, pre_nrm, pre_idx)
+	_capture_navel_dimple(pre_pos, pre_nrm, pre_idx, pre_md.uv)
+	_navel_patch = _build_navel_patch(pre_md) if not navel_flat_applied else null
 	_lumbar_z = Geom.lumbar_exterior_z(_rest, _navel_rest)
 	var back_z := minf(_guts_min.z - 0.006, organ_z - 0.055)
 	var wrap_skin := _wrap_skin_md()
@@ -2455,7 +2628,7 @@ func _bake_if_needed() -> bool:
 		_surgical_mi.material_override = wm
 		if _organs and _organs.has_method("register_deform_material"):
 			_organs.call("register_deform_material", wm, true)
-	_surgical_mi.mesh = _with_wound_color(_surgical_mi.mesh as ArrayMesh, _outer)
+	_surgical_mi.mesh = _navel_patch_mesh(_with_wound_color(_surgical_mi.mesh as ArrayMesh, _outer))
 	_cavity_mi = _make_skinned_mi("SurgicalCavity", _cavity_display_mesh(), false)
 	_cavity_mi.material_override = _cavity_material()
 	_wall_mi = _make_skinned_mi("SurgicalWall", ArrayMesh.new(), false)
@@ -2770,7 +2943,7 @@ func _make_skinned_mi(nm: String, mesh: Mesh, use_skin_mat: bool) -> MeshInstanc
 func _rebuild_surgical_meshes(outer: Geom.MeshData, inner: Geom.MeshData, wall: Geom.MeshData) -> void:
 	_invalidate_grid()
 	if _surgical_mi:
-		_surgical_mi.mesh = _with_wound_color(_mesh_with_evert(outer, _outer_rest, _outer_evert), outer)
+		_surgical_mi.mesh = _navel_patch_mesh(_with_wound_color(_mesh_with_evert(outer, _outer_rest, _outer_evert), outer))
 		if _skin:
 			_surgical_mi.skin = _skin
 		_apply_evert_weight()
@@ -5979,8 +6152,9 @@ func _update_soft_organs(dt: float) -> void:
 		var now_out := bool(so.call("is_extracted"))
 		if str(k) == "uterus" and now_out:
 			# 整颗子宫已是柔体，原网格保持隐藏；阴道始终接到当前宫颈。
+			# 0.4.12：阴道顶端只跟系带根部走一小段，伸长部分由系带管子表现（不再把阴道拉成一根怪管跟着子宫走）。
 			if _organs and _organs.has_method("set_canal_stretch"):
-				var cx: Vector3 = so.call("cervix_world")
+				var cx: Vector3 = so.call("canal_os_world") if so.has_method("canal_os_world") else so.call("cervix_world")
 				_organs.call("set_canal_stretch", cx, 1.0)
 		elif str(k) == "uterus" and _organs:
 			if _organs.has_method("clear_canal_stretch") and not now_out:
@@ -6170,7 +6344,7 @@ func debug_add_extract_charge(kind: String, strength: float, dt: float) -> void:
 		if _organs:
 			so.call("step", minf(dt, 1.0 / 30.0), _organs.call("abdomen_frame"), _wound_center_world(), _cavity_outward())
 			if kind == "uterus" and _organs.has_method("set_canal_stretch") and bool(so.call("is_extracted")):
-				_organs.call("set_canal_stretch", so.call("cervix_world"), 1.0)
+				_organs.call("set_canal_stretch", so.call("canal_os_world"), 1.0)
 
 
 func debug_putback_organ(kind: String) -> bool:

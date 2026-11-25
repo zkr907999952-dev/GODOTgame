@@ -1,23 +1,41 @@
 extends MeshInstance3D
-## 0.4.12：子宫 / 膀胱以短刚体段链（宫颈→宫体→宫底）扯出。
-## 夹点直接跟着钳尖，其余由硬距离 / 角度约束跟上，不再用缓慢加档平移。
-## 原网格刚体蒙皮到段链，不撕裂。档位 = 实际伸出创口的长度。
-## 输卵管两端封口并埋进宫角 / 卵巢；卵巢钉在管尽头，无碰撞卡死。
+## 0.4.12（t63u / t64u）：子宫 / 膀胱扯出改为真正的动态段链，不再沿固定轨道整体平移。
+## - 宫体 6 节硬段（宫颈→宫底）+ 关节角度限制，带惯性与重力：快拖会被甩起，松手后在体外摆动、下垂。
+## - 宫颈经一根可伸长的系带（阴道上段 + 韧带被拉长）连到盆腔深处的根点；系带跟肠子一样只从创口穿出。
+## - 腹壁视作只在创口开洞的膜：每个质点记住在体内 / 体外，只能经创口进出，跨膜的段必须穿过洞口。
+## - 夹点只驱动一个节点，其余靠约束和动量跟随；最远伸出受系带最大长度限制。
+## - 出生时按原网格真实的世界变换（骨盆骨骼，而非腹部坐标系）重建静止姿态，与可见原子宫重合。
+## - 原网格刚体蒙皮到段链，不撕裂；输卵管 / 卵巢是挂在宫角上的独立小链，在体外受重力下垂。
 
 const SEGS := 6
-const ITER := 20
-const DAMP := 0.68
+const ITER := 14
+const DAMP := 0.68              # 体内：周围组织托住，速度很快被吃掉
+const AIR_DAMP := 0.988         # 体外：每步（60 Hz 基准）保留的速度，摆动几秒后才停
+const TUBE_AIR_DAMP := 0.97
 const GRAVITY := Vector3(0, -9.8, 0)
 const PULL_SPEED := 0.22
 const PUTBACK_SPEED := 0.16
 const TUBE_LEVEL := 4
 const LEVELS := 5
-const MAX_BEND := 0.85          # ~49°
+const MAX_BEND := 0.03          # 每个关节最多约 1.7°：宫体是硬的肌性器官，摆动来自系带；线性蒙皮几乎不拉伸
 const MAX_STRETCH := 1.02
 const MAX_SPEED := 6.0
 const TUBE_PTS := 7
 const TUBE_RADIUS := 0.0034
-const PHYS_SCALE := 1.10
+const PHYS_SCALE := 1.0         # 与原网格等大，出生时完全重合
+const TETHER_N := 8             # 系带节点数（含根点）
+const TETHER_MIN := 0.004
+const OUT_EXTRA := 0.035        # 宫颈最多伸出创口约 3.5 cm，整颗子宫可完全在体外
+const HOLE_R := 0.020           # 创口洞半径（质点中线可偏离的范围）
+const WALL_MARGIN := 0.004
+const BODY_R := 0.016           # 体外宫体与皮肤的碰撞半径
+const TETHER_R := 0.006
+const IN_SPRING := 0.10
+const TUBE_IN_SPRING := 0.35
+const BODY_STIFF := 1.0         # 形状匹配比例：宫体整体是刚体（摆动 / 甩动来自系带），蒙皮边长不变
+const BODY_W := 0.35            # 宫体节点相对系带节点的逆质量
+const SKIN_CELL := 0.02
+const PUTBACK_TIMEOUT := 8.0
 
 const AdnexaChain := preload("res://scripts/surgery/adnexa_chain.gd")
 
@@ -34,9 +52,10 @@ var wound_center: Vector3 = Vector3.ZERO
 var outward: Vector3 = Vector3.UP
 var hold_index: int = -1
 var hold_pos: Vector3 = Vector3.ZERO
+var last_step_usec: int = 0
 
 var _rest_ab: PackedVector3Array = PackedVector3Array()
-var _p: PackedVector3Array = PackedVector3Array()
+var _p: PackedVector3Array = PackedVector3Array()   # 宫体节点（只读视图，供拾取 / 测试）
 var _q: PackedVector3Array = PackedVector3Array()
 var _seg_rest: PackedFloat32Array = PackedFloat32Array()
 var _axis_ab: Vector3 = Vector3.UP
@@ -50,6 +69,27 @@ var _has_prev_frame := false
 var _navel: Vector3 = Vector3.ZERO
 var _inited := false
 var _rest_up: Vector3 = Vector3.UP
+
+# 合并质点：[0, TETHER_N) 系带（0 = 根点），[TETHER_N, TETHER_N + SEGS) 宫体
+var _x: PackedVector3Array = PackedVector3Array()
+var _xq: PackedVector3Array = PackedVector3Array()
+var _st: PackedByteArray = PackedByteArray()       # 0 = 体内，1 = 体外
+var _tlen: float = TETHER_MIN
+var _drag_off: Vector3 = Vector3.ZERO
+var _drv_i: int = -1
+var _drv_pos: Vector3 = Vector3.ZERO
+var _putback_t: float = 0.0
+
+# 未校正的原始静止数据（网格局部 - 肚脐），出扯时按原网格实际世界变换重建
+var _raw_vis: PackedVector3Array = PackedVector3Array()
+var _raw_cervix: Vector3 = Vector3.ZERO
+var _raw_fundus: Vector3 = Vector3.ZERO
+var _raw_horn: Array = [Vector3.ZERO, Vector3.ZERO]
+var _src_mi: MeshInstance3D = null
+var _corr: Transform3D = Transform3D.IDENTITY
+var _raw_tan: PackedFloat32Array = PackedFloat32Array()
+var _skel: Skeleton3D = null
+var _skin_res: Skin = null
 
 var _vis_rest: PackedVector3Array = PackedVector3Array()
 var _vis_nrm: PackedVector3Array = PackedVector3Array()
@@ -66,13 +106,17 @@ var _am: ArrayMesh
 var _src: Array = []
 var _adnex_src: Array = []
 var _chains: Dictionary = {}
+var _tubes: Dictionary = {}       # side -> {p, q, st, rest_u}
 var _early: Dictionary = {}
 var _mat: ShaderMaterial = null
 var _tube_mat: ShaderMaterial = null
 var _has_pull_target := false
 var _pull_target: Vector3 = Vector3.ZERO
 var _ovary_rest_ab_cache: Array = [Vector3.ZERO, Vector3.ZERO]
+var _ovary_basis: Array = [Basis.IDENTITY, Basis.IDENTITY]
 var _ovary_centered: Dictionary = {}
+var _tether_node: Node = null
+var _grid: Dictionary = {}
 
 
 func _ready() -> void:
@@ -130,7 +174,7 @@ func fundus_world() -> Vector3:
 func horn_world(side: int) -> Vector3:
 	side = clampi(side, 0, 1)
 	if _bone.is_empty() or _rest_bone.is_empty():
-		return _frame * (_horn_ab[side] as Vector3)
+		return _frame * (_horn_ab[side] as Vector3) + _drag_off
 	return _xform_rest(_horn_ab[side] as Vector3)
 
 
@@ -143,6 +187,49 @@ func any_tube_chain() -> bool:
 	return tube_chain_active(0) or tube_chain_active(1)
 
 
+## 系带（阴道上段 + 韧带）当前的节点，0 为盆腔根点，最后接宫颈。
+func tether_points() -> PackedVector3Array:
+	var out := PackedVector3Array()
+	for i in mini(TETHER_N, _x.size()):
+		out.append(_x[i])
+	if not _p.is_empty():
+		out.append(_p[0])
+	return out
+
+
+func tether_length() -> float:
+	return _tlen
+
+
+func tether_max_length() -> float:
+	return _wound_depth() + OUT_EXTRA
+
+
+func root_world() -> Vector3:
+	return _frame * _cervix_ab + _drag_off
+
+
+## 阴道宫颈端应该跟随的位置（世界坐标，已换回 canal 着色器使用的腹部坐标约定）。
+## 阴道只被系带带出一小段（≤ 2 cm），其余由系带管子表现，不再把整条阴道拉成一根怪管。
+func canal_os_world() -> Vector3:
+	var root := root_world()
+	var tgt := root
+	if _x.size() >= TETHER_N:
+		var want := minf(_tlen, 0.02)
+		var acc := 0.0
+		tgt = _x[0]
+		for i in range(1, TETHER_N):
+			var seg := _x[i - 1].distance_to(_x[i])
+			if acc + seg >= want and seg > 1e-6:
+				tgt = _x[i - 1].lerp(_x[i], (want - acc) / seg)
+				break
+			acc += seg
+			tgt = _x[i]
+	# canal 着色器的静止宫颈在腹部坐标约定下（未做骨骼校正）。
+	var raw_root := _frame * _raw_cervix + _drag_off
+	return tgt + (raw_root - root)
+
+
 func setup(p_kind: String, frame: Transform3D, navel: Vector3, main_meshes: Array, adnex_meshes: Array, cervix_rest: Vector3, fundus_rest: Vector3, horns: Array) -> void:
 	kind = p_kind
 	_frame = frame
@@ -151,39 +238,159 @@ func setup(p_kind: String, frame: Transform3D, navel: Vector3, main_meshes: Arra
 	_navel = navel
 	_src = main_meshes.duplicate()
 	_adnex_src = adnex_meshes.duplicate()
-	_cervix_ab = cervix_rest - navel
-	_fundus_ab = fundus_rest - navel
+	_raw_cervix = cervix_rest - navel
+	_raw_fundus = fundus_rest - navel
+	_raw_horn = [Vector3.ZERO, Vector3.ZERO]
+	for i in mini(2, horns.size()):
+		_raw_horn[i] = (horns[i] as Vector3) - navel
+	_raw_vis = PackedVector3Array()
+	_raw_tan = PackedFloat32Array()
+	_vis_nrm = PackedVector3Array()
+	_vis_uv = PackedVector2Array()
+	_vis_idx = PackedInt32Array()
+	_src_mi = null
+	for mi in main_meshes:
+		var m := mi as MeshInstance3D
+		if m == null or m.mesh == null:
+			continue
+		if _src_mi == null:
+			_src_mi = m
+		if _mat == null and m.material_override is ShaderMaterial:
+			_mat = (m.material_override as ShaderMaterial).duplicate() as ShaderMaterial
+			_mat.set_shader_parameter("is_uterus", false)
+			_mat.set_shader_parameter("is_gut", false)
+		_append_surface(m.mesh, navel, _raw_vis, _vis_nrm, _vis_uv, _vis_idx)
+	if _mat:
+		material_override = _mat
+		_mat.set_meta("soft_organ", kind)
+	_prepare_tube_mat()
+	_rebase()
+	_inited = true
+	visible = false
+
+
+## 原子宫挂在骨盆骨骼上（MeshInstance 的全局变换），与腹部坐标系 _frame 并不一致；
+## 这里求出 C = _frame⁻¹ · G · T(navel)，把所有静止数据换成「腹部坐标下真实可见的位置」。
+func _rebase() -> void:
+	_corr = Transform3D.IDENTITY
+	if _src_mi != null and is_instance_valid(_src_mi) and _src_mi.is_inside_tree():
+		_corr = _frame.affine_inverse() * _src_mi.global_transform * Transform3D(Basis.IDENTITY, _navel)
+	_cervix_ab = _corr * _raw_cervix
+	_fundus_ab = _corr * _raw_fundus
 	_axis_ab = _fundus_ab - _cervix_ab
 	_rest_len = maxf(_axis_ab.length(), 0.03)
 	if _axis_ab.length_squared() < 1e-8:
 		_axis_ab = Vector3(0, 1, 0)
 	else:
 		_axis_ab = _axis_ab.normalized()
-	_horn_ab = [Vector3.ZERO, Vector3.ZERO]
-	for i in mini(2, horns.size()):
-		_horn_ab[i] = (horns[i] as Vector3) - navel
-	_vis_rest = PackedVector3Array()
-	_vis_nrm = PackedVector3Array()
-	_vis_uv = PackedVector2Array()
-	_vis_idx = PackedInt32Array()
-	for mi in main_meshes:
-		var m := mi as MeshInstance3D
-		if m == null or m.mesh == null:
-			continue
-		if _mat == null and m.material_override is ShaderMaterial:
-			_mat = (m.material_override as ShaderMaterial).duplicate() as ShaderMaterial
-			_mat.set_shader_parameter("is_uterus", false)
-			_mat.set_shader_parameter("is_gut", false)
-		_append_surface(m.mesh, navel, _vis_rest, _vis_nrm, _vis_uv, _vis_idx)
-	if _mat:
-		material_override = _mat
-		_mat.set_meta("soft_organ", kind)
+	_horn_ab = [_corr * (_raw_horn[0] as Vector3), _corr * (_raw_horn[1] as Vector3)]
+	_vis_rest.resize(_raw_vis.size())
+	for i in _raw_vis.size():
+		_vis_rest[i] = _corr * _raw_vis[i]
 	_build_spine()
 	_bind_visual()
+	_build_skinned_mesh()
 	_cache_ovary_rest()
-	_prepare_tube_mat()
-	_inited = true
-	visible = false
+
+
+## 原网格做成 GPU 蒙皮网格（顶点在校正后的腹部坐标，绑定 = 静止骨骼的逆），
+## 每帧只写 6 根骨骼的姿态，不再每帧用 SurfaceTool 重建几千个顶点。
+func _build_skinned_mesh() -> void:
+	if _vis_rest.is_empty():
+		return
+	if _am == null:
+		_am = ArrayMesh.new()
+	mesh = _am
+	var n := _vis_rest.size()
+	var nrm := PackedVector3Array()
+	nrm.resize(n)
+	var tan := PackedFloat32Array()
+	tan.resize(n * 4)
+	var bones := PackedInt32Array()
+	bones.resize(n * 4)
+	var wts := PackedFloat32Array()
+	wts.resize(n * 4)
+	var cb := _corr.basis
+	for i in n:
+		var nn: Vector3 = (cb * (_vis_nrm[i] if i < _vis_nrm.size() else Vector3.UP)).normalized()
+		nrm[i] = nn
+		var tt := Vector3(_raw_tan[i * 4], _raw_tan[i * 4 + 1], _raw_tan[i * 4 + 2]) if _raw_tan.size() >= (i + 1) * 4 else Vector3.RIGHT
+		tt = (cb * tt).normalized()
+		tan[i * 4] = tt.x
+		tan[i * 4 + 1] = tt.y
+		tan[i * 4 + 2] = tt.z
+		tan[i * 4 + 3] = _raw_tan[i * 4 + 3] if _raw_tan.size() >= (i + 1) * 4 else 1.0
+		var sg := _bind_seg[i]
+		var tw := _bind_t[i]
+		bones[i * 4] = sg
+		bones[i * 4 + 1] = mini(sg + 1, SEGS - 1)
+		bones[i * 4 + 2] = 0
+		bones[i * 4 + 3] = 0
+		wts[i * 4] = 1.0 - tw
+		wts[i * 4 + 1] = tw
+		wts[i * 4 + 2] = 0.0
+		wts[i * 4 + 3] = 0.0
+	# 去掉静止网格里本来就退化的三角（以前的黑三角来源）。
+	var idx := PackedInt32Array()
+	for f in range(0, _vis_idx.size() - 2, 3):
+		var ia := _vis_idx[f]
+		var ib := _vis_idx[f + 1]
+		var ic := _vis_idx[f + 2]
+		if ia < 0 or ib < 0 or ic < 0 or ia >= n or ib >= n or ic >= n:
+			continue
+		if (_vis_rest[ib] - _vis_rest[ia]).cross(_vis_rest[ic] - _vis_rest[ia]).length_squared() < 1e-16:
+			continue
+		idx.append_array([ia, ib, ic])
+	var arr: Array = []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = _vis_rest
+	arr[Mesh.ARRAY_NORMAL] = nrm
+	arr[Mesh.ARRAY_TANGENT] = tan
+	arr[Mesh.ARRAY_TEX_UV] = _vis_uv
+	arr[Mesh.ARRAY_BONES] = bones
+	arr[Mesh.ARRAY_WEIGHTS] = wts
+	arr[Mesh.ARRAY_INDEX] = idx
+	_am.clear_surfaces()
+	_am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	if _mat:
+		_am.surface_set_material(0, _mat)
+	if _skel == null or not is_instance_valid(_skel):
+		_skel = Skeleton3D.new()
+		_skel.name = "UterusSkeleton"
+		add_child(_skel)
+		for b in SEGS:
+			_skel.add_bone("seg%d" % b)
+	_skin_res = Skin.new()
+	for b2 in SEGS:
+		_skin_res.add_bind(b2, (_rest_bone[b2] as Transform3D).affine_inverse())
+	skin = _skin_res
+	skeleton = get_path_to(_skel) if is_inside_tree() else NodePath("UterusSkeleton")
+	extra_cull_margin = 2.0
+
+
+func spawn_offset() -> Dictionary:
+	## 柔体网格与可见原网格（按其真实全局变换）之间的偏差，出生时应约为 0。
+	var out := {"centroid_mm": 0.0, "max_mm": 0.0, "axis_deg": 0.0}
+	if _src_mi == null or not is_instance_valid(_src_mi) or _raw_vis.is_empty():
+		return out
+	var verts := _skin_all()
+	var ca := Vector3.ZERO
+	var cb := Vector3.ZERO
+	var mx := 0.0
+	var gx := _src_mi.global_transform
+	for i in verts.size():
+		var orig: Vector3 = gx * (_raw_vis[i] + _navel)
+		ca += verts[i]
+		cb += orig
+		mx = maxf(mx, verts[i].distance_to(orig))
+	ca /= float(verts.size())
+	cb /= float(verts.size())
+	out["centroid_mm"] = ca.distance_to(cb) * 1000.0
+	out["max_mm"] = mx * 1000.0
+	var ax_now := (fundus_world() - cervix_world()).normalized()
+	var ax_orig := (gx * (_raw_fundus + _navel) - gx * (_raw_cervix + _navel)).normalized()
+	out["axis_deg"] = rad_to_deg(acos(clampf(ax_now.dot(ax_orig), -1.0, 1.0)))
+	return out
 
 
 func _append_surface(msh: Mesh, navel: Vector3, rest: PackedVector3Array, nrm: PackedVector3Array, uv: PackedVector2Array, idx: PackedInt32Array) -> void:
@@ -192,8 +399,15 @@ func _append_surface(msh: Mesh, navel: Vector3, rest: PackedVector3Array, nrm: P
 	var N: PackedVector3Array = arr[Mesh.ARRAY_NORMAL] if arr[Mesh.ARRAY_NORMAL] != null else PackedVector3Array()
 	var U: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV] if arr[Mesh.ARRAY_TEX_UV] != null else PackedVector2Array()
 	var I: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+	var T: PackedFloat32Array = arr[Mesh.ARRAY_TANGENT] if arr[Mesh.ARRAY_TANGENT] != null else PackedFloat32Array()
 	var base := rest.size()
 	for i in P.size():
+		if T.size() >= (i + 1) * 4:
+			_raw_tan.append_array([T[i * 4], T[i * 4 + 1], T[i * 4 + 2], T[i * 4 + 3]])
+		else:
+			var nn: Vector3 = N[i] if i < N.size() else Vector3.UP
+			var tt := nn.cross(Vector3.UP if absf(nn.y) < 0.9 else Vector3.RIGHT).normalized()
+			_raw_tan.append_array([tt.x, tt.y, tt.z, 1.0])
 		rest.append(P[i] - navel)
 		if i < N.size():
 			nrm.append(N[i])
@@ -218,7 +432,6 @@ func _build_spine() -> void:
 		_rest_ab[i] = _cervix_ab.lerp(_fundus_ab, float(i) / float(SEGS - 1))
 	for i in SEGS - 1:
 		_seg_rest[i] = _rest_ab[i].distance_to(_rest_ab[i + 1])
-	# 静止骨骼（腹局部）
 	_rest_up = Vector3.RIGHT.cross(_axis_ab)
 	if _rest_up.length_squared() < 1e-8:
 		_rest_up = Vector3.FORWARD.cross(_axis_ab)
@@ -265,6 +478,7 @@ func _bind_visual() -> void:
 
 func _prepare_tube_mat() -> void:
 	_chains = {0: {"active": false, "rope": null, "ovary": null}, 1: {"active": false, "rope": null, "ovary": null}}
+	_tubes = {}
 	_early = {0: false, 1: false}
 	for mi in _adnex_src:
 		var m := mi as MeshInstance3D
@@ -295,7 +509,13 @@ func _cache_ovary_rest() -> void:
 		var acc := Vector3.ZERO
 		for p in P:
 			acc += p
-		_ovary_rest_ab_cache[side] = acc / float(P.size()) - _navel
+		var c := acc / float(P.size())
+		if m.is_inside_tree():
+			# 卵巢同样按它真实的全局变换取位置。
+			_ovary_rest_ab_cache[side] = _frame.affine_inverse() * (m.global_transform * c)
+			_ovary_basis[side] = m.global_transform.basis
+		else:
+			_ovary_rest_ab_cache[side] = c - _navel
 
 
 func _centered_mesh(src: Mesh, mi: MeshInstance3D) -> Mesh:
@@ -331,6 +551,8 @@ func begin_extract(frame: Transform3D, wound: Vector3, out_dir: Vector3) -> void
 	if outward.length_squared() < 1e-8:
 		outward = Vector3.UP
 	if not organ_active:
+		_drag_off = Vector3.ZERO
+		_rebase()
 		_hide_sources(true)
 		_init_particles()
 		extract_charge = 1.0
@@ -338,8 +560,10 @@ func begin_extract(frame: Transform3D, wound: Vector3, out_dir: Vector3) -> void
 		organ_active = true
 		visible = true
 		_has_pull_target = false
+		_putback_t = 0.0
 		_rebuild_visual()
-		_ensure_bound_tubes()
+		_ensure_tubes()
+		_ensure_tether_mesh()
 
 
 func _hide_sources(hide: bool) -> void:
@@ -351,50 +575,66 @@ func _hide_sources(hide: bool) -> void:
 			(mi2 as MeshInstance3D).visible = not hide
 
 
+func _rest_world(bi: int) -> Vector3:
+	return _frame * _rest_ab[bi] + _drag_off
+
+
 func _init_particles() -> void:
-	var n := _rest_ab.size()
-	_p.resize(n)
-	_q.resize(n)
-	for i in n:
-		var pw: Vector3 = _frame * _rest_ab[i]
-		_p[i] = pw
-		_q[i] = pw
+	var nb := TETHER_N + SEGS
+	_x.resize(nb)
+	_xq.resize(nb)
+	_st.resize(nb)
+	var root := root_world()
+	for i in TETHER_N:
+		_x[i] = root
+		_xq[i] = root
+		_st[i] = 0
+	for b in SEGS:
+		var pw := _rest_world(b)
+		_x[TETHER_N + b] = pw
+		_xq[TETHER_N + b] = pw
+		_st[TETHER_N + b] = 0
+	_tlen = TETHER_MIN
+	_sync_body()
+	_bone = []
 	_update_bones()
 
 
+func _sync_body() -> void:
+	_p.resize(SEGS)
+	_q.resize(SEGS)
+	for b in SEGS:
+		_p[b] = _x[TETHER_N + b]
+		_q[b] = _xq[TETHER_N + b]
+
+
 func add_charge(strength: float, dt: float) -> void:
+	## 无钳子时的「持续拉」：一个虚拟夹点拽着宫底先走向创口、再向外，其余部分靠物理跟上。
 	if not organ_active or retracting:
 		return
 	dt = minf(maxf(dt, 0.0), 0.2)
 	var dist := clampf(strength, 0.0, 1.5) * PULL_SPEED * dt
 	if dist <= 1e-8:
 		return
-	if _p.size() != SEGS:
+	if _x.size() != TETHER_N + SEGS:
 		_init_particles()
-	var fund: Vector3 = _p[SEGS - 1]
-	var desired: Vector3 = fund
+	var cur: Vector3 = _pull_target if _has_pull_target else fundus_world()
+	var rel := cur - wound_center
+	var outd := rel.dot(outward)
+	var desired := cur
 	var to_move := dist
-	var outd := (fund - wound_center).dot(outward)
-	if outd < 0.004:
-		var tgt := wound_center + outward * 0.006
-		var d := tgt - fund
+	if outd < 0.006:
+		var tgt := wound_center + outward * 0.008
+		var d := tgt - cur
 		var L := d.length()
 		if L > 1e-6:
-			var step := minf(to_move, L)
-			desired += d * (step / L)
-			to_move -= step
+			var stp := minf(to_move, L)
+			desired += d * (stp / L)
+			to_move -= stp
 	if to_move > 0.0:
 		desired += outward * to_move
-	desired = _reachable_from_cervix(desired)
-	# 整条段链跟着宫底一起走，像把硬一些的器官扯出来，而不是只把宫底拉长。
-	var delta := desired - fund
-	if delta.length_squared() > 1e-12:
-		for i in _p.size():
-			_p[i] = _p[i] + delta
-			if i < _q.size():
-				_q[i] = _q[i] + delta
+	_pull_target = _reach_clamp(SEGS - 1, desired, outd >= 0.0)
 	_has_pull_target = true
-	_pull_target = desired
 
 
 func start_putback() -> void:
@@ -403,6 +643,7 @@ func start_putback() -> void:
 	retracting = true
 	hold_index = -1
 	_has_pull_target = false
+	_putback_t = 0.0
 
 
 func force_reset() -> void:
@@ -417,17 +658,26 @@ func force_reset() -> void:
 	_early = {0: false, 1: false}
 	_p = PackedVector3Array()
 	_q = PackedVector3Array()
+	_x = PackedVector3Array()
+	_xq = PackedVector3Array()
+	_st = PackedByteArray()
+	_tlen = TETHER_MIN
+	_drag_off = Vector3.ZERO
 	_has_prev_frame = false
+	if _tether_node and is_instance_valid(_tether_node):
+		_tether_node.queue_free()
+	_tether_node = null
 
 
 func detach_adnexa(side: int) -> bool:
 	if kind != "uterus" or not organ_active:
 		return false
 	side = clampi(side, 0, 1)
-	if tube_chain_active(side):
-		return true
 	_early[side] = true
-	_spawn_chain(side)
+	_ensure_tubes()
+	var ch: Dictionary = _chains.get(side, {})
+	ch["active"] = true
+	_chains[side] = ch
 	return true
 
 
@@ -435,7 +685,7 @@ func rebind_adnexa() -> void:
 	_clear_chains()
 	_early = {0: false, 1: false}
 	if organ_active:
-		_ensure_bound_tubes()
+		_ensure_tubes()
 
 
 func _horn_is_out(side: int) -> bool:
@@ -450,14 +700,11 @@ func _ovary_rest_ab(side: int) -> Vector3:
 
 func ovary_world(side: int) -> Vector3:
 	side = clampi(side, 0, 1)
-	if tube_chain_active(side):
-		var ch: Dictionary = _chains.get(side, {})
-		var ov: MeshInstance3D = ch.get("ovary")
-		if ov and is_instance_valid(ov):
-			return ov.global_position
-		var rope: Node = ch.get("rope")
-		if rope and is_instance_valid(rope) and rope.has_method("tip"):
-			return rope.call("tip")
+	var tb: Dictionary = _tubes.get(side, {})
+	if not tb.is_empty():
+		var tp: PackedVector3Array = tb["p"]
+		if not tp.is_empty():
+			return tp[tp.size() - 1]
 	return _xform_rest(_ovary_rest_ab(side)) if organ_active and not _bone.is_empty() else _frame * _ovary_rest_ab(side)
 
 
@@ -478,30 +725,52 @@ func cervix_out_distance() -> float:
 	return (cervix_world() - wound_center).dot(outward)
 
 
+## 宫底到皮肤 / 创口平面的有符号距离（米，正 = 体外）。
+func fundus_skin_distance() -> float:
+	var f := fundus_world()
+	var sd := (f - wound_center).dot(outward)
+	if not skin_p.is_empty() and _st.size() == TETHER_N + SEGS and _st[TETHER_N + SEGS - 1] == 1:
+		var sh := _skin_h(f)
+		if float(sh[0]) < 1e8:
+			return maxf(sd, float(sh[0])) if sd > 0.0 else sd
+	return sd
+
+
+func body_out_count() -> int:
+	var c := 0
+	for b in SEGS:
+		if _st.size() > TETHER_N + b and _st[TETHER_N + b] == 1:
+			c += 1
+	return c
+
+
+func node_outside(bi: int) -> bool:
+	return _st.size() > TETHER_N + bi and _st[TETHER_N + bi] == 1
+
+
 func tube_head_gap(side: int) -> float:
 	if kind != "uterus":
 		return 0.0
+	var rope := _chain_node(side)
+	if rope == null or not rope.has_method("head"):
+		return 0.0
 	var horn := horn_world(side)
-	if tube_chain_active(side) or (organ_active and _chain_node(side) != null):
-		var rope := _chain_node(side)
-		if rope and rope.has_method("head"):
-			# 管头埋在宫角内，与宫角的间隙应约为 embed，不得离开宫角。
-			var h: Vector3 = rope.call("head")
-			var d: Vector3 = rope.get("_dir") if "_dir" in rope else (ovary_world(side) - horn)
-			if d.length_squared() < 1e-10:
-				d = Vector3.RIGHT
-			d = d.normalized()
-			var expect := horn - d * float(rope.get("horn_embed"))
-			return h.distance_to(expect)
-	return 0.0
+	var h: Vector3 = rope.call("head")
+	var d: Vector3 = rope.get("_dir")
+	if d.length_squared() < 1e-10:
+		d = Vector3.RIGHT
+	d = d.normalized()
+	var expect := horn - d * float(rope.get("horn_embed"))
+	return h.distance_to(expect)
 
 
 func ovary_tip_gap(side: int) -> float:
-	if tube_chain_active(side) or (organ_active and _chain_node(side) != null):
-		var rope := _chain_node(side)
-		if rope and rope.has_method("tip"):
-			return ovary_world(side).distance_to(rope.call("tip"))
-	# 绑定态：卵巢就在管尽头
+	var rope := _chain_node(side)
+	if rope and rope.has_method("tip"):
+		var ch: Dictionary = _chains.get(side, {})
+		var ov: MeshInstance3D = ch.get("ovary")
+		if ov and is_instance_valid(ov):
+			return ov.global_position.distance_to(rope.call("tip"))
 	return 0.0
 
 
@@ -514,90 +783,150 @@ func _chain_node(side: int) -> Node:
 	return null
 
 
-func _maybe_auto_chain() -> void:
-	if kind != "uterus" or not organ_active:
-		return
-	if extract_charge + 1e-4 < float(TUBE_LEVEL):
-		_ensure_bound_tubes()
-		return
-	for side in [0, 1]:
-		if tube_chain_active(side):
-			continue
-		if _horn_is_out(side) or extract_charge >= float(LEVELS) - 1e-3:
-			_spawn_chain(side)
-	_ensure_bound_tubes()
+# ---------------------------------------------------------------- 输卵管 / 卵巢小链
 
-
-func _ensure_bound_tubes() -> void:
-	if kind != "uterus" or not organ_active:
-		return
-	for side in [0, 1]:
-		if tube_chain_active(side):
-			continue
-		if _chain_node(side) == null:
-			_spawn_bound(side)
-		else:
-			_place_bound(side)
-
-
-func _spawn_bound(side: int) -> void:
-	var rope := AdnexaChain.new()
-	rope.name = "AdnexaBound%d" % side
-	if _tube_mat:
-		rope.use_organ_material(_tube_mat)
-	add_child(rope)
-	var horn := horn_world(side)
-	var ovp := ovary_world(side)
-	rope.setup_line(horn, ovp, TUBE_PTS)
-	var ov := _make_ovary_blob(side)
-	add_child(ov)
-	ov.global_position = ovp
-	_chains[side] = {"active": false, "rope": rope, "ovary": ov}
-
-
-func _place_bound(side: int) -> void:
-	var rope := _chain_node(side)
-	if rope == null:
-		return
+func _tube_rest_world(side: int, k: int, n: int) -> Vector3:
 	var horn := horn_world(side)
 	var ovp := _xform_rest(_ovary_rest_ab(side))
-	if rope.has_method("set_head_and_rest"):
-		rope.call("set_head_and_rest", horn, ovp)
-	var ch: Dictionary = _chains[side]
+	var d := ovp - horn
+	if d.length_squared() < 1e-10:
+		d = Vector3(0.02, 0.0, 0.0)
+	var a := horn - d.normalized() * 0.007
+	return a.lerp(ovp, float(k) / float(n - 1))
+
+
+func _ensure_tubes() -> void:
+	if kind != "uterus" or not organ_active:
+		return
+	for side in [0, 1]:
+		var rope := _chain_node(side)
+		if rope == null:
+			rope = AdnexaChain.new()
+			rope.name = "AdnexaChain%d" % side
+			if _tube_mat:
+				rope.use_organ_material(_tube_mat)
+			add_child(rope)
+			rope.setup_line(horn_world(side), _xform_rest(_ovary_rest_ab(side)), TUBE_PTS)
+			var ov := _make_ovary_blob(side)
+			add_child(ov)
+			var ch_old: Dictionary = _chains.get(side, {})
+			_chains[side] = {"active": bool(ch_old.get("active", false)), "rope": rope, "ovary": ov}
+		if not _tubes.has(side) or (_tubes[side] as Dictionary).is_empty():
+			var n := TUBE_PTS
+			var p := PackedVector3Array()
+			var st := PackedByteArray()
+			var rest := PackedFloat32Array()
+			for k in n:
+				p.append(_tube_rest_world(side, k, n))
+				st.append(0)
+			for k2 in n - 1:
+				rest.append(p[k2].distance_to(p[k2 + 1]))
+			_tubes[side] = {"p": p, "q": p.duplicate(), "st": st, "rest": rest}
+		_apply_tube(side)
+
+
+func _apply_tube(side: int) -> void:
+	var tb: Dictionary = _tubes.get(side, {})
+	var rope := _chain_node(side)
+	if tb.is_empty() or rope == null:
+		return
+	var p: PackedVector3Array = tb["p"]
+	var dir := Vector3.RIGHT
+	if p.size() >= 2:
+		dir = (p[1] - p[0])
+	rope.call("apply_points", p, tb["q"], dir)
+	var ch: Dictionary = _chains.get(side, {})
 	var ov: MeshInstance3D = ch.get("ovary")
-	if ov and is_instance_valid(ov):
-		ov.global_position = ovp
+	if ov and is_instance_valid(ov) and not p.is_empty():
+		ov.global_transform = Transform3D(_ovary_basis[side] as Basis, p[p.size() - 1])
 		ov.visible = true
 
 
-func _spawn_chain(side: int) -> void:
-	if tube_chain_active(side):
+func _step_tube(side: int, dt: float, kinematic: bool) -> void:
+	var tb: Dictionary = _tubes.get(side, {})
+	if tb.is_empty():
 		return
-	# 若已有绑定管，就地改成悬挂，避免传送。
-	var horn := horn_world(side)
-	var ovp := ovary_world(side)
+	var p: PackedVector3Array = tb["p"]
+	var q: PackedVector3Array = tb["q"]
+	var st: PackedByteArray = tb["st"]
+	var rest: PackedFloat32Array = tb["rest"]
+	var n := p.size()
+	if n < 2:
+		return
 	var rope := _chain_node(side)
-	var ov: MeshInstance3D = null
-	var ch_old: Dictionary = _chains.get(side, {})
-	if ch_old.get("ovary") != null:
-		ov = ch_old.get("ovary")
-	if rope == null:
-		rope = AdnexaChain.new()
-		rope.name = "AdnexaChain%d" % side
-		if _tube_mat:
-			rope.use_organ_material(_tube_mat)
-		add_child(rope)
-		rope.setup_line(horn, ovp, TUBE_PTS)
-	else:
-		if rope.has_method("set_head_and_rest"):
-			rope.call("set_head_and_rest", horn, ovp)
-	if ov == null:
-		ov = _make_ovary_blob(side)
-		add_child(ov)
-	ov.global_position = ovp
-	ov.visible = true
-	_chains[side] = {"active": true, "rope": rope, "ovary": ov}
-	_place_chain(side, 0.0)
+	var hi := int(rope.get("hold_index")) if rope else -1
+	var hp: Vector3 = rope.get("hold_pos") if rope else Vector3.ZERO
+	var horn := horn_world(side)
+	var horn_out := _horn_is_out(side)
+	var spring := 0.0 if (horn_out or hi >= 0 or bool(_early.get(side, false))) else TUBE_IN_SPRING
+	if kinematic:
+		spring = 0.5
+	var k60 := dt * 60.0
+	for k in range(1, n):
+		if k == hi:
+			q[k] = p[k]
+			p[k] = hp
+			continue
+		var cur := p[k]
+		var out := st[k] == 1
+		var v := (cur - q[k]) * (pow(TUBE_AIR_DAMP, k60) if out else DAMP)
+		if out:
+			v += gravity * dt * dt
+		q[k] = cur
+		p[k] = cur + v
+		if spring > 0.0:
+			p[k] = p[k].lerp(_tube_rest_world(side, k, n), spring)
+		if p[k].y < floor_y + 0.006:
+			p[k].y = floor_y + 0.006
+	var head_dir := (p[1] - horn)
+	if head_dir.length_squared() < 1e-10:
+		head_dir = Vector3.RIGHT
+	head_dir = head_dir.normalized()
+	for _it in 8:
+		p[0] = horn - head_dir * 0.007
+		if hi > 0 and hi < n:
+			p[hi] = hp
+		for k3 in n - 1:
+			var d := p[k3 + 1] - p[k3]
+			var L := d.length()
+			if L < 1e-8:
+				continue
+			var corr := (L - rest[k3]) / L
+			var wa := 0.0 if (k3 == 0 or k3 == hi) else 1.0
+			var wb := 0.0 if (k3 + 1 == hi) else 1.0
+			var ws := wa + wb
+			if ws <= 0.0:
+				continue
+			p[k3] += d * corr * (wa / ws)
+			p[k3 + 1] -= d * corr * (wb / ws)
+		for k4 in range(1, n):
+			if k4 == hi:
+				continue
+			var r := _wall(p[k4], st[k4], 0.004)
+			p[k4] = r[0]
+			st[k4] = int(r[1])
+		for k5 in n - 1:
+			_cross_fix_arr(p, st, k5, k5 + 1, 0.0 if k5 == 0 else 1.0, 0.0 if k5 + 1 == hi else 1.0)
+	p[0] = horn - head_dir * 0.007
+	if hi > 0 and hi < n:
+		p[hi] = hp
+	tb["p"] = p
+	tb["q"] = q
+	tb["st"] = st
+	_tubes[side] = tb
+	_apply_tube(side)
+
+
+func _maybe_auto_chain() -> void:
+	if kind != "uterus" or not organ_active:
+		return
+	for side in [0, 1]:
+		var ch: Dictionary = _chains.get(side, {})
+		if bool(ch.get("active", false)):
+			continue
+		if _horn_is_out(side) or extract_charge >= float(LEVELS) - 1e-3 or bool(_early.get(side, false)):
+			ch["active"] = true
+			_chains[side] = ch
 
 
 func _make_ovary_blob(side: int) -> MeshInstance3D:
@@ -647,67 +976,15 @@ func _clear_chains() -> void:
 		if ov != null and is_instance_valid(ov):
 			ov.queue_free()
 		_chains[side] = {"active": false, "rope": null, "ovary": null}
-
-
-func _place_chain(side: int, dt: float) -> void:
-	var ch: Dictionary = _chains.get(side, {})
-	var rope: Node = ch.get("rope")
-	if rope == null or not is_instance_valid(rope):
-		return
-	var horn := horn_world(side)
-	if not bool(ch.get("active", false)):
-		_place_bound(side)
-		return
-	rope.set("gravity", gravity)
-	rope.set("floor_y", floor_y)
-	if rope.has_method("pin_head"):
-		rope.call("pin_head", horn)
-	# 宫角还在体内且未被夹住：锁回静止姿态，不要穿腹壁。
-	var held := int(rope.get("hold_index")) >= 0
-	if not _horn_is_out(side) and not held:
-		var ovp := _xform_rest(_ovary_rest_ab(side))
-		# 若已被向外拉过，允许沿创口方向，但侧面锁在静止侧。
-		if rope.has_method("set_head_and_rest"):
-			rope.call("set_head_and_rest", horn, ovp)
-	elif dt > 0.0 and rope.has_method("step"):
-		rope.call("step", dt)
-		if not _horn_is_out(side) and not held:
-			pass
-		elif not _horn_is_out(side) and held:
-			# 只许顺着创口出去，不许从腹壁侧面穿出。
-			_clamp_chain_to_wound(rope)
-	var ov: MeshInstance3D = ch.get("ovary")
-	if ov != null and is_instance_valid(ov):
-		var tip: Vector3 = rope.call("tip") if rope.has_method("tip") else horn
-		ov.global_position = tip
-		ov.visible = true
-
-
-func _clamp_chain_to_wound(rope: Node) -> void:
-	if rope == null or not rope.has_method("points"):
-		return
-	var pts: PackedVector3Array = rope.call("points")
-	var changed := false
-	for i in range(1, pts.size()):
-		var p: Vector3 = pts[i]
-		var rel := p - wound_center
-		var outd := rel.dot(outward)
-		var radial := rel - outward * outd
-		# 侧面偏离创口太远就收回到创口圆柱内。
-		if radial.length() > 0.035 and outd < 0.01:
-			p = wound_center + outward * minf(outd, 0.0) + radial.normalized() * 0.02
-			pts[i] = p
-			changed = true
-	if changed and rope.has_method("set_points"):
-		rope.call("set_points", pts)
+	_tubes = {}
 
 
 func rest_cervix_world() -> Vector3:
-	return _frame * _cervix_ab
+	return _frame * _cervix_ab + _drag_off
 
 
 func rest_fundus_world() -> Vector3:
-	return _frame * _fundus_ab
+	return _frame * _fundus_ab + _drag_off
 
 
 func centroid_world() -> Vector3:
@@ -717,6 +994,15 @@ func centroid_world() -> Vector3:
 	for p in _p:
 		s += p
 	return s / float(_p.size())
+
+
+func segment_stretch() -> float:
+	var m := 1.0
+	for i in _seg_rest.size():
+		if i + 1 >= _p.size():
+			break
+		m = maxf(m, _p[i].distance_to(_p[i + 1]) / maxf(float(_seg_rest[i]), 1e-6))
+	return m
 
 
 func max_edge_ratio() -> float:
@@ -748,7 +1034,6 @@ func ray_pick(origin: Vector3, dir: Vector3) -> Array:
 	var d := dir.normalized()
 	var best := 1e9
 	var bi := -1
-	# 段链节点 + 在相邻段上的最近点，便于夹到宫体表面。
 	for i in _p.size():
 		var w := _p[i] - origin
 		var t := w.dot(d)
@@ -798,6 +1083,7 @@ func hold_particle(i: int, tip: Vector3) -> void:
 
 func release_hold() -> void:
 	hold_index = -1
+	_has_pull_target = false
 
 
 func chain_ropes() -> Array:
@@ -810,8 +1096,7 @@ func chain_ropes() -> Array:
 
 func chain_hold(side: int, origin: Vector3, dir: Vector3) -> bool:
 	if not tube_chain_active(side):
-		# 提前夹住：先变成悬挂链再夹。
-		_spawn_chain(side)
+		detach_adnexa(side)
 	if not tube_chain_active(side):
 		return false
 	var rope: Node = (_chains[side] as Dictionary)["rope"]
@@ -822,7 +1107,7 @@ func chain_hold(side: int, origin: Vector3, dir: Vector3) -> bool:
 	var pts: PackedVector3Array = rope.call("points")
 	if pts.is_empty():
 		return false
-	if idx < 0:
+	if idx <= 0:
 		idx = pts.size() - 1
 	rope.set("hold_index", idx)
 	rope.set("hold_pos", pts[idx])
@@ -845,11 +1130,17 @@ func chain_release(side: int) -> void:
 		rope.set("hold_index", -1)
 
 
+## 外部（腹部软位移 / 互动拖拽）整体带着走：质点、根点、静止姿态都一起平移。
 func carry(xf: Transform3D) -> void:
-	for i in _p.size():
-		_p[i] = xf * _p[i]
-	for i in _q.size():
-		_q[i] = xf * _q[i]
+	_carry_points(xf)
+	_drag_off = xf * _drag_off if xf.basis.is_equal_approx(Basis.IDENTITY) else _drag_off + xf.origin
+
+
+func _carry_points(xf: Transform3D) -> void:
+	for i in _x.size():
+		_x[i] = xf * _x[i]
+	for i in _xq.size():
+		_xq[i] = xf * _xq[i]
 	if hold_index >= 0:
 		hold_pos = xf * hold_pos
 	if _has_pull_target:
@@ -857,27 +1148,197 @@ func carry(xf: Transform3D) -> void:
 	wound_center = xf * wound_center
 	outward = (xf.basis * outward).normalized()
 	for side in [0, 1]:
+		var tb: Dictionary = _tubes.get(side, {})
+		if not tb.is_empty():
+			var p: PackedVector3Array = tb["p"]
+			var q: PackedVector3Array = tb["q"]
+			for k in p.size():
+				p[k] = xf * p[k]
+			for k2 in q.size():
+				q[k2] = xf * q[k2]
+			tb["p"] = p
+			tb["q"] = q
+			_tubes[side] = tb
 		var rope := _chain_node(side)
-		if rope and is_instance_valid(rope) and rope.has_method("carry"):
-			rope.call("carry", xf)
-		var ch: Dictionary = _chains.get(side, {})
-		var ov: MeshInstance3D = ch.get("ovary")
-		if ov and is_instance_valid(ov):
-			ov.global_position = xf * ov.global_position
+		if rope and int(rope.get("hold_index")) >= 0:
+			rope.set("hold_pos", xf * (rope.get("hold_pos") as Vector3))
+	if not _x.is_empty():
+		_sync_body()
+
+
+# ---------------------------------------------------------------- 物理
+
+func _wound_depth() -> float:
+	return maxf(root_world().distance_to(wound_center), 0.02)
+
+
+## 夹点 / 虚拟拉动目标能到的最远处：系带长度用完就拉不动了（钳子停在器官上）。
+func _reach_clamp(bi: int, target: Vector3, is_out: bool) -> Vector3:
+	var arc := 0.0
+	for i in mini(bi, _seg_rest.size()):
+		arc += float(_seg_rest[i])
+	var sw := _wound_depth()
+	var tmax := sw + OUT_EXTRA
+	if is_out:
+		var maxd := (tmax - sw) + arc
+		var d := target - wound_center
+		if d.length() > maxd:
+			return wound_center + d.normalized() * maxd
+		return target
+	var root := root_world()
+	var maxd2 := tmax + arc
+	var d2 := target - root
+	if d2.length() > maxd2:
+		return root + d2.normalized() * maxd2
+	return target
+
+
+## 驱动目标：体内节点要出去只能走创口——目标在腹壁外而路径不经洞口时，先把节点引向洞口。
+func _driver_target(ci: int, target: Vector3) -> Vector3:
+	var cur := _x[ci]
+	var st := _st[ci]
+	var bi := ci - TETHER_N
+	if st == 0:
+		var dt_ := (target - wound_center).dot(outward)
+		if dt_ > -WALL_MARGIN:
+			var a := cur
+			var da := (a - wound_center).dot(outward)
+			var cross := target
+			if da < dt_ - 1e-6:
+				var t := clampf(-da / (dt_ - da), 0.0, 1.0)
+				cross = a.lerp(target, t)
+			var rel := cross - wound_center
+			var radial := rel - outward * rel.dot(outward)
+			if radial.length() > HOLE_R:
+				# 先朝洞口走（步长不超过钳尖本身的位移）。
+				var hole := wound_center - outward * WALL_MARGIN * 0.5
+				var step := maxf(cur.distance_to(target), 0.004)
+				var to_h := hole - cur
+				if to_h.length() > step:
+					to_h = to_h.normalized() * step
+				target = cur + to_h
+		return _reach_clamp(bi, target, false)
+	return _reach_clamp(bi, target, true)
+
+
+func _wall(p: Vector3, st: int, r_node: float) -> Array:
+	var rel := p - wound_center
+	var d := rel.dot(outward)
+	var radial := rel - outward * d
+	var r := radial.length()
+	if st == 0:
+		if d > 0.0:
+			if r <= HOLE_R:
+				st = 1
+			else:
+				p -= outward * (d + WALL_MARGIN)
+		elif r > 0.05 and not skin_p.is_empty():
+			# 远离创口处：别从体内穿出皮肤。
+			var sh := _skin_h(p)
+			var h: float = sh[0]
+			if h < 1e8 and h > -WALL_MARGIN and h < 0.03:
+				p -= (sh[1] as Vector3) * (h + WALL_MARGIN)
+	else:
+		if d < 0.0 and r <= HOLE_R:
+			st = 0
+		elif r <= HOLE_R + r_node:
+			pass
+		elif not skin_p.is_empty() and r > 0.035:
+			var sh2 := _skin_h(p)
+			var h2: float = sh2[0]
+			if h2 < r_node and h2 > -0.05:
+				p += (sh2[1] as Vector3) * (r_node - h2)
+			elif h2 >= 1e8 and d < WALL_MARGIN:
+				p += outward * (WALL_MARGIN - d)
+		elif d < WALL_MARGIN:
+			p += outward * (WALL_MARGIN - d)
+	return [p, st]
+
+
+func _cross_fix_arr(arr: PackedVector3Array, st: PackedByteArray, ia: int, ib: int, wa: float, wb: float) -> void:
+	if st[ia] == st[ib]:
+		return
+	var a := arr[ia]
+	var b := arr[ib]
+	var da := (a - wound_center).dot(outward)
+	var db := (b - wound_center).dot(outward)
+	if absf(da - db) < 1e-7:
+		return
+	var t := clampf(da / (da - db), 0.0, 1.0)
+	var x := a.lerp(b, t)
+	var rel := x - wound_center
+	var radial := rel - outward * rel.dot(outward)
+	var r := radial.length()
+	if r <= HOLE_R:
+		return
+	var shift := radial * (1.0 - HOLE_R / r)
+	var ws := wa + wb
+	if ws <= 0.0:
+		return
+	# 两端按权重平移，使穿膜点回到洞口内。
+	if wa > 0.0 and wb > 0.0:
+		arr[ia] = a - shift
+		arr[ib] = b - shift
+	elif wa > 0.0:
+		arr[ia] = a - shift / maxf(1.0 - t, 0.25)
+	else:
+		arr[ib] = b - shift / maxf(t, 0.25)
+
+
+func _inv_w(ci: int) -> float:
+	if ci == 0 or ci == _drv_i:
+		return 0.0
+	return BODY_W if ci >= TETHER_N else 1.0
+
+
+func _cell(p: Vector3) -> Vector3i:
+	return Vector3i(floori(p.x / SKIN_CELL), floori(p.y / SKIN_CELL), floori(p.z / SKIN_CELL))
+
+
+func _build_grid() -> void:
+	_grid.clear()
+	for i in skin_p.size():
+		var c := _cell(skin_p[i])
+		if _grid.has(c):
+			(_grid[c] as PackedInt32Array).append(i)
+		else:
+			_grid[c] = PackedInt32Array([i])
+
+
+func _skin_h(p: Vector3) -> Array:
+	if skin_p.is_empty() or skin_n.size() != skin_p.size():
+		return [1e9, outward]
+	var c0 := _cell(p)
+	var best := 1e9
+	var bi := -1
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				var arr = _grid.get(c0 + Vector3i(dx, dy, dz))
+				if arr == null:
+					continue
+				for i in arr:
+					var d := p.distance_squared_to(skin_p[i])
+					if d < best:
+						best = d
+						bi = i
+	if bi < 0:
+		return [1e9, outward]
+	var nn: Vector3 = skin_n[bi]
+	return [(p - skin_p[bi]).dot(nn), nn]
 
 
 func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> void:
 	if not organ_active:
 		return
+	var t0 := Time.get_ticks_usec()
 	dt = minf(maxf(dt, 0.0), 1.0 / 30.0)
 	if _has_prev_frame:
 		var xf := frame * _prev_frame.affine_inverse()
-		var moved := xf.origin.length_squared() > 1e-16
-		if moved or not xf.basis.is_equal_approx(Basis.IDENTITY):
-			# 只带着段链走，伤口稍后用传入值覆盖，避免和 tissue carry 抢伤口。
+		if xf.origin.length_squared() > 1e-16 or not xf.basis.is_equal_approx(Basis.IDENTITY):
 			var saved_w := wound_center
 			var saved_o := outward
-			carry(xf)
+			_carry_points(xf)
 			wound_center = saved_w
 			outward = saved_o
 	_prev_frame = frame
@@ -886,317 +1347,275 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 	wound_center = wound
 	if out_dir.length_squared() > 1e-8:
 		outward = out_dir.normalized()
-	if _p.size() != SEGS:
+	if _x.size() != TETHER_N + SEGS:
 		_init_particles()
+	_build_grid()
 	if retracting:
-		hold_index = -1
-		_has_pull_target = false
-		_retract_toward_rest(dt)
-		_update_bones()
-		_refresh_charge()
-		if extract_charge < float(TUBE_LEVEL):
-			for side_r in [0, 1]:
-				var ch_r: Dictionary = _chains.get(side_r, {})
-				ch_r["active"] = false
-				_chains[side_r] = ch_r
-				_early[side_r] = false
-		for side_r2 in [0, 1]:
-			_place_chain(side_r2, 0.0)
-		_rebuild_visual()
-		if _max_rest_offset() < 0.012 or extract_charge <= 1.05:
-			force_reset()
-			return
+		_step_putback(dt)
+		last_step_usec = Time.get_ticks_usec() - t0
 		return
-	# 仍在体内且未被夹住时保持原位，不要被重力拽出创口。
-	if hold_index < 0 and not _has_pull_target:
-		var any_out := false
-		for p0 in _p:
-			if (p0 - wound_center).dot(outward) > 0.002:
-				any_out = true
-				break
-		if not any_out:
-			for i0 in _p.size():
-				var pw: Vector3 = _frame * _rest_ab[i0]
-				_p[i0] = pw
-				_q[i0] = pw
-			_update_bones()
-			_refresh_charge()
-			_maybe_auto_chain()
-			for side0 in [0, 1]:
-				_place_chain(side0, dt)
-			_rebuild_visual()
-			return
-	# 夹点 / 拉动目标移动时，先把整条段链带上，再靠约束把宫颈留在轨道上。
-	if hold_index >= 0 and hold_index < _p.size():
-		var hd := hold_pos - _p[hold_index]
-		if hd.length_squared() > 1e-12:
-			for hi in _p.size():
-				_p[hi] = _p[hi] + hd
-				if hi < _q.size():
-					_q[hi] = _q[hi] + hd
-	elif _has_pull_target and _p.size() == SEGS:
-		var pd := _pull_target - _p[SEGS - 1]
-		if pd.length_squared() > 1e-12:
-			for pi in _p.size():
-				_p[pi] = _p[pi] + pd
-				if pi < _q.size():
-					_q[pi] = _q[pi] + pd
-	# 积分
-	var n := _p.size()
-	for i in n:
-		if i == hold_index:
-			_q[i] = _p[i]
-			_p[i] = hold_pos
+	var root := root_world()
+	var nb := TETHER_N + SEGS
+	_drv_i = -1
+	if hold_index >= 0 and hold_index < SEGS:
+		_drv_i = TETHER_N + hold_index
+		_drv_pos = _driver_target(_drv_i, hold_pos)
+	elif _has_pull_target:
+		_drv_i = nb - 1
+		_drv_pos = _driver_target(_drv_i, _pull_target)
+		_pull_target = _drv_pos
+	var driven := _drv_i >= 0
+	var any_out := false
+	for i0 in nb:
+		if _st[i0] == 1:
+			any_out = true
+			break
+	# 没有被拉、也没有任何部分在体外：停在体内原位（与原子宫重合）。
+	if not driven and not any_out and _tlen <= TETHER_MIN * 1.5:
+		for b0 in SEGS:
+			var pw := _rest_world(b0)
+			_x[TETHER_N + b0] = pw
+			_xq[TETHER_N + b0] = pw
+		for t_i in TETHER_N:
+			_x[t_i] = root
+			_xq[t_i] = root
+		_finish_step(dt, true)
+		last_step_usec = Time.get_ticks_usec() - t0
+		return
+	var sw := _wound_depth()
+	var loose := clampf((_tlen - TETHER_MIN) / maxf(sw * 0.6, 0.01), 0.0, 1.0)
+	var k60 := dt * 60.0
+	var air := pow(AIR_DAMP, k60)
+	# 1) Verlet 积分
+	_x[0] = root
+	_xq[0] = root
+	for i in range(1, nb):
+		if i == _drv_i:
+			_xq[i] = _x[i]
+			_x[i] = _drv_pos
 			continue
-		if _has_pull_target and i == n - 1 and hold_index < 0 and not retracting:
-			_q[i] = _p[i]
-			_p[i] = _pull_target
-			continue
-		var cur := _p[i]
-		var v := (cur - _q[i]) * DAMP
+		var cur := _x[i]
+		var out := _st[i] == 1
+		var v := (cur - _xq[i]) * (air if out else DAMP)
 		var sp := v.length()
 		if sp > MAX_SPEED * dt:
-			v = v * ((MAX_SPEED * dt) / maxf(sp, 1e-8))
-		if i > 0:
+			v *= (MAX_SPEED * dt) / maxf(sp, 1e-8)
+		if out:
 			v += gravity * dt * dt
-		_q[i] = cur
-		_p[i] = cur + v
-		if _p[i].y < floor_y + 0.008:
-			_p[i].y = floor_y + 0.008
+		_xq[i] = cur
+		var np := cur + v
+		if not out:
+			if i >= TETHER_N:
+				# 体内宫体被组织托着回原位；系带越长（已被扯开）托得越弱。
+				np = np.lerp(_rest_world(i - TETHER_N), IN_SPRING * (1.0 - loose))
+			else:
+				var s_i := float(i) * _tlen / float(TETHER_N)
+				var on_line := root + (wound_center - root).normalized() * minf(s_i, sw)
+				np = np.lerp(on_line, 0.2)
+		if np.y < floor_y + 0.008:
+			np.y = floor_y + 0.008
+		_x[i] = np
+	# 2) 被拉时系带跟着伸长（阴道上段 / 韧带被拉开），上限 = 创口深度 + OUT_EXTRA。
+	if driven:
+		var b0p := _x[TETHER_N]
+		var need := root.distance_to(b0p)
+		if _st[TETHER_N] == 1:
+			need = sw + b0p.distance_to(wound_center)
+		if need > _tlen:
+			_tlen = minf(need, sw + OUT_EXTRA)
+	# 3) 约束迭代
+	var seg_t := _tlen / float(TETHER_N)
 	for _it in ITER:
-		_solve_fabrik()
+		_x[0] = root
+		if _drv_i >= 0:
+			_x[_drv_i] = _drv_pos
+		# 系带：只限最长（绳子，可松弛）
+		for k in TETHER_N:
+			_solve_link(k, k + 1, seg_t, true)
+		# 宫体：硬段长
+		for b in SEGS - 1:
+			_solve_link(TETHER_N + b, TETHER_N + b + 1, float(_seg_rest[b]), false)
 		_solve_angles()
-		_constrain_cervix()
-	_solve_fabrik()
-	if hold_index >= 0 and hold_index < _p.size():
-		if _p[hold_index].distance_to(hold_pos) > 0.002:
-			hold_pos = _p[hold_index]
-	if _has_pull_target and _p.size() == SEGS:
-		# 保留向外的拉动目标，不被约束回退改写。
-		if _p[SEGS - 1].distance_to(_pull_target) < 0.002:
-			_pull_target = _p[SEGS - 1]
-	_update_bones()
-	_refresh_charge()
-	if not retracting:
-		_maybe_auto_chain()
-	else:
-		if extract_charge < float(TUBE_LEVEL) and any_tube_chain():
-			# 放回：悬链改回绑定，随宫体收回。
-			for side in [0, 1]:
-				var ch: Dictionary = _chains.get(side, {})
-				ch["active"] = false
-				_chains[side] = ch
-				_early[side] = false
-	for side in [0, 1]:
-		_place_chain(side, 0.0 if retracting else dt)
-	_rebuild_visual()
+		_straighten_body(BODY_STIFF)
+		for i2 in range(1, nb):
+			if i2 == _drv_i:
+				continue
+			var r := _wall(_x[i2], _st[i2], BODY_R if i2 >= TETHER_N else TETHER_R)
+			_x[i2] = r[0]
+			_st[i2] = int(r[1])
+		for k2 in nb - 1:
+			_cross_fix_arr(_x, _st, k2, k2 + 1, _inv_w(k2), _inv_w(k2 + 1))
+	# 最后：角度 + 从驱动点出发的精确段长（FABRIK 一遍），保证宫体不拉伸、不折。
+	_straighten_body(BODY_STIFF)
+	_fabrik_body()
+	_x[0] = root
+	if _drv_i >= 0:
+		_x[_drv_i] = _drv_pos
+		# 驱动节点的状态按实际位置更新
+		var rr := _wall(_x[_drv_i], _st[_drv_i], 0.0)
+		_st[_drv_i] = int(rr[1])
+		if hold_index >= 0:
+			hold_pos = _drv_pos
+	for i3 in nb:
+		if not _x[i3].is_finite():
+			_x[i3] = _rest_world(i3 - TETHER_N) if i3 >= TETHER_N else root
+			_xq[i3] = _x[i3]
+	_finish_step(dt, false)
+	last_step_usec = Time.get_ticks_usec() - t0
 
 
-func _pin_drivers() -> void:
-	if hold_index >= 0 and hold_index < _p.size():
-		_p[hold_index] = hold_pos
-	elif _has_pull_target and hold_index < 0 and not retracting and _p.size() == SEGS:
-		_p[SEGS - 1] = _pull_target
-
-
-func _solve_fabrik() -> void:
-	# 从宫颈（轨道）和夹点 / 宫底目标双向把段长精确拉回静止长。
-	var n := _p.size()
-	if n < 2 or _seg_rest.size() < n - 1:
+func _solve_link(a: int, b: int, rest: float, rope: bool) -> void:
+	var d := _x[b] - _x[a]
+	var L := d.length()
+	if L < 1e-9:
 		return
-	var goal_i := n - 1
-	var goal: Vector3 = _p[n - 1]
-	if hold_index >= 0 and hold_index < n:
-		goal_i = hold_index
-		goal = hold_pos
-	elif _has_pull_target and hold_index < 0 and not retracting:
-		goal = _pull_target
-		goal_i = n - 1
-	goal = _reachable_from_cervix(goal)
-	# 先把宫颈留在轨道上
-	_constrain_cervix()
-	# 后退：从目标走到宫颈
-	_p[goal_i] = goal
-	for i in range(goal_i - 1, -1, -1):
-		var rest := float(_seg_rest[i])
-		var d := _p[i] - _p[i + 1]
+	if rope and L <= rest:
+		return
+	if not rope and absf(L - rest) < rest * 0.0005:
+		return
+	var wa := _inv_w(a)
+	var wb := _inv_w(b)
+	var ws := wa + wb
+	if ws <= 0.0:
+		return
+	var corr := d * ((L - rest) / L)
+	_x[a] += corr * (wa / ws)
+	_x[b] -= corr * (wb / ws)
+
+
+## 形状匹配：静止宫体是一条直线，取当前首尾方向，以驱动点（无驱动时取质心）为基准摆回直线。
+func _straighten_body(k: float) -> void:
+	var a := _x[TETHER_N]
+	var b := _x[TETHER_N + SEGS - 1]
+	var dir := b - a
+	if dir.length_squared() < 1e-10:
+		return
+	dir = dir.normalized()
+	var arc := PackedFloat32Array()
+	arc.resize(SEGS)
+	arc[0] = 0.0
+	for i in range(1, SEGS):
+		arc[i] = arc[i - 1] + float(_seg_rest[i - 1])
+	var base := Vector3.ZERO
+	if _drv_i >= TETHER_N:
+		base = _x[_drv_i] - dir * arc[_drv_i - TETHER_N]
+	else:
+		var c := Vector3.ZERO
+		var ca := 0.0
+		for j in SEGS:
+			c += _x[TETHER_N + j]
+			ca += arc[j]
+		base = c / float(SEGS) - dir * (ca / float(SEGS))
+	for m in SEGS:
+		var ci := TETHER_N + m
+		if ci == _drv_i:
+			continue
+		_x[ci] = _x[ci].lerp(base + dir * arc[m], k)
+
+
+func _fabrik_body() -> void:
+	var start := TETHER_N
+	if _drv_i >= TETHER_N:
+		start = _drv_i
+	for i in range(start - 1, TETHER_N - 1, -1):
+		var d := _x[i] - _x[i + 1]
 		var L := d.length()
-		if L < 1e-8:
-			d = _frame.basis * _axis_ab
-			L = 1.0
-		_p[i] = _p[i + 1] + d * (rest / L)
-	_constrain_cervix()
-	# 前进：从宫颈把精确段长推回去
-	for i in n - 1:
-		var rest2 := float(_seg_rest[i])
-		var d2 := _p[i + 1] - _p[i]
+		if L > 1e-9:
+			_x[i] = _x[i + 1] + d * (float(_seg_rest[i - TETHER_N]) / L)
+	for j in range(start, TETHER_N + SEGS - 1):
+		var d2 := _x[j + 1] - _x[j]
 		var L2 := d2.length()
-		if L2 < 1e-8:
-			d2 = _frame.basis * _axis_ab
-			L2 = 1.0
-		_p[i + 1] = _p[i] + d2 * (rest2 / L2)
-	# 若目标点不是尾端，再从目标向尾端推一段
-	if goal_i < n - 1:
-		for i in range(goal_i, n - 1):
-			var rest3 := float(_seg_rest[i])
-			var d3 := _p[i + 1] - _p[i]
-			var L3 := d3.length()
-			if L3 < 1e-8:
-				d3 = _frame.basis * _axis_ab
-				L3 = 1.0
-			_p[i + 1] = _p[i] + d3 * (rest3 / L3)
-
-
-func _solve_distances() -> void:
-	var n := _p.size()
-	for i in n - 1:
-		var rest := float(_seg_rest[i]) if i < _seg_rest.size() else _p[i].distance_to(_p[i + 1])
-		if rest < 1e-6:
-			continue
-		var d := _p[i + 1] - _p[i]
-		var L := d.length()
-		if L < 1e-8:
-			continue
-		# 硬约束，把段长拉回静止长（允许极小拉伸）。
-		var lim := rest * MAX_STRETCH
-		var target := rest if L > lim or L < rest * 0.98 else L
-		if absf(L - rest) < rest * 0.001:
-			continue
-		var corr := (L - rest) / L
-		var li := _is_locked(i)
-		var lj := _is_locked(i + 1)
-		if li and lj:
-			continue
-		if li:
-			_p[i + 1] -= d * corr
-		elif lj:
-			_p[i] += d * corr
-		else:
-			_p[i] += d * corr * 0.5
-			_p[i + 1] -= d * corr * 0.5
+		if L2 > 1e-9:
+			_x[j + 1] = _x[j] + d2 * (float(_seg_rest[j - TETHER_N]) / L2)
 
 
 func _solve_angles() -> void:
-	var n := _p.size()
-	if n < 3:
-		return
-	for i in range(1, n - 1):
-		if _is_locked(i):
+	for b in range(1, SEGS - 1):
+		var i := TETHER_N + b
+		if i == _drv_i:
 			continue
-		var a := _p[i] - _p[i - 1]
-		var b := _p[i + 1] - _p[i]
+		var a := _x[i] - _x[i - 1]
+		var c := _x[i + 1] - _x[i]
 		var la := a.length()
-		var lb := b.length()
-		if la < 1e-6 or lb < 1e-6:
+		var lc := c.length()
+		if la < 1e-6 or lc < 1e-6:
 			continue
-		var c := clampf(a.dot(b) / (la * lb), -1.0, 1.0)
-		var ang := acos(c)
+		var ang := acos(clampf(a.dot(c) / (la * lc), -1.0, 1.0))
 		if ang <= MAX_BEND:
 			continue
-		# 弯过头：把中点推向两端中点，限制折叠。
-		var mid := (_p[i - 1] + _p[i + 1]) * 0.5
+		var mid := (_x[i - 1] + _x[i + 1]) * 0.5
 		var t := clampf((ang - MAX_BEND) / maxf(ang, 1e-5), 0.0, 1.0)
-		_p[i] = _p[i].lerp(mid, t * 0.85)
+		_x[i] = _x[i].lerp(mid, t * 0.85)
 
 
-func _constrain_cervix() -> void:
-	if kind != "uterus" or _p.is_empty():
-		return
-	if hold_index == 0:
-		# 夹住宫颈也不让它飞出创口太远。
-		var outd_h := (_p[0] - wound_center).dot(outward)
-		if outd_h > 0.006:
-			_p[0] -= outward * (outd_h - 0.006)
-		return
-	var rest_c: Vector3 = _frame * _cervix_ab
-	var path := wound_center - rest_c
-	var plen := path.length()
-	if plen < 1e-6:
-		_p[0] = rest_c
-		return
-	var dir_p := path / plen
-	var t := clampf((_p[0] - rest_c).dot(dir_p) / plen, 0.0, 1.0)
-	var on_path := rest_c + dir_p * (t * plen)
-	_p[0] = _p[0].lerp(on_path, 0.9)
-	var outd := (_p[0] - wound_center).dot(outward)
-	if outd > 0.003:
-		_p[0] -= outward * (outd - 0.003)
+func _finish_step(dt: float, kinematic_tubes: bool) -> void:
+	_sync_body()
+	_update_bones()
+	_refresh_charge()
+	_maybe_auto_chain()
+	for side in [0, 1]:
+		_step_tube(side, dt, kinematic_tubes)
+	_rebuild_visual()
+	_rebuild_tether()
 
 
-func _is_locked(i: int) -> bool:
-	if i == hold_index:
-		return true
-	if _has_pull_target and hold_index < 0 and not retracting and i == SEGS - 1:
-		return true
-	return false
-
-
-func _rest_total() -> float:
-	var s := 0.0
-	for i in _seg_rest.size():
-		s += float(_seg_rest[i])
-	return maxf(s, _rest_len)
-
-
-func _rail_cervix(p: Vector3) -> Vector3:
-	var rest_c: Vector3 = _frame * _cervix_ab
-	var path := wound_center - rest_c
-	var plen := maxf(path.length(), 1e-6)
-	var t := clampf((p - rest_c).dot(path) / (plen * plen), 0.0, 1.0)
-	var c := rest_c + path * t
-	var outd := (c - wound_center).dot(outward)
-	if outd > 0.003:
-		c -= outward * (outd - 0.003)
-	return c
-
-
-func _reachable_from_cervix(desired: Vector3) -> Vector3:
-	# 宫颈可在「体内原位 → 创口」轨道上滑动；宫底不超过静止总长。
-	var lim := _rest_total()
-	var q := _rail_cervix(desired)
-	var d := desired - q
-	var L := d.length()
-	if L <= lim:
-		return desired
-	return q + d * (lim / L)
-
-
-func _clamp_to_rest_length() -> void:
-	# 整条段链总长不得超过静止长，从宫颈缩放。
-	if _p.size() < 2:
-		return
-	var total := 0.0
-	for i in _p.size() - 1:
-		total += _p[i].distance_to(_p[i + 1])
-	var lim := _rest_total() * MAX_STRETCH
-	if total <= lim or total < 1e-6:
-		return
-	var c: Vector3 = _p[0]
-	var s := lim / total
-	for i in range(1, _p.size()):
-		_p[i] = c + (_p[i] - c) * s
-
-
-func _retract_toward_rest(dt: float) -> void:
-	var n := _p.size()
-	var step := PUTBACK_SPEED * dt
-	for i in n:
-		var tgt: Vector3 = _frame * _rest_ab[i]
-		var d := tgt - _p[i]
+## 放回：所有质点先沿原路退回创口（体外的不能穿腹壁），再回静止位，系带缩短。
+func _step_putback(dt: float) -> void:
+	_putback_t += dt
+	var stp := PUTBACK_SPEED * dt
+	var root := root_world()
+	var nb := TETHER_N + SEGS
+	_drv_i = -1
+	_tlen = maxf(TETHER_MIN, _tlen - stp * 1.5)
+	var hole_in := wound_center - outward * 0.012
+	for i in nb:
+		var tgt: Vector3
+		if i < TETHER_N:
+			tgt = root
+		else:
+			tgt = _rest_world(i - TETHER_N)
+		if _st[i] == 1:
+			tgt = hole_in
+		var d := tgt - _x[i]
 		var L := d.length()
-		if L <= 1e-6:
-			_p[i] = tgt
-			_q[i] = tgt
-			continue
-		var s := minf(step, L)
-		_p[i] = _p[i] + d * (s / L)
-		_q[i] = _p[i]
+		if L > stp:
+			_x[i] += d * (stp / L)
+		else:
+			_x[i] = tgt
+		var rel := _x[i] - wound_center
+		var dd := rel.dot(outward)
+		if _st[i] == 1 and dd < 0.0:
+			_st[i] = 0
+		_xq[i] = _x[i]
+	_sync_body()
+	_update_bones()
+	_refresh_charge()
+	if extract_charge < float(TUBE_LEVEL):
+		for side_r in [0, 1]:
+			var ch_r: Dictionary = _chains.get(side_r, {})
+			ch_r["active"] = false
+			_chains[side_r] = ch_r
+			_early[side_r] = false
+	for side in [0, 1]:
+		var rope := _chain_node(side)
+		if rope:
+			rope.set("hold_index", -1)
+		_step_tube(side, dt, true)
+	_rebuild_visual()
+	_rebuild_tether()
+	var all_in := true
+	for i2 in nb:
+		if _st[i2] == 1:
+			all_in = false
+			break
+	if (all_in and _max_rest_offset() < 0.012) or _putback_t > PUTBACK_TIMEOUT:
+		force_reset()
 
 
 func _max_rest_offset() -> float:
 	var m := 0.0
-	for i in _p.size():
-		m = maxf(m, _p[i].distance_to(_frame * _rest_ab[i]))
+	for b in _p.size():
+		m = maxf(m, _p[b].distance_to(_rest_world(b)))
 	return m
 
 
@@ -1209,11 +1628,39 @@ func _refresh_charge() -> void:
 	extract_charge = 1.0 + 4.0 * u
 
 
+func _ensure_tether_mesh() -> void:
+	if _tether_node and is_instance_valid(_tether_node):
+		return
+	var t := AdnexaChain.new()
+	t.name = "UterusTether"
+	t.set("radius", 0.0062)
+	t.set("taper", false)
+	if _mat:
+		t.material_override = _mat
+	add_child(t)
+	_tether_node = t
+	t.visible = false
+
+
+func _rebuild_tether() -> void:
+	if _tether_node == null or not is_instance_valid(_tether_node):
+		return
+	var pts := tether_points()
+	# 根点埋在阴道顶端里，只在明显被扯长后才显示。
+	var show := _tlen > 0.012 and pts.size() >= 2
+	(_tether_node as Node3D).visible = show
+	if show:
+		_tether_node.call("apply_points", pts, pts, pts[pts.size() - 1] - pts[0])
+
+
 func _update_bones() -> void:
+	# 沿链平行传输参考向量（时间上也接着上一帧），避免相邻骨骼半圈扭转把网格撕开。
+	var up := _frame.basis * _rest_up
+	if _bone.size() == SEGS:
+		up = (_bone[0] as Transform3D).basis.y
 	_bone = []
 	if _p.size() != SEGS:
 		return
-	var up := _frame.basis * _rest_up
 	if up.length_squared() < 1e-8:
 		up = Vector3.UP
 	else:
@@ -1233,10 +1680,6 @@ func _update_bones() -> void:
 			if x.length_squared() < 1e-10:
 				x = Vector3.FORWARD.cross(axis)
 		x = x.normalized()
-		if i > 0:
-			var prev_x: Vector3 = (_bone[i - 1] as Transform3D).basis.x
-			if x.dot(prev_x) < 0.0:
-				x = -x
 		var y := axis.cross(x)
 		up = y
 		_bone.append(Transform3D(Basis(x, y, axis), _p[i]))
@@ -1244,7 +1687,7 @@ func _update_bones() -> void:
 
 func _xform_rest(p_ab: Vector3) -> Vector3:
 	if _bone.is_empty() or _rest_bone.is_empty():
-		return _frame * p_ab
+		return _frame * p_ab + _drag_off
 	var u := clampf((p_ab - _cervix_ab).dot(_axis_ab) / maxf(_rest_len, 1e-4), 0.0, 1.0)
 	var f := u * float(SEGS - 1)
 	var i := clampi(int(floor(f)), 0, SEGS - 2)
@@ -1263,7 +1706,7 @@ func _skin_all() -> PackedVector3Array:
 	out.resize(_vis_rest.size())
 	if _bone.is_empty():
 		for i in _vis_rest.size():
-			out[i] = _frame * _vis_rest[i]
+			out[i] = _frame * _vis_rest[i] + _drag_off
 		return out
 	for vi in _vis_rest.size():
 		var i := _bind_seg[vi]
@@ -1274,7 +1717,6 @@ func _skin_all() -> PackedVector3Array:
 		if not pw.is_finite():
 			pw = _frame * _vis_rest[vi]
 		out[vi] = pw
-	# 绕当前段链质心均匀放大，补偿弯曲时线性混合把内侧边缩短。
 	if PHYS_SCALE != 1.0 and out.size() > 0 and _p.size() > 0:
 		var c := Vector3.ZERO
 		for q in _p:
@@ -1320,13 +1762,15 @@ func _rebuild_mesh(am: ArrayMesh, verts: PackedVector3Array, nrm_rest: PackedVec
 
 
 func _rebuild_visual() -> void:
-	if _vis_rest.is_empty() or _p.is_empty():
+	if _vis_rest.is_empty() or _p.is_empty() or _skel == null:
 		return
-	if _am == null:
-		_am = ArrayMesh.new()
-		mesh = _am
-	var verts := _skin_all()
-	_rebuild_mesh(_am, verts, _vis_nrm, _vis_uv, _vis_idx)
+	if _bone.size() != SEGS:
+		return
+	for b in SEGS:
+		var bx: Transform3D = _bone[b]
+		if not bx.origin.is_finite():
+			continue
+		_skel.set_bone_pose(b, bx)
 
 
 func exposed_length() -> float:
@@ -1334,7 +1778,7 @@ func exposed_length() -> float:
 		return 0.0
 	var best := 0.0
 	for i in _p.size():
-		if (_p[i] - wound_center).dot(outward) > -0.004:
+		if node_outside(i) or (_p[i] - wound_center).dot(outward) > -0.004:
 			best = maxf(best, _p[i].distance_to(wound_center))
 	return best
 
@@ -1367,7 +1811,8 @@ func debug_mesh_quality() -> Dictionary:
 	if _am == null or _am.get_surface_count() < 1:
 		return out
 	var arr: Array = _am.surface_get_arrays(0)
-	var V: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	# GPU 蒙皮：检查的是当前骨骼姿态下的顶点。
+	var V: PackedVector3Array = _skin_all()
 	var N: PackedVector3Array = arr[Mesh.ARRAY_NORMAL] if arr[Mesh.ARRAY_NORMAL] != null else PackedVector3Array()
 	var I: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
 	for v in V:
@@ -1378,6 +1823,8 @@ func debug_mesh_quality() -> Dictionary:
 			out["nan_normals"] = int(out["nan_normals"]) + 1
 	for f in range(0, I.size() - 2, 3):
 		out["faces"] = int(out["faces"]) + 1
+		if I[f] >= V.size() or I[f + 1] >= V.size() or I[f + 2] >= V.size():
+			continue
 		var a: Vector3 = V[I[f]]
 		var b: Vector3 = V[I[f + 1]]
 		var c: Vector3 = V[I[f + 2]]

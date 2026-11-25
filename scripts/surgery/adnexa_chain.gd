@@ -13,6 +13,7 @@ var floor_y: float = -1e9
 var radius: float = 0.0034
 var horn_embed: float = 0.007
 var ovary_embed: float = 0.006
+var taper: bool = true          # false：等径（子宫系带用）
 
 var _p: PackedVector3Array = PackedVector3Array()
 var _q: PackedVector3Array = PackedVector3Array()
@@ -43,6 +44,17 @@ func points() -> PackedVector3Array:
 func set_points(pts: PackedVector3Array) -> void:
 	_p = pts.duplicate()
 	_q = pts.duplicate()
+
+
+## 由外部（子宫柔体）算好物理后写入位置与上一帧位置，只重建网格，不清速度。
+func apply_points(pts: PackedVector3Array, prev: PackedVector3Array, dir: Vector3) -> void:
+	_p = pts.duplicate()
+	_q = prev.duplicate() if prev.size() == pts.size() else pts.duplicate()
+	if dir.length_squared() > 1e-10:
+		_dir = dir.normalized()
+	if not _p.is_empty():
+		_head = _p[0]
+	_rebuild_mesh()
 
 
 func point_count() -> int:
@@ -242,7 +254,7 @@ func _rebuild_mesh() -> void:
 	for i in n:
 		var u := float(i) / float(n - 1)
 		var rad := radius
-		if u > 0.72:
+		if taper and u > 0.72:
 			var s := (u - 0.72) / 0.28
 			rad = radius * (1.0 - s * 0.92)
 		rads[i] = maxf(rad, radius * 0.08)
