@@ -418,3 +418,70 @@ vec3 canal_stretch(vec3 p) {
 	if (rw <= 1e-5) return vec3(0.0);
 	return (canal_os_now - canal_os_rest) * t * rw * canal_stretch_on;
 }
+
+
+// 0.4.12 子宫脱垂：阴道上段内翻（双层折叠）+ 通道被下移的脱出物撑开。只写给阴道网格（prol_o.w = 1）。
+// prol_o.xyz = 外口(ab)，w = 开关；prol_a.xyz = 外口→宫颈单位轴，w = 通道长；
+// prol_p.x = 下移量 descent，y = 宫颈尖的路径坐标（正 = 在外口里面），z = 子宫长，w = 阴道壁厚；
+// prol_r0 / prol_r1 = 子宫截面半径（宫颈尖 → 宫底均分 8 份），与 ProlapseController.mass_radius_at 同一公式。
+uniform vec4 prol_o = vec4(0.0);
+uniform vec4 prol_a = vec4(0.0, 1.0, 0.0, 0.05);
+uniform vec4 prol_p = vec4(0.0);
+uniform vec4 prol_r0 = vec4(0.0);
+uniform vec4 prol_r1 = vec4(0.0);
+
+float prol_prof(int i) {
+	if (i < 4) return prol_r0[i];
+	return prol_r1[i - 4];
+}
+
+float prol_radius(float a) {
+	float U = prol_p.z;
+	float r0 = prol_r0.x;
+	if (U <= 1e-5 || r0 <= 1e-6) return 0.0;
+	if (a < 0.0) {
+		float t = clamp(-a / max(r0, 1e-4), 0.0, 1.0);
+		return r0 * sqrt(max(1.0 - t * t, 0.0));
+	}
+	if (a >= U) return 0.0;
+	float f = a / U * 7.0;
+	int i = clamp(int(floor(f)), 0, 6);
+	return mix(prol_prof(i), prol_prof(i + 1), clamp(f - float(i), 0.0, 1.0));
+}
+
+// xyz = 位移，w > 0.5 = 该点已内翻（法线反向，黏膜朝外）。
+vec4 prolapse_offset4(vec3 p) {
+	if (prol_o.w < 0.5) return vec4(0.0);
+	float d = prol_p.x;
+	if (d <= 1e-5) return vec4(0.0);
+	float ramp = clamp(d / 0.01, 0.0, 1.0);
+	vec3 ax = prol_a.xyz;
+	float al = length(ax);
+	if (al < 1e-5) return vec4(0.0);
+	ax /= al;
+	float L = prol_a.w;
+	float tip = prol_p.y;
+	float w = prol_p.w;
+	vec3 v = p - prol_o.xyz;
+	float s = dot(v, ax);
+	if (s < -0.012 || s > L + 0.03) return vec4(0.0);
+	vec3 radial = v - ax * s;
+	float r = length(radial);
+	if (r > 0.045) return vec4(0.0);
+	vec3 rdir = r > 1e-6 ? radial / r : normalize(cross(ax, abs(ax.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0)));
+	float a_fold = 0.5 * (L + tip);
+	if (s > a_fold && a_fold < L) {
+		// 内翻层：以折叠处为镜像贴到脱出物表面，宫颈端跟着宫颈尖走；跑到外口外面的部分收在外口圈上（体外由套筒网格表现）。
+		float s2 = 2.0 * a_fold - s;
+		float s2c = max(s2, 0.0);
+		float r_new = prol_radius(s2c - tip) + w + max(r - 0.006, 0.0) * 0.3;
+		vec3 np = prol_o.xyz + ax * s2c + rdir * r_new;
+		return vec4((np - p) * ramp, ramp);
+	}
+	float mr = prol_radius(s - tip);
+	if (mr <= 1e-5) return vec4(0.0);
+	float tgt = mr + 2.0 * w;
+	if (tgt <= r) return vec4(0.0);
+	float near = 1.0 - smoothstep(tgt, tgt + 0.02, r);
+	return vec4(rdir * (tgt - r) * near * ramp, 0.0);
+}

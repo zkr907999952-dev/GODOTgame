@@ -20,6 +20,7 @@ void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
 	vec3 off = strike_offset(l) + drag_offset(l) + dent_offset(l) + speculum_offset(l) + dilate_offset(l) + uterus_ball_offset(l);
+	off += prolapse_offset4(l + off).xyz;
 	vec3 off_w = ab_dir_to_world(off);
 	VERTEX += inverse(mat3(MODEL_MATRIX)) * off_w;
 	wp += off_w;

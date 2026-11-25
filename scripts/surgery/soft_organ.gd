@@ -1864,3 +1864,120 @@ func ovary_at_chain_end(side: int) -> bool:
 	var head: Vector3 = rope.call("head")
 	var ov := ovary_world(side)
 	return ov.distance_to(tip) < 0.006 and ov.distance_to(head) > ov.distance_to(tip) + 0.01
+
+
+# ---------------------------------------------------------------- 外部驱动（0.4.12 子宫脱垂）
+## 段链由 ProlapseController 解算（经阴道脱出，不走腹部创口）；这里只负责：
+## 隐藏原网格、GPU 蒙皮、输卵管/卵巢小链。portal = 阴道外口，portal_out = 外口朝外方向。
+
+var external_drive := false
+var adnexa_hide_outside := true
+
+
+func begin_external(frame: Transform3D, portal: Vector3, portal_out: Vector3) -> void:
+	_frame = frame
+	_prev_frame = frame
+	_has_prev_frame = false
+	wound_center = portal
+	outward = portal_out.normalized() if portal_out.length_squared() > 1e-8 else Vector3.DOWN
+	if organ_active:
+		return
+	_drag_off = Vector3.ZERO
+	_rebase()
+	_hide_sources(true)
+	_init_particles()
+	extract_charge = 1.0
+	retracting = false
+	organ_active = true
+	external_drive = true
+	visible = true
+	_has_pull_target = false
+	hold_index = -1
+	_rebuild_visual()
+	_ensure_tubes()
+
+
+func end_external() -> void:
+	external_drive = false
+	force_reset()
+
+
+func rest_nodes_ab() -> PackedVector3Array:
+	return _rest_ab
+
+
+func seg_rest_lengths() -> PackedFloat32Array:
+	return _seg_rest
+
+
+func node_count() -> int:
+	return SEGS
+
+
+func step_external(dt: float, frame: Transform3D, nodes: PackedVector3Array, portal: Vector3, portal_out: Vector3) -> void:
+	if not organ_active or nodes.size() != SEGS:
+		return
+	var t0 := Time.get_ticks_usec()
+	dt = minf(maxf(dt, 0.0), 1.0 / 30.0)
+	if _has_prev_frame:
+		var xf := frame * _prev_frame.affine_inverse()
+		if xf.origin.length_squared() > 1e-16 or not xf.basis.is_equal_approx(Basis.IDENTITY):
+			# 只搬输卵管小链；宫体节点由外部直接给出。
+			for side in [0, 1]:
+				var tb: Dictionary = _tubes.get(side, {})
+				if tb.is_empty():
+					continue
+				var p: PackedVector3Array = tb["p"]
+				var q: PackedVector3Array = tb["q"]
+				for k in p.size():
+					p[k] = xf * p[k]
+				for k2 in q.size():
+					q[k2] = xf * q[k2]
+				tb["p"] = p
+				tb["q"] = q
+				_tubes[side] = tb
+	_prev_frame = frame
+	_has_prev_frame = true
+	_frame = frame
+	wound_center = portal
+	if portal_out.length_squared() > 1e-8:
+		outward = portal_out.normalized()
+	if _x.size() != TETHER_N + SEGS:
+		_init_particles()
+	for t in TETHER_N:
+		_x[t] = nodes[0]
+		_xq[t] = nodes[0]
+		_st[t] = 0
+	for b in SEGS:
+		var ci := TETHER_N + b
+		_xq[ci] = _x[ci]
+		_x[ci] = nodes[b]
+		_st[ci] = 1 if (nodes[b] - portal).dot(outward) > 0.0 else 0
+	_tlen = TETHER_MIN
+	_sync_body()
+	_update_bones()
+	for side in [0, 1]:
+		_step_tube(side, dt, false)
+		# 宫角已在体外时，输卵管/卵巢留在外翻的阴道套筒里（不从套筒表面穿出来）。
+		var ch: Dictionary = _chains.get(side, {})
+		var vis := not (adnexa_hide_outside and _horn_is_out(side))
+		var rope = ch.get("rope")
+		if rope != null and is_instance_valid(rope):
+			(rope as Node3D).visible = vis
+		var ov = ch.get("ovary")
+		if ov != null and is_instance_valid(ov):
+			(ov as Node3D).visible = vis
+	_rebuild_visual()
+	if _tether_node and is_instance_valid(_tether_node):
+		(_tether_node as Node3D).visible = false
+	last_step_usec = Time.get_ticks_usec() - t0
+
+
+## 当前蒙皮后的网格顶点（世界坐标），供脱垂检测穿模 / 套筒包裹。
+func skinned_vertices() -> PackedVector3Array:
+	return _skin_all()
+
+
+## 静止网格顶点（校正后的腹部坐标）。
+func rest_vertices_ab() -> PackedVector3Array:
+	return _vis_rest

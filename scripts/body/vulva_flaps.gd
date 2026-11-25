@@ -39,6 +39,7 @@ var _iw := [PackedFloat32Array(), PackedFloat32Array()]  # 插入权重：中线
 var _pin := [PackedByteArray(), PackedByteArray()]      # 仅身体接缝锁定
 var _orders := [PackedInt32Array(), PackedInt32Array()]
 var _inserter: RefCounted
+var _custom_ins := false   # 自定义插入物（无 configure）：走它自己的 project_out / penetration
 var _hinge_p := [Vector3.ZERO, Vector3.ZERO]
 var _mat: Material
 var _spread := 0.0
@@ -380,6 +381,13 @@ func spread() -> float:
 
 
 ## 扩张器在位时把前庭内圈（阴道外口）撑到能容纳闭合叶片的椭圆，与开合滑条无关。
+## 插入物形状变了但包络尺寸没变（如脱出物在外口处换了走向）：强制按当前插入物重解一次。
+func refresh_insert() -> void:
+	if ok and _intro_mix > 1e-4:
+		_sync_envelope_inserter()
+		_commit()
+
+
 func set_introitus_open(half_x: float, half_y: float, mix: float, axis: Vector3 = Vector3.ZERO, up: Vector3 = Vector3.ZERO, angle_deg: float = 0.0, blade_sep: float = 0.0) -> void:
 	var m := clampf(mix, 0.0, 1.0)
 	var hx := maxf(half_x, 0.0)
@@ -442,6 +450,11 @@ func _inflated_mouth_point(p: Vector3) -> Vector3:
 		acc += q0
 	var c := acc / float(_mouth_s.size())
 	var q := _envelope_point(p, c)
+	if _custom_ins:
+		# 自定义插入物：口缘贴在它自己的截面上（偏心 / 弯曲也对）。
+		if not _cf_ready:
+			_cache_intro_frame()
+		q = _inserter.project_out(p, _cf_c, _cf_ax, _cf_up)
 	return p.lerp(q, _intro_mix)
 
 
@@ -1588,6 +1601,11 @@ func _commit_dress_soft() -> void:
 
 
 func _sync_envelope_inserter() -> void:
+	_sync_envelope_inserter_inner()
+	_custom_ins = _inserter != null and not _inserter.has_method("configure") and _inserter.has_method("project_out") and _inserter.has_method("penetration")
+
+
+func _sync_envelope_inserter_inner() -> void:
 	var Envelope := preload("res://scripts/body/vulva/envelope_inserter.gd")
 	if _intro_mix < 1e-4 or _intro_hx < 1e-5:
 		_inserter = null
@@ -1717,6 +1735,9 @@ func _cache_intro_frame() -> void:
 func _fast_inside_metal(p: Vector3) -> bool:
 	if _intro_mix < 1e-4 or _intro_hx < 1e-5 or _intro_hy < 1e-5:
 		return false
+	# 自定义插入物（无 configure，如脱垂物的弯胶囊）：用它自己的穿透量判断，不套椭圆柱。
+	if _custom_ins:
+		return _inserter.penetration(p, _cf_c, _cf_ax, _cf_up) > 1e-6
 	var r := p - _cf_c
 	if absf(r.dot(_cf_ax)) > ALONG_RANGE:
 		return false
@@ -1746,7 +1767,7 @@ func _fast_project(p: Vector3, is_inner: bool, side_sign: float = 0.0) -> Vector
 	if not _cf_ready:
 		_cache_intro_frame()
 	# 自定义插入物（非解析包络）走接口；扩张器 / 椭圆走本地热路径。
-	if _inserter != null and not _inserter.has_method("configure") and _inserter.has_method("project_out"):
+	if _custom_ins:
 		return _inserter.project_out(p, _cf_c, _cf_ax, _cf_up)
 	var r := p - _cf_c
 	var along := r.dot(_cf_ax)

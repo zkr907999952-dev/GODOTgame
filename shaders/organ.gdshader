@@ -183,6 +183,12 @@ void vertex() {
 		off += belly * 0.62;
 		off += speculum_offset(l + off);
 		off += dilate_offset(l + off);
+		// 0.4.12：子宫脱垂时阴道内翻 / 撑开（只对阴道网格开）。
+		vec4 po = prolapse_offset4(l + off);
+		off += po.xyz;
+		if (po.w > 0.5) {
+			NORMAL = -NORMAL;
+		}
 	}
 	// 0.4.11：阴道宫颈端跟随脱出的柔体子宫颈（未脱出时 canal_stretch_on=0）。
 	off += canal_stretch(l + off);

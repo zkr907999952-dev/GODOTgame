@@ -435,6 +435,120 @@ func _push_dilate_uniforms() -> void:
 		mat.set_shader_parameter("uter_ball_p", p)
 
 
+# ------------------------------------------------------------------ 0.4.12 子宫脱垂
+const ProlapseControllerScript := preload("res://scripts/body/prolapse/prolapse_controller.gd")
+var _prolapse: Node = null
+var _prol_u: Dictionary = {}
+
+
+## 子宫脱垂控制器（第一次用到时创建）。见 docs/uterine_prolapse.md。
+func prolapse() -> Node:
+	if _prolapse == null or not is_instance_valid(_prolapse):
+		_prolapse = ProlapseControllerScript.new()
+		_prolapse.name = "Prolapse"
+		add_child(_prolapse)
+		_prolapse.call("setup", self)
+	return _prolapse
+
+
+func has_prolapse() -> bool:
+	return _prolapse != null and is_instance_valid(_prolapse) and bool(_prolapse.call("is_active"))
+
+
+## 阴道着色器的脱垂参数（只写给阴道网格；其它网格保持关闭）。
+func set_prolapse_deform(open_ab: Vector3, axis_ab: Vector3, canal_len: float, descent: float, tip_sigma: float, uterus_len: float, wall: float, prof: PackedFloat32Array) -> void:
+	var r0 := Vector4.ZERO
+	var r1 := Vector4.ZERO
+	for i in mini(prof.size(), 8):
+		if i < 4:
+			r0[i] = prof[i]
+		else:
+			r1[i - 4] = prof[i]
+	_prol_u = {
+		"prol_o": Vector4(open_ab.x, open_ab.y, open_ab.z, 1.0),
+		"prol_a": Vector4(axis_ab.x, axis_ab.y, axis_ab.z, canal_len),
+		"prol_p": Vector4(descent, tip_sigma, uterus_len, wall),
+		"prol_r0": r0,
+		"prol_r1": r1,
+	}
+	_push_prolapse_uniforms()
+
+
+func clear_prolapse_deform() -> void:
+	_prol_u = {}
+	_push_prolapse_uniforms()
+
+
+func prolapse_uniforms() -> Dictionary:
+	return _prol_u
+
+
+var _prol_others_clear := false
+
+
+func _push_prolapse_uniforms() -> void:
+	# 每帧只写阴道网格；其它网格只在第一次（或清除时）写一次「关」。
+	for mi in organ_meshes:
+		if mi == null or not is_instance_valid(mi):
+			continue
+		var mat := mi.material_override as ShaderMaterial
+		if mat == null:
+			continue
+		var is_vag := str(mi.get_meta("organ_kind", "")) == "vagina"
+		if is_vag and not _prol_u.is_empty():
+			for k in _prol_u.keys():
+				mat.set_shader_parameter(k, _prol_u[k])
+		elif is_vag or not _prol_others_clear:
+			mat.set_shader_parameter("prol_o", Vector4.ZERO)
+	_prol_others_clear = true
+
+
+## CPU 版阴道脱垂位移（与着色器 prolapse_offset4 同一公式），给自检测内翻 / 撑开。
+func prolapse_offset_ab(p: Vector3) -> Vector4:
+	if _prol_u.is_empty():
+		return Vector4.ZERO
+	var o4: Vector4 = _prol_u["prol_o"]
+	var a4: Vector4 = _prol_u["prol_a"]
+	var p4: Vector4 = _prol_u["prol_p"]
+	var d := p4.x
+	if d <= 1e-5:
+		return Vector4.ZERO
+	var ramp := clampf(d / 0.01, 0.0, 1.0)
+	var o := Vector3(o4.x, o4.y, o4.z)
+	var ax := Vector3(a4.x, a4.y, a4.z).normalized()
+	var L := a4.w
+	var tip := p4.y
+	var w := p4.w
+	var v := p - o
+	var s := v.dot(ax)
+	if s < -0.012 or s > L + 0.03:
+		return Vector4.ZERO
+	var radial := v - ax * s
+	var r := radial.length()
+	if r > 0.045:
+		return Vector4.ZERO
+	var rdir := radial / r if r > 1e-6 else ax.cross(Vector3.RIGHT if absf(ax.x) < 0.9 else Vector3.UP).normalized()
+	var a_fold := 0.5 * (L + tip)
+	var pc: Node = _prolapse
+	if s > a_fold and a_fold < L:
+		var s2 := 2.0 * a_fold - s
+		var s2c := maxf(s2, 0.0)
+		var mr2 := float(pc.call("mass_radius_at", s2c - tip)) if pc else 0.0
+		var r_new := mr2 + w + maxf(r - 0.006, 0.0) * 0.3
+		var np := o + ax * s2c + rdir * r_new
+		var dv := (np - p) * ramp
+		return Vector4(dv.x, dv.y, dv.z, ramp)
+	var mr := float(pc.call("mass_radius_at", s - tip)) if pc else 0.0
+	if mr <= 1e-5:
+		return Vector4.ZERO
+	var tgt := mr + 2.0 * w
+	if tgt <= r:
+		return Vector4.ZERO
+	var near := 1.0 - smoothstep(tgt, tgt + 0.02, r)
+	var dv2 := rdir * (tgt - r) * near * ramp
+	return Vector4(dv2.x, dv2.y, dv2.z, 0.0)
+
+
 ## 阴道开口 / 宫颈 / 轴（朝宫颈），同时给腹部局部和世界坐标。
 ## 外口优先用 mouth_loop 中心，宫颈端对齐 UterusCavity 的 os_center，与内腔拉链和阴道拉伸兼容。
 func vagina_canal() -> Dictionary:
@@ -2022,6 +2136,9 @@ func reset_interaction() -> void:
 	_navel_deep_t = 0.0
 	_blade_entry_cut = false
 	_blade_exit_cut = false
+	# 0.4.12：「复原」同时让子宫脱垂完全回位。
+	if _prolapse != null and is_instance_valid(_prolapse):
+		_prolapse.call("reset")
 
 
 func is_dragging() -> bool:
