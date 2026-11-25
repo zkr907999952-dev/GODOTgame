@@ -4370,7 +4370,7 @@ func _refresh_surgery_ui() -> void:
 	if special and _btn_place_clone:
 		_btn_place_clone.visible = false
 	if _btn_surgery_enter:
-		# T-11：角色观察视角（站在地上）也显示，按下自动躺上检查床再进入。
+		# T-11 / T-15：角色观察视角（站在地上）也显示，按下以当前站姿直接进入（不上检查床）。
 		var obs_s := g != null and g.has_method("can_enter_body_mode_from_observe") and bool(g.call("can_enter_body_mode_from_observe"))
 		_btn_surgery_enter.visible = (on_bed or obs_s) and not special and not is_map_open()
 		_btn_surgery_enter.position = Vector2(sl, st + 56.0)

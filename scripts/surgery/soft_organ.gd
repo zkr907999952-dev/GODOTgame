@@ -25,7 +25,12 @@ const TUBE_RADIUS := 0.0034
 const PHYS_SCALE := 1.0         # 与原网格等大，出生时完全重合
 const TETHER_N := 8             # 系带节点数（含根点）
 const TETHER_MIN := 0.004
-const OUT_EXTRA := 0.035        # 宫颈最多伸出创口约 3.5 cm，整颗子宫可完全在体外
+const OUT_EXTRA := 0.012        # t72u：宫颈最多伸出创口约 1.2 cm（整颗子宫仍可完全在体外，但不再挂得很远）
+## t72u：系带只画创口内侧这一小段到宫颈（短的肉色阴道上段过渡），体内更深的部分不画。
+const TRANSITION_IN := 0.012
+const CERVIX_OUT_MAX := 0.02    # 体外宫颈 / 系带点离创口中心最远 2 cm
+const TRANSITION_R := 0.0105
+const TRANSITION_COLOR := Color(0.8038, 0.5382, 0.4751)
 const HOLE_R := 0.020           # 创口洞半径（质点中线可偏离的范围）
 const WALL_MARGIN := 0.004
 const BODY_R := 0.016           # 体外宫体与皮肤的碰撞半径
@@ -60,6 +65,8 @@ var _nf_reach: float = 0.0
 var _nf_charge: float = -1.0
 var last_step_usec: int = 0
 var _asleep := false
+var _quiet_frames := 0
+const SLEEP_QUIET := 20
 var _sleep_vis_ok := false
 
 var _rest_ab: PackedVector3Array = PackedVector3Array()
@@ -207,6 +214,54 @@ func tether_points() -> PackedVector3Array:
 
 func tether_length() -> float:
 	return _tlen
+
+
+## t72u：真正画出来的过渡段（创口内侧 TRANSITION_IN 处 → 宫颈）的点；系带全在深处时为空。
+func transition_points() -> PackedVector3Array:
+	var pts := tether_points()
+	var out := PackedVector3Array()
+	if pts.size() < 2:
+		return out
+	var lim := -TRANSITION_IN
+	var start := -1
+	for i in pts.size():
+		if (pts[i] - wound_center).dot(outward) >= lim:
+			start = i
+			break
+	if start < 0:
+		return out
+	# 入口固定在创口中心正下方 TRANSITION_IN 处：断端从创口里伸出来，深处的系带不画。
+	var entry := wound_center - outward * TRANSITION_IN
+	# 只取入口 → 宫颈的平滑短段（不跟着系带的松弛节点打折），中点略向创口中心收。
+	var cerv := pts[pts.size() - 1]
+	var mid := entry.lerp(cerv, 0.5)
+	var wc_on := wound_center + outward * (mid - wound_center).dot(outward)
+	mid = mid.lerp(wc_on, 0.35)
+	out.append(entry)
+	out.append(entry.lerp(mid, 0.6))
+	out.append(mid)
+	out.append(mid.lerp(cerv, 0.5))
+	out.append(cerv)
+	return out
+
+
+func transition_length() -> float:
+	var pts := transition_points()
+	var l := 0.0
+	for i in range(1, pts.size()):
+		l += pts[i - 1].distance_to(pts[i])
+	return l
+
+
+func set_transition_color(c: Color) -> void:
+	if _tether_node and is_instance_valid(_tether_node):
+		var m := (_tether_node as GeometryInstance3D).material_override as StandardMaterial3D
+		if m:
+			m.albedo_color = c
+	_transition_color = c
+
+
+var _transition_color := TRANSITION_COLOR
 
 
 func tether_max_length() -> float:
@@ -1532,7 +1587,13 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 		var max_v2 := 0.0
 		for i_s in nb:
 			max_v2 = maxf(max_v2, _x[i_s].distance_squared_to(_xq[i_s]))
+		# T-15：松手瞬间速度本来就≈0（慢慢拖出来的），不能立刻休眠——要连续 SLEEP_QUIET 个模拟帧都不动
+		# （真的停在平衡位置）才睡，否则会定在松手时的姿势（站姿时横着戳在创口外不往下垂）。
 		if max_v2 < 4e-10:
+			_quiet_frames += 1
+		else:
+			_quiet_frames = 0
+		if max_v2 < 4e-10 and (_quiet_frames >= SLEEP_QUIET or _asleep):
 			if _asleep and _sleep_vis_ok and not vis_carry:
 				last_step_usec = Time.get_ticks_usec() - t0
 				return
@@ -1546,6 +1607,7 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 	else:
 		_asleep = false
 		_sleep_vis_ok = false
+		_quiet_frames = 0
 	_build_grid()
 	var sw := _wound_depth()
 	var loose := clampf((_tlen - TETHER_MIN) / maxf(sw * 0.6, 0.01), 0.0, 1.0)
@@ -1597,6 +1659,12 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 		# 系带：只限最长（绳子，可松弛）
 		for k in TETHER_N:
 			_solve_link(k, k + 1, seg_t, true)
+		# t72u：体外的系带 / 宫颈拴在创口中心附近（短过渡），子宫不会挂得离创口很远。
+		for kt in range(1, TETHER_N + 1):
+			if _st[kt] == 1 and kt != _drv_i:
+				var dw := _x[kt] - wound_center
+				if dw.length() > CERVIX_OUT_MAX:
+					_x[kt] = wound_center + dw.normalized() * CERVIX_OUT_MAX
 		# 宫体：硬段长
 		for b in SEGS - 1:
 			_solve_link(TETHER_N + b, TETHER_N + b + 1, float(_seg_rest[b]), false)
@@ -1801,10 +1869,14 @@ func _ensure_tether_mesh() -> void:
 		return
 	var t := AdnexaChain.new()
 	t.name = "UterusTether"
-	t.set("radius", 0.0062)
+	# t72u：短而粗的肉色阴道上段过渡（不再用子宫红材质画一根长管）。
+	t.set("radius", TRANSITION_R)
 	t.set("taper", false)
-	if _mat:
-		t.material_override = _mat
+	var fm := StandardMaterial3D.new()
+	fm.albedo_color = _transition_color
+	fm.roughness = 0.55
+	fm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	t.material_override = fm
 	add_child(t)
 	_tether_node = t
 	t.visible = false
@@ -1813,9 +1885,9 @@ func _ensure_tether_mesh() -> void:
 func _rebuild_tether() -> void:
 	if _tether_node == null or not is_instance_valid(_tether_node):
 		return
-	var pts := tether_points()
-	# 根点埋在阴道顶端里，只在明显被扯长后才显示。
-	var show := _tlen > 0.012 and pts.size() >= 2
+	var pts := transition_points()
+	# 根点埋在阴道顶端里，只在明显被扯长后才显示；只画创口附近到宫颈的一小段。
+	var show := _tlen > 0.012 and pts.size() >= 2 and pts[0].distance_to(pts[pts.size() - 1]) > 0.002
 	(_tether_node as Node3D).visible = show
 	if show:
 		_tether_node.call("apply_points", pts, pts, pts[pts.size() - 1] - pts[0])

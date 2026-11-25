@@ -2159,6 +2159,21 @@ var touch_active: bool = false
 var _touch_surgery: bool = false
 var _vagina_drag: bool = false
 var _prol_hand_rig: Node = null
+var _body_hold_on := false
+var _body_hold_pos := Vector3.ZERO
+
+
+## T-15：站姿进入手术 / 阴道互动时钉住当前站立位置；退出时放开。
+func set_body_mode_hold(on: bool) -> void:
+	if on and not _body_hold_on:
+		_body_hold_pos = global_position
+	_body_hold_on = on
+	if on:
+		velocity = Vector3.ZERO
+
+
+func is_body_mode_held() -> bool:
+	return _body_hold_on
 var _prol_hand_plane := Vector3.ZERO
 var _prol_hand_off := Vector3.ZERO
 
@@ -3284,6 +3299,10 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 	_update_move_ratio(_pos_before, _want_hv, wish_len, delta)
 	_apply_ledge_support(jumped)
+	# T-15：站姿手术 / 阴道互动期间钉住站立位置（不被切口 / 器官 / 台阶逻辑挪动、不滑走）。
+	if _body_hold_on:
+		global_position = _body_hold_pos
+		velocity = Vector3.ZERO
 	_was_grounded = is_on_floor() or _ledge_support
 	_stomp_ragdolls(delta)
 	_fti_tick()

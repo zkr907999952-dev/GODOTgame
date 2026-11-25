@@ -1,5 +1,5 @@
 extends "res://scripts/tests/v0411_check.gd"
-## 未发布（0.4.12 开发中，t67u / T-11）：观察视角进入阴道互动 / 手术；拿取工具拖动悬垂内脏
+## 未发布（0.4.12 开发中，t67u / T-11，T-15 起观察视角以站姿进入不上床）：观察视角进入阴道互动 / 手术；拿取工具拖动悬垂内脏
 ## （扯出量不变、不放回）；手术钳绕钳口倾斜；夹子宫向腹腔外拉；输卵管 / 卵巢拉伸有上限。
 ##   godot --headless --path . -s res://scripts/tests/v0421b_check.gd
 
@@ -75,11 +75,12 @@ func _check_observe_entry() -> void:
 	bv.emit_signal("pressed")
 	var vm: Node = player.call("get_vagina_mode")
 	var ok_v := await _wait_until(func(): return vm != null and bool(vm.call("is_active")), 40)
-	_ok(ok_v, "observe: 阴道互动 button boards the exam bed and enters vagina mode")
-	_ok(str(player.get("occupancy")) == "exam_bed", "observe: player is on the exam bed after the button")
+	_ok(ok_v, "observe: 阴道互动 button enters vagina mode")
+	# T-15：不再自动上检查床，以当前站姿进入。
+	_ok(str(player.get("occupancy")) == "" and vs.get("occupied") == null, "observe: player stays standing (not moved onto the exam bed)")
 	_ok(bool(player.call("is_display_mode")), "observe: stays in the observe view")
 	await _leave_bed()
-	_ok(vs.get("occupied") == null, "observe: left the bed again")
+	_ok(vs.get("occupied") == null and not bool(vm.call("is_active")), "observe: left vagina mode again")
 	main.call("run_action", str(main.call("action_for_key", KEY_Y)), KEY_Y)
 	var ok_y := await _wait_until(func(): return bool(vm.call("is_active")), 40)
 	_ok(ok_y, "observe: Y enters vagina mode from the observe view")
@@ -89,8 +90,12 @@ func _check_observe_entry() -> void:
 	bs.emit_signal("pressed")
 	var su: Node = player.call("get_surgery")
 	var ok_s := await _wait_until(func(): return bool(su.call("is_active")), 40)
-	_ok(ok_s, "observe: 开始手术 button boards the exam bed and starts surgery")
+	_ok(ok_s, "observe: 开始手术 button starts surgery")
+	_ok(str(player.get("occupancy")) == "" and bool(su.get("standing_session")), "observe: surgery starts in the standing pose (no bed)")
 	_ok(bool(player.call("is_display_mode")), "observe: surgery keeps the observe view")
+	# 后面的钳子 / 拿取检查沿用检查床路径。
+	su.call("exit_surgery")
+	await _frames(2)
 
 
 func _check_tilt() -> void:

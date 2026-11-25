@@ -264,6 +264,26 @@ func _check_model(g: int) -> void:
 	_ok(tip_off < 0.003, "grade %d: model cervix follows the physics chain (%.2f mm)" % [g, tip_off * 1000])
 	if g >= 3:
 		_ok((cerv - O).dot(-ain) > 0.005, "grade %d: model cervix / os is outside the introitus" % g)
+	if g == 4:
+		# t73u：外口到子宫的连接段（阴道壁蒂）够粗、肉粉色（阴道黏膜材质，不是子宫红）。
+		var nr := float(md.get("neck_radius"))
+		var rmax := 0.0
+		for r2 in rr:
+			rmax = maxf(rmax, r2)
+		var vg: Array = org.call("viscera_meshes", "vagina")
+		var vcol = ((vg[0] as MeshInstance3D).material_override as ShaderMaterial).get_shader_parameter("base_color") if not vg.is_empty() else null
+		var m0 := mesh.surface_get_material(0) as ShaderMaterial
+		var pink: bool = m0 != null and vcol != null and m0.get_shader_parameter("base_color") == vcol and (vcol as Color).g > 0.4
+		# 细颈环（弧长 > U）都在黏膜面里：面 0 顶点数应 ≥ 细颈环数 × 13。
+		var neck_rings := 0
+		var Uu := float(pc.get("_U"))
+		for a2 in arcs:
+			if a2 > Uu:
+				neck_rings += 1
+		var v_s0 := (mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
+		print("PROLAPSE neck: radius %.1f mm (body max %.1f mm), rings %d, mucosa surface verts %d, pink=%s" % [nr * 1000, rmax * 1000, neck_rings, v_s0, pink])
+		_ok(nr >= 0.013 and nr >= rmax * 0.55, "grade IV: the introitus→uterus connection is thick (%.1f mm radius vs body %.1f mm)" % [nr * 1000, rmax * 1000])
+		_ok(pink and neck_rings >= 3 and v_s0 >= (neck_rings + 1) * 13, "grade IV: the connection uses the flesh-pink vaginal mucosa material, not the red uterus colour")
 
 
 func _check_vagina_deform(g: int) -> void:

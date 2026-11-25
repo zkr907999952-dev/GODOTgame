@@ -866,9 +866,9 @@ func toggle_vagina() -> bool:
 	return bool(vm.call("is_active"))
 
 
-## ---- T-11：角色观察视角（展示模式、站在地上）也能直接进入阴道互动 / 手术 ----
-## 两种模式都需要躺在检查床上：自动躺到当前地图最近的空检查床（没有就在面前放一张），
-## 保持观察视角，等姿势落定几帧后再进入模式。
+## ---- T-11 / T-15：角色观察视角（展示模式、站在地上）也能直接进入阴道互动 / 手术 ----
+## T-15：不再自动躺到检查床上，直接以当前站姿进入；镜头 / 工具 / 取出 / 悬垂物理都按当前姿态计算。
+## 退出后回到观察视角。人在检查床上时仍走原来的检查床路径。
 var _observe_mode_pending: String = ""
 
 
@@ -883,63 +883,38 @@ func can_enter_body_mode_from_observe() -> bool:
 		return false
 	if vehicle_system.get("occupied") != null:
 		return false
-	if _observe_mode_pending != "":
+	if str(_player.get("occupancy")) != "":
+		return false
+	if _player.has_method("is_ragdoll") and bool(_player.call("is_ragdoll")):
+		return false
+	var ps := surgery_system_of(_player)
+	if ps and bool(ps.call("is_active")):
+		return false
+	var pv := vagina_mode_of(_player)
+	if pv and bool(pv.call("is_active")):
 		return false
 	return true
-
-
-func _free_exam_bed_for_observe() -> Node:
-	var best: Node = null
-	var bd := 1e18
-	var p := _player.global_position
-	for v in vehicle_system.get("vehicles"):
-		if v == null or not is_instance_valid(v) or not v.visible:
-			continue
-		if str(vehicle_system.call("kind_of", v)) != "exam_bed":
-			continue
-		if bool(v.get("occupied")):
-			continue
-		var who = v.get("patient")
-		if who != null and is_instance_valid(who):
-			continue
-		var d := p.distance_squared_to((v as Node3D).global_position)
-		if d < bd:
-			bd = d
-			best = v
-	if best == null and vehicle_system.has_method("spawn_at_aim"):
-		best = vehicle_system.call("spawn_at_aim", "exam_bed")
-	return best
 
 
 func enter_mode_from_observe(mode: String) -> bool:
 	if not can_enter_body_mode_from_observe():
 		return false
-	var bed := _free_exam_bed_for_observe()
-	if bed == null:
-		return false
-	vehicle_system.set("nearest", bed)
-	if not bool(vehicle_system.call("try_enter")):
-		return false
-	_observe_mode_pending = mode
-	_finish_observe_mode_entry.call_deferred()
-	return true
-
-
-func _finish_observe_mode_entry() -> void:
-	for _i in 3:
-		await get_tree().process_frame
-	var mode := _observe_mode_pending
-	_observe_mode_pending = ""
-	if _player == null or str(_player.get("occupancy")) != "exam_bed":
-		return
 	if mode == "vagina":
 		var vm := vagina_mode_of(_player)
-		if vm and not bool(vm.call("is_active")):
-			vm.call("enter")
-	elif mode == "surgery":
+		return vm != null and vm.has_method("enter_standing") and bool(vm.call("enter_standing"))
+	if mode == "surgery":
 		var surg := surgery_system_of(_player)
-		if surg and not bool(surg.call("is_active")):
-			surg.call("enter_surgery")
+		return surg != null and surg.has_method("enter_surgery_standing") and bool(surg.call("enter_surgery_standing"))
+	return false
+
+
+## 是否正以站姿（不在检查床上）进行手术 / 阴道互动。
+func body_mode_standing() -> bool:
+	var ps := surgery_system_of(_player) if _player else null
+	if ps and bool(ps.call("is_active")) and bool(ps.get("standing_session")):
+		return true
+	var pv := vagina_mode_of(_player) if _player else null
+	return pv != null and bool(pv.call("is_active")) and bool(pv.get("standing_session"))
 
 
 func observe_mode_pending() -> String:

@@ -16,10 +16,13 @@ const CERVIX_RINGS := 3
 const NECK_RINGS := 4
 const DOME_FRACS := [0.93, 0.72, 0.42, 0.0]
 const OS_DIMPLE := 0.0025
+## IV 度：宫体弧长超过 U × 这个比例后（宫底过渡 + 细颈）用阴道黏膜材质。
+const NECK_PINK_FROM := 0.88
 const REBUILD_EPS := 0.00008
 
 var vertex_count := 0
 var rebuilds := 0
+var neck_radius := 0.0      # 最近一次重建的细颈半径（0 = 没有细颈）
 var _am: ArrayMesh
 var _mat_body: Material = null
 var _mat_cervix: Material = null
@@ -137,6 +140,7 @@ func rebuild(frame: Transform3D, nodes_ab: PackedVector3Array, arcs: PackedFloat
 		radii[ri] = maxf(r, 0.0)
 	_last_centers = centers
 	_last_radii = radii
+	neck_radius = neck_r if has_neck else 0.0
 	_last_arcs = ring_a
 	# ---- 切线 + 平行移动标架
 	var tans := PackedVector3Array()
@@ -169,10 +173,12 @@ func rebuild(frame: Transform3D, nodes_ab: PackedVector3Array, arcs: PackedFloat
 	var u1 := PackedVector2Array()
 	var i1 := PackedInt32Array()
 	var W := SIDES + 1
+	var neck_from := U * NECK_PINK_FROM if has_neck else U
 	var prev_surf := -1
 	for k4 in R - 1:
 		var amid := 0.5 * (ring_a[k4] + ring_a[k4 + 1])
-		var surf := 0 if (amid < cervix_len or amid > U) else 1
+		# 细颈（IV 度宫底 → 外口的阴道壁蒂）连同宫底过渡段都用阴道黏膜材质（肉粉色），不是子宫的红色。
+		var surf := 0 if (amid < cervix_len or amid > neck_from) else 1
 		var V: PackedVector3Array = v0 if surf == 0 else v1
 		var N: PackedVector3Array = n0 if surf == 0 else n1
 		var UV: PackedVector2Array = u0 if surf == 0 else u1

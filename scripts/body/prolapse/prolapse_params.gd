@@ -15,8 +15,8 @@ class_name ProlapseParams
 @export var wall: float = 0.0032
 ## 专用模型里宫颈段的长度（宫颈黏膜材质；之后是宫体材质）。
 @export var cervix_expose: float = 0.013
-## IV 度时宫底到外口之间细颈（阴道穹窿的蒂）的半径。
-@export var neck_r: float = 0.010
+## IV 度时宫底到外口之间的阴道壁蒂（被拉长的阴道壁）半径：t73u 加粗到 16 mm，用阴道黏膜（肉粉色）材质。
+@export var neck_r: float = 0.016
 ## 脱垂期间简化子宫链的节点数（宫颈 → 宫底）。
 @export var nodes: int = 5
 ## 截面半径按子宫网格分位数测得后再乘这个系数。

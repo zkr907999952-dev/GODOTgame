@@ -1,5 +1,6 @@
 extends Node
-## 阴道互动模式：检查床上进入，镜头飞到外阴，自由环绕 + 两个预设视角，专用工具栏。
+## 阴道互动模式：检查床上进入（T-15：观察视角也可以当前站姿直接进入，不上床），镜头飞到外阴，
+## 自由环绕 + 两个预设视角，专用工具栏。镜头都按阴道通道当前的世界朝向计算（躺 / 站都对）。
 class_name VaginaMode
 
 const RegistryScript := preload("res://scripts/interact/vagina_tool_registry.gd")
@@ -57,6 +58,46 @@ func can_enter() -> bool:
 	return not active and _on_bed()
 
 
+## T-15：站姿会话（从观察视角进入，不上检查床）。
+var standing_session := false
+
+
+func _standing_ok() -> bool:
+	if player == null or not is_instance_valid(player):
+		return false
+	if str(player.get("occupancy")) != "":
+		return false
+	if player.has_method("is_dead") and bool(player.call("is_dead")):
+		return false
+	if player.has_method("is_display_mode") and not bool(player.call("is_display_mode")):
+		return false
+	return true
+
+
+func _mode_ok() -> bool:
+	return _on_bed() or (standing_session and _standing_ok())
+
+
+func enter_standing() -> bool:
+	if active:
+		return true
+	if _on_bed():
+		return enter()
+	if not _standing_ok():
+		return false
+	standing_session = true
+	if not enter():
+		standing_session = false
+		return false
+	if player.has_method("set_body_mode_hold"):
+		player.call("set_body_mode_hold", true)
+	return true
+
+
+func is_standing() -> bool:
+	return active and standing_session
+
+
 func _on_bed() -> bool:
 	if player == null:
 		return false
@@ -70,7 +111,7 @@ func _on_bed() -> bool:
 func enter() -> bool:
 	if active:
 		return true
-	if not _on_bed():
+	if not _mode_ok():
 		return false
 	# 与手术互斥：先进互动就退出手术。
 	if surgery and surgery.has_method("is_active") and bool(surgery.call("is_active")):
@@ -105,6 +146,12 @@ func exit() -> void:
 	_view_jolt = Vector3.ZERO
 	if player and player.has_method("clear_orbit_anchor"):
 		player.call("clear_orbit_anchor")
+	if standing_session:
+		standing_session = false
+		if player and player.has_method("set_body_mode_hold"):
+			player.call("set_body_mode_hold", false)
+		if player and player.has_method("tp_home") and str(player.get("occupancy")) == "":
+			player.call("tp_home", false)
 	if _resume_play_mode >= 0 and player and player.has_method("set_play_mode"):
 		if int(player.get("play_mode")) != _resume_play_mode:
 			player.call("set_play_mode", _resume_play_mode)
@@ -433,9 +480,20 @@ func camera_axis_angle() -> float:
 	return acos(clampf(absf(fwd.normalized().dot(ax.normalized())), 0.0, 1.0))
 
 
+## 阴道口视角：相机从外口外侧沿轴线看进去。站着时轴线几乎竖直（相机会在两腿之间贴近地面、仰看），
+## 改为从前下方斜看进去（仍对准外口、沿通道方向偏 ~45°）。
+func _introitus_from() -> Vector3:
+	var axis := canal_axis_world()
+	if absf(axis.y) > 0.6:
+		var f := -axis * 0.62 + canal_up_world() * 0.78
+		if f.length_squared() > 1e-8:
+			return f.normalized()
+	return -axis
+
+
 func _preset_forward() -> Vector3:
 	if camera_preset == PRESET_INTROITUS:
-		return canal_axis_world()
+		return -_introitus_from()
 	if camera_preset == PRESET_ABDOMEN:
 		return -canal_up_world()
 	return _camera_forward()
@@ -463,7 +521,7 @@ func _apply_preset(snap: bool) -> void:
 	if camera_preset == PRESET_INTROITUS:
 		# 在外口外侧，沿轴线看进去。
 		target = opening + axis * 0.012
-		from_target = -axis
+		from_target = _introitus_from()
 		dist = 0.26
 	elif camera_preset == PRESET_ABDOMEN:
 		target = organ_group_center()
@@ -472,7 +530,9 @@ func _apply_preset(snap: bool) -> void:
 	else:
 		# 自由视角：以下体（外口略内侧）为中心，斜侧方看过去。
 		target = opening.lerp(cervix_world(), 0.35)
-		from_target = (up * 0.55 + axis * -0.25)
+		# 站姿（通道近乎竖直）时 -axis 朝下，改成略高于外口的侧前方。
+		var ax_k := -0.25 if absf(axis.y) < 0.6 else 0.12
+		from_target = (up * 0.55 + axis * ax_k)
 		var side := up.cross(axis)
 		if side.length_squared() > 1e-8:
 			from_target += side.normalized() * 0.80
@@ -523,6 +583,10 @@ func _restore_xray() -> void:
 
 func _process(_delta: float) -> void:
 	if not active or player == null:
+		return
+	# 站姿会话：离开观察视角 / 上了载具 / 死亡 → 退出。
+	if standing_session and not _standing_ok():
+		exit()
 		return
 	# 姿态跟着蒙皮中线走，预设方向保持，目标随身体。
 	if camera_preset != PRESET_FREE:

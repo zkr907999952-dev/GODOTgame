@@ -26,6 +26,26 @@ func _run() -> void:
 	quit(1 if fails > 0 else 0)
 
 
+## t72u：取出后只有一小段肉色阴道过渡连着子宫，子宫不挂得很远。
+func _check_transition(so: Node, wound: Vector3, when: String) -> void:
+	var tl := float(so.call("transition_length"))
+	var c_out := float(so.call("cervix_out_distance"))
+	var rest_len := float(so.get("_rest_len"))
+	var fund: Vector3 = so.call("fundus_world")
+	var cerv: Vector3 = so.call("cervix_world")
+	var f_d := fund.distance_to(wound)
+	var tn: Node = so.get("_tether_node")
+	var col_ok := false
+	if tn and is_instance_valid(tn):
+		var m := (tn as GeometryInstance3D).material_override as StandardMaterial3D
+		col_ok = m != null and m.albedo_color.g > 0.4 and m.albedo_color.r < 0.9
+	print("TRANSITION %s: visible stump %.1f cm, cervix %.1f cm out, cervix→wound %.1f cm, fundus→wound %.1f cm (uterus %.1f cm), tether max %.1f cm, flesh=%s" % [when, tl * 100, c_out * 100, cerv.distance_to(wound) * 100, f_d * 100, rest_len * 100, float(so.call("tether_max_length")) * 100, col_ok])
+	_ok(tl <= 0.035, "%s: only a short vaginal transition is drawn (%.1f cm ≤ 3.5 cm)" % [when, tl * 100])
+	_ok(c_out <= 0.02 and cerv.distance_to(wound) <= 0.035, "%s: the cervix stays close to the wound (%.1f cm out, %.1f cm away)" % [when, c_out * 100, cerv.distance_to(wound) * 100])
+	_ok(f_d <= rest_len + 0.04, "%s: the uterus does not hang far from the wound (fundus %.1f cm ≤ %.1f cm)" % [when, f_d * 100, (rest_len + 0.04) * 100])
+	_ok(col_ok, "%s: the transition is flesh-pink (vaginal mucosa), not uterus red" % when)
+
+
 func _tether_through_wound(so: Node, wound: Vector3, outv: Vector3) -> Array:
 	# 系带 + 宫体整条链：每个跨过创口平面的段都要穿过洞口。
 	var pts: PackedVector3Array = so.call("tether_points")
@@ -104,6 +124,7 @@ func _check_fling() -> void:
 	var nout := int(so.call("body_out_count"))
 	print("PULL fundus %.1f cm outside skin/wound plane, cervix %.1f cm, body nodes outside %d/6, tether %.1f/%.1f cm, level %d" % [f_out * 100.0, c_out * 100.0, nout, float(so.call("tether_length")) * 100.0, float(so.call("tether_max_length")) * 100.0, int(s.call("extract_level", "uterus"))])
 	_ok(f_out > 0.03, "after a full pull the fundus is outside the body (%.1f cm)" % (f_out * 100.0))
+	_check_transition(so, wound, "after a full pull")
 	_ok(nout >= 5, "most of the uterus is outside (%d/6 nodes)" % nout)
 	_ok(int(s.call("extract_level", "uterus")) == 5, "full pull reaches level 5")
 	var tw: Array = _tether_through_wound(so, wound, outv)
@@ -151,6 +172,7 @@ func _check_fling() -> void:
 	_ok(f_hang > 0.0 and int(so.call("body_out_count")) >= 4, "the released uterus hangs outside the body (%.1f cm, %d/6)" % [f_hang * 100.0, int(so.call("body_out_count"))])
 	var tw2: Array = _tether_through_wound(so, s.call("_wound_center_world"), (s.call("_cavity_outward") as Vector3).normalized())
 	_ok(float(tw2[1]) < 0.022, "after swinging the tether still passes through the wound (%.1f mm)" % (float(tw2[1]) * 1000.0))
+	_check_transition(so, s.call("_wound_center_world"), "after swinging")
 	var edge2 := float(so.call("max_edge_ratio"))
 	print("EDGE max mesh edge stretch after swing %.4f" % edge2)
 	_ok(edge2 < 1.03, "max edge stretch after swinging %.3f" % edge2)

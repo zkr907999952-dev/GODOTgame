@@ -788,6 +788,60 @@ func can_enter() -> bool:
 	return is_on_exam_bed() and not active
 
 
+## T-15：从观察视角以当前站姿进入（不上检查床）。
+var standing_session := false
+
+
+func _standing_ok() -> bool:
+	if player == null or not is_instance_valid(player):
+		return false
+	if str(player.get("occupancy")) != "":
+		return false
+	if player.has_method("is_dead") and bool(player.call("is_dead")):
+		return false
+	if player.has_method("is_display_mode") and not bool(player.call("is_display_mode")):
+		return false
+	return true
+
+
+func body_mode_ok() -> bool:
+	return is_on_exam_bed() or (standing_session and _standing_ok())
+
+
+func enter_surgery_standing() -> bool:
+	if active:
+		return true
+	if is_on_exam_bed():
+		return enter_surgery()
+	if not _standing_ok():
+		return false
+	standing_session = true
+	if not enter_surgery():
+		standing_session = false
+		return false
+	if player.has_method("set_body_mode_hold"):
+		player.call("set_body_mode_hold", true)
+	_frame_standing_camera(true)
+	return true
+
+
+## 站姿手术镜头：以当前姿态的腹部（肚脐 / 创口区）为中心，从腹部外法线方向看。
+func _frame_standing_camera(snap: bool) -> void:
+	if player == null or not player.has_method("apply_orbit_pose"):
+		return
+	var c := _navel_world()
+	if c.length_squared() < 1e-10:
+		return
+	var outw := _cavity_outward().normalized()
+	var from := outw
+	from.y += 0.25
+	player.call("apply_orbit_pose", c, from.normalized(), 0.72, snap)
+
+
+func surgery_camera_target() -> Vector3:
+	return _navel_world()
+
+
 func has_cavity() -> bool:
 	return _cavity_mi != null and _inner != null and _inner.vert_count() > 0
 
@@ -914,7 +968,7 @@ var _resume_play_mode := -1
 func enter_surgery() -> bool:
 	if active:
 		return true
-	if not is_on_exam_bed():
+	if not body_mode_ok():
 		return false
 	if not _bake_if_needed():
 		push_warning("surgery: bake failed")
@@ -945,6 +999,15 @@ func exit_surgery() -> void:
 	if not active:
 		return
 	active = false
+	if standing_session:
+		standing_session = false
+		if player and player.has_method("set_body_mode_hold"):
+			player.call("set_body_mode_hold", false)
+		# 站姿：退出后回到普通观察镜头。
+		if player and player.has_method("clear_orbit_anchor"):
+			player.call("clear_orbit_anchor")
+		if player and player.has_method("tp_home") and str(player.get("occupancy")) == "":
+			player.call("tp_home", false)
 	if _resume_play_mode >= 0 and player and player.has_method("set_play_mode"):
 		if int(player.get("play_mode")) != _resume_play_mode:
 			player.call("set_play_mode", _resume_play_mode)
@@ -3456,6 +3519,9 @@ func _place_scalpel(world_p: Vector3, dir: Vector3, nrm: Vector3 = Vector3.ZERO)
 func _find_exam_bed() -> Node:
 	if player == null:
 		return null
+	# T-15：站姿手术不用任何检查床（不要拿场景里别的空床当托板 / 地面高度）。
+	if not is_on_exam_bed():
+		return null
 	var g := player.get_parent()
 	var vs: Node = g.get("vehicle_system") if g else null
 	if vs == null:
@@ -3506,11 +3572,12 @@ func _catch_top_y() -> float:
 	var bed := _find_exam_bed()
 	if bed and bed.has_method("seat_global"):
 		return float((bed.call("seat_global") as Vector3).y)
-	if _flap_catch and is_instance_valid(_flap_catch):
+	if _flap_catch and is_instance_valid(_flap_catch) and is_on_exam_bed():
 		return _flap_catch.global_position.y + 0.8
 	if player:
-		return player.global_position.y + 0.7
-	return 0.8
+		# 站姿：接住面 = 脚下地面。
+		return player.global_position.y
+	return 0.0
 
 
 func _spawn_flap(flap_md: Geom.MeshData, flap_outer: Geom.MeshData) -> bool:
@@ -3781,7 +3848,7 @@ func _navel_world() -> Vector3:
 
 
 func _process(dt: float) -> void:
-	if active and not is_on_exam_bed():
+	if active and not body_mode_ok():
 		exit_surgery()
 	if speculum:
 		var st0 := str(speculum.state)
@@ -6145,6 +6212,14 @@ func _ensure_soft(kind: String) -> Node:
 			cervix_rest = Vector3((box_mn.x + box_mx.x) * 0.5, box_mn.y, box_mn.z)
 			fundus_rest = Vector3((box_mn.x + box_mx.x) * 0.5, box_mx.y, box_mx.z)
 	so.call("setup", kind, fr, navel, main_meshes, adnex, cervix_rest, fundus_rest, horns)
+	# t72u：子宫取出后的过渡段用阴道的肉粉底色。
+	if kind == "uterus" and so.has_method("set_transition_color"):
+		var vgm: Array = _organs.call("viscera_meshes", "vagina") if _organs and _organs.has_method("viscera_meshes") else []
+		for vmi in vgm:
+			var vm_mat = (vmi as MeshInstance3D).material_override if vmi is MeshInstance3D else null
+			if vm_mat is ShaderMaterial and (vm_mat as ShaderMaterial).get_shader_parameter("base_color") is Color:
+				so.call("set_transition_color", (vm_mat as ShaderMaterial).get_shader_parameter("base_color"))
+				break
 	# 子宫还要把内膜腔体一起隐藏。
 	if kind == "uterus":
 		var extra: Array = []
