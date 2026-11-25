@@ -263,7 +263,7 @@ func _push_deform() -> void:
 	if not _present or state == "withdrawing" and _anim_t > 0.65:
 		_clear_deform()
 		return
-	# 开合角只驱动阴道壁半开距：depth * tan(half_angle) + 闭合厚度。阴唇不跟滑条。
+	# 开合角驱动阴道壁半开距，同时把外口撑成叶片在外口平面上的真实截面（不是固定左右分开）。
 	var half := deg_to_rad(angle * 0.5)
 	var half_gap := MeshFactory.CLOSED_HALF + _depth * tan(half)
 	var mixv := 1.0
@@ -276,6 +276,17 @@ func _push_deform() -> void:
 		origin += organs.call("soft_offset_ab", _open_ab)
 	var half_width := MeshFactory.BLADE_WIDTH * 0.5 + 0.002
 	organs.call("set_speculum_deform", origin, _axis_ab, _up_ab, _depth, half_gap, mixv, MeshFactory.CLOSED_HALF, half_width)
+	# 外口处的叶片包络：半宽随锥度，半高 = 叶片中心距 + 叶片剖面高，并随开合角增大。
+	var z_intro := maxf(MeshFactory.BLADE_LEN - _depth, 0.006)
+	var t_along := clampf(z_intro / MeshFactory.BLADE_LEN, 0.0, 1.0)
+	var taper := lerpf(1.0, 0.58, t_along * t_along)
+	var ca := cos(half)
+	if ca < 0.2:
+		ca = 0.2
+	var hx := MeshFactory.BLADE_WIDTH * 0.5 * taper + MeshFactory.BLADE_THICK + 0.001
+	var blade_h := (0.011 * lerpf(1.0, 0.50, t_along) + MeshFactory.BLADE_THICK) / ca
+	var blade_sep := MeshFactory.CLOSED_HALF / ca + z_intro * tan(half)
+	var hy := blade_sep + blade_h + 0.001
 	# 插入一开始（甚至还在体外接近外口时）阴唇和外口就要张开，容纳闭合叶片。
 	var labia_mix := mixv
 	if state == "inserting":
@@ -284,7 +295,7 @@ func _push_deform() -> void:
 		labia_mix = 1.0
 	_spread_drive = LABIA_SPREAD * labia_mix
 	if organs.has_method("set_speculum_labia"):
-		organs.call("set_speculum_labia", labia_mix, half_width, MeshFactory.CLOSED_HALF + 0.002, _axis_ab, _up_ab)
+		organs.call("set_speculum_labia", labia_mix, hx, hy, _axis_ab, _up_ab, angle, blade_sep)
 	if organs.has_method("set_vulva_spread"):
 		var want := _spread_drive
 		var p = organs.get("player") if organs != null else null

@@ -2782,6 +2782,7 @@ func _process(_delta: float) -> void:
 	if _player and "play_mode" in _player and int(_player.play_mode) != _last_mode:
 		_last_mode = int(_player.play_mode)
 		_sync_from_systems()
+		_refresh_surgery_ui()
 	if _vehicle_system:
 		var occ = _vehicle_system.get("occupied")
 		if occ:

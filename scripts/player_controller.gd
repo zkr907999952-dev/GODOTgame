@@ -334,6 +334,9 @@ func surgery_look_locked() -> bool:
 	var s := active_surgery()
 	if s == null or not s.has_method("look_locked"):
 		return false
+	# 观察模式：工具只用左键，右键环绕 / 中键平移保持可用。
+	if is_display_mode():
+		return false
 	return bool(s.call("look_locked"))
 
 

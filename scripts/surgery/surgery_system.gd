@@ -908,6 +908,9 @@ func toggle() -> void:
 		enter_surgery()
 
 
+var _resume_play_mode := -1
+
+
 func enter_surgery() -> bool:
 	if active:
 		return true
@@ -916,6 +919,10 @@ func enter_surgery() -> bool:
 	if not _bake_if_needed():
 		push_warning("surgery: bake failed")
 		return false
+	# 观察模式也可以进入：记下进入时的视角，退出时回到观察，不强迫切第一人称。
+	_resume_play_mode = -1
+	if player and "play_mode" in player:
+		_resume_play_mode = int(player.play_mode)
 	active = true
 	tool = ""
 	path_points = PackedVector3Array()
@@ -933,6 +940,10 @@ func exit_surgery() -> void:
 	if not active:
 		return
 	active = false
+	if _resume_play_mode >= 0 and player and player.has_method("set_play_mode"):
+		if int(player.get("play_mode")) != _resume_play_mode:
+			player.call("set_play_mode", _resume_play_mode)
+	_resume_play_mode = -1
 	stroke_active = false
 	path_points = PackedVector3Array()
 	_clear_cut_preview()

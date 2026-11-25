@@ -1,6 +1,6 @@
 extends "res://scripts/tests/v0409b_check.gd"
-## 未发布自检：扩张器开合轴向、沿阴道插入、插入即拨开阴唇（与滑条无关）、
-## 滑条只撑阴道壁、宫颈位于通道末端、直肠局部缩放与肛门衔接、最大开口下尽量不穿模。
+## 未发布自检：扩张器开合轴向、沿阴道插入、插入即拨开阴唇、
+## 滑条撑阴道壁并让外口跟随叶片截面、宫颈位于通道末端、直肠局部缩放与肛门衔接、最大开口下尽量不穿模。
 ##   godot --headless --path . -s res://scripts/tests/v0412_check.gd
 
 
@@ -248,7 +248,8 @@ func _check_insert_labia_and_walls() -> void:
 	_ok(absf(spread1 - spread0) < 0.08, "slider does not change labia spread (%.2f -> %.2f)" % [spread0, spread1])
 	if rig.vulva and rig.vulva.has_method("introitus_half_extents"):
 		var ext1: Vector2 = rig.vulva.call("introitus_half_extents")
-		_ok(absf(ext1.x - ext0.x) < 0.002 and absf(ext1.y - ext0.y) < 0.002, "introitus size is independent of the slider")
+		_ok(ext1.y > ext0.y + 0.004, "introitus height follows the blade opening (hy %.1f -> %.1f mm)" % [ext0.y * 1000.0, ext1.y * 1000.0])
+		_ok(absf(ext1.x - ext0.x) < 0.008, "introitus width stays near the blade width (hx %.1f -> %.1f mm)" % [ext0.x * 1000.0, ext1.x * 1000.0])
 	var gap1: float = rig.get("_spec_d").w
 	_ok(gap1 > gap0 + 0.010, "slider drives vaginal wall half-gap only (%.1f -> %.1f mm)" % [gap0 * 1000.0, gap1 * 1000.0])
 	# 最大开口下，把 shader 的壁变形应用到阴道网格，测与直肠的间隙。

@@ -271,9 +271,25 @@ func _check_organs_0405() -> void:
 
 
 func _ray_hits_tris(P: PackedVector3Array, idx: PackedInt32Array, o: Vector3, d: Vector3, tmax: float) -> bool:
+	# 细化后三角形只有几个平方毫米，Geometry3D 的交点在这个尺度上会全部判空，改用重心坐标自算。
 	for f in idx.size() / 3:
-		var hit = Geometry3D.ray_intersects_triangle(o, d, P[idx[f * 3]], P[idx[f * 3 + 1]], P[idx[f * 3 + 2]])
-		if hit != null and (hit as Vector3).distance_to(o) < tmax:
+		var a: Vector3 = P[idx[f * 3]]
+		var b: Vector3 = P[idx[f * 3 + 1]]
+		var c: Vector3 = P[idx[f * 3 + 2]]
+		var n: Vector3 = (b - a).cross(c - a)
+		var nd := n.dot(d)
+		if absf(nd) < 1e-16:
+			continue
+		var t := n.dot(a - o) / nd
+		if t < 0.0 or t > tmax:
+			continue
+		var p0: Vector3 = o + d * t
+		var n2 := n.dot(n)
+		if n2 < 1e-20:
+			continue
+		var u := n.dot((c - b).cross(p0 - b)) / n2
+		var v := n.dot((a - c).cross(p0 - c)) / n2
+		if u >= -1e-5 and v >= -1e-5 and u + v <= 1.0 + 1e-5:
 			return true
 	return false
 

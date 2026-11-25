@@ -219,7 +219,7 @@ func setup(skel: Skeleton3D) -> bool:
 
 
 # ------------------------------------------------------------------ 0.4.05 外阴分瓣
-const VulvaFlaps := preload("res://scripts/body/vulva_flaps.gd")
+const VulvaFlaps := preload("res://scripts/body/vulva/vulva_system.gd")
 var vulva = null
 
 
@@ -307,12 +307,12 @@ func set_speculum_deform(origin_ab: Vector3, axis_ab: Vector3, up_ab: Vector3, d
 	_spec_m = Vector4(clampf(mixv, 0.0, 1.0), maxf(half_closed, 0.002), 0.0, 0.0)
 
 
-func set_speculum_labia(mixv: float, half_x: float, half_y: float, axis_ab: Vector3, up_ab: Vector3) -> void:
+func set_speculum_labia(mixv: float, half_x: float, half_y: float, axis_ab: Vector3, up_ab: Vector3, angle_deg: float = 0.0, blade_sep: float = 0.0) -> void:
 	_spec_spread = clampf(SPEC_LABIA_SPREAD * clampf(mixv, 0.0, 1.0), 0.0, 1.0)
 	if vulva == null:
 		return
 	if vulva.has_method("set_introitus_open"):
-		vulva.call("set_introitus_open", half_x, half_y, clampf(mixv, 0.0, 1.0), axis_ab, up_ab)
+		vulva.call("set_introitus_open", half_x, half_y, clampf(mixv, 0.0, 1.0), axis_ab, up_ab, angle_deg, blade_sep)
 	vulva.set_spread(maxf(vulva.spread(), _spec_spread))
 
 
