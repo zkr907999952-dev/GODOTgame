@@ -19,11 +19,23 @@ varying vec3 v_ab;
 void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
-	vec3 off = strike_offset(l) + drag_offset(l) + dent_offset(l) + speculum_offset(l) + dilate_offset(l) + uterus_ball_offset(l);
+	vec3 off = strike_offset(l) + drag_offset(l) + dent_offset(l) + speculum_offset(l) + dilate_offset(l) + canal_stir_offset(l) + uterus_straighten_offset(l) + uterus_ball_offset(l);
 	off += prolapse_offset4(l + off).xyz;
 	vec3 off_w = ab_dir_to_world(off);
 	VERTEX += inverse(mat3(MODEL_MATRIX)) * off_w;
 	wp += off_w;
+	// 把背面顶点压到剖切面上，得到类似子宫平切的实心切面，而不是斜剖的皮瓣。
+	if (section_on > 0.5) {
+		vec3 n = section_normal;
+		float nl = length(n);
+		if (nl > 1e-5) {
+			n /= nl;
+			float s = dot(wp - section_point, n);
+			vec3 dw = -n * s;
+			wp += dw;
+			VERTEX += inverse(mat3(MODEL_MATRIX)) * dw;
+		}
+	}
 	v_world = wp;
 	v_ab = l + off;
 }

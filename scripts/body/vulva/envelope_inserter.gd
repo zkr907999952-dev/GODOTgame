@@ -1,6 +1,6 @@
 extends "res://scripts/body/vulva/vulva_inserter.gd"
-## 两叶 / 椭圆 / 胶囊都可表示的通用截面插入物。
-## 扩张器：两个上下椭圆（blade_sep>0）；手指 / 棒状：blade_sep=0 的单椭圆或圆。
+## 截面插入物：blade_sep=0 为单椭圆 / 胶囊；blade_sep>0 时上下两瓣共享同一
+## 圆角矩形（stadium）扩张体积——两瓣外壳加上它们之间的空隙，组织贴合此外表面。
 
 var _mix := 0.0
 var _hx := 0.0
@@ -9,6 +9,8 @@ var _sep := 0.0
 var _axis := Vector3(0, 1, 0)
 var _up := Vector3(0, 0, 1)
 var _along := 0.028
+# 体外一侧（沿轴负向）的影响范围：外口不要被推出体表太远。
+var _along_out := 0.008
 
 
 func configure(half_x: float, half_y: float, mixv: float, axis: Vector3, up: Vector3, blade_sep: float = 0.0, along_range: float = 0.028) -> void:
@@ -17,6 +19,7 @@ func configure(half_x: float, half_y: float, mixv: float, axis: Vector3, up: Vec
 	_mix = clampf(mixv, 0.0, 1.0)
 	_sep = maxf(blade_sep, 0.0)
 	_along = maxf(along_range, 0.008)
+	_along_out = minf(_along, 0.008)
 	if axis.length_squared() > 1e-8:
 		_axis = axis.normalized()
 	var u := up
@@ -35,7 +38,23 @@ func mix() -> float:
 
 
 func envelope() -> Dictionary:
-	return {"half_x": _hx, "half_y": _hy, "blade_sep": _sep, "axis": _axis, "up": _up}
+	return {
+		"half_x": _hx,
+		"half_y": _hy,
+		"blade_sep": _sep,
+		"axis": _axis,
+		"up": _up,
+		"corner": _corner(),
+		"along": _along,
+		"along_out": _along_out,
+	}
+
+
+func _corner() -> float:
+	# blade_sep>0 时表示圆角矩形的「平直半高」= hy - corner。
+	if _sep < 1e-5:
+		return 0.0
+	return clampf(_hy - _sep, 0.001, minf(_hx, _hy) * 0.95)
 
 
 func _basis_side() -> Vector3:
@@ -47,72 +66,122 @@ func _ell_k(x: float, y: float, hx: float, hh: float) -> float:
 	return (x * x) / maxf(hx * hx, 1e-8) + (y * y) / maxf(hh * hh, 1e-8)
 
 
+## 圆角矩形 SDF（与 organ_common.speculum_offset 同一公式）。负值在体内。
+static func stadium_sdf(x: float, y: float, hx: float, hy: float, cr: float) -> float:
+	var cx := maxf(cr, 0.0005)
+	var he := Vector2(maxf(hx, cx + 0.0004), maxf(hy, cx + 0.0004))
+	var q := Vector2(absf(x) - (he.x - cx), absf(y) - (he.y - cx))
+	return Vector2(maxf(q.x, 0.0), maxf(q.y, 0.0)).length() + minf(maxf(q.x, q.y), 0.0) - cx
+
+
+static func stadium_grad(x: float, y: float, hx: float, hy: float, cr: float) -> Vector2:
+	var cx := maxf(cr, 0.0005)
+	var he := Vector2(maxf(hx, cx + 0.0004), maxf(hy, cx + 0.0004))
+	var qx := absf(x) - (he.x - cx)
+	var qy := absf(y) - (he.y - cx)
+	var sx := 1.0 if x >= 0.0 else -1.0
+	var sy := 1.0 if y >= 0.0 else -1.0
+	if qx > 0.0 and qy > 0.0:
+		var L := Vector2(qx, qy).length()
+		if L < 1e-12:
+			return Vector2(0.0, sy)
+		return Vector2(sx * qx / L, sy * qy / L)
+	if qx > qy:
+		return Vector2(sx, 0.0)
+	return Vector2(0.0, sy)
+
+
+static func stadium_project(x: float, y: float, hx: float, hy: float, cr: float, margin: float = 1.016) -> Vector2:
+	# 从原点沿射线打到圆角矩形外壳。近轴点必须能被推到上下瓣，不能用「最近面」（那会把组织推向左右侧壁，外口高度塌掉）。
+	var hx2 := hx * margin
+	var hy2 := hy * margin
+	var cr2 := maxf(cr * margin, 0.0005)
+	cr2 = minf(cr2, minf(hx2, hy2) - 0.0004)
+	if absf(x) < 1e-8 and absf(y) < 1e-8:
+		return Vector2(0.0, hy2)
+	var L := Vector2(x, y).length()
+	var dx := x / L
+	var dy := y / L
+	var flat_x := hx2 - cr2
+	var flat_y := hy2 - cr2
+	if absf(dx) > 1e-8:
+		var t_side := hx2 / absf(dx)
+		if absf(t_side * dy) <= flat_y + 1e-6:
+			return Vector2(dx * t_side, dy * t_side)
+	if absf(dy) > 1e-8:
+		var t_tb := hy2 / absf(dy)
+		if absf(t_tb * dx) <= flat_x + 1e-6:
+			return Vector2(dx * t_tb, dy * t_tb)
+	var sx := 1.0 if dx >= 0.0 else -1.0
+	var sy := 1.0 if dy >= 0.0 else -1.0
+	var cx := sx * flat_x
+	var cy := sy * flat_y
+	# |t d - c|^2 = cr^2
+	var b := -2.0 * (dx * cx + dy * cy)
+	var c0 := cx * cx + cy * cy - cr2 * cr2
+	var disc := b * b - 4.0 * c0
+	if disc < 0.0:
+		return Vector2(dx * hx2, dy * hy2)
+	var t := (-b + sqrt(disc)) * 0.5
+	if t < 0.0:
+		t = (-b - sqrt(disc)) * 0.5
+	t = maxf(t, 0.0)
+	return Vector2(dx * t, dy * t)
+
+
 func _hull(x: float, y: float) -> Vector2:
 	var hx := maxf(_hx, 1e-5)
 	var hy := maxf(_hy, 1e-5)
-	var cy := _sep
-	if cy < 1e-5:
+	var cr := _corner()
+	if cr < 1e-5:
 		var e := (x * x) / (hx * hx) + (y * y) / (hy * hy)
 		if e <= 1e-8:
 			return Vector2(0.0, hy)
 		var k := 1.0 / sqrt(e)
 		return Vector2(x * k, y * k)
-	var hh := maxf(hy - cy, 0.002)
-	var L := sqrt(x * x + y * y)
-	if L < 1e-8:
-		return Vector2(0.0, hy)
-	var dx := x / L
-	var dy := y / L
-	if absf(dx) > 1e-6:
-		var t_side := hx / absf(dx)
-		if absf(t_side * dy) <= cy + 1e-6:
-			return Vector2(dx * t_side, dy * t_side)
-	var sy := 1.0 if dy >= 0.0 else -1.0
-	var A := (dx * dx) / (hx * hx) + (dy * dy) / (hh * hh)
-	var B := -2.0 * dy * sy * cy / (hh * hh)
-	var C := (cy * cy) / (hh * hh) - 1.0
-	var disc := B * B - 4.0 * A * C
-	if disc < 0.0 or A < 1e-12:
-		return Vector2(dx * hx, dy * hy)
-	var t := (-B + sqrt(disc)) / (2.0 * A)
-	if t < 0.0:
-		t = (-B - sqrt(disc)) / (2.0 * A)
-	return Vector2(dx * maxf(t, 0.0), dy * maxf(t, 0.0))
+	return stadium_project(x, y, hx, hy, cr, 1.0)
 
 
 func _out_metal(x: float, y: float) -> Vector2:
 	var hx := maxf(_hx, 1e-5)
 	var hy := maxf(_hy, 1e-5)
-	var cy := _sep
-	var hh := maxf(hy - cy, 0.002)
-	var margin := 1.016
-	if cy < 1e-5:
+	var cr := _corner()
+	if cr < 1e-5:
 		var e := _ell_k(x, y, hx, hy)
 		if e < 1e-8:
-			return Vector2(0.0, hy * margin)
-		var s := margin / sqrt(e)
+			return Vector2(0.0, hy * 1.016)
+		var s := 1.016 / sqrt(e)
 		return Vector2(x * s, y * s)
-	var ku := _ell_k(x, y - cy, hx, hh)
-	var kl := _ell_k(x, y + cy, hx, hh)
-	if ku <= kl:
-		if ku < 1e-8:
-			return Vector2(0.0, cy + hh * margin)
-		var s2 := margin / sqrt(ku)
-		return Vector2(x * s2, cy + (y - cy) * s2)
-	if kl < 1e-8:
-		return Vector2(0.0, -(cy + hh * margin))
-	var s3 := margin / sqrt(kl)
-	return Vector2(x * s3, -cy + (y + cy) * s3)
+	return stadium_project(x, y, hx, hy, cr, 1.016)
 
 
 func _inside_metal(x: float, y: float) -> bool:
 	var hx := maxf(_hx, 1e-5)
 	var hy := maxf(_hy, 1e-5)
-	var cy := _sep
-	var hh := maxf(hy - cy, 0.002)
-	if cy < 1e-5:
+	var cr := _corner()
+	if cr < 1e-5:
 		return _ell_k(x, y, hx, hy) < 1.0
-	return _ell_k(x, y - cy, hx, hh) < 1.0 or _ell_k(x, y + cy, hx, hh) < 1.0
+	return stadium_sdf(x, y, hx, hy, cr) < 0.0
+
+
+func is_inside_xy(x: float, y: float) -> bool:
+	return _inside_metal(x, y)
+
+
+func project_xy(x: float, y: float) -> Vector2:
+	return _out_metal(x, y)
+
+
+func hull_xy(x: float, y: float) -> Vector2:
+	return _hull(x, y)
+
+
+func along_limits() -> Vector2:
+	return Vector2(_along, _along_out)
+
+
+func _along_ok(along: float) -> bool:
+	return along <= _along and along >= -_along_out
 
 
 func project_out(p: Vector3, origin: Vector3, axis: Vector3, up: Vector3) -> Vector3:
@@ -131,7 +200,7 @@ func project_out(p: Vector3, origin: Vector3, axis: Vector3, up: Vector3) -> Vec
 	side = side.normalized()
 	var r := p - origin
 	var along := r.dot(ax)
-	if absf(along) > _along:
+	if not _along_ok(along):
 		return p
 	var x := r.dot(side)
 	var y := r.dot(u)
@@ -156,21 +225,19 @@ func penetration(p: Vector3, origin: Vector3, axis: Vector3, up: Vector3) -> flo
 		return 0.0
 	side = side.normalized()
 	var r := p - origin
-	if absf(r.dot(ax)) > _along:
+	if not _along_ok(r.dot(ax)):
 		return 0.0
 	var x := r.dot(side)
 	var y := r.dot(u)
 	var hx := maxf(_hx, 1e-5)
 	var hy := maxf(_hy, 1e-5)
-	var cy := _sep
-	var hh := maxf(hy - cy, 0.002)
-	var k := 2.0
-	if cy < 1e-5:
-		k = _ell_k(x, y, hx, hy)
+	var cr := _corner()
+	if cr < 1e-5:
+		var k := _ell_k(x, y, hx, hy)
 		if k < 1.0:
 			return (1.0 - sqrt(maxf(k, 0.0))) * minf(hx, hy)
-	else:
-		k = minf(_ell_k(x, y - cy, hx, hh), _ell_k(x, y + cy, hx, hh))
-		if k < 1.0:
-			return (1.0 - sqrt(maxf(k, 0.0))) * minf(hx, hh)
+		return 0.0
+	var d := stadium_sdf(x, y, hx, hy, cr)
+	if d < 0.0:
+		return -d
 	return 0.0

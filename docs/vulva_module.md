@@ -10,7 +10,7 @@
 | `scripts/body/vulva_flaps.gd` | 皮瓣剪裁、接缝圈、骨骼+PBD、网格修复。System 继承它。 |
 | `scripts/body/vulva/vulva_params.gd` | 数据参数（刚度、骨骼名、圈数、拉伸上限）。 |
 | `scripts/body/vulva/vulva_inserter.gd` | 通用插入物接口。 |
-| `scripts/body/vulva/envelope_inserter.gd` | 椭圆 / 双叶截面实现（扩张器、胶囊、圆截面道具）。 |
+| `scripts/body/vulva/envelope_inserter.gd` | 椭圆 / 圆角矩形（stadium）截面。扩张器上下两瓣共享同一体积（外壳+空隙）。 |
 | `shaders/vulva_soft.gdshader` | 前庭黏膜：外圈跟皮肤贴图连续，向内过渡到黏膜色。 |
 
 ## 网格与顶点组
@@ -31,14 +31,14 @@
 不要在外阴脚本里为扩张器 / 手指 / 玩具写 `if`。任意道具实现 `VulvaInserter`：
 
 - `mix()` — 0 未插入，1 完全在位
-- `envelope()` — `{half_x, half_y, blade_sep, axis, up}`，外口平面上的截面包络
+- `envelope()` — `{half_x, half_y, blade_sep, corner, axis, up}`，外口平面上的截面包络。`blade_sep>0` 时表示 stadium 的平直半高（`hy - corner`），不是两叶中心距
 - `project_out(p, origin, axis, up)` — 把顶点推出物体
 - `penetration(p, …)` — 穿模深度
 - `cross_section(origin, axis, up)` — 可选，精确多边形截面
 
 然后 `vulva.set_inserter(ins)`。已有：
 
-- `EnvelopeInserter`：双叶（扩张器随开合角变化的叶片包络）或单椭圆 / 圆（棒、指节）
+- `EnvelopeInserter`：扩张器为单一 stadium（两瓣外壳 + 中间空隙）；`blade_sep=0` 时仍是单椭圆 / 圆（棒、指节）。体外一侧只影响约 8 mm，避免外口/大腿连接被顶出。`debug_mesh_quality()` 会检查接缝圈和大腿-阴部皮肤三角形是否退化或翻转
 - `VulvaSystem.set_capsule_insert(origin, axis, radius, mix)` — 钳子、手指的快捷入口
 - `ProlapseMassInserter`（`scripts/body/prolapse/`）— 子宫脱垂时脱出物从里往外穿过外口：弯胶囊（阴道轴 → 脱出方向），没有 `configure()`，走自定义路径
 
@@ -59,7 +59,7 @@
 - 阴蒂 / 包皮独立网格或形变骨，绑到 `clitoral_hood`
 - 小阴唇更密的一圈，只用 `labia_minora_*`
 - 通道按 `canal_seg_*` 做深度相关的润滑 / 箍紧参数
-- 新道具：实现 `VulvaInserter`（也可用网格 SDF 做 `project_out`）；非解析包络会走接口，椭圆/双叶走热路径
+- 新道具：实现 `VulvaInserter`（也可用网格 SDF 做 `project_out`）；非解析包络会走接口，椭圆/stadium 走热路径
 - 把 `VulvaParams` 存成资源，按角色或体型加载
 - 通道深度方向的软体（按 `canal_seg_*` 分段刚度），以及阴蒂/小阴唇独立骨驱动
 - 周围皮肤衰减可换成预计算的谐波权或骨骼蒙皮，而不必改插入物接口

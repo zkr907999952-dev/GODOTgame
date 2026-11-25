@@ -175,12 +175,15 @@ void vertex() {
 	} else if (is_uterus) {
 		off += belly * 0.72;
 		off += uter_offset(l);
+		off += uterus_straighten_offset(l + off);
+		off += canal_stir_offset(l + off);
 		off += rod_offset(l + off) * 0.55;
 		off += speculum_offset(l + off);
 		off += dilate_offset(l + off);
 		off += uterus_ball_offset(l + off);
 	} else {
 		off += belly * 0.62;
+		off += canal_stir_offset(l + off);
 		off += speculum_offset(l + off);
 		off += dilate_offset(l + off);
 		// 0.4.12：子宫脱垂时阴道内翻 / 撑开（只对阴道网格开）。

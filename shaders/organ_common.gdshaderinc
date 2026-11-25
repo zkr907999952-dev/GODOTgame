@@ -150,15 +150,65 @@ vec3 dent_offset(vec3 p) {
 	return dent_off * exp(-dot(d, d) / (dent.w * dent.w));
 }
 
-// 阴道扩张器：沿阴道轴把管壁 / 外阴撑成开合椭圆，露出内壁与宫颈。
+// 阴道扩张器：上下两瓣共享同一个圆角矩形（stadium）扩张体积，
+// 组织贴合两瓣外壳加上中间空隙的凸包外表面。
 // spec_o.xyz = 开口(ab-local)，w = 插入深度（<=0 关闭）
 // spec_d.xyz = 朝宫颈方向，w = 尖端半开距（米）
 // spec_u.xyz = 开合方向（耻骨/会阴），w = 叶片半宽
-// spec_m.x = 混合，y = 闭合半高
+// spec_m.x = 混合，y = 外口半高，z = 圆角半径（默认 4 mm）
 uniform vec4 spec_o = vec4(0.0);
 uniform vec4 spec_d = vec4(0.0);
 uniform vec4 spec_u = vec4(0.0);
 uniform vec4 spec_m = vec4(0.0);
+
+float stadium_sdf(vec2 p, vec2 he, float cr) {
+	float c = max(cr, 0.0005);
+	vec2 h = max(he, vec2(c + 0.0004));
+	vec2 q = abs(p) - h + vec2(c);
+	return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - c;
+}
+
+vec2 stadium_grad(vec2 p, vec2 he, float cr) {
+	float c = max(cr, 0.0005);
+	vec2 h = max(he, vec2(c + 0.0004));
+	vec2 q = abs(p) - h + vec2(c);
+	vec2 s = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	if (q.x > 0.0 && q.y > 0.0) {
+		float L = length(q);
+		if (L < 1e-8) return vec2(0.0, s.y);
+		return s * (q / L);
+	}
+	if (q.x > q.y) return vec2(s.x, 0.0);
+	return vec2(0.0, s.y);
+}
+
+vec2 stadium_ray(vec2 p, vec2 he, float cr) {
+	float c = max(cr, 0.0005);
+	vec2 h = max(he, vec2(c + 0.0004));
+	c = min(c, min(h.x, h.y) - 0.0004);
+	float L = length(p);
+	if (L < 1e-8) return vec2(0.0, h.y);
+	vec2 d = p / L;
+	vec2 flat = h - vec2(c);
+	if (abs(d.x) > 1e-8) {
+		float t_side = h.x / abs(d.x);
+		if (abs(t_side * d.y) <= flat.y + 1e-6) return d * t_side;
+	}
+	if (abs(d.y) > 1e-8) {
+		float t_tb = h.y / abs(d.y);
+		if (abs(t_tb * d.x) <= flat.x + 1e-6) return d * t_tb;
+	}
+	vec2 s = vec2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
+	vec2 cc = s * flat;
+	float b = -2.0 * dot(d, cc);
+	float c0 = dot(cc, cc) - c * c;
+	float disc = b * b - 4.0 * c0;
+	if (disc < 0.0) return vec2(d.x * h.x, d.y * h.y);
+	float t = (-b + sqrt(disc)) * 0.5;
+	if (t < 0.0) t = (-b - sqrt(disc)) * 0.5;
+	t = max(t, 0.0);
+	return d * t;
+}
 
 vec3 speculum_offset(vec3 p) {
 	float depth = spec_o.w;
@@ -181,28 +231,27 @@ vec3 speculum_offset(vec3 p) {
 	float half_side = max(spec_u.w, 0.008);
 	float mixv = clamp(spec_m.x, 0.0, 1.0);
 	float half_closed = max(spec_m.y, 0.002);
+	float cr = spec_m.z;
+	if (cr < 1e-5) cr = 0.004;
 	vec3 v = p - o;
 	float s = dot(v, ax);
-	float smin = -0.022;
+	// 体外一侧只推 7 mm，避免外口/大腿连接被顶出体表。
+	float smin = -0.007;
 	float smax = depth + 0.014;
-	if (s < smin - 0.025 || s > smax + 0.025) return vec3(0.0);
-	float along_w = smoothstep(smin - 0.018, smin, s) * (1.0 - smoothstep(smax, smax + 0.02, s));
+	if (s < smin - 0.012 || s > smax + 0.025) return vec3(0.0);
+	float along_w = smoothstep(smin - 0.008, smin, s) * (1.0 - smoothstep(smax, smax + 0.02, s));
 	if (along_w < 0.01) return vec3(0.0);
-	float along = clamp(s / max(depth, 1e-4), 0.0, 1.15);
-	float ry = mix(half_closed, half_tip, clamp(along, 0.0, 1.0)) + 0.003;
-	// 外口就要容纳闭合叶片宽度；沿通道再随叶片略收。
-	float rx = half_side * mix(1.0, 0.78, clamp(along, 0.0, 1.0));
+	float along = clamp(s / max(depth, 1e-4), 0.0, 1.0);
+	float ry = mix(half_closed, half_tip, along);
+	float rx = half_side * mix(1.0, 0.85, along);
+	cr = min(cr, min(rx, ry) - 0.0004);
 	float xu = dot(v, side);
 	float yu = dot(v, up);
-	vec3 radial = side * xu + up * yu;
-	float pr = length(radial);
-	if (pr < 1e-6) return vec3(0.0);
-	float e = (xu * xu) / max(rx * rx, 1e-8) + (yu * yu) / max(ry * ry, 1e-8);
-	if (e >= 1.0) return vec3(0.0);
-	float k = 1.0 / sqrt(max(e, 1e-6));
-	float cap = (max(rx, ry) + 0.02) / pr;
-	k = min(k, cap);
-	return (radial / pr) * (pr * k - pr) * mixv * along_w;
+	float e = stadium_sdf(vec2(xu, yu), vec2(rx, ry), cr);
+	if (e >= 0.0) return vec3(0.0);
+	// 沿径向推到外壳，避免近轴点被推到左右侧壁。
+	vec2 hit = stadium_ray(vec2(xu, yu), vec2(rx, ry), cr);
+	return (side * (hit.x - xu) + up * (hit.y - yu)) * mixv * along_w;
 }
 
 // 阴道扩张环：跟着金属球沿轴线走，弹性，球过后回缩到杆径。
@@ -212,6 +261,8 @@ vec3 speculum_offset(vec3 p) {
 uniform vec4 dilate_o = vec4(0.0);
 uniform vec4 dilate_d = vec4(0.0);
 uniform vec4 dilate_p = vec4(0.0);
+// 扩张环相对轴线的侧向偏移（球不在轴上时，环跟着球走）。
+uniform vec3 dilate_lat = vec3(0.0);
 
 // 与下面 CPU 的 OrganRig.canal_dilate_radius_at 保持同一公式。
 float dilate_target_radius(float along) {
@@ -255,7 +306,7 @@ vec3 dilate_offset(vec3 p) {
 	if (s < smin - 0.02 || s > smax + 0.02) return vec3(0.0);
 	float along_w = smoothstep(smin - 0.016, smin, s) * (1.0 - smoothstep(smax, smax + 0.016, s));
 	if (along_w < 0.01) return vec3(0.0);
-	vec3 radial = v - ax * s;
+	vec3 radial = v - ax * s - dilate_lat;
 	float pr = length(radial);
 	if (pr < 1e-6) return vec3(0.0);
 	float target = dilate_target_radius(s);
@@ -485,3 +536,53 @@ vec4 prolapse_offset4(vec3 p) {
 	float near = 1.0 - smoothstep(tgt, tgt + 0.02, r);
 	return vec4(rdir * (tgt - r) * near * ramp, 0.0);
 }
+
+// 球杆搅动：组织弹性跟随位移（杆停下后回弹到静止扩张形状）。
+// stir_off = ab-local 位移；stir_p.xyz = 作用中心（球心），w = 影响半径（<=0 关闭）
+uniform vec3 stir_off = vec3(0.0);
+uniform vec4 stir_p = vec4(0.0);
+
+vec3 canal_stir_offset(vec3 p) {
+	float R = stir_p.w;
+	if (R <= 1e-5 || dot(stir_off, stir_off) < 1e-12) return vec3(0.0);
+	vec3 d = p - stir_p.xyz;
+	float k = exp(-dot(d, d) / (R * R));
+	return stir_off * k;
+}
+
+// 子宫被球顶直：原先前倾弯折，球在宫腔内推进时绕宫颈把宫体转向杆轴。
+// uter_str = 0..1；uter_str_from = 休息宫底方向；uter_str_to = 杆轴；uter_str_len = 作用长度。
+uniform float uter_str = 0.0;
+uniform vec3 uter_str_pivot = vec3(0.0);
+uniform vec3 uter_str_from = vec3(0.0);
+uniform vec3 uter_str_to = vec3(0.0);
+uniform float uter_str_len = 0.06;
+
+vec3 uterus_straighten_offset(vec3 p) {
+	float a = clamp(uter_str, 0.0, 1.0);
+	if (a < 1e-4) return vec3(0.0);
+	vec3 from = uter_str_from;
+	vec3 to = uter_str_to;
+	float fl = length(from);
+	float tl = length(to);
+	if (fl < 1e-5 || tl < 1e-5) return vec3(0.0);
+	from /= fl;
+	to /= tl;
+	vec3 q = p - uter_str_pivot;
+	float along = dot(q, from);
+	if (along < -0.004) return vec3(0.0);
+	float w = clamp(along / max(uter_str_len, 0.01), 0.0, 1.0);
+	w = w * w * (3.0 - 2.0 * w);
+	float cd = clamp(dot(from, to), -1.0, 1.0);
+	float ang = acos(cd) * a * w;
+	if (abs(ang) < 1e-5) return vec3(0.0);
+	vec3 rax = cross(from, to);
+	float rl = length(rax);
+	if (rl < 1e-6) return vec3(0.0);
+	rax /= rl;
+	float c = cos(ang);
+	float s = sin(ang);
+	vec3 q2 = q * c + cross(rax, q) * s + rax * dot(rax, q) * (1.0 - c);
+	return q2 - q;
+}
+

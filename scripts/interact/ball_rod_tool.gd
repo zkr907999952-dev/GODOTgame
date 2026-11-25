@@ -53,6 +53,11 @@ var _area: Area3D
 var _shape: SphereShape3D
 var _inserter: RefCounted
 var _parked := true
+var _prev_tip: Vector3 = Vector3.ZERO
+var _have_prev_tip := false
+var _stir_world: Vector3 = Vector3.ZERO
+var _straighten := 0.0
+var _debug_dt := 0.0
 
 
 func setup(p_mode: Node, p_organs: Node, p_player: Node) -> void:
@@ -73,6 +78,9 @@ func activate() -> void:
 	depth = -0.04 - radius()
 	lateral = Vector3.ZERO
 	dragging = false
+	_have_prev_tip = false
+	_stir_world = Vector3.ZERO
+	_straighten = 0.0
 	if _root:
 		_root.visible = true
 	_sync_pose(0.0)
@@ -92,6 +100,10 @@ func deactivate() -> void:
 			organs.call("clear_canal_dilate")
 		if organs.has_method("clear_uterus_ball"):
 			organs.call("clear_uterus_ball")
+		if organs.has_method("clear_canal_stir"):
+			organs.call("clear_canal_stir")
+		if organs.has_method("clear_uterus_straighten"):
+			organs.call("clear_uterus_straighten")
 		if organs.get("vulva") and organs.vulva.has_method("set_inserter") and not _prolapse_owns_introitus():
 			organs.vulva.call("set_inserter", null)
 	if _root:
@@ -214,8 +226,40 @@ func debug_set_depth(s: float) -> void:
 	var cerv := _cervix_depth()
 	through_cervix = s > cerv + radius() * 0.4
 	cervix_pressure = 0.0
+	_have_prev_tip = false
+	_stir_world = Vector3.ZERO
+	_debug_dt = 0.5
 	_sync_pose(0.0)
 	_apply_deform()
+	_debug_dt = 0.0
+
+
+func debug_step_lateral(offset_world: Vector3, dt: float = 0.016) -> void:
+	_debug_dt = maxf(dt, 1e-4)
+	_prev_tip = tip_world()
+	_have_prev_tip = true
+	var axis := _axis_world()
+	lateral = offset_world - axis * offset_world.dot(axis)
+	_sync_pose(0.0)
+	_apply_deform()
+	_debug_dt = 0.0
+
+
+func debug_settle(dt: float = 0.25) -> void:
+	# 杆停下后让搅动位移回弹（目标速度为 0）。
+	_debug_dt = maxf(dt, 1e-4)
+	_prev_tip = tip_world()
+	_have_prev_tip = true
+	_apply_deform()
+	_debug_dt = 0.0
+
+
+func debug_stir_offset() -> Vector3:
+	return _stir_world
+
+
+func debug_straighten() -> float:
+	return _straighten
 
 
 func debug_add_pressure(p: float) -> void:
@@ -433,7 +477,7 @@ func _apply_depth_gate(desired: float, dt: float) -> void:
 	last_pull_force = 0.0
 	var cerv := _cervix_depth()
 	var r := radius()
-	var max_in := cerv + r * 0.55 + _opening_world().distance_to(_fundus_world()) * 0.85
+	var max_in := cerv + r * 0.55 + maxf(_opening_world().distance_to(_fundus_world()), _uterus_rest_len()) * (0.85 + 0.12 * _straighten)
 	var min_out := -0.06 - r
 	desired = clampf(desired, min_out, max_in)
 	var gate_start := cerv - r * 0.85
@@ -551,7 +595,13 @@ func _apply_deform() -> void:
 			organs.call("clear_canal_dilate")
 		if organs.has_method("clear_uterus_ball"):
 			organs.call("clear_uterus_ball")
+		if organs.has_method("clear_canal_stir"):
+			organs.call("clear_canal_stir")
+		if organs.has_method("clear_uterus_straighten"):
+			organs.call("clear_uterus_straighten")
 		uterus_distend = 0.0
+		_stir_world = Vector3.ZERO
+		_straighten = 0.0
 		return
 	var canal: Dictionary = organs.call("vagina_canal")
 	if canal.is_empty():
@@ -567,17 +617,17 @@ func _apply_deform() -> void:
 	var mixv := 1.0
 	if depth < -r:
 		mixv = clampf((depth + r + 0.008) / 0.016, 0.0, 1.0)
+	var lat_ab := Vector3.ZERO
+	if organs.get("_frame") != null and lateral.length_squared() > 1e-10:
+		var xf0: Transform3D = organs.get("_frame")
+		lat_ab = xf0.basis.inverse() * lateral
 	if organs.has_method("set_canal_dilate"):
 		var res := residual + cervix_pulse * 0.45
-		organs.call("set_canal_dilate", opening_ab, axis_ab, depth, r, mixv, SHAFT_RADIUS, res, cerv_s)
+		organs.call("set_canal_dilate", opening_ab, axis_ab, depth, r, mixv, SHAFT_RADIUS, res, cerv_s, lat_ab)
 	# 阴唇 / 外口：VulvaInserter。
 	if organs.get("vulva") and organs.vulva.has_method("set_inserter"):
 		if _inserter == null:
 			_inserter = InserterScript.new()
-		var lat_ab := Vector3.ZERO
-		if organs.get("_frame") != null and lateral.length_squared() > 1e-10:
-			var xf: Transform3D = organs.get("_frame")
-			lat_ab = xf.basis.inverse() * lateral
 		_inserter.configure(depth, r, SHAFT_RADIUS, axis_ab, up_ab, mixv, lat_ab)
 		if not _prolapse_owns_introitus():
 			organs.vulva.call("set_inserter", _inserter if mixv > 0.02 else null)
@@ -596,9 +646,139 @@ func _apply_deform() -> void:
 		uterus_distend = r * mixv
 	elif organs.has_method("clear_uterus_ball"):
 		organs.call("clear_uterus_ball")
+	_apply_stir_and_straighten(opening_ab, axis_ab, cerv_s, r, mixv, lat_ab)
+
+
+func _apply_stir_and_straighten(opening_ab: Vector3, axis_ab: Vector3, cerv_s: float, r: float, mixv: float, lat_ab: Vector3) -> void:
+	if organs == null:
+		return
+	# 脱垂进行中不跟球杆抢子宫姿态。
+	if organs.has_method("has_prolapse") and bool(organs.call("has_prolapse")):
+		var pc = organs.call("prolapse")
+		if pc and pc.has_method("amount") and float(pc.call("amount")) > 0.02:
+			if organs.has_method("clear_uterus_straighten"):
+				organs.call("clear_uterus_straighten")
+			if organs.has_method("clear_canal_stir"):
+				organs.call("clear_canal_stir")
+			_straighten = 0.0
+			_stir_world = Vector3.ZERO
+			return
+	var tip := tip_world()
+	var dt := _debug_dt if _debug_dt > 1e-5 else get_physics_process_delta_time()
+	if dt <= 1e-5:
+		dt = 1.0 / 60.0
+	var vel := Vector3.ZERO
+	if _have_prev_tip:
+		vel = (tip - _prev_tip) / dt
+	_prev_tip = tip
+	_have_prev_tip = true
+	# 跟随速度：杆在动时组织被带着走；停下后目标为 0，弹簧回弹。
+	var target := vel * 0.07
+	if target.length() > 0.018:
+		target = target.normalized() * 0.018
+	var k := 1.0 - exp(-dt * 14.0)
+	_stir_world = _stir_world.lerp(target, k)
+	var xf: Transform3D = organs.get("_frame") if organs.get("_frame") != null else Transform3D.IDENTITY
+	var stir_ab: Vector3 = xf.basis.inverse() * _stir_world
+	var tip_ab: Vector3 = xf.affine_inverse() * tip if tip.is_finite() else (opening_ab + axis_ab * depth + lat_ab)
+	var influence := maxf(r * 4.5, 0.05)
+	if organs.has_method("set_canal_stir"):
+		if mixv > 0.05 and _stir_world.length() > 1e-5:
+			organs.call("set_canal_stir", stir_ab, tip_ab, influence)
+		elif organs.has_method("clear_canal_stir"):
+			organs.call("clear_canal_stir")
+	# 进入宫腔后按深入程度把前倾子宫顶直，抽出时放松。宫颈闸门仍由 _apply_depth_gate 管。
+	var want := 0.0
+	if through_cervix and depth > cerv_s - r * 0.2:
+		var rest_len := _uterus_rest_len()
+		var into := maxf(depth - cerv_s, 0.0)
+		var t := clampf(into / maxf(rest_len * 0.65, 0.02), 0.0, 1.0)
+		want = t * t * (3.0 - 2.0 * t)
+	var ks := 1.0 - exp(-dt * 8.0)
+	_straighten = lerpf(_straighten, want, ks)
+	if organs.has_method("set_uterus_straighten") and _straighten > 0.01:
+		var cerv_ab: Vector3 = opening_ab + axis_ab * cerv_s
+		var rest_ax: Vector3 = organs.call("uterus_rest_axis_ab") if organs.has_method("uterus_rest_axis_ab") else axis_ab
+		var rod_ax := axis_ab
+		if _root:
+			rod_ax = (xf.basis.inverse() * _axis_world())
+			if rod_ax.length_squared() > 1e-8:
+				rod_ax = rod_ax.normalized()
+		organs.call("set_uterus_straighten", _straighten, cerv_ab, rest_ax, rod_ax, maxf(_uterus_rest_len(), 0.04))
+	elif organs.has_method("clear_uterus_straighten"):
+		organs.call("clear_uterus_straighten")
+
+
+func _uterus_rest_len() -> float:
+	var c := _cervix_world()
+	# 用子宫网格中心到宫颈的距离估计宫腔长度，保留前倾弯折，不投影到阴道轴上。
+	if organs and organs.has_method("viscera_meshes"):
+		var arr: Array = organs.call("viscera_meshes", "uterus")
+		if arr.is_empty():
+			arr = organs.call("viscera_meshes", "uterus_cavity")
+		var acc := Vector3.ZERO
+		var n := 0
+		for mi in arr:
+			if mi is MeshInstance3D and (mi as MeshInstance3D).mesh:
+				var xf: Transform3D = (mi as MeshInstance3D).global_transform
+				acc += xf * (mi as MeshInstance3D).mesh.get_aabb().get_center()
+				n += 1
+		if n > 0:
+			var mid := acc / float(n)
+			var L := c.distance_to(mid)
+			if L > 0.02:
+				return L * 1.35
+	return maxf(_opening_world().distance_to(_fundus_world()) * 0.7, 0.04)
+
+
+func _ball_wall_clearance() -> float:
+	# 宫腔内球心到（拉直 + 撑开后）宫壁的最小余量。负值表示穿模。
+	if organs == null or not through_cervix:
+		return 0.0
+	var r := radius()
+	var xf: Transform3D = organs.get("_frame") if organs.get("_frame") != null else Transform3D.IDENTITY
+	var tip_ab: Vector3 = xf.affine_inverse() * tip_world()
+	var worst := 1e9
+	var n := 0
+	if organs.has_method("viscera_meshes"):
+		var arr: Array = organs.call("viscera_meshes", "uterus_cavity")
+		if arr.is_empty():
+			arr = organs.call("viscera_meshes", "uterus")
+		for mi in arr:
+			if not (mi is MeshInstance3D) or (mi as MeshInstance3D).mesh == null:
+				continue
+			var mesh: Mesh = (mi as MeshInstance3D).mesh
+			if mesh.get_surface_count() < 1:
+				continue
+			var a: Array = mesh.surface_get_arrays(0)
+			if a.is_empty() or a[Mesh.ARRAY_VERTEX] == null:
+				continue
+			var P: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+			var step := maxi(1, P.size() / 80)
+			var gxf: Transform3D = (mi as MeshInstance3D).global_transform
+			for i in range(0, P.size(), step):
+				var p_ab: Vector3 = xf.affine_inverse() * (gxf * P[i])
+				if organs.has_method("uterus_straighten_offset_at"):
+					p_ab += organs.call("uterus_straighten_offset_at", p_ab)
+				# 与 uterus_ball_offset 相同：球内点被推到 need 半径。
+				var need := r
+				var d := p_ab - tip_ab
+				var dist := d.length()
+				var def := p_ab
+				if dist < 1e-6:
+					def = tip_ab + Vector3(0, need * 0.25, 0)
+				elif dist < need:
+					def = tip_ab + d / dist * need
+				var cl := def.distance_to(tip_ab) - r
+				worst = minf(worst, cl)
+				n += 1
+	if n == 0:
+		return 0.0
+	return worst
 
 
 func _physics_process(delta: float) -> void:
+
 	if _root == null or not _root.visible:
 		return
 	var t0 := Time.get_ticks_usec()

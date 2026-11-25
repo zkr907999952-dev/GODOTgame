@@ -89,8 +89,16 @@ var _spec_spread: float = 0.0
 var _dilate_o: Vector4 = Vector4.ZERO
 var _dilate_d: Vector4 = Vector4.ZERO
 var _dilate_p: Vector4 = Vector4.ZERO
+var _dilate_lat: Vector3 = Vector3.ZERO
 var _uter_ball: Vector4 = Vector4.ZERO
 var _uter_ball_p: Vector4 = Vector4.ZERO
+var _stir_off: Vector3 = Vector3.ZERO
+var _stir_p: Vector4 = Vector4.ZERO
+var _uter_str: float = 0.0
+var _uter_str_pivot: Vector3 = Vector3.ZERO
+var _uter_str_from: Vector3 = Vector3.ZERO
+var _uter_str_to: Vector3 = Vector3.ZERO
+var _uter_str_len: float = 0.06
 ## Cached rest-space canal (opening / cervix / axis), fitted once.
 var _canal_rest: Dictionary = {}
 var _gut_along_cache: Dictionary = {}
@@ -280,7 +288,7 @@ func vulva_flaps():
 	return vulva
 
 
-func set_speculum_deform(origin_ab: Vector3, axis_ab: Vector3, up_ab: Vector3, depth: float, half_gap: float, mixv: float, half_closed: float = 0.004, half_width: float = 0.016) -> void:
+func set_speculum_deform(origin_ab: Vector3, axis_ab: Vector3, up_ab: Vector3, depth: float, half_gap: float, mixv: float, half_closed: float = 0.004, half_width: float = 0.016, corner: float = 0.004) -> void:
 	if depth <= 1e-5 or mixv <= 1e-5:
 		# 叶片已完全抽出时才清壁变形；阴唇开合由 set_speculum_labia 单独管。
 		_spec_o = Vector4.ZERO
@@ -310,7 +318,7 @@ func set_speculum_deform(origin_ab: Vector3, axis_ab: Vector3, up_ab: Vector3, d
 	_spec_o = Vector4(origin_ab.x, origin_ab.y, origin_ab.z, depth)
 	_spec_d = Vector4(ax.x, ax.y, ax.z, maxf(half_gap, 0.002))
 	_spec_u = Vector4(up.x, up.y, up.z, maxf(half_width, 0.006))
-	_spec_m = Vector4(clampf(mixv, 0.0, 1.0), maxf(half_closed, 0.002), 0.0, 0.0)
+	_spec_m = Vector4(clampf(mixv, 0.0, 1.0), maxf(half_closed, 0.002), maxf(corner, 0.001), 0.0)
 
 
 func set_speculum_labia(mixv: float, half_x: float, half_y: float, axis_ab: Vector3, up_ab: Vector3, angle_deg: float = 0.0, blade_sep: float = 0.0) -> void:
@@ -337,7 +345,7 @@ func clear_speculum_deform() -> void:
 
 
 ## 通道扩张环：origin/axis 为腹部局部，depth 是球心沿轴距外口的距离，radius 是球半径。
-func set_canal_dilate(origin_ab: Vector3, axis_ab: Vector3, depth: float, radius: float, mixv: float, shaft_r: float = 0.004, residual: float = 0.0, cervix_depth: float = 0.0) -> void:
+func set_canal_dilate(origin_ab: Vector3, axis_ab: Vector3, depth: float, radius: float, mixv: float, shaft_r: float = 0.004, residual: float = 0.0, cervix_depth: float = 0.0, lateral_ab: Vector3 = Vector3.ZERO) -> void:
 	if mixv <= 1e-5 or radius <= 1e-6:
 		clear_canal_dilate()
 		return
@@ -349,6 +357,7 @@ func set_canal_dilate(origin_ab: Vector3, axis_ab: Vector3, depth: float, radius
 	_dilate_o = Vector4(origin_ab.x, origin_ab.y, origin_ab.z, depth)
 	_dilate_d = Vector4(ax.x, ax.y, ax.z, maxf(radius, 0.001))
 	_dilate_p = Vector4(clampf(mixv, 0.0, 1.0), maxf(shaft_r, 0.0), clampf(residual, 0.0, 1.0), cervix_depth)
+	_dilate_lat = lateral_ab - ax * lateral_ab.dot(ax)
 	_push_dilate_uniforms()
 
 
@@ -356,6 +365,7 @@ func clear_canal_dilate() -> void:
 	_dilate_o = Vector4.ZERO
 	_dilate_d = Vector4.ZERO
 	_dilate_p = Vector4.ZERO
+	_dilate_lat = Vector3.ZERO
 	_push_dilate_uniforms()
 
 
@@ -403,6 +413,186 @@ func uterus_ball_distend() -> float:
 	return _uter_ball.w * _uter_ball_p.x
 
 
+func canal_dilate_lateral() -> Vector3:
+	return _dilate_lat
+
+
+func set_canal_stir(offset_ab: Vector3, center_ab: Vector3, radius: float) -> void:
+	_stir_off = offset_ab
+	_stir_p = Vector4(center_ab.x, center_ab.y, center_ab.z, maxf(radius, 0.0))
+	_push_dilate_uniforms()
+
+
+func clear_canal_stir() -> void:
+	_stir_off = Vector3.ZERO
+	_stir_p = Vector4.ZERO
+	_push_dilate_uniforms()
+
+
+func canal_stir_offset() -> Vector3:
+	return _stir_off
+
+
+func canal_stir_offset_at(p_ab: Vector3) -> Vector3:
+	var R := _stir_p.w
+	if R <= 1e-5 or _stir_off.length_squared() < 1e-12:
+		return Vector3.ZERO
+	var d := p_ab - Vector3(_stir_p.x, _stir_p.y, _stir_p.z)
+	var k := exp(-d.length_squared() / (R * R))
+	return _stir_off * k
+
+
+func set_uterus_straighten(amount: float, pivot_ab: Vector3, from_ab: Vector3, to_ab: Vector3, length_m: float = 0.06) -> void:
+	_uter_str = clampf(amount, 0.0, 1.0)
+	_uter_str_pivot = pivot_ab
+	_uter_str_from = from_ab
+	_uter_str_to = to_ab
+	_uter_str_len = maxf(length_m, 0.01)
+	_push_dilate_uniforms()
+
+
+func clear_uterus_straighten() -> void:
+	_uter_str = 0.0
+	_uter_str_pivot = Vector3.ZERO
+	_uter_str_from = Vector3.ZERO
+	_uter_str_to = Vector3.ZERO
+	_push_dilate_uniforms()
+
+
+func uterus_straighten() -> float:
+	return _uter_str
+
+
+func uterus_rest_axis_ab() -> Vector3:
+	var canal: Dictionary = vagina_canal() if has_method("vagina_canal") else {}
+	var cerv: Vector3 = canal.get("cervix_ab", Vector3.ZERO)
+	var far := cerv
+	var best := -1.0
+	var n := 0
+	if has_method("viscera_meshes"):
+		var arr: Array = viscera_meshes("uterus")
+		if arr.is_empty():
+			arr = viscera_meshes("uterus_cavity")
+		for mi in arr:
+			if not (mi is MeshInstance3D) or (mi as MeshInstance3D).mesh == null:
+				continue
+			var mesh: Mesh = (mi as MeshInstance3D).mesh
+			if mesh.get_surface_count() < 1:
+				continue
+			var a: Array = mesh.surface_get_arrays(0)
+			if a.is_empty() or a[Mesh.ARRAY_VERTEX] == null:
+				continue
+			var P: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+			var xf: Transform3D = (mi as MeshInstance3D).global_transform
+			var step := maxi(1, P.size() / 120)
+			for i in range(0, P.size(), step):
+				var p_ab: Vector3 = _frame.affine_inverse() * (xf * P[i])
+				var d := p_ab.distance_squared_to(cerv)
+				if d > best:
+					best = d
+					far = p_ab
+				n += 1
+	if n > 0 and best > 1e-6:
+		return (far - cerv).normalized()
+	var canal_ax: Vector3 = canal.get("axis_ab", Vector3(0, 1, 0))
+	var up: Vector3 = canal.get("up_ab", Vector3(0, 0, 1))
+	var fallback := canal_ax * 0.35 + up * 0.65
+	return fallback.normalized() if fallback.length_squared() > 1e-8 else Vector3(0, 1, 0)
+
+
+func uterus_bend_angle() -> float:
+	# 休息宫轴与当前（已拉直混合后的）宫轴之间的夹角，弧度。完全拉直为 0。
+	var from := _uter_str_from if _uter_str_from.length_squared() > 1e-8 else uterus_rest_axis_ab()
+	var to := _uter_str_to
+	if to.length_squared() < 1e-8:
+		var canal: Dictionary = vagina_canal() if has_method("vagina_canal") else {}
+		to = canal.get("axis_ab", Vector3(0, 1, 0))
+	if from.length_squared() < 1e-8 or to.length_squared() < 1e-8:
+		return 0.0
+	from = from.normalized()
+	to = to.normalized()
+	var rest := acos(clampf(from.dot(to), -1.0, 1.0))
+	return rest * (1.0 - _uter_str)
+
+
+func uterus_straighten_offset_at(p_ab: Vector3) -> Vector3:
+	var a := clampf(_uter_str, 0.0, 1.0)
+	if a < 1e-4:
+		return Vector3.ZERO
+	var from := _uter_str_from
+	var to := _uter_str_to
+	if from.length_squared() < 1e-10 or to.length_squared() < 1e-10:
+		return Vector3.ZERO
+	from = from.normalized()
+	to = to.normalized()
+	var q := p_ab - _uter_str_pivot
+	var along := q.dot(from)
+	if along < -0.004:
+		return Vector3.ZERO
+	var w := clampf(along / maxf(_uter_str_len, 0.01), 0.0, 1.0)
+	w = w * w * (3.0 - 2.0 * w)
+	var ang := acos(clampf(from.dot(to), -1.0, 1.0)) * a * w
+	if absf(ang) < 1e-5:
+		return Vector3.ZERO
+	var rax := from.cross(to)
+	if rax.length_squared() < 1e-12:
+		return Vector3.ZERO
+	rax = rax.normalized()
+	var c := cos(ang)
+	var s := sin(ang)
+	var q2 := q * c + rax.cross(q) * s + rax * q.dot(rax) * (1.0 - c)
+	return q2 - q
+
+
+func speculum_offset_ab(p_ab: Vector3) -> Vector3:
+	# 与 organ_common.speculum_offset 同一公式，供包络/位移自检。
+	var depth := _spec_o.w
+	if depth <= 0.0:
+		return Vector3.ZERO
+	var o := Vector3(_spec_o.x, _spec_o.y, _spec_o.z)
+	var ax := Vector3(_spec_d.x, _spec_d.y, _spec_d.z)
+	if ax.length_squared() < 1e-10:
+		return Vector3.ZERO
+	ax = ax.normalized()
+	var up := Vector3(_spec_u.x, _spec_u.y, _spec_u.z)
+	up = up - ax * up.dot(ax)
+	if up.length_squared() < 1e-10:
+		return Vector3.ZERO
+	up = up.normalized()
+	var side := ax.cross(up)
+	if side.length_squared() < 1e-10:
+		return Vector3.ZERO
+	side = side.normalized()
+	var half_tip := maxf(_spec_d.w, 0.002)
+	var half_side := maxf(_spec_u.w, 0.008)
+	var mixv := clampf(_spec_m.x, 0.0, 1.0)
+	var half_closed := maxf(_spec_m.y, 0.002)
+	var cr := _spec_m.z
+	if cr < 1e-5:
+		cr = 0.004
+	var v := p_ab - o
+	var s := v.dot(ax)
+	var smin := -0.007
+	var smax := depth + 0.014
+	if s < smin - 0.012 or s > smax + 0.025:
+		return Vector3.ZERO
+	var along_w := smoothstep(smin - 0.008, smin, s) * (1.0 - smoothstep(smax, smax + 0.02, s))
+	if along_w < 0.01:
+		return Vector3.ZERO
+	var along := clampf(s / maxf(depth, 1e-4), 0.0, 1.0)
+	var ry := lerpf(half_closed, half_tip, along)
+	var rx := half_side * lerpf(1.0, 0.85, along)
+	cr = minf(cr, minf(rx, ry) - 0.0004)
+	var xu := v.dot(side)
+	var yu := v.dot(up)
+	var Envelope := preload("res://scripts/body/vulva/envelope_inserter.gd")
+	var e: float = Envelope.stadium_sdf(xu, yu, rx, ry, cr)
+	if e >= 0.0:
+		return Vector3.ZERO
+	var hit: Vector2 = Envelope.stadium_project(xu, yu, rx, ry, cr, 1.0)
+	return (side * (hit.x - xu) + up * (hit.y - yu)) * mixv * along_w
+
+
 func _push_dilate_uniforms() -> void:
 	for m in _all_mats:
 		if m == null:
@@ -410,6 +600,14 @@ func _push_dilate_uniforms() -> void:
 		m.set_shader_parameter("dilate_o", _dilate_o)
 		m.set_shader_parameter("dilate_d", _dilate_d)
 		m.set_shader_parameter("dilate_p", _dilate_p)
+		m.set_shader_parameter("dilate_lat", _dilate_lat)
+		m.set_shader_parameter("stir_off", _stir_off)
+		m.set_shader_parameter("stir_p", _stir_p)
+		m.set_shader_parameter("uter_str", _uter_str)
+		m.set_shader_parameter("uter_str_pivot", _uter_str_pivot)
+		m.set_shader_parameter("uter_str_from", _uter_str_from)
+		m.set_shader_parameter("uter_str_to", _uter_str_to)
+		m.set_shader_parameter("uter_str_len", _uter_str_len)
 		m.set_shader_parameter("uter_ball", _uter_ball)
 		# 宫腔（内膜）不额外加壁厚，子宫外膜加上壁厚，其它网格关掉球撑开。
 		var wall_p := _uter_ball_p
@@ -2139,6 +2337,11 @@ func reset_interaction() -> void:
 	# 0.4.12：「复原」同时让子宫脱垂完全回位。
 	if _prolapse != null and is_instance_valid(_prolapse):
 		_prolapse.call("reset")
+	clear_canal_dilate()
+	clear_uterus_ball()
+	clear_canal_stir()
+	clear_uterus_straighten()
+	clear_speculum_deform()
 
 
 func is_dragging() -> bool:
@@ -2793,6 +2996,14 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("dilate_o", _dilate_o)
 		m.set_shader_parameter("dilate_d", _dilate_d)
 		m.set_shader_parameter("dilate_p", _dilate_p)
+		m.set_shader_parameter("dilate_lat", _dilate_lat)
+		m.set_shader_parameter("stir_off", _stir_off)
+		m.set_shader_parameter("stir_p", _stir_p)
+		m.set_shader_parameter("uter_str", _uter_str)
+		m.set_shader_parameter("uter_str_pivot", _uter_str_pivot)
+		m.set_shader_parameter("uter_str_from", _uter_str_from)
+		m.set_shader_parameter("uter_str_to", _uter_str_to)
+		m.set_shader_parameter("uter_str_len", _uter_str_len)
 		m.set_shader_parameter("canal_stretch_on", _canal_stretch_on)
 		m.set_shader_parameter("canal_os_rest", _canal_os_rest)
 		m.set_shader_parameter("canal_os_now", _canal_os_now)

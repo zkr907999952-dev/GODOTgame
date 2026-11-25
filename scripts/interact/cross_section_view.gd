@@ -6,7 +6,11 @@ class_name CrossSectionView
 
 const CUT_SHADER := preload("res://shaders/section_cut.gdshader")
 const CAP_SHADER := preload("res://shaders/section_cap.gdshader")
-const SECTION_LAYER := 1 << 18
+# 15 / 16 未被角色补光、第一人称头、脏器补光占用。18 是 FP_HEAD_LAYER，
+# 主相机第三人称看得到，所以以前的断面拷贝白面会漏进主视图。
+const SECTION_LAYER_LONG := 1 << 15
+const SECTION_LAYER_TRANS := 1 << 16
+const SECTION_LAYER := SECTION_LAYER_LONG | SECTION_LAYER_TRANS
 const MODE_BOTH := "both"
 const MODE_LONG := "long"
 const MODE_TRANS := "trans"
@@ -148,6 +152,7 @@ func _ensure_ui() -> void:
 		add_child(_panel)
 	_layout_views()
 	_rebuild_copies()
+	_isolate_main_cameras()
 	# 工具栏上的开关（若 HUD 还没有，就做一个浮动钮）。
 	_ensure_toggle_button()
 
@@ -185,7 +190,7 @@ func _make_view(nm: String, is_long: bool) -> SubViewportContainer:
 	cam.size = 0.18 if is_long else 0.09
 	cam.near = 0.01
 	cam.far = 0.8
-	cam.cull_mask = SECTION_LAYER
+	cam.cull_mask = SECTION_LAYER_LONG if is_long else SECTION_LAYER_TRANS
 	cam.environment = _env
 	cam.current = true
 	vp.add_child(cam)
@@ -322,6 +327,71 @@ func _prolapse_ctl() -> Node:
 	return organs.call("prolapse")
 
 
+func _isolate_main_cameras() -> void:
+	# 从所有非断面摄像机清掉 15/16 层，主视图就不会画到断面拷贝的白切面。
+	var hide := SECTION_LAYER_LONG | SECTION_LAYER_TRANS
+	if player and player.has_method("get_camera"):
+		var cam = player.get_camera()
+		if cam is Camera3D:
+			cam.cull_mask = cam.cull_mask & ~hide
+	var vp: Viewport = null
+	if player:
+		vp = player.get_viewport()
+	if vp == null:
+		vp = get_viewport()
+	if vp:
+		var cam2 := vp.get_camera_3d()
+		if cam2 and cam2 != _long_cam and cam2 != _trans_cam:
+			cam2.cull_mask = cam2.cull_mask & ~hide
+
+
+func debug_isolation() -> Dictionary:
+	var hide := SECTION_LAYER_LONG | SECTION_LAYER_TRANS
+	var main_mask := 0
+	if player and player.has_method("get_camera"):
+		var cam = player.get_camera()
+		if cam is Camera3D:
+			main_mask = int(cam.cull_mask)
+	var src_section_on := 0.0
+	var shared := 0
+	var long_n := 0
+	var trans_n := 0
+	var unique := 0
+	for rec in _copies:
+		var copy = rec.get("copy")
+		var src = rec.get("src")
+		var cut = rec.get("cut")
+		if rec.get("which", "long") == "trans":
+			trans_n += 1
+		else:
+			long_n += 1
+		if cut is ShaderMaterial:
+			unique += 1
+		if src is MeshInstance3D:
+			var mat = (src as MeshInstance3D).material_override
+			if mat != null and mat == cut:
+				shared += 1
+			if mat is ShaderMaterial and (mat as ShaderMaterial).shader != CUT_SHADER and (mat as ShaderMaterial).shader != CAP_SHADER:
+				var on = (mat as ShaderMaterial).get_shader_parameter("section_on")
+				if on != null:
+					src_section_on = maxf(src_section_on, float(on))
+			# 源材质即使没有 section_on 也算隔离成功（默认 0）。
+	return {
+		"long_layer": SECTION_LAYER_LONG,
+		"trans_layer": SECTION_LAYER_TRANS,
+		"main_mask": main_mask,
+		"main_sees_section": (main_mask & hide) != 0,
+		"long_cam_mask": int(_long_cam.cull_mask) if _long_cam else 0,
+		"trans_cam_mask": int(_trans_cam.cull_mask) if _trans_cam else 0,
+		"long_copies": long_n,
+		"trans_copies": trans_n,
+		"unique_materials": unique,
+		"shared_source_material": shared,
+		"source_section_on": src_section_on,
+		"layers_distinct": _long_cam != null and _trans_cam != null and (_long_cam.cull_mask & _trans_cam.cull_mask) == 0,
+	}
+
+
 ## 断面拷贝的脱垂参数：阴道拷贝用和阴道网格同一组 prol_*，其它拷贝关闭。
 func _apply_prolapse_uniforms(rec: Dictionary) -> void:
 	var u: Dictionary = organs.call("prolapse_uniforms") if organs and organs.has_method("prolapse_uniforms") else {}
@@ -353,17 +423,18 @@ func _add_copy(src: MeshInstance3D, tissue: int) -> void:
 	copy.mesh = src.mesh
 	copy.skin = src.skin
 	copy.skeleton = src.skeleton
-	copy.layers = SECTION_LAYER
+	copy.layers = SECTION_LAYER_LONG
 	copy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	copy.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 	var cut := ShaderMaterial.new()
 	cut.shader = CUT_SHADER
 	cut.set_shader_parameter("tissue", tissue)
-	cut.set_shader_parameter("stylize_layers", 1.0 if tissue == 3 else 0.0)
+	# 纵向切面用平涂（类似子宫平切）；横向阴道环仍可分层。
+	cut.set_shader_parameter("stylize_layers", 0.0)
 	var cap := ShaderMaterial.new()
 	cap.shader = CAP_SHADER
 	cap.set_shader_parameter("tissue", tissue)
-	cap.set_shader_parameter("stylize_layers", 1.0 if tissue == 3 else 0.0)
+	cap.set_shader_parameter("stylize_layers", 0.0)
 	cut.next_pass = cap
 	copy.material_override = cut
 	src.add_child(copy)
@@ -476,6 +547,7 @@ func _process(_delta: float) -> void:
 		last_step_usec = int(Time.get_ticks_usec() - t0)
 		return
 	_bind_worlds()
+	_isolate_main_cameras()
 	# 工具刚生成时补拷贝；脱垂开始 / 结束时也重建（加上 / 去掉脱垂柔体和套筒）。
 	if _copies.is_empty() or not _copies_alive() or _prol_built != (_prolapse_ctl() != null):
 		_rebuild_copies()
@@ -532,7 +604,7 @@ func _apply_shared_deform(cut: ShaderMaterial, cap: ShaderMaterial, src: ShaderM
 	if src == null:
 		return
 	# frame_only：自带最终形状的网格（脱垂柔体 / 套筒）只要腹部坐标系，不叠加通道 / 宫腔变形。
-	var keys: Array = ["ab_navel", "ab_right", "ab_up", "ab_fwd"] if frame_only else ["spec_o", "spec_d", "spec_u", "spec_m", "dilate_o", "dilate_d", "dilate_p", "uter_ball", "uter_ball_p", "ab_navel", "ab_right", "ab_up", "ab_fwd"]
+	var keys: Array = ["ab_navel", "ab_right", "ab_up", "ab_fwd"] if frame_only else ["spec_o", "spec_d", "spec_u", "spec_m", "dilate_o", "dilate_d", "dilate_p", "dilate_lat", "uter_ball", "uter_ball_p", "stir_off", "stir_p", "uter_str", "uter_str_pivot", "uter_str_from", "uter_str_to", "uter_str_len", "ab_navel", "ab_right", "ab_up", "ab_fwd"]
 	for key in keys:
 		# 名称以 organ_common 实际 uniforms 为准，拷不到就跳过。
 		if src.get_shader_parameter(key) != null:
@@ -565,16 +637,16 @@ func _ensure_trans_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab: V
 		copy.mesh = src.mesh
 		copy.skin = src.skin
 		copy.skeleton = src.skeleton
-		copy.layers = SECTION_LAYER
+		copy.layers = SECTION_LAYER_TRANS
 		copy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		var cut := ShaderMaterial.new()
 		cut.shader = CUT_SHADER
 		cut.set_shader_parameter("tissue", rec["tissue"])
-		cut.set_shader_parameter("stylize_layers", 1.0 if int(rec["tissue"]) == 3 else 0.0)
+		cut.set_shader_parameter("stylize_layers", 1.0 if int(rec["tissue"]) == 3 and not bool(rec.get("no_deform", false)) else 0.0)
 		var cap := ShaderMaterial.new()
 		cap.shader = CAP_SHADER
 		cap.set_shader_parameter("tissue", rec["tissue"])
-		cap.set_shader_parameter("stylize_layers", 1.0 if int(rec["tissue"]) == 3 else 0.0)
+		cap.set_shader_parameter("stylize_layers", 0.0)
 		cut.next_pass = cap
 		copy.material_override = cut
 		src.add_child(copy)

@@ -23,6 +23,7 @@ const PBD_ITERS := 3
 const LAPLACE_ITERS := 4
 const MAX_EDGE_STRETCH := 1.85
 const ALONG_RANGE := 0.028
+const ALONG_OUT := 0.008
 const SKIN_FALLOFF := 0.038
 
 var flaps_mi: MeshInstance3D
@@ -70,6 +71,7 @@ var _body_flags := PackedInt32Array()
 var _body_surf: Array = []
 var _dress_rest := PackedVector3Array()
 var _dress_inf := PackedFloat32Array()
+var _dress_tris := PackedInt32Array()
 var _dress_near := PackedInt32Array()
 var _dress_active := PackedInt32Array()
 var _seam_pair_flap := PackedInt32Array()
@@ -1463,6 +1465,7 @@ func _capture_dress_soft() -> void:
 	_body_surf.clear()
 	_dress_rest = PackedVector3Array()
 	_dress_inf = PackedFloat32Array()
+	_dress_tris = PackedInt32Array()
 	_dress_near = PackedInt32Array()
 	_dress_active = PackedInt32Array()
 	_seam_pair_flap = PackedInt32Array()
@@ -1549,6 +1552,22 @@ func _capture_dress_soft() -> void:
 		var sj: int = _dress_near[i3]
 		_dress_near[i3] = seam_dress_of[sj] if sj >= 0 and sj < seam_dress_of.size() else -1
 
+	if not _body_surf.is_empty() and arr[Mesh.ARRAY_INDEX] != null:
+		var bidx: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+		for f in bidx.size() / 3:
+			var a := bidx[f * 3]
+			var b := bidx[f * 3 + 1]
+			var c := bidx[f * 3 + 2]
+			if a >= _dress_inf.size() or b >= _dress_inf.size() or c >= _dress_inf.size():
+				continue
+			if _dress_inf[a] < 0.02 and _dress_inf[b] < 0.02 and _dress_inf[c] < 0.02:
+				continue
+			_dress_tris.append(a)
+			_dress_tris.append(b)
+			_dress_tris.append(c)
+
+
+
 
 func _write_dress_verts(P: PackedVector3Array) -> void:
 	if _body_am == null or _body_surf.is_empty() or _dress_mi == null:
@@ -1596,8 +1615,54 @@ func _commit_dress_soft() -> void:
 		var nj: int = _dress_near[i]
 		var disp := D[nj] if nj >= 0 and nj < D.size() else Vector3.ZERO
 		P[i] = _dress_rest[i] + disp * w
+	_repair_dress_flips(P)
 	_write_dress_verts(P)
 	_dress_dirty = true
+
+
+func _repair_dress_flips(P: PackedVector3Array) -> void:
+	# 大腿-阴部接缝处，位移过大时三角形会翻转或退化。把肇事顶点的位移按比例收回，直到恢复与静姿态同向。
+	if _body_surf.is_empty() or _dress_rest.is_empty():
+		return
+	var arr: Array = _body_surf[0]["arr"]
+	if arr.is_empty() or arr[Mesh.ARRAY_INDEX] == null:
+		return
+	var marked := {}
+	for ai in _dress_active.size():
+		marked[int(_dress_active[ai])] = true
+	var tri: PackedInt32Array = _dress_tris
+	if tri.is_empty():
+		tri = arr[Mesh.ARRAY_INDEX]
+	for pass_i in 8:
+		var bad := 0
+		for f in tri.size() / 3:
+			var a := tri[f * 3]
+			var b := tri[f * 3 + 1]
+			var c := tri[f * 3 + 2]
+			if not (marked.has(a) or marked.has(b) or marked.has(c)):
+				continue
+			if a >= P.size() or b >= P.size() or c >= P.size():
+				continue
+			if a >= _dress_rest.size():
+				continue
+			var n0 := (_dress_rest[b] - _dress_rest[a]).cross(_dress_rest[c] - _dress_rest[a])
+			var n1 := (P[b] - P[a]).cross(P[c] - P[a])
+			var deg := n1.length() < 1e-10
+			var flip := (not deg) and n0.length_squared() > 1e-16 and n1.dot(n0) < 0.0
+			if not deg and not flip:
+				continue
+			bad += 1
+			for vi in [a, b, c]:
+				if not marked.has(vi):
+					continue
+				var w: float = _dress_inf[vi] if vi < _dress_inf.size() else 0.0
+				# 先收缩过渡点；后几轮连接线顶点一起收回，避免接缝处折面。
+				if w >= 0.999 and not deg and pass_i < 3:
+					continue
+				var k := 0.50 if pass_i < 5 else 0.28
+				P[vi] = _dress_rest[vi].lerp(P[vi], k)
+		if bad == 0:
+			break
 
 
 func _sync_envelope_inserter() -> void:
@@ -1679,29 +1744,10 @@ func _hull_2d(x: float, y: float) -> Vector2:
 			return Vector2(0.0, hy)
 		var k := 1.0 / sqrt(e)
 		return Vector2(x * k, y * k)
-	var hh := maxf(hy - cy, 0.002)
-	var L := sqrt(x * x + y * y)
-	if L < 1e-8:
-		return Vector2(0.0, hy)
-	var dx := x / L
-	var dy := y / L
-	if absf(dx) > 1e-6:
-		var t_side := hx / absf(dx)
-		var y_hit := t_side * dy
-		if absf(y_hit) <= cy + 1e-6:
-			return Vector2(dx * t_side, dy * t_side)
-	var sy := 1.0 if dy >= 0.0 else -1.0
-	var A := (dx * dx) / (hx * hx) + (dy * dy) / (hh * hh)
-	var B := -2.0 * dy * sy * cy / (hh * hh)
-	var C := (cy * cy) / (hh * hh) - 1.0
-	var disc := B * B - 4.0 * A * C
-	if disc < 0.0 or A < 1e-12:
-		return Vector2(dx * hx, dy * hy)
-	var t := (-B + sqrt(disc)) / (2.0 * A)
-	if t < 0.0:
-		t = (-B - sqrt(disc)) / (2.0 * A)
-	t = maxf(t, 0.0)
-	return Vector2(dx * t, dy * t)
+	# 两瓣共享同一 stadium：blade_sep = hy - corner。
+	var Envelope := preload("res://scripts/body/vulva/envelope_inserter.gd")
+	var cr := clampf(hy - cy, 0.001, minf(hx, hy) * 0.95)
+	return Envelope.stadium_project(x, y, hx, hy, cr, 1.0)
 
 
 func _ell_k(x: float, y: float, hx: float, hh: float) -> float:
@@ -1709,18 +1755,18 @@ func _ell_k(x: float, y: float, hx: float, hh: float) -> float:
 
 
 func _closest_out_metal(x: float, y: float, hx: float, hh: float, cy: float) -> Vector2:
-	var ku := _ell_k(x, y - cy, hx, hh)
-	var kl := _ell_k(x, y + cy, hx, hh)
+	# cy>0：两瓣 + 空隙是同一个圆角矩形，hy = cy + hh（与 set_speculum_labia 的约定一致）。
+	if cy >= 1e-5:
+		var hy := cy + hh
+		var Envelope := preload("res://scripts/body/vulva/envelope_inserter.gd")
+		var cr := clampf(hy - cy, 0.001, minf(hx, hy) * 0.95)
+		return Envelope.stadium_project(x, y, hx, hy, cr, 1.016)
+	var ku := _ell_k(x, y, hx, hh)
 	var margin := 1.016
-	if ku <= kl:
-		if ku < 1e-8:
-			return Vector2(0.0, cy + hh * margin)
-		var s := margin / sqrt(ku)
-		return Vector2(x * s, cy + (y - cy) * s)
-	if kl < 1e-8:
-		return Vector2(0.0, -(cy + hh * margin))
-	var s2 := margin / sqrt(kl)
-	return Vector2(x * s2, -cy + (y + cy) * s2)
+	if ku < 1e-8:
+		return Vector2(0.0, hh * margin)
+	var s := margin / sqrt(ku)
+	return Vector2(x * s, y * s)
 
 
 func _cache_intro_frame() -> void:
@@ -1739,7 +1785,8 @@ func _fast_inside_metal(p: Vector3) -> bool:
 	if _custom_ins:
 		return _inserter.penetration(p, _cf_c, _cf_ax, _cf_up) > 1e-6
 	var r := p - _cf_c
-	if absf(r.dot(_cf_ax)) > ALONG_RANGE:
+	var along := r.dot(_cf_ax)
+	if along > ALONG_RANGE or along < -ALONG_OUT:
 		return false
 	var x := r.dot(_cf_side)
 	var y := r.dot(_cf_up)
@@ -1748,8 +1795,9 @@ func _fast_inside_metal(p: Vector3) -> bool:
 	var hy := maxf(_intro_hy, 1e-5)
 	if cy < 1e-5:
 		return _ell_k(x, y, hx, hy) < 1.0
-	var hh := maxf(hy - cy, 0.002)
-	return _ell_k(x, y - cy, hx, hh) < 1.0 or _ell_k(x, y + cy, hx, hh) < 1.0
+	var Envelope := preload("res://scripts/body/vulva/envelope_inserter.gd")
+	var cr := clampf(hy - cy, 0.001, minf(hx, hy) * 0.95)
+	return Envelope.stadium_sdf(x, y, hx, hy, cr) < 0.0
 
 
 func _side_bias_x(x: float, side_sign: float) -> float:
@@ -1771,7 +1819,7 @@ func _fast_project(p: Vector3, is_inner: bool, side_sign: float = 0.0) -> Vector
 		return _inserter.project_out(p, _cf_c, _cf_ax, _cf_up)
 	var r := p - _cf_c
 	var along := r.dot(_cf_ax)
-	if absf(along) > ALONG_RANGE:
+	if along > ALONG_RANGE or along < -ALONG_OUT:
 		return p
 	var x := _side_bias_x(r.dot(_cf_side), side_sign)
 	var y := r.dot(_cf_up)
@@ -1791,9 +1839,11 @@ func _fast_project(p: Vector3, is_inner: bool, side_sign: float = 0.0) -> Vector
 				var s := 1.016 / sqrt(e)
 				out2 = Vector2(x * s, y * s)
 	else:
-		inside = _ell_k(x, y - cy, hx, hh) < 1.0 or _ell_k(x, y + cy, hx, hh) < 1.0
+		var Envelope := preload("res://scripts/body/vulva/envelope_inserter.gd")
+		var cr := clampf(hy - cy, 0.001, minf(hx, hy) * 0.95)
+		inside = Envelope.stadium_sdf(x, y, hx, hy, cr) < 0.0
 		if inside:
-			out2 = _closest_out_metal(x, y, hx, hh, cy)
+			out2 = Envelope.stadium_project(x, y, hx, hy, cr, 1.016)
 	if absf(side_sign) > 0.5 and out2.x * side_sign < 0.0:
 		out2 = _hull_2d(x, y)
 	if not inside and is_inner:
@@ -2029,23 +2079,24 @@ func _legacy_pen(p: Vector3, c: Vector3, b: Array) -> float:
 	var up: Vector3 = b[1]
 	var side: Vector3 = b[2]
 	var r := p - c
-	if absf(r.dot(ax)) > ALONG_RANGE:
+	var along := r.dot(ax)
+	if along > ALONG_RANGE or along < -ALONG_OUT:
 		return 0.0
 	var x := r.dot(side)
 	var y := r.dot(up)
 	var cy := maxf(_intro_sep, 0.0)
 	var hx := maxf(_intro_hx, 1e-5)
 	var hy := maxf(_intro_hy, 1e-5)
-	var hh := maxf(hy - cy, 0.002)
-	var k := 2.0
 	if cy < 1e-5:
-		k = _ell_k(x, y, hx, hy)
+		var k := _ell_k(x, y, hx, hy)
 		if k < 1.0:
 			return (1.0 - sqrt(maxf(k, 0.0))) * minf(hx, hy)
-	else:
-		k = minf(_ell_k(x, y - cy, hx, hh), _ell_k(x, y + cy, hx, hh))
-		if k < 1.0:
-			return (1.0 - sqrt(maxf(k, 0.0))) * minf(hx, hh)
+		return 0.0
+	var Envelope := preload("res://scripts/body/vulva/envelope_inserter.gd")
+	var cr := clampf(hy - cy, 0.001, minf(hx, hy) * 0.95)
+	var d := Envelope.stadium_sdf(x, y, hx, hy, cr)
+	if d < 0.0:
+		return -d
 	return 0.0
 
 
@@ -2170,6 +2221,37 @@ func debug_mesh_quality() -> Dictionary:
 			err += _vest_uv[k].distance_to(_rim_sample_uv(k))
 			nerr += 1
 	out["rim_uv_err"] = err / float(maxi(nerr, 1))
+	# 大腿与阴部接缝（身体皮肤网格上受阴唇位移影响的三角形）。
+	out["dress_degenerate"] = 0
+	out["dress_flipped"] = 0
+	out["dress_tris"] = 0
+	if not _body_surf.is_empty() and not _dress_rest.is_empty() and not _dress_inf.is_empty():
+		var barr: Array = _body_surf[0]["arr"]
+		if not barr.is_empty() and barr[Mesh.ARRAY_INDEX] != null and barr[Mesh.ARRAY_VERTEX] != null:
+			var BP: PackedVector3Array = barr[Mesh.ARRAY_VERTEX]
+			var bidx: PackedInt32Array = _dress_tris if not _dress_tris.is_empty() else barr[Mesh.ARRAY_INDEX]
+			for f2 in bidx.size() / 3:
+				var a2 := bidx[f2 * 3]
+				var b2 := bidx[f2 * 3 + 1]
+				var c2 := bidx[f2 * 3 + 2]
+				if a2 >= _dress_inf.size() or b2 >= _dress_inf.size() or c2 >= _dress_inf.size():
+					continue
+				if _dress_inf[a2] < 0.02 and _dress_inf[b2] < 0.02 and _dress_inf[c2] < 0.02:
+					continue
+				if a2 >= BP.size() or b2 >= BP.size() or c2 >= BP.size():
+					continue
+				if a2 >= _dress_rest.size():
+					continue
+				out["dress_tris"] = int(out["dress_tris"]) + 1
+				var e1 := BP[b2] - BP[a2]
+				var e2 := BP[c2] - BP[a2]
+				var fn := e1.cross(e2)
+				if fn.length() < 1e-10 or e1.length() < 1e-8 or e2.length() < 1e-8:
+					out["dress_degenerate"] = int(out["dress_degenerate"]) + 1
+					continue
+				var n0 := (_dress_rest[b2] - _dress_rest[a2]).cross(_dress_rest[c2] - _dress_rest[a2])
+				if n0.length_squared() > 1e-16 and fn.dot(n0) < 0.0:
+					out["dress_flipped"] = int(out["dress_flipped"]) + 1
 	return out
 
 
