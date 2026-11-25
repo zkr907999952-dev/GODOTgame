@@ -3,6 +3,7 @@ extends Node
 class_name VaginaMode
 
 const RegistryScript := preload("res://scripts/interact/vagina_tool_registry.gd")
+const SectionScript := preload("res://scripts/interact/cross_section_view.gd")
 
 signal mode_changed(active: bool)
 signal tool_changed(tool_id: String)
@@ -27,6 +28,7 @@ var _saved_xray_amount := 0.0
 var _xray_pushed := false
 var _anchor := Vector3.ZERO
 var _controller: Node
+var _section: Node
 var _view_jolt := Vector3.ZERO
 
 
@@ -96,6 +98,7 @@ func exit() -> void:
 		return
 	active = false
 	_teardown_controller()
+	_teardown_section()
 	tool_id = ""
 	camera_preset = PRESET_FREE
 	_restore_xray()
@@ -129,6 +132,7 @@ func set_tool(id: String) -> void:
 			return
 		_teardown_controller()
 		tool_id = ""
+		_sync_section()
 		tool_changed.emit(tool_id)
 		return
 	if registry and not registry.has_tool(next):
@@ -143,6 +147,7 @@ func set_tool(id: String) -> void:
 		_activate_speculum()
 	elif tool_id != "":
 		_activate_controller(tool_id)
+	_sync_section()
 	tool_changed.emit(tool_id)
 
 
@@ -216,6 +221,41 @@ func end_tool_drag() -> void:
 
 func add_view_jolt(v: Vector3) -> void:
 	_view_jolt = v
+
+
+
+func _sync_section() -> void:
+	# 选中长柄金属球时默认打开右上角断面图；关掉或换工具则隐藏。
+	if tool_id == "ball_rod":
+		_ensure_section()
+		if _section and _section.has_method("set_visible_on"):
+			_section.call("set_visible_on", true)
+	elif _section and _section.has_method("set_visible_on"):
+		_section.call("set_visible_on", false)
+
+
+func _ensure_section() -> void:
+	if _section != null and is_instance_valid(_section):
+		return
+	_section = SectionScript.new()
+	_section.name = "CrossSectionView"
+	add_child(_section)
+	if _section.has_method("setup"):
+		_section.call("setup", self, organs, player)
+
+
+func _teardown_section() -> void:
+	if _section == null:
+		return
+	if is_instance_valid(_section):
+		if _section.has_method("deactivate"):
+			_section.call("deactivate")
+		_section.queue_free()
+	_section = null
+
+
+func cross_section() -> Node:
+	return _section if is_instance_valid(_section) else null
 
 
 func set_camera_preset(preset: String, snap: bool = false) -> void:
