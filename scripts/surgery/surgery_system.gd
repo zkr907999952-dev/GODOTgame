@@ -920,6 +920,11 @@ func enter_surgery() -> bool:
 		push_warning("surgery: bake failed")
 		return false
 	# 观察模式也可以进入：记下进入时的视角，退出时回到观察，不强迫切第一人称。
+	# 与阴道互动互斥。
+	if player and player.has_method("get_vagina_mode"):
+		var vm = player.call("get_vagina_mode")
+		if vm and vm.has_method("is_active") and bool(vm.call("is_active")):
+			vm.call("exit")
 	_resume_play_mode = -1
 	if player and "play_mode" in player:
 		_resume_play_mode = int(player.play_mode)

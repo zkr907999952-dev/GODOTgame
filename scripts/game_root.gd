@@ -49,7 +49,7 @@ const MAPS := [
 const KEYMAP := {
 	"common": {
 		KEY_TAB: "toggle_mode", KEY_M: "map_menu", KEY_ESCAPE: "escape", KEY_H: "hide_ui",
-		KEY_X: "xray", KEY_B: "breath", KEY_T: "interact_mode", KEY_R: "reset",
+		KEY_X: "xray", KEY_B: "breath", KEY_T: "interact_mode", KEY_Y: "vagina_mode", KEY_R: "reset",
 		KEY_1: "dance", KEY_2: "dance", KEY_3: "dance", KEY_4: "dance",
 		KEY_5: "dance", KEY_6: "dance", KEY_7: "dance", KEY_8: "dance",
 		KEY_9: "dance_clear", KEY_0: "dance_clear",
@@ -216,6 +216,8 @@ func action_for_key(key: int, mode: String = "") -> String:
 	if in_veh and a in ["weapon_wheel", "holster", "weapon_slot", "prone", "possess_aim"]:
 		return ""
 	# 检查床上，或靠近已躺在检查床上的分身时，T 进入 / 退出手术模式。
+	if key == KEY_Y and can_toggle_vagina():
+		return "vagina_toggle"
 	if key == KEY_T and can_toggle_surgery():
 		return "surgery_toggle"
 	return a
@@ -300,6 +302,8 @@ func run_action(action: String, key: int = 0) -> void:
 			_hud.call("cycle_interact_mode")
 		"surgery_toggle":
 			toggle_surgery()
+		"vagina_toggle":
+			toggle_vagina()
 		"reset":
 			# 角色控制 + 持枪：R = 换弹；否则 R = 复位视角 / 腹部形变（网页 R）
 			if _player.call("weapon_armed"):
@@ -826,6 +830,36 @@ func toggle_surgery() -> bool:
 		return false
 	surg.call("toggle")
 	return bool(surg.call("is_active")) if surg.has_method("is_active") else true
+
+
+func vagina_mode_of(host: Node = null) -> Node:
+	var h := host if host else surgery_subject()
+	if h and h.has_method("get_vagina_mode"):
+		return h.call("get_vagina_mode")
+	return null
+
+
+func can_toggle_vagina() -> bool:
+	var host := surgery_subject()
+	if host == null:
+		return false
+	var vm := vagina_mode_of(host)
+	if vm and bool(vm.call("is_active")):
+		return true
+	if host == _player and str(_player.get("occupancy")) == "exam_bed":
+		return true
+	if host != _player and host.has_method("is_on_exam_bed") and bool(host.call("is_on_exam_bed")):
+		return nearby_exam_bed() != null
+	return false
+
+
+func toggle_vagina() -> bool:
+	var host := surgery_subject()
+	var vm := vagina_mode_of(host)
+	if vm == null:
+		return false
+	vm.call("toggle")
+	return bool(vm.call("is_active"))
 
 
 ## 菜单「清除所有分身」

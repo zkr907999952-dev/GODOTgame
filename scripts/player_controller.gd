@@ -3,6 +3,7 @@ extends CharacterBody3D
 const SoftLocoScript = preload("res://scripts/soft_loco.gd")
 const OrganRigScript = preload("res://scripts/organs/organ_rig.gd")
 const SurgerySystemScript = preload("res://scripts/surgery/surgery_system.gd")
+const VaginaModeScript = preload("res://scripts/interact/vagina_mode.gd")
 const CharacterLookScript = preload("res://scripts/character_look.gd")
 const WeaponSystemScript = preload("res://scripts/weapons/weapon_system.gd")
 const CharacterHealthScript = preload("res://scripts/character_health.gd")
@@ -93,6 +94,9 @@ var _rmb_down: bool = false
 var _mmb_down: bool = false
 ## 0.3.9：检查床观察视角的中键平移量（目标点每帧跟随身体焦点，平移量叠加在焦点上）。
 var _bed_pan: Vector3 = Vector3.ZERO
+## 阴道互动等模式指定的环绕锚点（世界坐标）。开着时检查床观察镜头跟这个点，而不是肚脐。
+var _orbit_anchor_on := false
+var _orbit_anchor_world := Vector3.ZERO
 var _pan_drag: bool = false
 var _fp_pan: Vector3 = Vector3.ZERO
 ## 房间墙内包围盒（由 game_root 设置；城市里为空 → 只做物理碰撞）
@@ -122,6 +126,7 @@ var _loco: Node
 ## 体内脏器 + 腹部透视 + 拖拽/击腹互动（scripts/organs/organ_rig.gd）
 var _organs: Node
 var _surgery: Node = null
+var _vagina: Node = null
 ## 武器模块（scripts/weapons/weapon_system.gd）
 var _weapons: Node
 var _health: Node
@@ -242,6 +247,10 @@ func _ready() -> void:
 	add_child(_surgery)
 	if skel:
 		_surgery.call("setup", self, skel, _organs)
+	_vagina = VaginaModeScript.new()
+	_vagina.name = "VaginaMode"
+	add_child(_vagina)
+	_vagina.call("setup", self, _organs, _surgery)
 	_weapons = WeaponSystemScript.new()
 	_weapons.name = "Weapons"
 	add_child(_weapons)
@@ -319,6 +328,10 @@ func weapon_drawn() -> bool:
 
 func get_surgery() -> Node:
 	return _surgery
+
+
+func get_vagina_mode() -> Node:
+	return _vagina
 
 
 func active_surgery() -> Node:
@@ -1371,6 +1384,38 @@ func set_tp_view(yaw: float, elev: float, dist: float, snap: bool = true) -> voi
 		_update_tp_camera(0.0, true)
 
 
+func set_orbit_anchor_world(p: Vector3) -> void:
+	_orbit_anchor_world = p
+	_orbit_anchor_on = p.is_finite()
+	if _orbit_anchor_on:
+		_tp_focus = ""
+		_tp_target_goal = p - _base_origin()
+
+
+func clear_orbit_anchor() -> void:
+	_orbit_anchor_on = false
+	_orbit_anchor_world = Vector3.ZERO
+
+
+func apply_orbit_pose(target_world: Vector3, from_target: Vector3, dist: float, snap: bool = false) -> void:
+	# from_target：从目标指向相机的方向。
+	set_orbit_anchor_world(target_world)
+	var dir := from_target
+	if dir.length_squared() < 1e-10:
+		dir = Vector3(0, 0, 1)
+	else:
+		dir = dir.normalized()
+	var elev := asin(clampf(dir.y, -1.0, 1.0))
+	var yaw := atan2(dir.x, dir.z)
+	_tp_yaw_goal = _tp_yaw + wrapf(yaw - _tp_yaw, -PI, PI)
+	_tp_elev_goal = clampf(elev, TP_ELEV_MIN, TP_ELEV_MAX)
+	_tp_dist_goal = clampf(dist, camera_distance_min, camera_distance_max)
+	_bed_pan = Vector3.ZERO
+	if snap:
+		_tp_snap_to_goal()
+		_update_tp_camera(0.0, true)
+
+
 func _tp_snap_to_goal() -> void:
 	_tp_yaw = _tp_yaw_goal
 	_tp_elev = _tp_elev_goal
@@ -1538,9 +1583,12 @@ func _update_tp_camera(delta: float, snap: bool = false) -> void:
 	# focus). Following it every frame keeps dolly and orbit usable, instead
 	# of leaving the target inside the table collision from a standing offset.
 	if occupancy == "exam_bed" and play_mode == GameMode.DISPLAY:
-		var focus := _tp_focus if _tp_focus != "" else "belly"
-		if TP_FOCUS.has(focus):
-			_tp_target_goal = focus_point(focus) + _bed_pan - _base_origin()
+		if _orbit_anchor_on and _orbit_anchor_world.is_finite():
+			_tp_target_goal = _orbit_anchor_world + _bed_pan - _base_origin()
+		else:
+			var focus := _tp_focus if _tp_focus != "" else "belly"
+			if TP_FOCUS.has(focus):
+				_tp_target_goal = focus_point(focus) + _bed_pan - _base_origin()
 	if tp_auto_rotate and not _rmb_down:
 		_tp_yaw_goal += tp_auto_rotate_speed * TAU / 60.0 * delta
 	var k := 1.0 if snap else 1.0 - exp(-TP_DAMP_RATE * delta)

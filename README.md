@@ -24,7 +24,8 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 - 阴唇改为少量开合骨骼加软体（PBD）：外口按插入物在外口平面上的真实截面撑开（扩张器叶片随开合角变化的包络，而不是固定向两边翻），阴唇不再穿进叶片；周围皮肤有衰减，取出后回弹。
 - 外阴拆成独立模块（`scripts/body/vulva/`，说明见 `docs/vulva_module.md`）：通用插入物接口、数据参数、命名顶点组（大小阴唇 / 包皮 / 外口圈 / 通道分段）和好的扩展点，方便后续阴部交互。
 - 检查床上观察模式也可以进入手术；工具仍用左键，右键环绕和中键平移可用；退出手术后回到进入前的观察视角。手机、电脑一样。
-- 版本仍为 0.4.11 / 54，不打包。自检：`scripts/tests/v0416_check.gd`，以及 `v0415_check.gd`、`v0414_check.gd`、`v0413_check.gd`、`v0412_check.gd`、`v0411_check.gd`、`v0410_check.gd`、`v0409_check.gd`、`v0409b_check.gd`、`v0403_check.gd`、`v0405_check.gd`。
+- 新增阴道互动模式（检查床上，含观察模式，电脑按 Y）：镜头飞到外阴，可自由环绕，并有「阴道口视角」「小腹视角」两个预设。专用工具栏按注册表扩展；阴道扩张器从手术栏移到这里，行为不变。说明见 `docs/vagina_interaction.md`。
+- 版本仍为 0.4.11 / 54，不打包。自检：`scripts/tests/v0417_check.gd`、`scripts/tests/v0416_check.gd`，以及 `v0415_check.gd`、`v0414_check.gd`、`v0413_check.gd`、`v0412_check.gd`、`v0411_check.gd`、`v0410_check.gd`、`v0409_check.gd`、`v0409b_check.gd`、`v0403_check.gd`、`v0405_check.gd`。
 
 ## 0.4.11
 

@@ -70,7 +70,7 @@ func _check_insert_open() -> void:
 	hud.call("_refresh_surgery_ui")
 	await _frames(2)
 	var btn: Button = hud.get("_btn_tool_speculum")
-	_ok(btn != null and btn.visible and btn.text == "阴道扩张器", "surgery toolbar has 「阴道扩张器」")
+	_ok(btn != null and btn.text == "阴道扩张器", "speculum tool button still exists (now on the vagina-interaction toolbar)")
 	s.call("set_tool", "speculum")
 	await _frames(2)
 	_ok(str(s.call("current_tool")) == "speculum", "selecting the tool sets current_tool to speculum")
@@ -130,9 +130,15 @@ func _check_insert_open() -> void:
 		if rig.vulva and rig.vulva.has_method("introitus_half_extents"):
 			var ext0: Vector2 = rig.vulva.call("introitus_half_extents")
 			_ok(ext0.x >= 0.014 and ext0.y >= 0.011, "introitus opens enough for the closed blades (hx=%.1f hy=%.1f mm)" % [ext0.x * 1000.0, ext0.y * 1000.0])
-	# 打开滑条
-	hud.call("_refresh_surgery_ui")
-	await _frames(2)
+	# 开合滑条和取出按钮已移到阴道互动工具栏。
+	var vm: Node = player.call("get_vagina_mode") if player and player.has_method("get_vagina_mode") else null
+	_ok(vm != null, "player exposes get_vagina_mode() for the relocated speculum HUD")
+	if vm:
+		vm.call("enter")
+		vm.call("set_tool", "speculum")
+		if hud.has_method("_refresh_vagina_ui"):
+			hud.call("_refresh_vagina_ui")
+		await _frames(2)
 	var box: Control = hud.get("_speculum_box")
 	var sl: Slider = hud.get("_speculum_slider")
 	_ok(box != null and box.visible and sl != null, "opening slider is shown while the tool is active and inserted")
@@ -154,6 +160,11 @@ func _check_insert_open() -> void:
 		_ok(gap_open > gap_closed + 0.008, "slider widens the vaginal wall gap only (%.1f -> %.1f mm)" % [gap_closed * 1000.0, gap_open * 1000.0])
 	var rem: Button = hud.get("_btn_spec_remove")
 	_ok(rem != null and rem.visible, "「取出扩张器」 is available on PC and touch")
+	# 后续保持/取出用例仍走手术系统 API，需回到手术模式。
+	if vm:
+		vm.call("exit")
+	s.call("enter_surgery")
+	await _frames(2)
 
 
 func _check_persist_and_follow() -> void:

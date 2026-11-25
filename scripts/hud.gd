@@ -48,6 +48,13 @@ var _btn_cut_ring: Button
 var _btn_cut_confirm: Button
 var _surgery_bar: HBoxContainer
 var _surgery_cut_bar: HBoxContainer
+var _btn_vagina_enter: Button
+var _btn_vagina_exit: Button
+var _btn_cam_free: Button
+var _btn_cam_introitus: Button
+var _btn_cam_abdomen: Button
+var _vagina_bar: HBoxContainer
+var _vagina_tool_btns: Dictionary = {}
 var _panel_settings: PanelContainer
 var _panel_interact: PanelContainer
 var _panel_camera: PanelContainer
@@ -353,6 +360,7 @@ func _build_ui() -> void:
 	add_child(_touch)
 	move_child(_touch, 0)  # 画在 HUD 面板下面
 	_build_surgery_ui(root)
+	_build_vagina_ui(root)
 	get_viewport().size_changed.connect(_apply_layout)
 	call_deferred("_apply_layout")
 
@@ -4132,18 +4140,16 @@ func _build_surgery_ui(root: Control) -> void:
 	_btn_tool_forceps.pressed.connect(func(): _on_surgery_tool_picked("forceps"))
 	_surgery_bar.add_child(_btn_tool_forceps)
 
-	# 0.4.09：阴道扩张器（库斯科式，插入后用滑条开合）。
+	# 阴道扩张器已移到阴道互动工具栏，这里只创建按钮，不挂手术栏。
 	_btn_tool_speculum = _make_chrome_button("阴道扩张器")
-	_btn_tool_speculum.name = "SurgerySpeculumButton"
+	_btn_tool_speculum.name = "VaginaSpeculumButton"
 	_btn_tool_speculum.toggle_mode = true
-	_btn_tool_speculum.pressed.connect(func(): _on_surgery_tool_picked("speculum"))
-	_surgery_bar.add_child(_btn_tool_speculum)
+	_btn_tool_speculum.pressed.connect(func(): _on_vagina_tool_picked("speculum"))
 
 	_btn_spec_remove = _make_chrome_button("取出扩张器")
-	_btn_spec_remove.name = "SurgeryRemoveSpeculumButton"
+	_btn_spec_remove.name = "VaginaRemoveSpeculumButton"
 	_btn_spec_remove.visible = false
 	_btn_spec_remove.pressed.connect(_on_remove_speculum_pressed)
-	_surgery_bar.add_child(_btn_spec_remove)
 
 	# 0.4.04：选中的拉钩可移除（手机上没有 Delete / 右键）。
 	_btn_retr_remove = _make_chrome_button("移除拉钩")
@@ -4321,12 +4327,14 @@ func _refresh_surgery_ui() -> void:
 	if not on_bed and g and g.has_method("can_toggle_surgery"):
 		on_bed = bool(g.call("can_toggle_surgery"))
 	var active := s != null and bool(s.call("is_active"))
+	var vag_on := is_vagina_active()
+	var special := active or vag_on
 	var v := get_viewport().get_visible_rect().size if get_viewport() else Vector2(1280, 720)
 	var sl := _safe.x + 16.0
 	var st := _safe.y + 16.0
 	# 手术中隐藏无关顶栏 / 菜单 / 触屏摇杆，保留透视和第一/第三人称切换。
 	# 俯视地图开着时不要把顶栏抢回来。
-	var show_chrome := (not active) and (not is_map_open())
+	var show_chrome := (not special) and (not is_map_open())
 	if _btn_settings:
 		_btn_settings.visible = show_chrome
 	if _btn_map:
@@ -4344,16 +4352,16 @@ func _refresh_surgery_ui() -> void:
 	if _touch:
 		# 手术中仍要处理划屏（无工具转视角、选工具后切割），只是不画摇杆等无关触控铬。
 		# 整层隐藏会导致 TouchControls._input 直接返回，手机上手术刀完全无法交互。
-		if active and touch_ui:
+		if special and touch_ui:
 			_touch.visible = true
 		else:
 			_touch.visible = show_chrome
-	if active and _btn_enter_exit:
+	if special and _btn_enter_exit:
 		_btn_enter_exit.visible = false
-	if active and _btn_place_clone:
+	if special and _btn_place_clone:
 		_btn_place_clone.visible = false
 	if _btn_surgery_enter:
-		_btn_surgery_enter.visible = on_bed and not active and not is_map_open()
+		_btn_surgery_enter.visible = on_bed and not special and not is_map_open()
 		_btn_surgery_enter.position = Vector2(sl, st + 56.0)
 		_btn_surgery_enter.custom_minimum_size = Vector2(120, 40) if touch_ui else Vector2(100, 32)
 	if _btn_surgery_exit:
@@ -4410,27 +4418,7 @@ func _refresh_surgery_ui() -> void:
 		if _btn_tool_forceps:
 			_btn_tool_forceps.set_pressed_no_signal(tool == "forceps")
 			_style_button(_btn_tool_forceps, tool == "forceps")
-		if _btn_tool_speculum:
-			_btn_tool_speculum.set_pressed_no_signal(tool == "speculum")
-			_style_button(_btn_tool_speculum, tool == "speculum")
-		var spec_in := s != null and s.has_method("is_speculum_present") and bool(s.call("is_speculum_present"))
-		var spec_ready := s != null and s.has_method("is_speculum_inserted") and bool(s.call("is_speculum_inserted"))
-		if _btn_spec_remove:
-			_btn_spec_remove.visible = tool == "speculum" and spec_in
-		if _speculum_box:
-			_speculum_box.visible = tool == "speculum" and spec_ready
-			var bar_y := st + (104.0 if touch_ui else 92.0)
-			if _surgery_cut_bar and _surgery_cut_bar.visible:
-				bar_y += 56.0 if touch_ui else 44.0
-			_speculum_box.position = Vector2(sl, bar_y)
-			if touch_ui and _speculum_slider:
-				_speculum_slider.custom_minimum_size = Vector2(280, 32)
-			if spec_ready and _speculum_slider and s.has_method("speculum_angle"):
-				var ang := float(s.call("speculum_angle"))
-				if absf(_speculum_slider.value - ang) > 0.25:
-					_speculum_slider.set_value_no_signal(ang)
-				if _speculum_value:
-					_speculum_value.text = "%.0f°" % ang
+		# 扩张器已从手术栏移走；开合滑条改在阴道互动模式里显示。
 		var fm := str(s.get("forceps_mode")) if s != null and s.get("forceps_mode") != null else "pull"
 		for pair in [[_btn_fc_pull, "pull"], [_btn_fc_back, "putback"]]:
 			var b: Button = pair[0]
@@ -4463,12 +4451,9 @@ func _refresh_surgery_ui() -> void:
 	else:
 		if _surgery_cut_bar:
 			_surgery_cut_bar.visible = false
-		if _speculum_box:
-			_speculum_box.visible = false
-		if _btn_spec_remove:
-			_btn_spec_remove.visible = false
 		if _organ_target_label:
 			_organ_target_label.visible = false
+	_refresh_vagina_ui()
 
 
 func _sync_organ_target_label(s: Node, tool: String, sl: float, st: float, touch_ui: bool, v: Vector2) -> void:
@@ -4547,3 +4532,201 @@ func _on_forceps_mode(m: String) -> void:
 
 func _on_forceps_mode_changed(_m: String) -> void:
 	_refresh_surgery_ui()
+
+
+func _vagina() -> Node:
+	if _player and _player.has_method("get_vagina_mode"):
+		return _player.call("get_vagina_mode")
+	return null
+
+
+func is_vagina_active() -> bool:
+	var vm := _vagina()
+	return vm != null and bool(vm.call("is_active"))
+
+
+func _build_vagina_ui(root: Control) -> void:
+	_btn_vagina_enter = _make_chrome_button("阴道互动")
+	_btn_vagina_enter.name = "VaginaEnterButton"
+	_btn_vagina_enter.visible = false
+	_btn_vagina_enter.pressed.connect(_on_vagina_enter)
+	root.add_child(_btn_vagina_enter)
+
+	_btn_vagina_exit = _make_chrome_button("退出阴道互动")
+	_btn_vagina_exit.name = "VaginaExitButton"
+	_btn_vagina_exit.visible = false
+	_btn_vagina_exit.custom_minimum_size = Vector2(140, 32)
+	_btn_vagina_exit.pressed.connect(_on_vagina_exit)
+	root.add_child(_btn_vagina_exit)
+
+	_btn_cam_free = _make_chrome_button("自由视角")
+	_btn_cam_free.name = "VaginaCamFreeButton"
+	_btn_cam_free.toggle_mode = true
+	_btn_cam_free.pressed.connect(func(): _on_vagina_preset("free"))
+	_btn_cam_introitus = _make_chrome_button("阴道口视角")
+	_btn_cam_introitus.name = "VaginaCamIntroitusButton"
+	_btn_cam_introitus.toggle_mode = true
+	_btn_cam_introitus.pressed.connect(func(): _on_vagina_preset("introitus"))
+	_btn_cam_abdomen = _make_chrome_button("小腹视角")
+	_btn_cam_abdomen.name = "VaginaCamAbdomenButton"
+	_btn_cam_abdomen.toggle_mode = true
+	_btn_cam_abdomen.pressed.connect(func(): _on_vagina_preset("abdomen"))
+
+	_vagina_bar = HBoxContainer.new()
+	_vagina_bar.name = "VaginaToolbar"
+	_vagina_bar.add_theme_constant_override("separation", 8)
+	_vagina_bar.visible = false
+	_vagina_bar.mouse_filter = Control.MOUSE_FILTER_STOP
+	_vagina_bar.add_child(_btn_cam_free)
+	_vagina_bar.add_child(_btn_cam_introitus)
+	_vagina_bar.add_child(_btn_cam_abdomen)
+	# 工具按钮按注册表生成，扩张器沿用已有按钮。
+	_vagina_tool_btns.clear()
+	if _btn_tool_speculum:
+		_vagina_bar.add_child(_btn_tool_speculum)
+		_vagina_tool_btns["speculum"] = _btn_tool_speculum
+	if _btn_spec_remove:
+		_vagina_bar.add_child(_btn_spec_remove)
+	# 预留空位（注册表里 reserved 的项目）。
+	for rec in [["ball_rod", "长柄金属球"], ["reserved_2", "预留"], ["reserved_3", "预留"]]:
+		var slot := _make_chrome_button(rec[1])
+		slot.name = "VaginaTool_%s" % rec[0]
+		slot.disabled = true
+		slot.modulate = Color(1, 1, 1, 0.45)
+		_vagina_bar.add_child(slot)
+		_vagina_tool_btns[rec[0]] = slot
+	root.add_child(_vagina_bar)
+	_bind_vagina()
+
+
+func _bind_vagina() -> void:
+	var vm := _vagina()
+	if vm == null:
+		return
+	if vm.has_signal("mode_changed") and not vm.is_connected("mode_changed", _on_vagina_mode):
+		vm.connect("mode_changed", _on_vagina_mode)
+	if vm.has_signal("tool_changed") and not vm.is_connected("tool_changed", _on_vagina_tool_changed):
+		vm.connect("tool_changed", _on_vagina_tool_changed)
+	if vm.has_signal("camera_preset_changed") and not vm.is_connected("camera_preset_changed", _on_vagina_preset_changed):
+		vm.connect("camera_preset_changed", _on_vagina_preset_changed)
+
+
+func _on_vagina_enter() -> void:
+	var g := _game()
+	if g and g.has_method("toggle_vagina"):
+		if not is_vagina_active():
+			g.call("toggle_vagina")
+	else:
+		var vm := _vagina()
+		if vm:
+			vm.call("enter")
+	_refresh_surgery_ui()
+
+
+func _on_vagina_exit() -> void:
+	var vm := _vagina()
+	if vm:
+		vm.call("exit")
+	_refresh_surgery_ui()
+
+
+func _on_vagina_mode(_active: bool) -> void:
+	if _active:
+		close_panels()
+	_refresh_surgery_ui()
+	_sync_from_systems()
+
+
+func _on_vagina_tool_changed(_tool: String) -> void:
+	_refresh_surgery_ui()
+
+
+func _on_vagina_preset_changed(_p: String) -> void:
+	_refresh_surgery_ui()
+
+
+func _on_vagina_tool_picked(tool: String) -> void:
+	var vm := _vagina()
+	if vm:
+		vm.call("set_tool", tool)
+	_refresh_surgery_ui()
+
+
+func _on_vagina_preset(preset: String) -> void:
+	var vm := _vagina()
+	if vm:
+		vm.call("set_camera_preset", preset, false)
+	_refresh_surgery_ui()
+
+
+func _refresh_vagina_ui() -> void:
+	_bind_vagina()
+	var vm := _vagina()
+	var g := _game()
+	var on_bed := _player != null and str(_player.get("occupancy")) == "exam_bed"
+	if not on_bed and g and g.has_method("can_toggle_vagina"):
+		on_bed = bool(g.call("can_toggle_vagina"))
+	var active := vm != null and bool(vm.call("is_active"))
+	var surgery_on := is_surgery_active()
+	var v := get_viewport().get_visible_rect().size if get_viewport() else Vector2(1280, 720)
+	var sl := _safe.x + 16.0
+	var st := _safe.y + 16.0
+	if _btn_vagina_enter:
+		_btn_vagina_enter.visible = on_bed and not active and not surgery_on and not is_map_open()
+		var enter_x := sl + (128.0 if touch_ui else 112.0)
+		if _btn_surgery_enter and _btn_surgery_enter.visible:
+			enter_x = _btn_surgery_enter.position.x + maxf(_btn_surgery_enter.size.x, _btn_surgery_enter.custom_minimum_size.x) + 8.0
+		_btn_vagina_enter.position = Vector2(enter_x, st + 56.0)
+		_btn_vagina_enter.custom_minimum_size = Vector2(120, 40) if touch_ui else Vector2(100, 32)
+	if _btn_vagina_exit:
+		_btn_vagina_exit.visible = active
+		_btn_vagina_exit.position = Vector2(sl, st)
+		_btn_vagina_exit.custom_minimum_size = Vector2(160, 40) if touch_ui else Vector2(140, 32)
+	if _vagina_bar:
+		_vagina_bar.visible = active
+		_vagina_bar.position = Vector2(sl, st + 48.0)
+		if touch_ui:
+			_vagina_bar.add_theme_constant_override("separation", 10)
+			for b in [_btn_cam_free, _btn_cam_introitus, _btn_cam_abdomen, _btn_tool_speculum, _btn_spec_remove]:
+				if b:
+					b.custom_minimum_size = Vector2(maxf(b.custom_minimum_size.x, 80.0), 48.0)
+					b.add_theme_font_size_override("font_size", 16)
+	if not active:
+		if _speculum_box and not surgery_on:
+			_speculum_box.visible = false
+		if _btn_spec_remove and not surgery_on:
+			_btn_spec_remove.visible = false
+		return
+	var preset := str(vm.call("current_preset")) if vm else "free"
+	if _btn_cam_free:
+		_btn_cam_free.set_pressed_no_signal(preset == "free")
+		_style_button(_btn_cam_free, preset == "free")
+	if _btn_cam_introitus:
+		_btn_cam_introitus.set_pressed_no_signal(preset == "introitus")
+		_style_button(_btn_cam_introitus, preset == "introitus")
+	if _btn_cam_abdomen:
+		_btn_cam_abdomen.set_pressed_no_signal(preset == "abdomen")
+		_style_button(_btn_cam_abdomen, preset == "abdomen")
+	var tool := str(vm.call("current_tool")) if vm else ""
+	if _btn_tool_speculum:
+		_btn_tool_speculum.visible = true
+		_btn_tool_speculum.disabled = false
+		_btn_tool_speculum.set_pressed_no_signal(tool == "speculum")
+		_style_button(_btn_tool_speculum, tool == "speculum")
+	var s := _surgery()
+	var spec_in := s != null and s.has_method("is_speculum_present") and bool(s.call("is_speculum_present"))
+	var spec_ready := s != null and s.has_method("is_speculum_inserted") and bool(s.call("is_speculum_inserted"))
+	if _btn_spec_remove:
+		_btn_spec_remove.visible = tool == "speculum" and spec_in
+	if _speculum_box:
+		_speculum_box.visible = tool == "speculum" and spec_ready
+		var bar_y := st + (104.0 if touch_ui else 92.0)
+		_speculum_box.position = Vector2(sl, bar_y)
+		if touch_ui and _speculum_slider:
+			_speculum_slider.custom_minimum_size = Vector2(280, 32)
+		if spec_ready and _speculum_slider and s.has_method("speculum_angle"):
+			var ang := float(s.call("speculum_angle"))
+			if absf(_speculum_slider.value - ang) > 0.25:
+				_speculum_slider.set_value_no_signal(ang)
+			if _speculum_value:
+				_speculum_value.text = "%.0f°" % ang
