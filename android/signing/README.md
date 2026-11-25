@@ -31,6 +31,6 @@ LIBGL_ALWAYS_SOFTWARE=1 /home/box/bin/godot --headless --path . \
   --export-release Android build/android/蒂法玉腹沙盒-0.2.XX-android-arm64.apk
 ```
 
-也可用 `android/signing/export-android-release.sh <versionName>`（例如 `0.2.22`）。
+也可用 `android/signing/export-android-release.sh <versionName>`（例如 `0.2.22`）。脚本在导出后会用 `apksigner` 校验 v1 / v2 签名和正式证书指纹，失败则中止。
 
 发布到 GitHub Releases：标签 `android-<version>`，资源名 `TifaYufuSandbox-<version>-android-arm64.apk`，并在说明里写明这是 0.2.22 起的新证书、旧版需先卸载。
