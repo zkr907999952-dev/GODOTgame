@@ -27,7 +27,8 @@ Godot **4.7.2** 项目（Forward Plus）。角色与地图来自网页原型 [ro
 - 新增阴道互动模式（检查床上，含观察模式，电脑按 Y）：镜头飞到外阴，可自由环绕，并有「阴道口视角」「小腹视角」两个预设。专用工具栏按注册表扩展；阴道扩张器从手术栏移到这里，行为不变。说明见 `docs/vagina_interaction.md`。
 - 长柄金属球：镀铬圆杆和末端圆球，滑条同时改直径和碰撞；拖入阴道时通道被球环撑开，过宫颈有阻力与突破感，进入宫腔后子宫和内腔被撑开。两种预设视角下都可操控。
 - 选中金属球时右上角默认打开断面图小窗：纵向（沿阴道轴线）和横向（过球的垂直切片），切开的断面用组织色平涂并描边，跟着体内变形一起更新。
-- 版本仍为 0.4.11 / 54，不打包。自检：`scripts/tests/v0419_check.gd`、`scripts/tests/v0418_check.gd`、`scripts/tests/v0417_check.gd`、`scripts/tests/v0416_check.gd`，以及 `v0415_check.gd`、`v0414_check.gd`、`v0413_check.gd`、`v0412_check.gd`、`v0411_check.gd`、`v0410_check.gd`、`v0409_check.gd`、`v0409b_check.gd`、`v0403_check.gd`、`v0405_check.gd`。
+- 子宫脱垂系统（说明见 `docs/uterine_prolapse.md`）：子宫沿阴道下移、外翻脱出，分 I–IV 度；上段阴道内翻，体外是包住子宫的外翻套筒，宫颈露在最外端；外口和阴唇按脱出物截面撑开；体外部分是柔性悬挂物理，可拖拽、甩动，往回推可复位。第一种触发方式：长杆钢球进入宫腔后放大（直径 ≥ 约 23 mm），强行扯出时宫颈卡住球把子宫拖出来。手术中脱垂状态下用钳子经创口扯子宫，会先逐渐复位脱垂，再进入正常扯出。「复原」「放回内脏」都会复原脱垂。断面小窗显示内翻的阴道和脱出的子宫，阴道互动界面显示当前等级。
+- 版本仍为 0.4.11 / 54，不打包。自检：`scripts/tests/v0420_prolapse_check.gd`、`scripts/tests/v0419_check.gd`、`scripts/tests/v0418_check.gd`、`scripts/tests/v0417_check.gd`、`scripts/tests/v0416_check.gd`，以及 `v0415_check.gd`、`v0414_check.gd`、`v0413_check.gd`、`v0412_check.gd`、`v0411_check.gd`、`v0410_check.gd`、`v0409_check.gd`、`v0409b_check.gd`、`v0403_check.gd`、`v0405_check.gd`。
 
 ## 0.4.11
 

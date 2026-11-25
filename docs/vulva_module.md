@@ -40,6 +40,9 @@
 
 - `EnvelopeInserter`：双叶（扩张器随开合角变化的叶片包络）或单椭圆 / 圆（棒、指节）
 - `VulvaSystem.set_capsule_insert(origin, axis, radius, mix)` — 钳子、手指的快捷入口
+- `ProlapseMassInserter`（`scripts/body/prolapse/`）— 子宫脱垂时脱出物从里往外穿过外口：弯胶囊（阴道轴 → 脱出方向），没有 `configure()`，走自定义路径
+
+自定义插入物（没有 `configure()`）：外阴的「是否在插入物里」判断、投影和外口圈都直接用它的 `penetration` / `project_out`（不再套椭圆柱），偏心或弯曲的形状也不会穿模。插入物形状变了但包络尺寸没变时调用 `vulva.refresh_insert()` 强制重解。
 
 取出后 `set_inserter(null)` 或 `mix=0`，软体回到静息。
 
