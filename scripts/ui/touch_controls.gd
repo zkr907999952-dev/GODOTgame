@@ -111,14 +111,6 @@ func vp() -> Vector2:
 	return get_viewport_rect().size
 
 
-func _touch_scale() -> float:
-	# 逻辑高度较低时略缩小摇杆和动作键，避免和顶栏挤在一起。
-	var h := vp().y - safe.y - safe.w
-	if h >= 400.0:
-		return 1.0
-	return clampf(h / 400.0, 0.72, 1.0)
-
-
 ## 把 ScreenTouch / 模拟鼠标坐标统一到本控件所在的逻辑像素（content_scale 空间）。
 ## 真机事件有时是窗口物理像素，按钮命中和点身体会整体错位。
 ## 划屏增量必须和位置用同一套换算：不能只因为 backing 更大就把 relative 一律缩小，
@@ -206,14 +198,6 @@ func _in_surgery() -> bool:
 	return hud != null and hud.has_method("is_surgery_active") and bool(hud.call("is_surgery_active"))
 
 
-func _in_vagina() -> bool:
-	return hud != null and hud.has_method("is_vagina_active") and bool(hud.call("is_vagina_active"))
-
-
-func _in_body_mode() -> bool:
-	return _in_surgery() or _in_vagina()
-
-
 func _surgery_tool() -> String:
 	var s := _active_surgery()
 	if s:
@@ -225,14 +209,10 @@ func _map_open() -> bool:
 	return hud != null and hud.has_method("is_map_open") and bool(hud.call("is_map_open"))
 
 
-func _menu_open() -> bool:
-	return hud != null and hud.has_method("is_menu_open") and bool(hud.call("is_menu_open"))
-
-
 func _show_stick() -> bool:
 	if layout_edit:
 		return true
-	if _map_open() or _in_body_mode() or _menu_open():
+	if _map_open() or _in_surgery():
 		return false
 	return _fp() or _in_drive()
 
@@ -267,7 +247,7 @@ func _in_plane() -> bool:
 func _show_flight_stick() -> bool:
 	if layout_edit:
 		return true
-	if _map_open() or _menu_open() or not _flight_stick_mode():
+	if _map_open() or not _flight_stick_mode():
 		return false
 	return _in_drive() and _in_plane()
 
@@ -275,7 +255,7 @@ func _show_flight_stick() -> bool:
 func _show_flight_yaw_slider() -> bool:
 	if layout_edit:
 		return true
-	if _map_open() or _menu_open() or not _flight_slider_mode():
+	if _map_open() or not _flight_slider_mode():
 		return false
 	return _in_drive() and _in_plane()
 
@@ -358,13 +338,12 @@ func _rect_from(id: String, default_pos: Vector2, default_size: Vector2) -> Rect
 
 
 func stick_center() -> Vector2:
-	var ss := STICK_SIZE * _touch_scale()
-	var raw := Vector2(safe.x + EDGE_X + ss * 0.5, vp().y - safe.w - EDGE_B - ss * 0.5)
+	var raw := Vector2(safe.x + EDGE_X + STICK_SIZE * 0.5, vp().y - safe.w - EDGE_B - STICK_SIZE * 0.5)
 	return _layout_center("stick", raw)
 
 
 func stick_radius() -> float:
-	return STICK_SIZE * _touch_scale() * 0.5 * _layout_scale("stick")
+	return STICK_SIZE * 0.5 * _layout_scale("stick")
 
 
 func begin_layout_edit() -> void:
@@ -436,65 +415,47 @@ func selected_scale() -> float:
 
 func _default_item(id: String) -> Dictionary:
 	var v := vp()
-	var sc := _touch_scale()
-	var btn := BTN * sc
-	var stick := STICK_SIZE * sc
-	var gap := GAP * sc
-	var x := v.x - safe.z - EDGE_X - btn
-	var y := v.y - safe.w - EDGE_B - btn
+	var x := v.x - safe.z - EDGE_X - BTN
+	var y := v.y - safe.w - EDGE_B - BTN
 	var top := safe.y + 6.0
 	var right := v.x - safe.z - 16.0
 	var by := v.y - safe.w
 	match id:
 		"stick":
-			var c := Vector2(safe.x + EDGE_X + stick * 0.5, v.y - safe.w - EDGE_B - stick * 0.5)
-			return {"center": c, "size": Vector2(stick, stick), "label": "摇杆"}
+			var c := Vector2(safe.x + EDGE_X + STICK_SIZE * 0.5, v.y - safe.w - EDGE_B - STICK_SIZE * 0.5)
+			return {"center": c, "size": Vector2(STICK_SIZE, STICK_SIZE), "label": "摇杆"}
 		"mode":
 			var label := "切换·观察" if _fp() else "切换·控制"
-			if hud and hud.has_method("touch_mode_slot"):
-				var slot: Rect2 = hud.call("touch_mode_slot")
-				if slot.size.x > 8.0:
-					return {"center": slot.get_center(), "size": slot.size, "label": label}
 			return {"center": Vector2(v.x * 0.5, top + 22.0), "size": Vector2(112, 44), "label": label}
 		"vcam":
 			var first := false
 			if hud and hud.get("_vehicle_system"):
 				first = str(hud.get("_vehicle_system").get("vehicle_cam")) == "first"
-			if hud and hud.has_method("touch_vcam_slot"):
-				var vslot: Rect2 = hud.call("touch_vcam_slot")
-				if vslot.size.x > 8.0:
-					return {"center": vslot.get_center(), "size": vslot.size, "label": "切换·第三人称" if first else "切换·第一人称"}
 			return {"center": Vector2(v.x * 0.5, top + 22.0), "size": Vector2(128, 40), "label": "切换·第三人称" if first else "切换·第一人称"}
 		"crouch":
-			return {"center": Vector2(x + 8.0, y + 8.0) + Vector2(btn, btn) * 0.5, "size": Vector2(btn, btn), "label": "下蹲"}
+			return {"center": Vector2(x + 8.0, y + 8.0) + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "下蹲"}
 		"jump":
-			return {"center": Vector2(x, y - btn - gap) + Vector2(btn, btn) * 0.5, "size": Vector2(btn, btn), "label": "跳跃"}
+			return {"center": Vector2(x, y - BTN - GAP) + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "跳跃"}
 		"interact":
-			return {"center": Vector2(x, y - 2.0 * (btn + gap)) + Vector2(btn, btn) * 0.5, "size": Vector2(btn, btn), "label": "互动"}
+			return {"center": Vector2(x, y - 2.0 * (BTN + GAP)) + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "互动"}
 		"weapon":
-			var x2 := x - btn - gap
-			return {"center": Vector2(x2, y - 2.0 * (btn + gap) - 8.0) + Vector2(btn, btn) * 0.5, "size": Vector2(btn, btn), "label": "武器"}
+			var x2 := x - BTN - GAP
+			return {"center": Vector2(x2, y - 2.0 * (BTN + GAP) - 8.0) + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "武器"}
 		"fire", "drag":
-			var fire_pos := Vector2(x - btn - gap - 8.0, y - 20.0)
-			var fire_sz := Vector2(btn + 16.0, btn + 16.0)
+			var fire_pos := Vector2(x - BTN - GAP - 8.0, y - 20.0)
+			var fire_sz := Vector2(BTN + 16.0, BTN + 16.0)
 			return {"center": fire_pos + fire_sz * 0.5, "size": fire_sz, "label": "开火" if id == "fire" else "拖拽"}
 		"ads":
-			var fire_pos2 := Vector2(x - btn - gap - 8.0, y - 20.0)
-			var ads_pos := Vector2(fire_pos2.x - btn - gap - 10.0, y - (btn + gap) - 8.0)
-			return {"center": ads_pos + Vector2(btn, btn) * 0.5, "size": Vector2(btn, btn), "label": "瞄准"}
+			var fire_pos2 := Vector2(x - BTN - GAP - 8.0, y - 20.0)
+			var ads_pos := Vector2(fire_pos2.x - BTN - GAP - 10.0, y - (BTN + GAP) - 8.0)
+			return {"center": ads_pos + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "瞄准"}
 		"reload":
-			var x2r := x - btn - gap
-			return {"center": Vector2(x2r - 128.0 * sc, y) + Vector2(btn, btn) * 0.5, "size": Vector2(btn, btn), "label": "换弹"}
+			var x2r := x - BTN - GAP
+			return {"center": Vector2(x2r - 128.0, y) + Vector2(BTN, BTN) * 0.5, "size": Vector2(BTN, BTN), "label": "换弹"}
 		"fire_left":
-			var fire_sz2 := Vector2(btn + 16.0, btn + 16.0)
+			var fire_sz2 := Vector2(BTN + 16.0, BTN + 16.0)
 			var lx := safe.x + EDGE_X
-			# 放在摇杆上方，不要垂直居中（矮屏时会压住摇杆）。
-			var stick_top := (v.y - safe.w - EDGE_B - stick) 
-			var ly := stick_top - gap - fire_sz2.y
-			if ly < safe.y + 64.0:
-				# 实在不够高就挪到摇杆右侧偏上，仍避开摇杆圆。
-				lx = safe.x + EDGE_X + stick + gap
-				ly = v.y - safe.w - EDGE_B - stick - fire_sz2.y * 0.15
+			var ly := v.y * 0.5 - fire_sz2.y * 0.5
 			return {"center": Vector2(lx, ly) + fire_sz2 * 0.5, "size": fire_sz2, "label": "左开火"}
 		"enter":
 			var enter_sz := Vector2(108, 48)
@@ -556,20 +517,17 @@ func _default_item(id: String) -> Dictionary:
 		"thrust":
 			return {"center": Vector2(right - 88.0 - 32.0, by - 200.0 + 90.0), "size": Vector2(40, 180), "label": "油门"}
 		_:
-			return {"center": v * 0.5, "size": Vector2(btn, btn), "label": id}
+			return {"center": v * 0.5, "size": Vector2(BTN, BTN), "label": id}
 
 
 ## 按钮布局：id -> [Rect2, 文字]
 func buttons() -> Dictionary:
 	var out := {}
-	if _in_body_mode() and not layout_edit:
-		# 手术 / 阴道互动中摇杆和无关触控按钮隐藏，划屏手势仍由本控件处理。
+	if _in_surgery() and not layout_edit:
+		# 手术中摇杆和无关触控按钮隐藏，划屏手势仍由本控件处理。
 		return out
 	if _map_open() and not layout_edit:
 		# 打开地图时不显示角色交互按键，地图 UI 自己可用。
-		return out
-	if _menu_open() and not layout_edit:
-		# 设置 / 互动等面板打开时收起触屏键，避免和抽屉、列表叠在一起。
 		return out
 	var item_mode := _default_item("mode")
 	# Walking: 切换 is play-mode. In a vehicle, the top view-switch (vcam)
@@ -635,12 +593,10 @@ func fire_slot_rect() -> Rect2:
 	if b.has("drag"):
 		return b["drag"][0]
 	var v := vp()
-	var btn := BTN * _touch_scale()
-	var gap := GAP * _touch_scale()
-	var x := v.x - safe.z - EDGE_X - btn
-	var y := v.y - safe.w - EDGE_B - btn
-	var x2 := x - btn - gap
-	return Rect2(Vector2(x2 - 8.0, y - 20.0), Vector2(btn + 16.0, btn + 16.0))
+	var x := v.x - safe.z - EDGE_X - BTN
+	var y := v.y - safe.w - EDGE_B - BTN
+	var x2 := x - BTN - GAP
+	return Rect2(Vector2(x2 - 8.0, y - 20.0), Vector2(BTN + 16.0, BTN + 16.0))
 
 
 func zoom_visible() -> bool:
