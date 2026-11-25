@@ -216,7 +216,7 @@ func action_for_key(key: int, mode: String = "") -> String:
 	if in_veh and a in ["weapon_wheel", "holster", "weapon_slot", "prone", "possess_aim"]:
 		return ""
 	# 检查床上，或靠近已躺在检查床上的分身时，T 进入 / 退出手术模式。
-	if key == KEY_Y and can_toggle_vagina():
+	if key == KEY_Y and (can_toggle_vagina() or can_enter_body_mode_from_observe()):
 		return "vagina_toggle"
 	if key == KEY_T and can_toggle_surgery():
 		return "surgery_toggle"
@@ -824,6 +824,8 @@ func can_toggle_surgery() -> bool:
 
 
 func toggle_surgery() -> bool:
+	if not can_toggle_surgery() and can_enter_body_mode_from_observe():
+		return enter_mode_from_observe("surgery")
 	var host := surgery_subject()
 	var surg := surgery_system_of(host)
 	if surg == null:
@@ -854,12 +856,94 @@ func can_toggle_vagina() -> bool:
 
 
 func toggle_vagina() -> bool:
+	if not can_toggle_vagina() and can_enter_body_mode_from_observe():
+		return enter_mode_from_observe("vagina")
 	var host := surgery_subject()
 	var vm := vagina_mode_of(host)
 	if vm == null:
 		return false
 	vm.call("toggle")
 	return bool(vm.call("is_active"))
+
+
+## ---- T-11：角色观察视角（展示模式、站在地上）也能直接进入阴道互动 / 手术 ----
+## 两种模式都需要躺在检查床上：自动躺到当前地图最近的空检查床（没有就在面前放一张），
+## 保持观察视角，等姿势落定几帧后再进入模式。
+var _observe_mode_pending: String = ""
+
+
+func can_enter_body_mode_from_observe() -> bool:
+	if _player == null or vehicle_system == null:
+		return false
+	if _player.has_method("is_dead") and bool(_player.call("is_dead")):
+		return false
+	if not bool(_player.call("is_display_mode")):
+		return false
+	if map_view and map_view.is_open:
+		return false
+	if vehicle_system.get("occupied") != null:
+		return false
+	if _observe_mode_pending != "":
+		return false
+	return true
+
+
+func _free_exam_bed_for_observe() -> Node:
+	var best: Node = null
+	var bd := 1e18
+	var p := _player.global_position
+	for v in vehicle_system.get("vehicles"):
+		if v == null or not is_instance_valid(v) or not v.visible:
+			continue
+		if str(vehicle_system.call("kind_of", v)) != "exam_bed":
+			continue
+		if bool(v.get("occupied")):
+			continue
+		var who = v.get("patient")
+		if who != null and is_instance_valid(who):
+			continue
+		var d := p.distance_squared_to((v as Node3D).global_position)
+		if d < bd:
+			bd = d
+			best = v
+	if best == null and vehicle_system.has_method("spawn_at_aim"):
+		best = vehicle_system.call("spawn_at_aim", "exam_bed")
+	return best
+
+
+func enter_mode_from_observe(mode: String) -> bool:
+	if not can_enter_body_mode_from_observe():
+		return false
+	var bed := _free_exam_bed_for_observe()
+	if bed == null:
+		return false
+	vehicle_system.set("nearest", bed)
+	if not bool(vehicle_system.call("try_enter")):
+		return false
+	_observe_mode_pending = mode
+	_finish_observe_mode_entry.call_deferred()
+	return true
+
+
+func _finish_observe_mode_entry() -> void:
+	for _i in 3:
+		await get_tree().process_frame
+	var mode := _observe_mode_pending
+	_observe_mode_pending = ""
+	if _player == null or str(_player.get("occupancy")) != "exam_bed":
+		return
+	if mode == "vagina":
+		var vm := vagina_mode_of(_player)
+		if vm and not bool(vm.call("is_active")):
+			vm.call("enter")
+	elif mode == "surgery":
+		var surg := surgery_system_of(_player)
+		if surg and not bool(surg.call("is_active")):
+			surg.call("enter_surgery")
+
+
+func observe_mode_pending() -> String:
+	return _observe_mode_pending
 
 
 ## 菜单「清除所有分身」

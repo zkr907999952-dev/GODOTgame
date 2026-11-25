@@ -4033,6 +4033,9 @@ func _mesh_centroid_bind(md: Geom.MeshData) -> Vector3:
 
 
 func _begin_grab(origin: Vector3, dir: Vector3) -> bool:
+	# T-11：先看是否点中已悬垂在体外的物理内脏（肠袢 / 柔体器官 / 输卵管悬链 / 脱垂子宫）。
+	if _begin_organ_grab(origin, dir):
+		return true
 	if not can_use_grab():
 		return false
 	# 已剥离的皮瓣：点中则拿起、拖拽，松手时抛出。
@@ -5014,9 +5017,26 @@ func _set_forceps_jaw(angle_deg: float) -> void:
 		b.rotation = Vector3(0, -deg_to_rad(angle_deg), 0)
 
 
+## T-11：钳子绕钳口倾斜（钳柄偏向画面右下），不再正对镜头只看到一个点。
+const FORCEPS_TILT_DEG := 32.0
+
+
+func forceps_tilted_axis(dir: Vector3) -> Vector3:
+	var z0 := dir.normalized()
+	if z0.length_squared() < 1e-8:
+		z0 = Vector3.FORWARD
+	var up0 := Vector3.UP if absf(z0.dot(Vector3.UP)) < 0.95 else Vector3.FORWARD
+	var x0 := up0.cross(z0).normalized()   # 画面左
+	var y0 := z0.cross(x0).normalized()    # 画面上
+	# 钳柄端（-z）往画面右下偏：z 朝左上转 FORCEPS_TILT_DEG。
+	var side := (x0 * 0.55 + y0 * 0.84).normalized()
+	var t := deg_to_rad(FORCEPS_TILT_DEG)
+	return (z0 * cos(t) + side * sin(t)).normalized()
+
+
 func _place_forceps(tip: Vector3, dir: Vector3) -> void:
 	_ensure_forceps_node()
-	var z := dir.normalized()
+	var z := forceps_tilted_axis(dir)
 	var up := Vector3.UP if absf(z.dot(Vector3.UP)) < 0.95 else Vector3.FORWARD
 	var x := up.cross(z).normalized()
 	var y := z.cross(x).normalized()
@@ -5580,7 +5600,47 @@ func _begin_forceps(origin: Vector3, dir: Vector3, kinds: PackedStringArray = Pa
 	return false
 
 
+## T-11：夹住体内器官后往外拉——拖动距离先把夹点沿直线带到创口，过了创口再按手势侧向
+## 往腹腔外走（而不是在体内那一层深度横拖、穿过腹壁）。夹点本来就在体外时只保证不被拖回壁内。
+const FORCEPS_OUT_MIN := 0.004
+var _fc_start_rel := Vector3.ZERO
+var _fc_ray_ref := Vector3.ZERO
+var _fc_start_inside := false
+
+
+func _forceps_outward_tip(origin: Vector3, dir: Vector3, plane_tip: Vector3) -> Vector3:
+	var wc := _wound_center_world()
+	var ow := _cavity_outward().normalized()
+	if not _fc_start_inside:
+		var dd := (plane_tip - wc).dot(ow)
+		if dd < FORCEPS_OUT_MIN:
+			plane_tip += ow * (FORCEPS_OUT_MIN - dd)
+		return plane_tip
+	var start := wc + _fc_start_rel
+	var ref := _grab_plane_hit(origin, dir, _fc_ray_ref)
+	var disp := ref - _fc_ray_ref
+	return forceps_pull_path(start, wc, ow, disp)
+
+
+## 纯函数：起点 start（体内），创口中心 wc，外向 ow，手势位移 disp → 钳尖目标。
+func forceps_pull_path(start: Vector3, wc: Vector3, ow: Vector3, disp: Vector3) -> Vector3:
+	var s := disp.length()
+	var hole := wc + ow * FORCEPS_OUT_MIN
+	var lh := start.distance_to(hole)
+	if s <= lh or lh < 1e-5:
+		return start.lerp(hole, clampf(s / maxf(lh, 1e-5), 0.0, 1.0))
+	var e := s - lh
+	var lat := disp - ow * disp.dot(ow)
+	var side := lat / maxf(s, 1e-6)
+	var dirv := (ow + side).normalized()
+	return hole + dirv * e
+
+
 func _start_forceps_grip(pi: int, dir: Vector3) -> void:
+	var wc0 := _wound_center_world()
+	_fc_start_rel = _fc_last - wc0
+	_fc_ray_ref = _fc_last
+	_fc_start_inside = (_fc_last - wc0).dot(_cavity_outward().normalized()) < 0.0
 	_fc_active = true
 	_fc_pull = pi
 	stroke_active = true
@@ -5658,6 +5718,8 @@ func _drag_forceps(origin: Vector3, dir: Vector3) -> void:
 	if _fc_kind == "prolapse":
 		_prolapse_forceps_to(tip, origin, dir)
 		return
+	if forceps_mode != "putback":
+		tip = _forceps_outward_tip(origin, dir, tip)
 	_fc_last = tip
 	if _fc_kind == "soft":
 		var so := _soft_node(_fc_soft_kind)
@@ -5678,7 +5740,7 @@ func _drag_forceps(origin: Vector3, dir: Vector3) -> void:
 
 
 ## 把钳尖移到 tip：被扯得更远就从创口里再拉出几节（fed_len 增加），超过上限则钳尖被肠管拽住。
-func _forceps_hold(rope: Node, tip: Vector3) -> void:
+func _forceps_hold(rope: Node, tip: Vector3, no_feed: bool = false, reach_min: float = 0.0) -> void:
 	var n := int(rope.call("point_count"))
 	var hi := int(rope.get("hold_index"))
 	if n < 3 or hi <= 0 or hi >= n - 1:
@@ -5694,12 +5756,15 @@ func _forceps_hold(rope: Node, tip: Vector3) -> void:
 	if cap <= 1e-6:
 		cap = GUT_PULL_MAX
 	var fed := float(rope.get("fed_len"))
-	if need > fed:
+	if no_feed:
+		# T-11 拿取工具：只拖动已扯出的这段，不再从创口里多拉（上限 = 当前扯出长度）。
+		cap = fed
+	elif need > fed:
 		fed = minf(need, cap)
 		rope.set("fed_len", fed)
 	if need > cap:
 		var em := (ea + eb) * 0.5
-		var reach := maxf(minf(cap * fa - aa.distance_to(ea), cap * fb - ab.distance_to(eb)) / 1.03, 0.01)
+		var reach := maxf(minf(cap * fa - aa.distance_to(ea), cap * fb - ab.distance_to(eb)) / 1.03, maxf(0.01, reach_min))
 		if tip.distance_to(em) > reach:
 			tip = em + (tip - em).normalized() * reach
 	rope.set("hold_pos", tip)
@@ -7391,8 +7456,206 @@ func _pull_offset_cpu(l: Vector3) -> Vector3:
 	return _pull_off * w
 
 
+## ---- T-11：拿取工具拖动已悬垂在体外的物理内脏 ----------------------------------
+## 只移动 / 甩动：不放回、也不会再多扯出——肠袢 fed_len、柔体系带长度与扯出档位、
+## 脱垂量在拖动期间都保持不变（钳子才负责扯出 / 放回）。
+const ORGAN_GRAB_PICK := 0.022
+var organ_grab_kind: String = ""     # gut | soft | tube | prolapse
+var _og_pull := -1
+var _og_soft := ""
+var _og_side := -1
+var _og_reach := 0.0
+var organ_grabs := 0
+
+
+func is_organ_grab_active() -> bool:
+	return _grab_active and _grab_kind == "organ"
+
+
+func _begin_organ_grab(origin: Vector3, dir: Vector3) -> bool:
+	if not active:
+		return false
+	var d := dir.normalized()
+	var best := ORGAN_GRAB_PICK
+	var best_t := 1e9
+	var pick := {}
+	# 肠袢：ray_pick 只返回体外段的点。
+	for i in _gut_pulls.size():
+		var rope: Node = (_gut_pulls[i] as Dictionary)["rope"]
+		if rope == null or not is_instance_valid(rope) or bool(rope.get("retracting")):
+			continue
+		var pk: Array = rope.call("ray_pick", origin, d)
+		var idx := int(pk[0])
+		if idx < 0:
+			continue
+		var pts: PackedVector3Array = rope.call("points")
+		var rr := float(rope.get("radius")) if "radius" in rope else 0.008
+		var t := (pts[idx] - origin).dot(d)
+		if float(pk[1]) <= maxf(rr + 0.006, 0.012) and (float(pk[1]) < best or t < best_t - 0.01):
+			best = float(pk[1])
+			best_t = t
+			pick = {"kind": "gut", "i": i, "idx": idx, "p": pts[idx]}
+	# 柔体器官：只能抓体外节点；输卵管悬链：只抓已经是悬链的一侧（不拆新的）。
+	for k in _soft_organs.keys():
+		var so: Node = _soft_organs[k]
+		if so == null or not is_instance_valid(so) or not bool(so.call("is_extracted")) or bool(so.get("retracting")):
+			continue
+		var cage: PackedVector3Array = so.get("_p")
+		for bi in cage.size():
+			if not bool(so.call("node_outside", bi)):
+				continue
+			var w := cage[bi] - origin
+			var t2 := w.dot(d)
+			if t2 <= 0.0:
+				continue
+			var perp := (w - d * t2).length()
+			if perp < maxf(best, 0.024) and t2 < best_t + 0.004:
+				best = perp
+				best_t = t2
+				pick = {"kind": "soft", "k": str(k), "idx": bi, "p": cage[bi]}
+		if str(k) == "uterus":
+			for side in [0, 1]:
+				if not bool(so.call("tube_chain_active", side)):
+					continue
+				var rope2: Node = so.call("_chain_node", side)
+				if rope2 == null:
+					continue
+				var pk2: Array = rope2.call("ray_pick", origin, d)
+				if int(pk2[0]) < 0 or float(pk2[1]) > 0.010:
+					continue
+				var pts2: PackedVector3Array = rope2.call("points")
+				var t3 := (pts2[int(pk2[0])] - origin).dot(d)
+				if t3 < best_t - 0.004 or pick.is_empty():
+					best = float(pk2[1])
+					best_t = t3
+					pick = {"kind": "tube", "k": str(k), "side": side, "p": pts2[int(pk2[0])]}
+	# 脱垂子宫（阴道口外的部分）。
+	var pc := _prolapse_ctl()
+	if pc and bool(pc.call("is_active")):
+		var pp: Dictionary = pc.call("ray_pick", origin, d)
+		if not pp.is_empty():
+			var t4 := (Vector3(pp["point"]) - origin).dot(d)
+			if pick.is_empty() or t4 < best_t:
+				pick = {"kind": "prolapse", "idx": int(pp["node"]), "p": pp["point"]}
+	if pick.is_empty():
+		return false
+	return _start_organ_grab(pick, origin, d)
+
+
+func _start_organ_grab(pick: Dictionary, origin: Vector3, dir: Vector3) -> bool:
+	var kind := str(pick["kind"])
+	var p0: Vector3 = pick["p"]
+	match kind:
+		"gut":
+			var rope: Node = (_gut_pulls[int(pick["i"])] as Dictionary)["rope"]
+			rope.set("hold_index", int(pick["idx"]))
+			rope.set("hold_pos", p0)
+			var ea: Vector3 = rope.get("exit_a")
+			var eb: Vector3 = rope.get("exit_b")
+			_og_reach = p0.distance_to((ea + eb) * 0.5)
+			_og_pull = int(pick["i"])
+		"soft":
+			var so: Node = _soft_organs[str(pick["k"])]
+			if not bool(so.call("hold_particle_swing", int(pick["idx"]), p0)):
+				return false
+			_og_soft = str(pick["k"])
+		"tube":
+			var so2: Node = _soft_organs[str(pick["k"])]
+			if not bool(so2.call("chain_hold", int(pick["side"]), origin, dir)):
+				return false
+			_og_soft = str(pick["k"])
+			_og_side = int(pick["side"])
+		"prolapse":
+			var pc := _prolapse_ctl()
+			if pc == null:
+				return false
+			pc.call("begin_drive", "grab", int(pick["idx"]), p0, false, false)
+		_:
+			return false
+	organ_grab_kind = kind
+	organ_grabs += 1
+	_grab_kind = "organ"
+	_grab_active = true
+	_grab_last = p0
+	_grab_vel = Vector3.ZERO
+	stroke_active = true
+	return true
+
+
+func _organ_grab_to(tip: Vector3) -> void:
+	if not tip.is_finite():
+		return
+	_grab_vel = tip - _grab_last
+	_grab_last = tip
+	match organ_grab_kind:
+		"gut":
+			if _og_pull >= 0 and _og_pull < _gut_pulls.size():
+				var rope: Node = (_gut_pulls[_og_pull] as Dictionary)["rope"]
+				if rope and is_instance_valid(rope):
+					_forceps_hold(rope, tip, true, _og_reach)
+		"soft":
+			var so := _soft_node(_og_soft)
+			if so:
+				so.call("hold_particle", int(so.get("hold_index")), tip)
+				so.set("hold_no_feed", true)
+		"tube":
+			var so2 := _soft_node(_og_soft)
+			if so2:
+				so2.call("chain_drag", _og_side, tip)
+		"prolapse":
+			var pc := _prolapse_ctl()
+			if pc:
+				pc.call("drive_to", tip)
+
+
+func _end_organ_grab() -> void:
+	# 松手只是放开（随惯性摆动），从不触发放回。
+	match organ_grab_kind:
+		"gut":
+			if _og_pull >= 0 and _og_pull < _gut_pulls.size():
+				var rope: Node = (_gut_pulls[_og_pull] as Dictionary)["rope"]
+				if rope and is_instance_valid(rope):
+					rope.set("hold_index", -1)
+		"soft":
+			var so := _soft_node(_og_soft)
+			if so:
+				so.call("release_hold")
+		"tube":
+			var so2 := _soft_node(_og_soft)
+			if so2:
+				so2.call("chain_release", _og_side)
+		"prolapse":
+			var pc := _prolapse_ctl()
+			if pc:
+				pc.call("end_drive")
+	organ_grab_kind = ""
+	_og_pull = -1
+	_og_soft = ""
+	_og_side = -1
+
+
+## 测试：用射线开始拿取（与鼠标同一路径），再把抓点移到世界坐标 tip。
+func debug_organ_grab_begin(origin: Vector3, dir: Vector3) -> bool:
+	if tool != "grab":
+		set_tool("grab")
+	return begin_stroke(origin, dir) and is_organ_grab_active()
+
+
+func debug_organ_grab_to(tip: Vector3) -> void:
+	if is_organ_grab_active():
+		_organ_grab_to(tip)
+
+
+func debug_organ_grab_end() -> void:
+	if _grab_active:
+		_end_grab(true)
+
+
 func _drag_grab(origin: Vector3, dir: Vector3) -> void:
 	if not _grab_active:
+		return
+	if _grab_kind == "organ":
+		_organ_grab_to(_grab_plane_hit(origin, dir, _grab_last))
 		return
 	if _grab_kind == "flap":
 		var nxt := _grab_plane_hit(origin, dir, _grab_last)
@@ -7441,6 +7704,8 @@ func _end_grab(do_throw: bool) -> void:
 	elif _grab_kind == "skin":
 		# 松手后弹簧收回，保留弹性手感。
 		_split_drag = _pull_off.length()
+	elif _grab_kind == "organ":
+		_end_organ_grab()
 	elif _grab_kind == "retractor":
 		# 拉钩固定：松手立即把位移写进网格，不回弹（记下这把拉钩造成的位移，移除时可撤销）。
 		_bake_pull_tracked(_retr_drag)

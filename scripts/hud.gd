@@ -4275,6 +4275,10 @@ func _on_surgery_preview_changed() -> void:
 
 func _on_surgery_enter() -> void:
 	var g := _game()
+	if g and g.has_method("can_toggle_surgery") and not bool(g.call("can_toggle_surgery")) and g.has_method("enter_mode_from_observe"):
+		g.call("enter_mode_from_observe", "surgery")
+		_refresh_surgery_ui()
+		return
 	if g and g.has_method("toggle_surgery"):
 		_bind_surgery()
 		var s := _surgery()
@@ -4366,7 +4370,9 @@ func _refresh_surgery_ui() -> void:
 	if special and _btn_place_clone:
 		_btn_place_clone.visible = false
 	if _btn_surgery_enter:
-		_btn_surgery_enter.visible = on_bed and not special and not is_map_open()
+		# T-11：角色观察视角（站在地上）也显示，按下自动躺上检查床再进入。
+		var obs_s := g != null and g.has_method("can_enter_body_mode_from_observe") and bool(g.call("can_enter_body_mode_from_observe"))
+		_btn_surgery_enter.visible = (on_bed or obs_s) and not special and not is_map_open()
 		_btn_surgery_enter.position = Vector2(sl, st + 56.0)
 		_btn_surgery_enter.custom_minimum_size = Vector2(120, 40) if touch_ui else Vector2(100, 32)
 	if _btn_surgery_exit:
@@ -4716,7 +4722,8 @@ func _refresh_vagina_ui() -> void:
 	var sl := _safe.x + 16.0
 	var st := _safe.y + 16.0
 	if _btn_vagina_enter:
-		_btn_vagina_enter.visible = on_bed and not active and not surgery_on and not is_map_open()
+		var obs_v := g != null and g.has_method("can_enter_body_mode_from_observe") and bool(g.call("can_enter_body_mode_from_observe"))
+		_btn_vagina_enter.visible = (on_bed or obs_v) and not active and not surgery_on and not is_map_open()
 		var enter_x := sl + (128.0 if touch_ui else 112.0)
 		if _btn_surgery_enter and _btn_surgery_enter.visible:
 			enter_x = _btn_surgery_enter.position.x + maxf(_btn_surgery_enter.size.x, _btn_surgery_enter.custom_minimum_size.x) + 8.0

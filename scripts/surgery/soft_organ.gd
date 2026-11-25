@@ -32,6 +32,8 @@ const BODY_R := 0.016           # 体外宫体与皮肤的碰撞半径
 const TETHER_R := 0.006
 const IN_SPRING := 0.10
 const TUBE_IN_SPRING := 0.35
+## T-11：输卵管段最多拉长到静止长度的这个倍数（绳子硬上限，卵巢跟着走，不会被扯成细线）。
+const TUBE_MAX_STRETCH := 1.04
 const BODY_STIFF := 1.0         # 形状匹配比例：宫体整体是刚体（摆动 / 甩动来自系带），蒙皮边长不变
 const BODY_W := 0.35            # 宫体节点相对系带节点的逆质量
 const SKIN_CELL := 0.02
@@ -52,6 +54,10 @@ var wound_center: Vector3 = Vector3.ZERO
 var outward: Vector3 = Vector3.UP
 var hold_index: int = -1
 var hold_pos: Vector3 = Vector3.ZERO
+## T-11：拿取工具「只拖不扯」：系带不再伸长、夹点不回到腹壁内、扯出档位冻结。
+var hold_no_feed: bool = false
+var _nf_reach: float = 0.0
+var _nf_charge: float = -1.0
 var last_step_usec: int = 0
 
 var _rest_ab: PackedVector3Array = PackedVector3Array()
@@ -643,6 +649,8 @@ func start_putback() -> void:
 	retracting = true
 	hold_index = -1
 	_has_pull_target = false
+	hold_no_feed = false
+	_nf_charge = -1.0
 	_putback_t = 0.0
 
 
@@ -652,6 +660,8 @@ func force_reset() -> void:
 	organ_active = false
 	hold_index = -1
 	_has_pull_target = false
+	hold_no_feed = false
+	_nf_charge = -1.0
 	visible = false
 	_hide_sources(false)
 	_clear_chains()
@@ -861,6 +871,21 @@ func _step_tube(side: int, dt: float, kinematic: bool) -> void:
 	var spring := 0.0 if (horn_out or hi >= 0 or bool(_early.get(side, false))) else TUBE_IN_SPRING
 	if kinematic:
 		spring = 0.5
+	# T-11：夹点不能离宫角比管长还远——否则两端都钉死，中间被拉成细线。
+	if hi > 0 and hi < n:
+		var hd0 := p[1] - horn
+		if hd0.length_squared() < 1e-10:
+			hd0 = Vector3.RIGHT
+		var head0 := horn - hd0.normalized() * 0.007
+		var arc0 := 0.0
+		for a0 in mini(hi, rest.size()):
+			arc0 += rest[a0]
+		var reach := arc0 * TUBE_MAX_STRETCH
+		var dh := hp - head0
+		if dh.length() > reach:
+			hp = head0 + dh.normalized() * reach
+			if rope:
+				rope.set("hold_pos", hp)
 	var k60 := dt * 60.0
 	for k in range(1, n):
 		if k == hi:
@@ -910,11 +935,81 @@ func _step_tube(side: int, dt: float, kinematic: bool) -> void:
 	p[0] = horn - head_dir * 0.007
 	if hi > 0 and hi < n:
 		p[hi] = hp
+	_tube_hard_length(p, q, st, rest, hi)
+	# 管头始终嵌在宫角里、朝向第一节（硬长度后方向可能变了，重新对齐两遍）。
+	for _ha in 2:
+		var hd := p[1] - horn
+		if hd.length_squared() < 1e-10:
+			break
+		p[0] = horn - hd.normalized() * 0.007
+		_tube_hard_length(p, q, st, rest, hi)
+	if hi > 0 and hi < n and rope:
+		rope.set("hold_pos", p[hi])
 	tb["p"] = p
 	tb["q"] = q
 	tb["st"] = st
 	_tubes[side] = tb
 	_apply_tube(side)
+
+
+## T-11：迭代后再做一遍硬长度上限（宫角 → 卵巢的 FABRIK，夹点固定时再从夹点往回收一遍）。
+## 腹壁 / 洞口修正会把段拉长（体外段被宫角带走、体内段卡在壁后），这里让长度优先：
+## 被拽到腹壁外侧的点直接记为体外，下一帧不再被推回体内造成反复拉扯。
+func _tube_hard_length(p: PackedVector3Array, q: PackedVector3Array, st: PackedByteArray, rest: PackedFloat32Array, hi: int) -> void:
+	var n := p.size()
+	var lim := TUBE_MAX_STRETCH
+	if hi > 0 and hi < n:
+		var arc := 0.0
+		for a in hi:
+			arc += rest[a]
+		var dh := p[hi] - p[0]
+		if dh.length() > arc * lim * 0.995:
+			p[hi] = p[0] + dh.normalized() * arc * lim * 0.995
+			q[hi] = p[hi]
+	for k in range(1, n):
+		if k == hi:
+			continue
+		var d := p[k] - p[k - 1]
+		var L := d.length()
+		var mx := rest[k - 1] * lim
+		if L > mx and L > 1e-9:
+			var np := p[k - 1] + d * (mx / L)
+			q[k] += np - p[k]
+			p[k] = np
+	var passes := 4 if (hi > 0 and hi < n) else 0
+	for _pass in passes:
+		for k2 in range(hi - 1, 0, -1):
+			var d2 := p[k2] - p[k2 + 1]
+			var L2 := d2.length()
+			var mx2 := rest[k2] * lim
+			if L2 > mx2 and L2 > 1e-9:
+				var np2 := p[k2 + 1] + d2 * (mx2 / L2)
+				q[k2] += np2 - p[k2]
+				p[k2] = np2
+		for k3 in range(1, hi):
+			var d3 := p[k3] - p[k3 - 1]
+			var L3 := d3.length()
+			var mx3 := rest[k3 - 1] * lim
+			if L3 > mx3 and L3 > 1e-9:
+				var np3 := p[k3 - 1] + d3 * (mx3 / L3)
+				q[k3] += np3 - p[k3]
+				p[k3] = np3
+	if hi > 0 and hi < n:
+		# 仍有余差就让夹点本身让一点（钳子停在管子上，而不是把管子拉长）。
+		var d5 := p[hi] - p[hi - 1]
+		var mx5 := rest[hi - 1] * lim
+		if d5.length() > mx5:
+			p[hi] = p[hi - 1] + d5.normalized() * mx5
+			q[hi] = p[hi]
+		for k6 in range(hi + 1, n):
+			var d6 := p[k6] - p[k6 - 1]
+			var L6 := d6.length()
+			var mx6 := rest[k6 - 1] * lim
+			if L6 > mx6 and L6 > 1e-9:
+				p[k6] = p[k6 - 1] + d6 * (mx6 / L6)
+	for k4 in range(1, n):
+		if st[k4] == 0 and (p[k4] - wound_center).dot(outward) > 0.0:
+			st[k4] = 1
 
 
 func _maybe_auto_chain() -> void:
@@ -1084,6 +1179,47 @@ func hold_particle(i: int, tip: Vector3) -> void:
 func release_hold() -> void:
 	hold_index = -1
 	_has_pull_target = false
+	hold_no_feed = false
+	_nf_charge = -1.0
+
+
+## T-11：拿取工具拖动已在体外的宫体节点。只能抓体外节点；能拖到的最远处 = 该节点到
+## 「最靠近创口的连续体外节点」的链长 + 那个节点当前离创口的距离（体外系带也算），
+## 所以拖、甩都不会把体内部分再拽出来；夹点也不会被推回腹壁内。返回是否抓住。
+func hold_particle_swing(i: int, tip: Vector3) -> bool:
+	if _p.is_empty() or i < 0 or i >= _p.size() or not node_outside(i):
+		return false
+	if retracting:
+		return false
+	var j0 := i
+	while j0 > 0 and node_outside(j0 - 1):
+		j0 -= 1
+	var arc := 0.0
+	for b in range(j0, mini(i, _seg_rest.size())):
+		arc += float(_seg_rest[b])
+	var base := _p[j0].distance_to(wound_center)
+	if j0 == 0:
+		base = maxf(base, _tlen - _wound_depth())
+	_nf_reach = maxf(base + arc, _p[i].distance_to(wound_center)) + 0.002
+	hold_particle(i, tip)
+	hold_no_feed = true
+	_nf_charge = extract_charge
+	return true
+
+
+func _nf_clamp(target: Vector3) -> Vector3:
+	var lim := WALL_MARGIN + 0.002
+	var d := (target - wound_center).dot(outward)
+	if d < lim:
+		target += outward * (lim - d)
+	var rel := target - wound_center
+	if rel.length() > _nf_reach:
+		target = wound_center + rel.normalized() * _nf_reach
+		var d2 := (target - wound_center).dot(outward)
+		if d2 < lim:
+			target += outward * (lim - d2)
+	var r: Array = _wall(target, 1, BODY_R)
+	return r[0]
 
 
 func chain_ropes() -> Array:
@@ -1195,6 +1331,8 @@ func _reach_clamp(bi: int, target: Vector3, is_out: bool) -> Vector3:
 
 ## 驱动目标：体内节点要出去只能走创口——目标在腹壁外而路径不经洞口时，先把节点引向洞口。
 func _driver_target(ci: int, target: Vector3) -> Vector3:
+	if hold_no_feed:
+		return _nf_clamp(target)
 	var cur := _x[ci]
 	var st := _st[ci]
 	var bi := ci - TETHER_N
@@ -1416,7 +1554,7 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 			np.y = floor_y + 0.008
 		_x[i] = np
 	# 2) 被拉时系带跟着伸长（阴道上段 / 韧带被拉开），上限 = 创口深度 + OUT_EXTRA。
-	if driven:
+	if driven and not hold_no_feed:
 		var b0p := _x[TETHER_N]
 		var need := root.distance_to(b0p)
 		if _st[TETHER_N] == 1:
@@ -1622,6 +1760,9 @@ func _max_rest_offset() -> float:
 func _refresh_charge() -> void:
 	if not organ_active:
 		extract_charge = 0.0
+		return
+	if hold_no_feed and _nf_charge >= 0.0:
+		extract_charge = _nf_charge
 		return
 	var exp := exposed_length()
 	var u := clampf(exp / maxf(_rest_len * 0.80, 0.025), 0.0, 1.0)

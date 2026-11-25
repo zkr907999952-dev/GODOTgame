@@ -60,6 +60,7 @@ var _drive_active := false
 var _drive_node := 0
 var _drive_target := Vector3.ZERO
 var _drive_reduce := true
+var _drive_feed := true
 var _frame := Transform3D.IDENTITY
 var _prev_frame := Transform3D.IDENTITY
 var _has_prev := false
@@ -274,7 +275,8 @@ func try_trigger(tid: String, ctx: Dictionary) -> bool:
 # ------------------------------------------------------------------ 驱动 / 拖拽
 
 ## 开始牵拉某个节点（触发源 / 手 / 钳子）。目标为世界坐标。
-func begin_drive(src: String, node_i: int, target: Vector3, allow_reduce: bool = true) -> void:
+## allow_feed = false（T-11 手术拿取工具）：只拖动 / 甩动体外部分，不加重也不复位脱垂。
+func begin_drive(src: String, node_i: int, target: Vector3, allow_reduce: bool = true, allow_feed: bool = true) -> void:
 	_ensure_active()
 	if not _geo_ok:
 		return
@@ -283,6 +285,7 @@ func begin_drive(src: String, node_i: int, target: Vector3, allow_reduce: bool =
 	_drive_node = clampi(node_i, 0, _n - 1)
 	_drive_target = target
 	_drive_reduce = allow_reduce and bool(params.hand_reduce)
+	_drive_feed = allow_feed
 	_set_state(STATE_DRIVEN)
 
 
@@ -699,7 +702,7 @@ func step(dt: float) -> void:
 		if s_t < 0.0:
 			s_t = -rel.length()
 		var e := sp_h - s_t
-		if e > 0.0:
+		if e > 0.0 and _drive_feed:
 			descent += minf(e * float(params.feed_gain) * dt, float(params.feed_speed_max) * dt)
 		elif _drive_reduce and -e > float(params.reduce_deadband):
 			descent -= minf((-e - float(params.reduce_deadband)) * float(params.feed_gain) * dt, float(params.reduce_speed_max) * dt)
