@@ -59,6 +59,8 @@ var hold_no_feed: bool = false
 var _nf_reach: float = 0.0
 var _nf_charge: float = -1.0
 var last_step_usec: int = 0
+var _asleep := false
+var _sleep_vis_ok := false
 
 var _rest_ab: PackedVector3Array = PackedVector3Array()
 var _p: PackedVector3Array = PackedVector3Array()   # 宫体节点（只读视图，供拾取 / 测试）
@@ -1471,6 +1473,7 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 		return
 	var t0 := Time.get_ticks_usec()
 	dt = minf(maxf(dt, 0.0), 1.0 / 30.0)
+	var vis_carry := false
 	if _has_prev_frame:
 		var xf := frame * _prev_frame.affine_inverse()
 		if xf.origin.length_squared() > 1e-16 or not xf.basis.is_equal_approx(Basis.IDENTITY):
@@ -1479,6 +1482,7 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 			_carry_points(xf)
 			wound_center = saved_w
 			outward = saved_o
+			vis_carry = xf.origin.length_squared() > 4e-10 or not xf.basis.is_equal_approx(Basis.IDENTITY)
 	_prev_frame = frame
 	_has_prev_frame = true
 	_frame = frame
@@ -1487,8 +1491,10 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 		outward = out_dir.normalized()
 	if _x.size() != TETHER_N + SEGS:
 		_init_particles()
-	_build_grid()
 	if retracting:
+		_asleep = false
+		_sleep_vis_ok = false
+		_build_grid()
 		_step_putback(dt)
 		last_step_usec = Time.get_ticks_usec() - t0
 		return
@@ -1518,8 +1524,29 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 			_x[t_i] = root
 			_xq[t_i] = root
 		_finish_step(dt, true)
+		_asleep = true
 		last_step_usec = Time.get_ticks_usec() - t0
 		return
+	# 已取出但已收敛：跳过约束迭代；骨架随腹部坐标系搬运后只在需要时重画网格。
+	if not driven:
+		var max_v2 := 0.0
+		for i_s in nb:
+			max_v2 = maxf(max_v2, _x[i_s].distance_squared_to(_xq[i_s]))
+		if max_v2 < 4e-10:
+			if _asleep and _sleep_vis_ok and not vis_carry:
+				last_step_usec = Time.get_ticks_usec() - t0
+				return
+			_asleep = true
+			_finish_step(dt, true)
+			_sleep_vis_ok = true
+			last_step_usec = Time.get_ticks_usec() - t0
+			return
+		_asleep = false
+		_sleep_vis_ok = false
+	else:
+		_asleep = false
+		_sleep_vis_ok = false
+	_build_grid()
 	var sw := _wound_depth()
 	var loose := clampf((_tlen - TETHER_MIN) / maxf(sw * 0.6, 0.01), 0.0, 1.0)
 	var k60 := dt * 60.0

@@ -60,6 +60,7 @@ var _spine_i: int = -1
 var _navel_rest: Vector3 = Vector3(0.0, 1.06, 0.114)
 var _prof_tex: ImageTexture
 var _skin_mats: Array[ShaderMaterial] = []
+var last_step_usec: int = 0
 var _organ_mats: Array[ShaderMaterial] = []
 var _all_mats: Array[ShaderMaterial] = []
 var _time: float = 0.0
@@ -354,14 +355,22 @@ func set_canal_dilate(origin_ab: Vector3, axis_ab: Vector3, depth: float, radius
 		clear_canal_dilate()
 		return
 	ax = ax.normalized()
-	_dilate_o = Vector4(origin_ab.x, origin_ab.y, origin_ab.z, depth)
-	_dilate_d = Vector4(ax.x, ax.y, ax.z, maxf(radius, 0.001))
-	_dilate_p = Vector4(clampf(mixv, 0.0, 1.0), maxf(shaft_r, 0.0), clampf(residual, 0.0, 1.0), cervix_depth)
-	_dilate_lat = lateral_ab - ax * lateral_ab.dot(ax)
+	var o := Vector4(origin_ab.x, origin_ab.y, origin_ab.z, depth)
+	var d := Vector4(ax.x, ax.y, ax.z, maxf(radius, 0.001))
+	var pv := Vector4(clampf(mixv, 0.0, 1.0), maxf(shaft_r, 0.0), clampf(residual, 0.0, 1.0), cervix_depth)
+	var lat := lateral_ab - ax * lateral_ab.dot(ax)
+	if o.is_equal_approx(_dilate_o) and d.is_equal_approx(_dilate_d) and pv.is_equal_approx(_dilate_p) and lat.is_equal_approx(_dilate_lat):
+		return
+	_dilate_o = o
+	_dilate_d = d
+	_dilate_p = pv
+	_dilate_lat = lat
 	_push_dilate_uniforms()
 
 
 func clear_canal_dilate() -> void:
+	if _dilate_o == Vector4.ZERO and _dilate_d == Vector4.ZERO and _dilate_p == Vector4.ZERO and _dilate_lat == Vector3.ZERO:
+		return
 	_dilate_o = Vector4.ZERO
 	_dilate_d = Vector4.ZERO
 	_dilate_p = Vector4.ZERO
@@ -2594,7 +2603,9 @@ func _physics_process(_delta: float) -> void:
 
 
 func step(delta: float) -> void:
+	var t0 := Time.get_ticks_usec()
 	if not ready_ok:
+		last_step_usec = 0
 		return
 	var dt := minf(delta, 0.05)
 	if frozen:
@@ -2603,11 +2614,16 @@ func step(delta: float) -> void:
 		_push_uniforms()
 		_update_fx()
 		_update_props()
+		last_step_usec = int(Time.get_ticks_usec() - t0)
 		return
 	_time += dt
-	for w in _waves:
-		w["t"] = float(w["t"]) + dt
-	_waves = _waves.filter(func(w): return float(w["t"]) < STRIKE_LIFE)
+	if not _waves.is_empty():
+		var alive: Array = []
+		for w in _waves:
+			w["t"] = float(w["t"]) + dt
+			if float(w["t"]) < STRIKE_LIFE:
+				alive.append(w)
+		_waves = alive
 	_gut_exc += (0.0 - _gut_exc) * (1.0 - exp(-0.42 * dt))
 	var s_eff := clampf(gut_speed * (1.0 + _gut_exc * 0.3), 0.0, 1.0)
 	_peri_clock += Vector3(0.03 + s_eff * 0.2, 0.45 + s_eff * 0.9, 0.25 + s_eff * 0.5) * dt
@@ -2619,6 +2635,7 @@ func step(delta: float) -> void:
 	_push_uniforms()
 	_update_fx()
 	_update_props()
+	last_step_usec = int(Time.get_ticks_usec() - t0)
 
 
 ## 网页 figure.tsx 每帧肚脐段：自动抽插（thrust）/ 搅动（stir）
@@ -2945,6 +2962,27 @@ func _push_uniforms() -> void:
 			spar.append(Vector4(0, 0, 0, 0))
 	var xr := effective_xray()
 	var g := _gut_exc
+	var ba: Array = []
+	var bb: Array = []
+	for i in BALL_MAX:
+		if i < _ball_ch.size():
+			var ch: Dictionary = _ball_ch[i]
+			var a: Vector3 = ch["a"]
+			var d: Vector3 = ch["d"]
+			ba.append(Vector4(a.x, a.y, a.z, float(ch["rad"])))
+			bb.append(Vector4(d.x, d.y, d.z, float(ch["len"])))
+		else:
+			ba.append(Vector4.ZERO)
+			bb.append(Vector4.ZERO)
+	var ja := Vector4.ZERO
+	var jb := Vector4.ZERO
+	var jp := Vector4.ZERO
+	if not _jello.is_empty() and float(_jello.get("strength", 0.0)) > 0.0:
+		var ja3: Vector3 = _jello.get("a", Vector3.ZERO)
+		var jd3: Vector3 = _jello.get("d", Vector3(0, 0, 1))
+		ja = Vector4(ja3.x, ja3.y, ja3.z, float(_jello.get("reach", 0.0)))
+		jb = Vector4(jd3.x, jd3.y, jd3.z, float(_jello.get("rad", 0.016)))
+		jp = Vector4(float(_jello.get("strength", 1.0)), float(_jello.get("settle", 0.0)), float(_jello.get("age", 0.0)), float(_jello.get("tot", 0.0)))
 	for m in _all_mats:
 		m.set_shader_parameter("ab_navel", _frame.origin)
 		m.set_shader_parameter("ab_right", b.x)
@@ -2954,30 +2992,9 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("strike_par", spar)
 		m.set_shader_parameter("drag_grab", _drag_grab)
 		m.set_shader_parameter("drag_off", _drag_off)
-		var ba: Array = []
-		var bb: Array = []
-		for i in BALL_MAX:
-			if i < _ball_ch.size():
-				var ch: Dictionary = _ball_ch[i]
-				var a: Vector3 = ch["a"]
-				var d: Vector3 = ch["d"]
-				ba.append(Vector4(a.x, a.y, a.z, float(ch["rad"])))
-				bb.append(Vector4(d.x, d.y, d.z, float(ch["len"])))
-			else:
-				ba.append(Vector4.ZERO)
-				bb.append(Vector4.ZERO)
 		m.set_shader_parameter("ball_a", ba)
 		m.set_shader_parameter("ball_b", bb)
 		m.set_shader_parameter("ball_travel", _ball_travel)
-		var ja := Vector4.ZERO
-		var jb := Vector4.ZERO
-		var jp := Vector4.ZERO
-		if not _jello.is_empty() and float(_jello.get("strength", 0.0)) > 0.0:
-			var ja3: Vector3 = _jello.get("a", Vector3.ZERO)
-			var jd3: Vector3 = _jello.get("d", Vector3(0, 0, 1))
-			ja = Vector4(ja3.x, ja3.y, ja3.z, float(_jello.get("reach", 0.0)))
-			jb = Vector4(jd3.x, jd3.y, jd3.z, float(_jello.get("rad", 0.016)))
-			jp = Vector4(float(_jello.get("strength", 1.0)), float(_jello.get("settle", 0.0)), float(_jello.get("age", 0.0)), float(_jello.get("tot", 0.0)))
 		m.set_shader_parameter("jello_a", ja)
 		m.set_shader_parameter("jello_b", jb)
 		m.set_shader_parameter("jello_p", jp)
@@ -2985,17 +3002,6 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("spec_d", _spec_d)
 		m.set_shader_parameter("spec_u", _spec_u)
 		m.set_shader_parameter("spec_m", _spec_m)
-		m.set_shader_parameter("dilate_o", _dilate_o)
-		m.set_shader_parameter("dilate_d", _dilate_d)
-		m.set_shader_parameter("dilate_p", _dilate_p)
-		m.set_shader_parameter("dilate_lat", _dilate_lat)
-		m.set_shader_parameter("stir_off", _stir_off)
-		m.set_shader_parameter("stir_p", _stir_p)
-		m.set_shader_parameter("uter_str", _uter_str)
-		m.set_shader_parameter("uter_str_pivot", _uter_str_pivot)
-		m.set_shader_parameter("uter_str_from", _uter_str_from)
-		m.set_shader_parameter("uter_str_to", _uter_str_to)
-		m.set_shader_parameter("uter_str_len", _uter_str_len)
 		m.set_shader_parameter("canal_stretch_on", _canal_stretch_on)
 		m.set_shader_parameter("canal_os_rest", _canal_os_rest)
 		m.set_shader_parameter("canal_os_now", _canal_os_now)
@@ -3083,6 +3089,7 @@ func _push_uniforms() -> void:
 	if _light:
 		_light.global_position = _frame.origin - b.z * 0.04
 		_light.light_energy = (0.05 + xr * 0.06) * 8.0 if (show_organs and xr > 0.08) else 0.0
+
 
 
 # ------------------------------------------------------------------ build

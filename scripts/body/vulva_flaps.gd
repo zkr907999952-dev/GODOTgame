@@ -57,6 +57,19 @@ var _soft_P := [PackedVector3Array(), PackedVector3Array()]
 var _rest_edges := [PackedInt32Array(), PackedInt32Array()]
 var _rest_len := [PackedFloat32Array(), PackedFloat32Array()]
 var last_step_usec := 0
+var last_commit_usec := 0
+var commits := 0
+var _commit_frame := -1
+var _vest_idx := PackedInt32Array()
+var _soft_C := [PackedVector3Array(), PackedVector3Array()]
+var _soft_D := [PackedVector3Array(), PackedVector3Array()]
+var _soft_hard := [PackedByteArray(), PackedByteArray()]
+var _soft_was := [PackedByteArray(), PackedByteArray()]
+var _soft_wa := [PackedFloat32Array(), PackedFloat32Array()]
+var _soft_marked := [PackedByteArray(), PackedByteArray()]
+var _dress_P := PackedVector3Array()
+var _dress_D := PackedVector3Array()
+var _dress_marked := PackedByteArray()
 var _skin_tex: Texture2D
 var _adj_off := [PackedInt32Array(), PackedInt32Array()]
 var _adj_to := [PackedInt32Array(), PackedInt32Array()]
@@ -508,7 +521,31 @@ func _rot(p: Vector3, si: int, a: float) -> Vector3:
 	return h + (p - h).rotated(slit_dir, a)
 
 
+func step_usec_this_frame() -> int:
+	return last_commit_usec if _commit_frame == Engine.get_process_frames() else 0
+
+
+func _ensure_vec3(buf: PackedVector3Array, n: int) -> PackedVector3Array:
+	if buf.size() != n:
+		buf.resize(n)
+	return buf
+
+
+func _ensure_bytes(buf: PackedByteArray, n: int) -> PackedByteArray:
+	if buf.size() != n:
+		buf.resize(n)
+		buf.fill(0)
+	return buf
+
+
+func _ensure_f32(buf: PackedFloat32Array, n: int) -> PackedFloat32Array:
+	if buf.size() != n:
+		buf.resize(n)
+	return buf
+
+
 func _commit() -> void:
+	var t_all := Time.get_ticks_usec()
 	_cache_intro_frame()
 	_step_soft()
 	_commit_dress_soft()
@@ -546,6 +583,9 @@ func _commit() -> void:
 		if _mat:
 			flaps_mi.set_surface_override_material(si, _mat)
 	_commit_vestibule()
+	commits += 1
+	_commit_frame = Engine.get_process_frames()
+	last_commit_usec = int(Time.get_ticks_usec() - t_all)
 
 
 # ------------------------------------------------------------------ 0.4.08 前庭（裂隙边缘 → 阴道外口）
@@ -864,14 +904,25 @@ func _commit_vestibule() -> void:
 			var p := P[r * VEST_N + k]
 			var rad := p - c - axis * (p - c).dot(axis)
 			N[r * VEST_N + k] = (-rad.normalized() if rad.length_squared() > 1e-10 else -axis)
-	var idx := PackedInt32Array()
-	for r in VEST_ROWS:
-		for k in VEST_N:
-			var a := r * VEST_N + k
-			var b := r * VEST_N + (k + 1) % VEST_N
-			var c2 := (r + 1) * VEST_N + k
-			var d := (r + 1) * VEST_N + (k + 1) % VEST_N
-			idx.append_array([a, c2, b, b, c2, d])
+	var idx := _vest_idx
+	if idx.size() != VEST_ROWS * VEST_N * 6:
+		idx = PackedInt32Array()
+		idx.resize(VEST_ROWS * VEST_N * 6)
+		var w := 0
+		for r in VEST_ROWS:
+			for k in VEST_N:
+				var a := r * VEST_N + k
+				var b := r * VEST_N + (k + 1) % VEST_N
+				var c2 := (r + 1) * VEST_N + k
+				var d := (r + 1) * VEST_N + (k + 1) % VEST_N
+				idx[w] = a
+				idx[w + 1] = c2
+				idx[w + 2] = b
+				idx[w + 3] = b
+				idx[w + 4] = c2
+				idx[w + 5] = d
+				w += 6
+		_vest_idx = idx
 	# 统一网格绕向，法线由三角平均后再整体对齐到管内，避免逐三角翻转把 UV 绕向拧乱。
 	if idx.size() >= 3 and P.size() > 0:
 		var acc := 0.0
@@ -1590,14 +1641,16 @@ func _write_dress_verts(P: PackedVector3Array) -> void:
 func _commit_dress_soft() -> void:
 	if _dress_rest.is_empty() or _dress_active.is_empty():
 		return
-	var P := _dress_rest.duplicate()
+	_dress_P = _dress_rest.duplicate()
+	var P := _dress_P
 	if _intro_mix < 1e-4:
 		if _dress_dirty:
 			_write_dress_verts(P)
 			_dress_dirty = false
 		return
-	var D := PackedVector3Array()
-	D.resize(_dress_rest.size())
+	_dress_D = _ensure_vec3(_dress_D, _dress_rest.size())
+	var D := _dress_D
+	D.fill(Vector3.ZERO)
 	for k in _seam_pair_dress.size():
 		var di: int = _seam_pair_dress[k]
 		var si: int = _seam_pair_flap[k * 2]
@@ -1627,9 +1680,13 @@ func _repair_dress_flips(P: PackedVector3Array) -> void:
 	var arr: Array = _body_surf[0]["arr"]
 	if arr.is_empty() or arr[Mesh.ARRAY_INDEX] == null:
 		return
-	var marked := {}
+	if _dress_marked.size() != P.size():
+		_dress_marked.resize(P.size())
+	_dress_marked.fill(0)
 	for ai in _dress_active.size():
-		marked[int(_dress_active[ai])] = true
+		var di: int = int(_dress_active[ai])
+		if di >= 0 and di < _dress_marked.size():
+			_dress_marked[di] = 1
 	var tri: PackedInt32Array = _dress_tris
 	if tri.is_empty():
 		tri = arr[Mesh.ARRAY_INDEX]
@@ -1639,7 +1696,9 @@ func _repair_dress_flips(P: PackedVector3Array) -> void:
 			var a := tri[f * 3]
 			var b := tri[f * 3 + 1]
 			var c := tri[f * 3 + 2]
-			if not (marked.has(a) or marked.has(b) or marked.has(c)):
+			if a >= _dress_marked.size() or b >= _dress_marked.size() or c >= _dress_marked.size():
+				continue
+			if _dress_marked[a] == 0 and _dress_marked[b] == 0 and _dress_marked[c] == 0:
 				continue
 			if a >= P.size() or b >= P.size() or c >= P.size():
 				continue
@@ -1653,7 +1712,7 @@ func _repair_dress_flips(P: PackedVector3Array) -> void:
 				continue
 			bad += 1
 			for vi in [a, b, c]:
-				if not marked.has(vi):
+				if vi >= _dress_marked.size() or _dress_marked[vi] == 0:
 					continue
 				var w: float = _dress_inf[vi] if vi < _dress_inf.size() else 0.0
 				# 先收缩过渡点；后几轮连接线顶点一起收回，避免接缝处折面。
@@ -1909,22 +1968,17 @@ func _step_soft() -> void:
 		var iw: PackedFloat32Array = _iw[si]
 		var w: PackedFloat32Array = _w[si]
 		var sg := 1.0 if si == 0 else -1.0
-		var C := PackedVector3Array()
-		C.resize(n)
+		var C := _ensure_vec3(_soft_C[si], n)
 		for i in n:
 			var hw: float = float(w[i]) if i < w.size() else 0.0
 			C[i] = _rot(rest[i], si, ang * hw * sg)
 		var P := C.duplicate()
 		var sgx := 1.0 if si == 0 else -1.0
 		if _intro_mix >= 1e-4 and _rest_len[si].size() > 0:
-			var D := PackedVector3Array()
-			D.resize(n)
-			var hard := PackedByteArray()
-			hard.resize(n)
-			var was_in := PackedByteArray()
-			was_in.resize(n)
-			var wa_arr := PackedFloat32Array()
-			wa_arr.resize(n)
+			var D := _ensure_vec3(_soft_D[si], n)
+			var hard := _ensure_bytes(_soft_hard[si], n)
+			var was_in := _ensure_bytes(_soft_was[si], n)
+			var wa_arr := _ensure_f32(_soft_wa[si], n)
 			var near := PackedInt32Array()
 			for i0 in n:
 				var is_pin := i0 < pin.size() and pin[i0] != 0
@@ -1955,8 +2009,8 @@ func _step_soft() -> void:
 			var off: PackedInt32Array = _adj_off[si]
 			var to: PackedInt32Array = _adj_to[si]
 			if off.size() == n + 1 and near.size() > 0:
-				var marked := PackedByteArray()
-				marked.resize(n)
+				var marked := _ensure_bytes(_soft_marked[si], n)
+				marked.fill(0)
 				var ring := PackedInt32Array()
 				for j0 in near.size():
 					var ni: int = near[j0]

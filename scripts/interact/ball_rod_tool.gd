@@ -624,12 +624,12 @@ func _apply_deform() -> void:
 	if organs.has_method("set_canal_dilate"):
 		var res := residual + cervix_pulse * 0.45
 		organs.call("set_canal_dilate", opening_ab, axis_ab, depth, r, mixv, SHAFT_RADIUS, res, cerv_s, lat_ab)
-	# 阴唇 / 外口：VulvaInserter。
+	# 阴唇 / 外口：VulvaInserter。扩张器在位时由叶片包络占用外口，避免每帧和扩张器抢写（否则会反复重建皮瓣）。
 	if organs.get("vulva") and organs.vulva.has_method("set_inserter"):
 		if _inserter == null:
 			_inserter = InserterScript.new()
 		_inserter.configure(depth, r, SHAFT_RADIUS, axis_ab, up_ab, mixv, lat_ab)
-		if not _prolapse_owns_introitus():
+		if not _prolapse_owns_introitus() and not _speculum_owns_introitus():
 			organs.vulva.call("set_inserter", _inserter if mixv > 0.02 else null)
 	# 进入宫腔后撑开子宫和 UterusCavity。
 	uterus_distend = 0.0
@@ -812,6 +812,23 @@ func _prolapse_owns_introitus() -> bool:
 		return false
 	var pc := _prolapse()
 	return pc != null and bool(pc.call("owns_introitus"))
+
+
+func _speculum_owns_introitus() -> bool:
+	var s = null
+	if mode != null:
+		s = mode.get("surgery")
+	if s == null and organs != null:
+		var p = organs.get("player")
+		if p and p.has_method("get_surgery"):
+			s = p.call("get_surgery")
+	if s == null:
+		return false
+	if s.has_method("is_speculum_inserted"):
+		return bool(s.call("is_speculum_inserted"))
+	if s.has_method("is_speculum_present"):
+		return bool(s.call("is_speculum_present"))
+	return false
 
 
 func is_caught() -> bool:

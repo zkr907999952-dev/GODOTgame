@@ -254,12 +254,15 @@ func _clip_poly(poly: Array[Vector3], plane: Plane) -> Array[Vector3]:
 
 
 func _sync_texture_size(want: Vector2) -> void:
-	var cap := float(max_tex_size)
+	var cap_i := max_tex_size
+	if OS.get_name() == "Android" or OS.has_feature("mobile"):
+		cap_i = mini(cap_i, 512)
+	var cap := float(cap_i)
 	var k := minf(1.0, cap / maxf(want.x, want.y))
 	want *= k
 	var cur := _viewport.size
 	var step := func(x: float, c: int) -> int:
-		var q := clampi(int(ceil(x / TEX_STEP)) * TEX_STEP, TEX_STEP, max_tex_size)
+		var q := clampi(int(ceil(x / TEX_STEP)) * TEX_STEP, TEX_STEP, cap_i)
 		# 迟滞：变大立即跟上；变小到不足 70% 才缩，避免来回重建。
 		if q < c and q > int(c * 0.7):
 			return c
@@ -268,7 +271,10 @@ func _sync_texture_size(want: Vector2) -> void:
 	if sz != cur:
 		_viewport.size = sz
 	var root_vp := get_viewport()
-	if _viewport.msaa_3d != root_vp.msaa_3d:
+	if OS.get_name() == "Android" or OS.has_feature("mobile"):
+		if _viewport.msaa_3d != Viewport.MSAA_DISABLED:
+			_viewport.msaa_3d = Viewport.MSAA_DISABLED
+	elif _viewport.msaa_3d != root_vp.msaa_3d:
 		_viewport.msaa_3d = root_vp.msaa_3d
 
 

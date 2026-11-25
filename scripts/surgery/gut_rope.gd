@@ -76,6 +76,9 @@ var max_len: float = 0.9
 var floor_y: float = -1e9
 ## 0.4.08：载具里随载体转动的重力（在载具局部坐标系里积分，见 carry）。
 var gravity: Vector3 = GRAVITY
+var _asleep := false
+var _prev_anchor_a := Vector3.ZERO
+var _prev_anchor_b := Vector3.ZERO
 var capsules: Array = []
 ## 皮肤采样（世界坐标）
 var skin_p: PackedVector3Array = PackedVector3Array()
@@ -245,6 +248,26 @@ func step(dt: float) -> void:
 		hold_index = -1
 		fed_len = maxf(RETRACT_END_LEN, fed_len - _retract_rate * dt)
 		_shrink()
+		_asleep = false
+	elif hold_index < 0 and _p.size() >= 2:
+		var max_v2 := 0.0
+		for i0 in _p.size():
+			if i0 < _q.size():
+				max_v2 = maxf(max_v2, _p[i0].distance_squared_to(_q[i0]))
+		var anchor_moved := anchor_a.distance_squared_to(_prev_anchor_a) > 4e-10 or anchor_b.distance_squared_to(_prev_anchor_b) > 4e-10
+		_prev_anchor_a = anchor_a
+		_prev_anchor_b = anchor_b
+		if not anchor_moved and max_v2 < 4e-10:
+			if _asleep:
+				return
+			_asleep = true
+			_grow()
+			_update_radii()
+			_build_mesh()
+			return
+	_asleep = false
+	_prev_anchor_a = anchor_a
+	_prev_anchor_b = anchor_b
 	_grow()
 	var n := _p.size()
 	var rest := fed_len / float(n - 1)

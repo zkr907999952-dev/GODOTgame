@@ -171,18 +171,19 @@ func _make_view(nm: String, is_long: bool) -> SubViewportContainer:
 	var box := SubViewportContainer.new()
 	box.name = nm + "Box"
 	box.stretch = true
-	box.custom_minimum_size = Vector2(170, 168)
+	box.custom_minimum_size = Vector2(128, 128)
 	var vp := SubViewport.new()
 	vp.name = nm
-	vp.size = Vector2i(170, 168)
+	vp.size = Vector2i(128, 128)
 	vp.transparent_bg = false
 	vp.handle_input_locally = false
 	vp.msaa_3d = Viewport.MSAA_DISABLED
+	vp.positional_shadow_atlas_size = 0
 	# 无头自检不跑第二路 3D 绘制，避免共享主世界时卡住；参数和节点仍创建。
 	if DisplayServer.get_name() == "headless":
 		vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	else:
-		vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+		vp.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE
 	box.add_child(vp)
 	var cam := Camera3D.new()
 	cam.name = nm + "Cam"
@@ -253,9 +254,9 @@ func _layout_views() -> void:
 		_btn_both.set_pressed_no_signal(view_mode == MODE_BOTH)
 	var live := DisplayServer.get_name() != "headless"
 	if _long_vp:
-		_long_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if (live and _long_box and _long_box.visible and visible_on) else SubViewport.UPDATE_DISABLED
+		_long_vp.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE if (live and _long_box and _long_box.visible and visible_on) else SubViewport.UPDATE_DISABLED
 	if _trans_vp:
-		_trans_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if (live and _trans_box and _trans_box.visible and visible_on) else SubViewport.UPDATE_DISABLED
+		_trans_vp.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE if (live and _trans_box and _trans_box.visible and visible_on) else SubViewport.UPDATE_DISABLED
 
 
 func _bind_worlds() -> void:
@@ -327,9 +328,17 @@ func _prolapse_ctl() -> Node:
 	return organs.call("prolapse")
 
 
+var _iso_done := false
+
+
 func _isolate_main_cameras() -> void:
 	# 从所有非断面摄像机清掉 15/16 层，主视图就不会画到断面拷贝的白切面。
 	var hide := SECTION_LAYER_LONG | SECTION_LAYER_TRANS
+	if _iso_done and player and player.has_method("get_camera"):
+		var cam0 = player.get_camera()
+		if cam0 is Camera3D and (int(cam0.cull_mask) & hide) == 0:
+			return
+	_iso_done = true
 	if player and player.has_method("get_camera"):
 		var cam = player.get_camera()
 		if cam is Camera3D:
@@ -639,6 +648,7 @@ func _ensure_trans_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab: V
 		copy.skeleton = src.skeleton
 		copy.layers = SECTION_LAYER_TRANS
 		copy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		copy.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 		var cut := ShaderMaterial.new()
 		cut.shader = CUT_SHADER
 		cut.set_shader_parameter("tissue", rec["tissue"])
