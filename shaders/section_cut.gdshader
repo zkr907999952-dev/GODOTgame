@@ -1,4 +1,5 @@
-// 断面图：同一套腹部变形，再按剖切面裁掉一半；正面画组织色，背面补切割填充。
+// 断面图：同一套腹部变形，再按剖切面做真正的几何裁剪（丢掉切面一侧），正面画组织色。
+// 切面填充由下一 pass 的 section_cap 负责，这里不做投影。
 shader_type spatial;
 render_mode blend_mix, depth_draw_opaque, cull_back, unshaded, shadows_disabled, specular_schlick_ggx;
 
@@ -13,7 +14,8 @@ uniform vec3 section_normal = vec3(0.0, 0.0, 1.0);
 uniform vec3 canal_open_ab = vec3(0.0);
 uniform vec3 canal_axis_ab = vec3(0.0, 1.0, 0.0);
 uniform float stylize_layers = 1.0;
-uniform int cap_pass = 0; // 0 正面组织，1 背面切割填充
+uniform int cap_pass = 0;
+uniform float cap_thickness = 0.016;
 
 varying vec3 v_world;
 varying vec3 v_ab;
@@ -49,8 +51,8 @@ void fragment() {
 		if (nl > 1e-5) {
 			n /= nl;
 			float s = dot(v_world - section_point, n);
-			// 保留剖切面朝相机的一侧之外的组织；落在平面上的薄带留给轮廓。
-			if (s < 0.0004) {
+			// 真正的几何裁剪：丢掉剖切面朝相机一侧（s<0），保留切面后方的组织。
+			if (s < 0.00015) {
 				discard;
 			}
 		}
@@ -71,16 +73,13 @@ void fragment() {
 		}
 	}
 	vec3 col = tissue_color(id);
-	if (cap_pass == 1) {
-		col = tissue_color(id);
-	}
 	ALBEDO = col;
-	// 靠近剖切面画深色轮廓，漫画断面图的边缘。
+	// 靠近剖切面画很窄的深色轮廓，不要把整片组织涂黑。
 	if (section_on > 0.5) {
 		vec3 n = normalize(section_normal);
 		float s = dot(v_world - section_point, n);
-		float edge = 1.0 - smoothstep(0.0004, 0.0016, s);
-		ALBEDO = mix(ALBEDO, vec3(0.08, 0.05, 0.06), edge * 0.92);
+		float edge = 1.0 - smoothstep(0.00015, 0.0009, s);
+		ALBEDO = mix(ALBEDO, vec3(0.18, 0.10, 0.11), edge * 0.35);
 	}
 	ROUGHNESS = 1.0;
 	METALLIC = 0.0;

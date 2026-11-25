@@ -1,7 +1,8 @@
 extends CanvasLayer
 ## 断面图辅助小窗。默认在选中长柄金属球时于右上角打开。
-## 纵向（沿阴道轴线的矢状面）和横向（过球心、垂直轴线的切片），可切换或并排。
-## 用第二摄像机 + 剖切面着色器 + 背面填充，直播身体变形，尽量便宜。
+## 纵向：身体正中矢状面（过阴道/子宫轴线，解剖坐标，不跟相机、不跟金属棒）。
+## 横向：垂直于通道、过宫颈或球心。同一平面同时切开体表、阴道、子宫和金属棒，
+## 真正裁剪几何并平涂切面（不是把背面投影到平面上）。正交摄像机正对切面。
 class_name CrossSectionView
 
 const CUT_SHADER := preload("res://shaders/section_cut.gdshader")
@@ -83,7 +84,8 @@ func transverse_plane() -> Plane:
 
 
 func section_center() -> Vector3:
-	return _ball_world()
+	var pl := _planes()
+	return pl.get("long_look", pl.get("long_p", _ball_world()))
 
 
 func _ensure_ui() -> void:
@@ -278,43 +280,50 @@ func _rebuild_copies() -> void:
 	_clear_copies()
 	if organs == null:
 		return
-	# 子宫、宫腔、阴道、外阴前庭、金属球。
+	# 同一剖切面切开：体表（躯干皮肤）、阴道、子宫/宫腔、外阴、金属棒。
+	if organs.get("skin_meshes") is Array:
+		for mi in organs.skin_meshes:
+			if mi is MeshInstance3D:
+				_add_copy(mi, 0, "skin")
 	if organs.has_method("viscera_meshes"):
 		for kind in ["vagina", "uterus", "uterus_cavity"]:
 			var arr: Array = organs.call("viscera_meshes", kind)
 			for mi in arr:
 				if mi is MeshInstance3D:
-					_add_copy(mi, _tissue_of(kind, mi))
+					# 脱垂时原子宫已隐藏，只拷贝可见网格，避免和脱垂模型叠出残缺切面。
+					_add_copy(mi, _tissue_of(kind, mi), kind)
 	if organs.get("vulva") != null:
 		var v = organs.vulva
 		if v.get("vest_mi") is MeshInstance3D:
-			_add_copy(v.vest_mi, 3)
+			_add_copy(v.vest_mi, 3, "vestibule")
 		if v.get("flaps_mi") is MeshInstance3D:
-			_add_copy(v.flaps_mi, 0)
-	# 0.4.12 子宫脱垂：脱垂柔体子宫（子宫壁）与体外外翻套筒（黏膜，不分层）。
+			_add_copy(v.flaps_mi, 0, "flaps")
+	# 0.4.12 子宫脱垂：脱垂柔体子宫（子宫壁）。套筒接口已移除，保留兼容调用。
 	var pc := _prolapse_ctl()
 	if pc:
 		var so = pc.call("soft_organ")
 		if so is MeshInstance3D:
-			_add_copy(so, 4)
+			_add_copy(so, 4, "prolapse_uterus")
 			(_copies[_copies.size() - 1] as Dictionary)["no_deform"] = true
 		var sl = pc.call("sleeve")
 		if sl is MeshInstance3D:
-			_add_copy(sl, 3)
+			_add_copy(sl, 3, "sleeve")
 			var rec: Dictionary = _copies[_copies.size() - 1]
 			rec["no_deform"] = true
 			for m in [rec["cut"], rec["cap"]]:
 				(m as ShaderMaterial).set_shader_parameter("stylize_layers", 0.0)
 	_prol_built = pc != null
-	# 金属球（工具节点在 organs 下）。
+	# 金属棒（刚体，不套器官变形；随源节点每帧变换，剖切面不跟着棒走）。
 	var rod := organs.get_node_or_null("BallRod")
 	if rod:
 		for n in [rod.get_node_or_null("Tip"), rod.get_node_or_null("Shaft")]:
 			if n is MeshInstance3D:
-				_add_copy(n, 6)
+				_add_copy(n, 6, "rod")
+				(_copies[_copies.size() - 1] as Dictionary)["no_deform"] = true
 	for rec2 in _copies:
 		var sm = rec2["src"]
-		rec2["kind"] = str((sm as Node).get_meta("organ_kind", "")) if is_instance_valid(sm) else ""
+		if str(rec2.get("kind", "")) == "":
+			rec2["kind"] = str((sm as Node).get_meta("organ_kind", "")) if is_instance_valid(sm) else ""
 	_set_copies_visible(visible_on)
 
 
@@ -401,6 +410,56 @@ func debug_isolation() -> Dictionary:
 
 
 ## 断面拷贝的脱垂参数：阴道拷贝用和阴道网格同一组 prol_*，其它拷贝关闭。
+func debug_section_state() -> Dictionary:
+	var pl := _planes()
+	var long_pl: Plane = pl["long"]
+	var trans_pl: Plane = pl["trans"]
+	var kinds := PackedStringArray()
+	var rod_n := 0
+	var skin_n := 0
+	var uter_n := 0
+	var vag_n := 0
+	for rec in _copies:
+		var k := str(rec.get("kind", ""))
+		if not (k in kinds):
+			kinds.append(k)
+		if k == "rod":
+			rod_n += 1
+		elif k == "skin":
+			skin_n += 1
+		elif k == "uterus" or k == "uterus_cavity" or k == "prolapse_uterus":
+			uter_n += 1
+		elif k == "vagina":
+			vag_n += 1
+	var long_look_dot := 0.0
+	var trans_look_dot := 0.0
+	if _long_cam:
+		long_look_dot = absf((-_long_cam.global_transform.basis.z).normalized().dot(long_pl.normal.normalized()))
+	if _trans_cam:
+		trans_look_dot = absf((-_trans_cam.global_transform.basis.z).normalized().dot(trans_pl.normal.normalized()))
+	return {
+		"long_normal": long_pl.normal,
+		"trans_normal": trans_pl.normal,
+		"long_p": pl["long_p"],
+		"long_look": pl.get("long_look", pl["long_p"]),
+		"trans_p": pl["trans_p"],
+		"opening": pl["opening"],
+		"cervix": pl.get("cervix", Vector3.ZERO),
+		"axis": pl["axis"],
+		"side": pl["side"],
+		"long_dist_opening": absf(long_pl.distance_to(pl["opening"])),
+		"long_dist_cervix": absf(long_pl.distance_to(pl.get("cervix", pl["opening"]))),
+		"long_cam_along_normal": long_look_dot,
+		"trans_cam_along_normal": trans_look_dot,
+		"kinds": kinds,
+		"rod_copies": rod_n,
+		"skin_copies": skin_n,
+		"uterus_copies": uter_n,
+		"vagina_copies": vag_n,
+		"copy_count": _copies.size(),
+	}
+
+
 func _apply_prolapse_uniforms(rec: Dictionary) -> void:
 	var u: Dictionary = organs.call("prolapse_uniforms") if organs and organs.has_method("prolapse_uniforms") else {}
 	var is_vag := str(rec.get("kind", "")) == "vagina"
@@ -423,9 +482,30 @@ func _tissue_of(kind: String, mi: MeshInstance3D) -> int:
 	return 3
 
 
-func _add_copy(src: MeshInstance3D, tissue: int) -> void:
+func _cap_thickness_for(tissue: int, kind: String) -> float:
+	# 平切填充厚度：薄壁只填切口一圈，实心金属棒要盖过球体半径（最大 16 mm）。
+	if tissue == 6 or kind == "rod":
+		return 0.040
+	if tissue == 4 or kind == "prolapse_uterus" or kind == "uterus":
+		return 0.020
+	if tissue == 5 or kind == "uterus_cavity":
+		return 0.014
+	if kind == "skin":
+		return 0.008
+	if tissue == 3:
+		return 0.018
+	return 0.010
+
+
+func _add_copy(src: MeshInstance3D, tissue: int, kind: String = "") -> void:
 	if src == null or src.mesh == null:
 		return
+	if src.name.begins_with("Section_") or src.name.begins_with("SectionT_"):
+		return
+	# 已为该源建过纵向拷贝则跳过。
+	for rec0 in _copies:
+		if rec0.get("src") == src and rec0.get("which", "long") == "long":
+			return
 	var copy := MeshInstance3D.new()
 	copy.name = "Section_" + src.name
 	copy.mesh = src.mesh
@@ -434,15 +514,18 @@ func _add_copy(src: MeshInstance3D, tissue: int) -> void:
 	copy.layers = SECTION_LAYER_LONG
 	copy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	copy.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	var thick := _cap_thickness_for(tissue, kind)
 	var cut := ShaderMaterial.new()
 	cut.shader = CUT_SHADER
 	cut.set_shader_parameter("tissue", tissue)
-	# 纵向切面用平涂（类似子宫平切）；横向阴道环仍可分层。
+	# 纵向切面用平涂；横向阴道环仍可分层。
 	cut.set_shader_parameter("stylize_layers", 0.0)
+	cut.set_shader_parameter("cap_thickness", thick)
 	var cap := ShaderMaterial.new()
 	cap.shader = CAP_SHADER
 	cap.set_shader_parameter("tissue", tissue)
 	cap.set_shader_parameter("stylize_layers", 0.0)
+	cap.set_shader_parameter("cap_thickness", thick)
 	cut.next_pass = cap
 	copy.material_override = cut
 	src.add_child(copy)
@@ -451,7 +534,10 @@ func _add_copy(src: MeshInstance3D, tissue: int) -> void:
 		var sk := src.get_node_or_null(src.skeleton)
 		if sk:
 			copy.skeleton = copy.get_path_to(sk)
-	_copies.append({"copy": copy, "src": src, "cut": cut, "cap": cap, "tissue": tissue})
+	var rec_new := {"copy": copy, "src": src, "cut": cut, "cap": cap, "tissue": tissue, "kind": kind}
+	if kind == "rod" or kind == "prolapse_uterus" or kind == "sleeve":
+		rec_new["no_deform"] = true
+	_copies.append(rec_new)
 
 
 func _clear_copies() -> void:
@@ -465,8 +551,14 @@ func _clear_copies() -> void:
 func _set_copies_visible(on: bool) -> void:
 	for rec in _copies:
 		var c = rec["copy"]
-		if is_instance_valid(c):
-			c.visible = on
+		var src = rec.get("src")
+		if not is_instance_valid(c):
+			continue
+		# 源被隐藏（例如脱垂时的原子宫）时，断面拷贝也关掉，避免切不全的残片。
+		var src_on := true
+		if is_instance_valid(src) and src is Node3D:
+			src_on = (src as Node3D).visible
+		c.visible = on and src_on
 
 
 func _ball_world() -> Vector3:
@@ -495,6 +587,7 @@ func _planes() -> Dictionary:
 	var opening := Vector3.ZERO
 	var axis := Vector3(0, 1, 0)
 	var up := Vector3.UP
+	var cervix := Vector3.ZERO
 	if mode:
 		if mode.has_method("introitus_world"):
 			opening = mode.call("introitus_world")
@@ -502,6 +595,8 @@ func _planes() -> Dictionary:
 			axis = mode.call("canal_axis_world")
 		if mode.has_method("canal_up_world"):
 			up = mode.call("canal_up_world")
+		if mode.has_method("cervix_world"):
+			cervix = mode.call("cervix_world")
 	if axis.length_squared() < 1e-8:
 		axis = Vector3(0, 1, 0)
 	else:
@@ -517,10 +612,18 @@ func _planes() -> Dictionary:
 		side = Vector3.RIGHT
 	else:
 		side = side.normalized()
-	# 纵向：包含轴线和腹侧朝向的平面，法线朝向体侧。
+	# 纵向：身体正中矢状面。过通道/子宫轴线，法线为体侧（axis × 腹侧）。
+	# 锚在解剖轴线上（外口在轴上），不跟金属棒、不跟相机。棒离面时平面不动。
 	var long_n := side
-	var long_p := opening.lerp(_ball_world(), 0.55)
-	# 横向：过球心（或指定深度），法线即轴线。
+	var long_p := opening
+	var long_look := opening
+	if cervix.length_squared() > 1e-12:
+		long_look = opening.lerp(cervix, 0.55)
+	else:
+		long_look = opening + axis * 0.08
+	# 投影回正中面（宫颈本应在轴上；即使稍偏也不把平面带走）。
+	long_look = long_look - long_n * long_n.dot(long_look - opening)
+	# 横向：垂直于通道。有球且跟随球时过球心（v0419）；否则过宫颈。
 	var depth := trans_depth
 	var tip := _ball_world()
 	var trans_p := tip
@@ -529,21 +632,30 @@ func _planes() -> Dictionary:
 	if mode and mode.has_method("tool_controller"):
 		var ctl = mode.call("tool_controller")
 		caught = ctl != null and ctl.has_method("is_caught") and bool(ctl.call("is_caught"))
-	if pc and not caught:
-		# 脱垂中横切面放在外口：看外口被脱出物撑开的一圈。
-		trans_p = opening
 	if not follow_ball:
 		trans_p = opening + axis * depth
+	elif pc and not caught:
+		# 脱垂且球已脱出：横切面放在宫颈（脱出子宫的颈口），不再钉在外口。
+		if pc.has_method("cervix_world"):
+			trans_p = pc.call("cervix_world")
+		elif cervix.length_squared() > 1e-12:
+			trans_p = cervix
+		else:
+			trans_p = opening
+	else:
+		trans_p = tip
 	var long_pl := Plane(long_n, long_n.dot(long_p))
 	var trans_pl := Plane(axis, axis.dot(trans_p))
 	return {
 		"long": long_pl,
 		"trans": trans_pl,
 		"opening": opening,
+		"cervix": cervix,
 		"axis": axis,
 		"up": up,
 		"side": side,
 		"long_p": long_p,
+		"long_look": long_look,
 		"trans_p": trans_p,
 	}
 
@@ -557,10 +669,11 @@ func _process(_delta: float) -> void:
 	_bind_worlds()
 	_isolate_main_cameras()
 	# 工具刚生成时补拷贝；脱垂开始 / 结束时也重建（加上 / 去掉脱垂柔体和套筒）。
-	if _copies.is_empty() or not _copies_alive() or _prol_built != (_prolapse_ctl() != null):
+	if _copies.is_empty() or not _copies_alive() or _prol_built != (_prolapse_ctl() != null) or _copies_stale():
 		_rebuild_copies()
 	var pl := _planes()
 	_sync_materials(pl)
+	_set_copies_visible(true)
 	_place_cameras(pl)
 	_place_panel()
 	last_step_usec = int(Time.get_ticks_usec() - t0)
@@ -571,6 +684,22 @@ func _copies_alive() -> bool:
 		if rec["copy"] == null or not is_instance_valid(rec["copy"]):
 			return false
 	return true
+
+
+func _copies_stale() -> bool:
+	# 体表或金属棒晚于首次建拷贝才出现时，补进同一剖切面。
+	var has_skin := false
+	var has_rod := false
+	for rec in _copies:
+		if str(rec.get("kind", "")) == "skin":
+			has_skin = true
+		elif str(rec.get("kind", "")) == "rod":
+			has_rod = true
+	if organs and organs.get("skin_meshes") is Array and (organs.skin_meshes as Array).size() > 0 and not has_skin:
+		return true
+	if organs and organs.get_node_or_null("BallRod") != null and not has_rod:
+		return true
+	return false
 
 
 func _sync_materials(pl: Dictionary) -> void:
@@ -589,7 +718,7 @@ func _sync_materials(pl: Dictionary) -> void:
 		# 所以按视口拆成两套拷贝太贵。做法：材质先写纵向，横向视口用第二套拷贝。
 		# 为保持便宜，同一套拷贝用当前「主」平面，并排时给两路各备一份过重。
 		# 这里用材质的 section_* 只服务一个平面；并排时对每个源做 long/trans 各一份。
-		_apply_shared_deform(cut, cap, src_params, bool(rec.get("no_deform", false)))
+		_apply_shared_deform(cut, cap, src_params, rec)
 		_apply_prolapse_uniforms(rec)
 		# 默认先写纵向；_ensure_split_copies 会给横向单独的拷贝。
 		var plane: Plane = pl["long"] if rec.get("which", "long") == "long" else pl["trans"]
@@ -608,12 +737,28 @@ func _plane_point(pl: Plane) -> Vector3:
 	return pl.normal * pl.d
 
 
-func _apply_shared_deform(cut: ShaderMaterial, cap: ShaderMaterial, src: ShaderMaterial, frame_only: bool = false) -> void:
+func _deform_keys(rec: Dictionary) -> Array:
+	var keys: Array = ["ab_navel", "ab_right", "ab_up", "ab_fwd"]
+	if bool(rec.get("no_deform", false)):
+		return keys
+	if str(rec.get("kind", "")) == "skin":
+		# 体表与皮肤着色器一致：骨骼蒙皮已随源网格，这里只补打击/拖拽/按压，不套通道扩张。
+		return ["drag_grab", "drag_off", "drag_radius", "dent", "dent_off", "ab_navel", "ab_right", "ab_up", "ab_fwd"]
+	return [
+		"spec_o", "spec_d", "spec_u", "spec_m",
+		"dilate_o", "dilate_d", "dilate_p", "dilate_lat",
+		"uter_ball", "uter_ball_p",
+		"stir_off", "stir_p",
+		"uter_str", "uter_str_pivot", "uter_str_from", "uter_str_to", "uter_str_len",
+		"drag_grab", "drag_off", "drag_radius", "dent", "dent_off",
+		"ab_navel", "ab_right", "ab_up", "ab_fwd",
+	]
+
+
+func _apply_shared_deform(cut: ShaderMaterial, cap: ShaderMaterial, src: ShaderMaterial, rec: Dictionary = {}) -> void:
 	if src == null:
 		return
-	# frame_only：自带最终形状的网格（脱垂柔体 / 套筒）只要腹部坐标系，不叠加通道 / 宫腔变形。
-	var keys: Array = ["ab_navel", "ab_right", "ab_up", "ab_fwd"] if frame_only else ["spec_o", "spec_d", "spec_u", "spec_m", "dilate_o", "dilate_d", "dilate_p", "dilate_lat", "uter_ball", "uter_ball_p", "stir_off", "stir_p", "uter_str", "uter_str_pivot", "uter_str_from", "uter_str_to", "uter_str_len", "ab_navel", "ab_right", "ab_up", "ab_fwd"]
-	for key in keys:
+	for key in _deform_keys(rec):
 		# 名称以 organ_common 实际 uniforms 为准，拷不到就跳过。
 		if src.get_shader_parameter(key) != null:
 			var v = src.get_shader_parameter(key)
@@ -655,6 +800,9 @@ func _ensure_trans_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab: V
 		cap.shader = CAP_SHADER
 		cap.set_shader_parameter("tissue", rec["tissue"])
 		cap.set_shader_parameter("stylize_layers", 0.0)
+		var thick := _cap_thickness_for(int(rec["tissue"]), str(rec.get("kind", "")))
+		cut.set_shader_parameter("cap_thickness", thick)
+		cap.set_shader_parameter("cap_thickness", thick)
 		cut.next_pass = cap
 		copy.material_override = cut
 		src.add_child(copy)
@@ -673,7 +821,7 @@ func _ensure_trans_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab: V
 
 
 func _write_plane(rec: Dictionary, plane: Plane, pnt: Vector3, src_params: ShaderMaterial, open_ab: Vector3, axis_ab: Vector3) -> void:
-	_apply_shared_deform(rec["cut"], rec["cap"], src_params, bool(rec.get("no_deform", false)))
+	_apply_shared_deform(rec["cut"], rec["cap"], src_params, rec)
 	_apply_prolapse_uniforms(rec)
 	for m in [rec["cut"], rec["cap"]]:
 		m.set_shader_parameter("section_on", 1.0)
@@ -687,13 +835,13 @@ func _place_cameras(pl: Dictionary) -> void:
 	var axis: Vector3 = pl["axis"]
 	var up: Vector3 = pl["up"]
 	var side: Vector3 = pl["side"]
-	# 纵向摄像机沿体侧看向矢状面，正交，看到外口到子宫的整体。
+	# 纵向正交摄像机沿正中面法线（体侧）正对切面，注视轴线上的点，不跟离面的球走。
 	if _long_cam and (view_mode == MODE_LONG or view_mode == MODE_BOTH):
-		var c: Vector3 = pl["long_p"]
-		var size := 0.20
+		var c: Vector3 = pl.get("long_look", pl["long_p"])
+		var size := 0.22
 		var pc := _prolapse_ctl()
 		if pc:
-			# 脱垂：框住阴道上端到体外最远的脱出物。
+			# 脱垂：框住阴道上端到体外最远的脱出物，注视点锁在正中面上。
 			var opening: Vector3 = pl["opening"]
 			var pts: Array = [opening + axis * 0.05, opening]
 			for q in pc.call("node_positions"):
@@ -706,13 +854,12 @@ func _place_cameras(pl: Dictionary) -> void:
 				lo = Vector2(minf(lo.x, r.x), minf(lo.y, r.y))
 				hi = Vector2(maxf(hi.x, r.x), maxf(hi.y, r.y))
 			var mid := (lo + hi) * 0.5
-			c = opening + fwd * mid.x + up * mid.y + side * (c - opening).dot(side)
+			c = opening + fwd * mid.x + up * mid.y
 			size = clampf(maxf(hi.x - lo.x, hi.y - lo.y) * 1.3, 0.20, 0.34)
 		var from := side * 0.22
 		_long_cam.global_transform = Transform3D(Basis().looking_at(-from, up), c + from)
 		_long_cam.size = size
-		# 让剖切面朝向摄像机：法线与 from 同向。
-	# 横向摄像机沿轴线看向过球的横切面。
+	# 横向正交摄像机沿通道轴线正对横切面。
 	if _trans_cam and (view_mode == MODE_TRANS or view_mode == MODE_BOTH):
 		var c2: Vector3 = pl["trans_p"]
 		var from2 := -axis * 0.14
@@ -722,7 +869,6 @@ func _place_cameras(pl: Dictionary) -> void:
 		_trans_cam.global_transform = Transform3D(Basis().looking_at(-from2, tup), c2 + from2)
 		_trans_cam.size = 0.09
 	# 两路摄像机都在各自 SubViewport 里，world_3d 已指向主世界。
-	# 需要把摄像机放到主世界空间：作为 SubViewport 子节点时 global_transform 仍可设。
 	if _long_cam:
 		_flip_plane_to_camera(_long_cam, "long")
 	if _trans_cam:
@@ -730,25 +876,19 @@ func _place_cameras(pl: Dictionary) -> void:
 
 
 func _flip_plane_to_camera(cam: Camera3D, which: String) -> void:
-	# 保证剖切面法线指向相机，裁掉相机这一侧以外的？我们 discard s<0，
-	# s = dot(p - point, n)。希望保留「切面靠里」的组织，让切面正对相机。
-	# 令 n 指向相机，则相机一侧 s>0 被保留……不对：点在相机一侧 (p-point)·n > 0 若 n 朝相机。
-	# 我们想看到切面后面的组织截面，应丢掉相机与切面之间的组织，即丢掉 s>0？
-	# 当前 shader 丢掉 s<0。因此 n 应指向被丢掉的一侧 = 远离相机 = -to_cam。
+	# 平面位置保持解剖位置；这里只选定裁剪朝向：着色器丢掉 s<0，
+	# 所以法线指向被丢掉的一侧 = 相机这一侧的反方向，切面正对正交相机。
 	var pl := _planes()
-	var plane: Plane = pl[which]
-	var pnt: Vector3 = pl[which + "_p"]
-	var to_cam := (cam.global_position - pnt)
-	if to_cam.dot(plane.normal) > 0.0:
-		# 法线已朝向相机；改成反向，使 s<0 正好是相机这一侧。
-		# 在下一帧 _sync 里写 uniforms 前，把平面法线翻过来。
-		# 这里直接改材质。
-		var want := -plane.normal
-		for rec in _copies:
-			if rec.get("which", "long") != which:
-				continue
-			for m in [rec["cut"], rec["cap"]]:
-				m.set_shader_parameter("section_normal", want)
+	var pnt: Vector3 = pl["long_look"] if which == "long" else pl["trans_p"]
+	var to_cam := cam.global_position - pnt
+	if to_cam.length_squared() < 1e-10:
+		return
+	var want := -to_cam.normalized()
+	for rec in _copies:
+		if rec.get("which", "long") != which:
+			continue
+		for m in [rec["cut"], rec["cap"]]:
+			m.set_shader_parameter("section_normal", want)
 
 
 func _place_panel() -> void:
