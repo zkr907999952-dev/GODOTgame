@@ -202,7 +202,14 @@ func tool_controller() -> Node:
 
 
 func begin_tool_drag(screen: Vector2, origin: Vector3, dir: Vector3) -> bool:
-	if not active or _controller == null or not is_instance_valid(_controller):
+	if not active:
+		return false
+	_prol_drag = false
+	# 0.4.12：球卡在宫颈里时先交给球杆（拖球 = 拖子宫）；否则点中体外脱出物 = 用手拖子宫。
+	var caught := _controller != null and is_instance_valid(_controller) and _controller.has_method("is_caught") and bool(_controller.call("is_caught"))
+	if not caught and begin_prolapse_drag(origin, dir):
+		return true
+	if _controller == null or not is_instance_valid(_controller):
 		return false
 	if _controller.has_method("begin_drag"):
 		return bool(_controller.call("begin_drag", screen, origin, dir))
@@ -210,13 +217,77 @@ func begin_tool_drag(screen: Vector2, origin: Vector3, dir: Vector3) -> bool:
 
 
 func update_tool_drag(screen: Vector2, origin: Vector3, dir: Vector3) -> void:
+	if _prol_drag:
+		update_prolapse_drag(origin, dir)
+		return
 	if _controller and is_instance_valid(_controller) and _controller.has_method("update_drag"):
 		_controller.call("update_drag", screen, origin, dir)
 
 
 func end_tool_drag() -> void:
+	if _prol_drag:
+		end_prolapse_drag()
+		return
 	if _controller and is_instance_valid(_controller) and _controller.has_method("end_drag"):
 		_controller.call("end_drag")
+
+
+# ------------------------------------------------------------------ 0.4.12 用手拖脱出的子宫
+var _prol_drag := false
+var _prol_plane_p := Vector3.ZERO
+var _prol_grab_off := Vector3.ZERO
+
+
+func _prolapse_ctl() -> Node:
+	if organs == null or not organs.has_method("has_prolapse") or not bool(organs.call("has_prolapse")):
+		return null
+	return organs.call("prolapse")
+
+
+## 点中体外的脱出物就开始拖（物理子宫跟手，可甩；往回推可复位）。返回是否点中。
+func begin_prolapse_drag(origin: Vector3, dir: Vector3) -> bool:
+	var pc := _prolapse_ctl()
+	if pc == null:
+		return false
+	var hit: Dictionary = pc.call("ray_pick", origin, dir)
+	if hit.is_empty():
+		return false
+	var node_i := int(hit["node"])
+	var nodes: PackedVector3Array = pc.call("node_positions")
+	_prol_plane_p = hit["point"]
+	_prol_grab_off = nodes[node_i] - _prol_plane_p
+	pc.call("begin_drive", "hand", node_i, nodes[node_i], true)
+	_prol_drag = true
+	return true
+
+
+func update_prolapse_drag(origin: Vector3, dir: Vector3) -> void:
+	var pc := _prolapse_ctl()
+	if pc == null:
+		_prol_drag = false
+		return
+	var d := dir.normalized()
+	var n := d
+	if player and player.has_method("get_camera"):
+		var cam: Camera3D = player.call("get_camera")
+		if cam:
+			n = -cam.global_transform.basis.z
+	var den := d.dot(n)
+	if absf(den) < 1e-5:
+		return
+	var t := clampf((_prol_plane_p - origin).dot(n) / den, 0.02, 2.0)
+	pc.call("drive_to", origin + d * t + _prol_grab_off)
+
+
+func end_prolapse_drag() -> void:
+	_prol_drag = false
+	var pc := _prolapse_ctl()
+	if pc:
+		pc.call("end_drive")
+
+
+func is_prolapse_dragging() -> bool:
+	return _prol_drag
 
 
 func add_view_jolt(v: Vector3) -> void:

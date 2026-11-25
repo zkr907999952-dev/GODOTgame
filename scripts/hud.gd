@@ -56,6 +56,7 @@ var _btn_cam_abdomen: Button
 var _vagina_bar: HBoxContainer
 var _vagina_tool_btns: Dictionary = {}
 var _ball_box: VBoxContainer
+var _prolapse_label: Label   # 0.4.12 子宫脱垂等级
 var _ball_slider: HSlider
 var _ball_value: Label
 var _panel_settings: PanelContainer
@@ -2787,6 +2788,7 @@ func _process(_delta: float) -> void:
 	_refresh_corpse_drag_btn()
 	_refresh_possess_aim(_delta)
 	_refresh_bed_actions()
+	_tick_prolapse_label()
 	if _panel_interact and _panel_interact.visible:
 		_refresh_interact_actions()
 	# 模式由任何途径改变（Tab / 按钮 / 脚本）都刷新状态栏
@@ -4630,6 +4632,14 @@ func _build_vagina_ui(root: Control) -> void:
 	_ball_slider.value_changed.connect(_on_ball_diameter)
 	_ball_box.add_child(_ball_slider)
 	root.add_child(_ball_box)
+	_prolapse_label = Label.new()
+	_prolapse_label.name = "ProlapseGradeLabel"
+	_prolapse_label.visible = false
+	_prolapse_label.add_theme_color_override("font_color", Color(1.0, 0.86, 0.86))
+	_prolapse_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
+	_prolapse_label.add_theme_constant_override("outline_size", 4)
+	_prolapse_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(_prolapse_label)
 	_bind_vagina()
 
 
@@ -4732,6 +4742,8 @@ func _refresh_vagina_ui() -> void:
 			_btn_spec_remove.visible = false
 		if _ball_box:
 			_ball_box.visible = false
+		if _prolapse_label:
+			_prolapse_label.visible = false
 		return
 	var preset := str(vm.call("current_preset")) if vm else "free"
 	if _btn_cam_free:
@@ -4790,6 +4802,40 @@ func _refresh_vagina_ui() -> void:
 				_ball_slider.set_value_no_signal(mm)
 			if _ball_value:
 				_ball_value.text = "%.0f mm" % mm
+	_refresh_prolapse_label(sl, st + (104.0 if touch_ui else 92.0) + (64.0 if _ball_box and _ball_box.visible else 0.0) + (48.0 if _speculum_box and _speculum_box.visible else 0.0))
+
+
+const PROLAPSE_GRADE_TEXT := ["", "I 度 · 宫颈下移", "II 度 · 宫颈到达阴道口", "III 度 · 宫颈脱出", "IV 度 · 子宫完全脱出"]
+
+
+var _prol_lbl_pos := Vector2(16, 120)
+
+
+func _tick_prolapse_label() -> void:
+	if _prolapse_label == null:
+		return
+	var vm := _vagina()
+	if vm == null or not bool(vm.call("is_active")):
+		_prolapse_label.visible = false
+		return
+	_refresh_prolapse_label(_prol_lbl_pos.x, _prol_lbl_pos.y)
+
+
+## 0.4.12：阴道互动中显示子宫脱垂等级（没有脱垂时隐藏）。
+func _refresh_prolapse_label(x: float, y: float) -> void:
+	if _prolapse_label == null:
+		return
+	_prol_lbl_pos = Vector2(x, y)
+	var org: Node = _player.call("get_organs") if _player and _player.has_method("get_organs") else null
+	var on := org != null and org.has_method("has_prolapse") and bool(org.call("has_prolapse"))
+	if not on:
+		_prolapse_label.visible = false
+		return
+	var pc: Node = org.call("prolapse")
+	var g := clampi(int(pc.get("grade")), 0, 4)
+	_prolapse_label.text = "子宫脱垂 %s（%d%%）" % [PROLAPSE_GRADE_TEXT[g] if g > 0 else "0 度", int(round(float(pc.call("amount")) * 100.0))]
+	_prolapse_label.position = Vector2(x, y)
+	_prolapse_label.visible = true
 
 
 func _on_ball_diameter(v: float) -> void:

@@ -15,6 +15,8 @@ const OS_REST_R := 0.0049
 
 signal diameter_changed(diameter: float)
 signal breakthrough(entered: bool)
+## 0.4.12：大球在宫腔里被强行扯出 → 宫颈卡住球，子宫跟着脱垂（caught = true）；released = 球最终脱出宫颈。
+signal prolapse_caught(caught: bool)
 
 var mode: Node
 var organs: Node
@@ -34,6 +36,13 @@ var last_breakthrough_in := false
 var jolt := Vector3.ZERO
 var jolt_time := 0.0
 var uterus_distend := 0.0
+# 0.4.12 子宫脱垂触发 #1
+var caught := false                 # 球卡在宫颈里，正拖着子宫
+var last_pull_speed := 0.0          # 往外扯的速度（m/s，按期望深度的变化）
+var last_pull_force := 0.0          # 被宫颈挡住的行程（m）
+var prolapse_trigger_count := 0
+var _last_desired := INF
+var _caught_target := Vector3.ZERO
 
 var _root: Node3D
 var _tip_mi: MeshInstance3D
@@ -71,6 +80,8 @@ func activate() -> void:
 
 
 func deactivate() -> void:
+	if caught:
+		_release_catch(false)
 	dragging = false
 	through_cervix = false
 	cervix_pressure = 0.0
@@ -81,7 +92,7 @@ func deactivate() -> void:
 			organs.call("clear_canal_dilate")
 		if organs.has_method("clear_uterus_ball"):
 			organs.call("clear_uterus_ball")
-		if organs.get("vulva") and organs.vulva.has_method("set_inserter"):
+		if organs.get("vulva") and organs.vulva.has_method("set_inserter") and not _prolapse_owns_introitus():
 			organs.vulva.call("set_inserter", null)
 	if _root:
 		_root.visible = false
@@ -114,6 +125,14 @@ func set_diameter(d: float) -> void:
 	diameter = clampf(d, DIAMETER_MIN, DIAMETER_MAX)
 	_sync_visual()
 	diameter_changed.emit(diameter)
+	# 卡住时把球缩到宫颈能放过的大小：球从宫颈滑出，子宫停在当前脱垂等级。
+	if caught:
+		var pc := _prolapse()
+		var pp: Resource = pc.get("params") if pc else null
+		var cap := float(pp.get("cervix_capacity_r")) * float(pp.get("catch_ratio")) if pp else 0.0
+		if radius() < cap:
+			_release_catch(true)
+			return
 	_apply_deform()
 
 
@@ -121,6 +140,13 @@ func begin_drag(_screen: Vector2, origin: Vector3, dir: Vector3) -> bool:
 	if _root == null or not _root.visible:
 		activate()
 	dragging = true
+	_last_desired = INF
+	if caught:
+		var pc := _prolapse()
+		if pc:
+			pc.call("begin_drive", "ball_rod", 0, _caught_pointer(origin, dir), true)
+		_drive_caught(origin, dir)
+		return true
 	_move_from_ray(origin, dir, 1.0)
 	return true
 
@@ -128,11 +154,20 @@ func begin_drag(_screen: Vector2, origin: Vector3, dir: Vector3) -> bool:
 func update_drag(_screen: Vector2, origin: Vector3, dir: Vector3) -> void:
 	if not dragging:
 		return
+	if caught:
+		_drive_caught(origin, dir)
+		return
 	_move_from_ray(origin, dir, 1.0)
 
 
 func end_drag() -> void:
 	dragging = false
+	_last_desired = INF
+	if caught:
+		# 松手：子宫停在已达到的等级挂着甩，球仍卡在宫颈里，可以再拖。
+		var pc := _prolapse()
+		if pc:
+			pc.call("end_drive")
 
 
 ## 预设计算拖拽点（自检 / 输入共用）。
@@ -389,6 +424,13 @@ func _move_from_ray(origin: Vector3, dir: Vector3, _k: float) -> void:
 
 
 func _apply_depth_gate(desired: float, dt: float) -> void:
+	# 往外扯的速度（期望深度的变化率，按住时才算）。
+	if _last_desired != INF and dt > 0.0:
+		last_pull_speed = maxf((_last_desired - desired) / dt, 0.0)
+	else:
+		last_pull_speed = 0.0
+	_last_desired = desired
+	last_pull_force = 0.0
 	var cerv := _cervix_depth()
 	var r := radius()
 	var max_in := cerv + r * 0.55 + _opening_world().distance_to(_fundus_world()) * 0.85
@@ -420,12 +462,19 @@ func _apply_depth_gate(desired: float, dt: float) -> void:
 	else:
 		if pulling and depth <= gate_end + r * 0.35:
 			var blocked_out := maxf(gate_end - desired, 0.0)
+			last_pull_force = blocked_out
+			# 0.4.12 触发 #1：球够大 + 扯得够狠 → 宫颈卡住球，子宫被拖出来（不再弹出宫颈）。
+			if _try_prolapse_trigger(desired):
+				return
 			cervix_pressure += blocked_out * clampf(dt * 2.8, 0.0, 0.12)
 			depth = _approach(depth, maxf(depth, gate_end), dt, 3.0)
 			if cervix_pressure >= cervix_threshold() * 0.85:
 				_do_breakthrough(false, cerv, r)
 		else:
 			depth = _approach(depth, desired, dt, 10.0)
+			# 往外扯时宫颈挡着：一帧扯得再快也不能直接越过闸门（先卡住，再按压力弹出或触发脱垂）。
+			if pulling:
+				depth = maxf(depth, gate_end)
 			if desired >= gate_end or pushing:
 				cervix_pressure = maxf(cervix_pressure - dt * 1.8, 0.0)
 			if pulling and desired < gate_start and cervix_pressure >= cervix_threshold() * 0.85:
@@ -496,6 +545,14 @@ func _sync_pose(dt: float) -> void:
 func _apply_deform() -> void:
 	if organs == null or not organs.has_method("vagina_canal"):
 		return
+	if caught:
+		# 球在脱出的子宫里：通道 / 宫腔撑开交给脱垂系统（原子宫已隐藏），外口由脱出物占用。
+		if organs.has_method("clear_canal_dilate"):
+			organs.call("clear_canal_dilate")
+		if organs.has_method("clear_uterus_ball"):
+			organs.call("clear_uterus_ball")
+		uterus_distend = 0.0
+		return
 	var canal: Dictionary = organs.call("vagina_canal")
 	if canal.is_empty():
 		return
@@ -522,7 +579,8 @@ func _apply_deform() -> void:
 			var xf: Transform3D = organs.get("_frame")
 			lat_ab = xf.basis.inverse() * lateral
 		_inserter.configure(depth, r, SHAFT_RADIUS, axis_ab, up_ab, mixv, lat_ab)
-		organs.vulva.call("set_inserter", _inserter if mixv > 0.02 else null)
+		if not _prolapse_owns_introitus():
+			organs.vulva.call("set_inserter", _inserter if mixv > 0.02 else null)
 	# 进入宫腔后撑开子宫和 UterusCavity。
 	uterus_distend = 0.0
 	if through_cervix and depth > cerv_s - r * 0.2 and organs.has_method("set_uterus_ball"):
@@ -544,6 +602,10 @@ func _physics_process(delta: float) -> void:
 	if _root == null or not _root.visible:
 		return
 	var t0 := Time.get_ticks_usec()
+	if caught:
+		_follow_cervix()
+		last_step_usec = int(Time.get_ticks_usec() - t0)
+		return
 	if not dragging:
 		# 松手后位置跟着活中线，残留慢慢回。
 		residual = lerpf(residual, 0.22 if (depth > radius() or through_cervix) else 0.0, clampf(delta * 1.6, 0.0, 1.0))
@@ -555,3 +617,148 @@ func _physics_process(delta: float) -> void:
 		# 拖拽中 _move_from_ray 已经写过；这里只补中线跟随。
 		_sync_pose(delta)
 	last_step_usec = int(Time.get_ticks_usec() - t0)
+
+
+# ------------------------------------------------------------------ 0.4.12 子宫脱垂（触发 #1）
+
+func _prolapse() -> Node:
+	if organs == null or not organs.has_method("prolapse"):
+		return null
+	return organs.call("prolapse")
+
+
+func _prolapse_owns_introitus() -> bool:
+	if organs == null or not organs.has_method("has_prolapse") or not bool(organs.call("has_prolapse")):
+		return false
+	var pc := _prolapse()
+	return pc != null and bool(pc.call("owns_introitus"))
+
+
+func is_caught() -> bool:
+	return caught
+
+
+func _try_prolapse_trigger(_desired: float) -> bool:
+	var pc := _prolapse()
+	if pc == null:
+		return false
+	var ctx := {
+		"in_uterus": is_in_uterus(),
+		"ball_radius": radius(),
+		"pull_speed": last_pull_speed,
+		"pull_force": last_pull_force,
+		"target": tip_world(),
+	}
+	if not bool(pc.call("try_trigger", "ball_rod", ctx)):
+		return false
+	caught = true
+	prolapse_trigger_count += 1
+	cervix_pressure = 0.0
+	cervix_pulse = 1.0
+	_caught_target = tip_world()
+	if not dragging:
+		pc.call("end_drive")
+	jolt = -_axis_world() * 0.008
+	jolt_time = 0.14
+	prolapse_caught.emit(true)
+	_apply_deform()
+	return true
+
+
+## 卡住时的拖拽点：过球心、尽量正对相机的平面。
+func _caught_pointer(origin: Vector3, dir: Vector3) -> Vector3:
+	var d := dir.normalized() if dir.length_squared() > 1e-12 else Vector3.FORWARD
+	var n := d
+	if player and player.has_method("get_camera"):
+		var cam: Camera3D = player.call("get_camera")
+		if cam:
+			n = -cam.global_transform.basis.z
+	var p0 := tip_world()
+	var den := d.dot(n)
+	if absf(den) < 1e-5:
+		return p0
+	var t := clampf((p0 - origin).dot(n) / den, 0.02, 2.0)
+	return origin + d * t
+
+
+func _drive_caught(origin: Vector3, dir: Vector3) -> void:
+	var tgt := _caught_pointer(origin, dir)
+	drive_caught_to(tgt)
+
+
+## 卡住时直接给目标点（世界坐标），自检 / 输入共用。拉过最大脱垂再多 release_over_pull 球就从宫颈脱出。
+func drive_caught_to(target: Vector3) -> void:
+	var pc := _prolapse()
+	if pc == null or not caught:
+		return
+	_caught_target = target
+	if not bool(pc.call("is_driving")):
+		pc.call("begin_drive", "ball_rod", 0, target, true)
+	pc.call("drive_to", target)
+	var dmax := float(pc.call("descent_max"))
+	var pp: Resource = pc.get("params")
+	var over := float(pp.get("release_over_pull")) if pp else 0.03
+	if float(pc.get("descent")) >= dmax - 1e-4:
+		var c: Vector3 = pc.call("cervix_world")
+		if target.distance_to(c) > over:
+			_release_catch(true)
+			return
+	_follow_cervix()
+
+
+func _follow_cervix() -> void:
+	var pc := _prolapse()
+	if pc == null or not bool(pc.call("is_active")):
+		# 脱垂被复原（复原按钮 / 手术）：球留在宫腔里，回到普通状态。
+		caught = false
+		prolapse_caught.emit(false)
+		return
+	var nodes: PackedVector3Array = pc.call("node_positions")
+	if nodes.size() < 2 or _root == null:
+		return
+	var c := nodes[0]
+	var din := (nodes[1] - nodes[0]).normalized()
+	if not din.is_finite() or din.length_squared() < 0.5:
+		din = _axis_world()
+	var pos := c + din * radius() * 0.6
+	var z := din
+	var up := _up_world()
+	var x := up.cross(z)
+	if x.length_squared() < 1e-8:
+		x = Vector3.RIGHT.cross(z)
+	x = x.normalized()
+	var y := z.cross(x).normalized()
+	_root.global_transform = Transform3D(Basis(x, y, z), pos)
+	# 深度只作参考（沿阴道轴的投影，体外为负）。
+	depth = (c - _opening_world()).dot(_axis_world())
+
+
+## 球离开宫颈：slipped = 往外扯过头 / 缩小后滑出（球到体外）；否则（复原 / 退出）球回到普通状态。
+func _release_catch(slipped: bool) -> void:
+	if not caught:
+		return
+	caught = false
+	var pc := _prolapse()
+	if pc:
+		pc.call("end_drive")
+	if slipped:
+		through_cervix = false
+		cervix_pressure = 0.0
+		cervix_pulse = 1.0
+		uterus_distend = 0.0
+		# 球已经在体外：深度放到外面（沿通道轴最外），位置跟手。
+		depth = -0.06 - radius()
+		lateral = Vector3.ZERO
+		if _root:
+			var z := _axis_world()
+			var up := _up_world()
+			var x := up.cross(z)
+			if x.length_squared() < 1e-8:
+				x = Vector3.RIGHT.cross(z)
+			x = x.normalized()
+			_root.global_transform = Transform3D(Basis(x, z.cross(x).normalized(), z), _caught_target)
+		jolt = -_axis_world() * 0.012
+		jolt_time = 0.14
+		breakthrough.emit(false)
+	prolapse_caught.emit(false)
+	_apply_deform()

@@ -975,6 +975,10 @@ func restore_body() -> void:
 	_cut_anim = false
 	_clear_cut_preview()
 	_clear_trail()
+	# 0.4.12：整身复原也复原子宫脱垂。
+	var pcr := _prolapse_ctl()
+	if pcr:
+		pcr.call("reset")
 	_clear_guts()
 	_clear_retractors()
 	if speculum:
@@ -5522,6 +5526,9 @@ func _begin_forceps(origin: Vector3, dir: Vector3, kinds: PackedStringArray = Pa
 	# 2. 从创口点选对应器官，扯出新的一段 / 开始五档脱出（「放回」模式下不新扯）
 	if forceps_mode == "putback":
 		return false
+	# 0.4.12：子宫脱垂中从创口夹子宫 → 先按拉出量把脱垂复位，复位完再进入正常的创口扯出。
+	if (kinds.is_empty() or kinds.has("uterus")) and _try_begin_prolapse_reduce(origin, dir):
+		return true
 	var hv: Variant = _ray_cavity_hit(origin, dir)
 	var pick := viscera_pick if kinds.is_empty() else {}
 	if _organs and _organs.has_method("ray_pick_viscera") and (pick.is_empty() or not kinds.is_empty()):
@@ -5648,6 +5655,9 @@ func _drag_forceps(origin: Vector3, dir: Vector3) -> void:
 	if not _fc_active:
 		return
 	var tip := _grab_plane_hit(origin, dir, _fc_last)
+	if _fc_kind == "prolapse":
+		_prolapse_forceps_to(tip, origin, dir)
+		return
 	_fc_last = tip
 	if _fc_kind == "soft":
 		var so := _soft_node(_fc_soft_kind)
@@ -5696,6 +5706,11 @@ func _forceps_hold(rope: Node, tip: Vector3) -> void:
 
 
 func _end_forceps() -> void:
+	if _fc_kind == "prolapse":
+		var pc := _prolapse_ctl()
+		if pc:
+			pc.call("end_surgery_reduce")
+		_prol_pending = 0.0
 	if _fc_kind == "soft":
 		var so := _soft_node(_fc_soft_kind)
 		if so:
@@ -5741,6 +5756,11 @@ func debug_forceps_begin_kind(origin: Vector3, dir: Vector3, kinds: PackedString
 
 func debug_forceps_drag_to(tip: Vector3) -> void:
 	if not _fc_active:
+		return
+	if _fc_kind == "prolapse":
+		var cam := get_viewport().get_camera_3d() if is_inside_tree() and get_viewport() else null
+		var o := cam.global_position if cam else tip + _cavity_outward() * 0.3
+		_prolapse_forceps_to(tip, o, (tip - o).normalized())
 		return
 	_fc_last = tip
 	if _fc_kind == "soft":
@@ -5922,6 +5942,12 @@ func _clear_soft_organs() -> void:
 	if _organs and _organs.has_method("set_kind_visible"):
 		for k2 in ["uterus", "uterus_cavity", "bladder", "tube", "ovary"]:
 			_organs.call("set_kind_visible", k2, true)
+	if _organs:
+		_organs.set_meta("uterus_extracted", false)
+	# 脱垂还在：原子宫继续隐藏（显示的是脱垂柔体）。
+	var pcv := _prolapse_ctl()
+	if pcv:
+		pcv.call("rehide_sources")
 	extraction_hint = ""
 
 
@@ -5932,6 +5958,11 @@ func si_hide_rate() -> float:
 
 func restore_extracted_organs() -> bool:
 	var any := not _gut_pulls.is_empty() or not _soft_organs.is_empty()
+	# 0.4.12：「放回内脏」同时复原子宫脱垂。
+	var pc0 := _prolapse_ctl()
+	if pc0:
+		any = true
+		pc0.call("reset")
 	if _fc_active:
 		debug_forceps_end()
 	_clear_forceps_preview()
@@ -6041,11 +6072,16 @@ func _start_soft_extract(kind: String, origin: Vector3, dir: Vector3, early_side
 		extraction_hint = UTERUS_SPECULUM_HINT
 		surgery_hint.emit(extraction_hint)
 		return false
+	if kind == "uterus" and _prolapse_ctl() != null:
+		# 仍在脱垂：不能直接扯（先复位）。
+		return false
 	var so := _ensure_soft(kind)
 	if so == null:
 		return false
 	var fr: Transform3D = _organs.call("abdomen_frame") if _organs else Transform3D.IDENTITY
 	so.call("begin_extract", fr, _wound_center_world(), _cavity_outward())
+	if kind == "uterus" and _organs:
+		_organs.set_meta("uterus_extracted", true)
 	if _organs and _organs.has_method("set_kind_visible"):
 		if kind == "uterus":
 			_organs.call("set_kind_visible", "uterus", false)
@@ -6119,6 +6155,7 @@ func _carry_soft_with_tissue_drag(wound: Vector3) -> Vector3:
 
 
 func _update_soft_organs(dt: float) -> void:
+	_update_prolapse_forceps(dt)
 	if _soft_organs.is_empty():
 		_tissue_drag_has = false
 		_tissue_drag_prev = Vector3.ZERO
@@ -6311,6 +6348,12 @@ func debug_begin_extract(kind: String) -> bool:
 	if kind == "colon":
 		ok = _start_colon_pull(_wound_center_world(), dir)
 		sel = "colon"
+	elif kind == "uterus" and _prolapse_ctl() != null:
+		# 脱垂中：瞄准子宫静止时的宫底，先进入「复位」。
+		var pc := _prolapse_ctl()
+		var aim: Vector3 = pc.call("rest_fundus_world")
+		ok = _try_begin_prolapse_reduce(aim - dir * 0.12, dir)
+		sel = kind
 	elif kind == "uterus" or kind == "bladder":
 		ok = _start_soft_extract(kind, origin, dir, -1)
 		sel = kind
@@ -8376,3 +8419,95 @@ func _measure_evert_profile(md = null) -> Dictionary:
 
 func _mesh_evert_blend() -> Geom.MeshData:
 	return _outer_evert if _outer_evert else _outer
+
+
+# ------------------------------------------------------------------ 0.4.12 子宫脱垂：手术复位后再扯出
+var _prol_pending := 0.0          # 已向外拉、还没换算成复位的距离
+var _prol_ray_o := Vector3.ZERO
+var _prol_ray_d := Vector3.FORWARD
+var prolapse_reduce_handoffs := 0  # 复位完成后转入创口扯出的次数（自检用）
+
+
+func _prolapse_ctl() -> Node:
+	if _organs == null or not _organs.has_method("has_prolapse") or not bool(_organs.call("has_prolapse")):
+		return null
+	return _organs.call("prolapse")
+
+
+## 射线经创口指向体内的子宫部分（脱垂柔体在体内的节点附近）→ 夹住开始复位。
+func _try_begin_prolapse_reduce(origin: Vector3, dir: Vector3) -> bool:
+	var pc := _prolapse_ctl()
+	if pc == null or not active:
+		return false
+	var d := dir.normalized()
+	var nodes: PackedVector3Array = pc.call("node_positions")
+	var best := 1e9
+	var best_p := Vector3.ZERO
+	# 体内部分：在体内的节点 + 宫底静止位置（复位后会回去的地方）。
+	var cand := PackedVector3Array()
+	for i in nodes.size():
+		if not bool(pc.call("node_outside", i)):
+			cand.append(nodes[i])
+	cand.append(pc.call("rest_fundus_world"))
+	for p in cand:
+		var t := (p - origin).dot(d)
+		if t <= 0.0:
+			continue
+		var q := origin + d * t
+		var dist := q.distance_to(p)
+		if dist < best:
+			best = dist
+			best_p = p
+	if best > 0.035:
+		return false
+	_fc_kind = "prolapse"
+	_fc_soft_kind = "uterus"
+	_fc_last = best_p
+	_prol_pending = 0.0
+	_prol_ray_o = origin
+	_prol_ray_d = d
+	pc.call("begin_surgery_reduce")
+	_start_forceps_grip(-1, dir)
+	_set_selected_organ("uterus")
+	return true
+
+
+func _prolapse_forceps_to(tip: Vector3, origin: Vector3, dir: Vector3) -> void:
+	var outw := _cavity_outward()
+	var pull := (tip - _fc_last).dot(outw)
+	if pull > 0.0:
+		_prol_pending += pull
+	# 钳尖只沿创口外向跟手（脱垂在复位时子宫被往上提），侧向随手。
+	_fc_last = tip
+	_prol_ray_o = origin
+	_prol_ray_d = dir.normalized()
+
+
+func _update_prolapse_forceps(dt: float) -> void:
+	if not (_fc_active and _fc_kind == "prolapse"):
+		return
+	var pc := _prolapse_ctl()
+	if pc == null:
+		_prolapse_handoff()
+		return
+	var before := float(pc.get("descent"))
+	var after := float(pc.call("surgery_reduce", _prol_pending, dt))
+	var gain := maxf(float((pc.get("params") as Resource).get("surgery_reduce_gain")), 1e-3)
+	_prol_pending = maxf(_prol_pending - (before - after) / gain, 0.0)
+	if after <= 1e-5:
+		pc.call("reset")
+		_prolapse_handoff()
+	_place_forceps(_fc_last, _prol_ray_d)
+
+
+## 复位完成：继续拉 = 进入正常的经创口扯出子宫（五档 / 柔体）。
+func _prolapse_handoff() -> void:
+	prolapse_reduce_handoffs += 1
+	_fc_active = false
+	var ok := _start_soft_extract("uterus", _prol_ray_o, _prol_ray_d, -1)
+	if not ok:
+		_fc_kind = "gut"
+		_fc_soft_kind = ""
+		stroke_active = false
+		return
+	_prol_pending = 0.0
