@@ -165,10 +165,10 @@ func _check_guts_and_hide() -> void:
 			width1 = v2.y - v2.x
 	_ok(width1 > width0 + 0.01, "hiding grows toward the pull point as more is pulled (width %.3f -> %.3f)" % [width0, width1])
 	# 小肠体内隐藏更慢，同样扯出长度不会那么快把肚子掏空。
-	_ok(absf(float(s.call("si_hide_rate")) - 0.35) < 0.001, "SI hide rate is reduced to 0.35")
-	var w_si: Vector4 = rig.call("gut_hide_window", along, fed, plen, 0.35)
+	_ok(absf(float(s.call("si_hide_rate")) - 0.48) < 0.001, "SI hide rate is 0.48")
+	var w_si: Vector4 = rig.call("gut_hide_window", along, fed, plen, 0.48)
 	var w_co: Vector4 = rig.call("gut_hide_window", along, fed, plen, 1.0)
-	_ok(w_si.y < w_co.y * 0.45 and w_si.y > 0.0, "SI hide window is much narrower than colon for the same pull (SI half=%.3f colon half=%.3f)" % [w_si.y, w_co.y])
+	_ok(w_si.y < w_co.y * 0.55 and w_si.y > w_co.y * 0.40, "SI hide window is still narrower than colon (SI half=%.3f colon half=%.3f)" % [w_si.y, w_co.y])
 	# 放回反向恢复
 	_ok(bool(s.call("debug_putback_organ", "colon")), "colon put-back")
 	for i in 80:

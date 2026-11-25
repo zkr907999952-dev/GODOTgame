@@ -793,30 +793,56 @@ func _ensure_viscera_pick_cache() -> void:
 			Pab[i] = l
 			mn = mn.min(l)
 			mx = mx.max(l)
+		var C: PackedFloat32Array = arr[Mesh.ARRAY_CUSTOM0] if arr[Mesh.ARRAY_CUSTOM0] != null else PackedFloat32Array()
+		var along := PackedFloat32Array()
+		along.resize(P.size())
+		if not C.is_empty():
+			var stride := 4 if C.size() >= P.size() * 4 else 1
+			for i3 in P.size():
+				along[i3] = C[i3 * stride]
 		var samples := PackedVector3Array()
+		var sample_along := PackedFloat32Array()
 		var step := maxi(1, int(ceil(float(Pab.size()) / 500.0)))
 		var i2 := 0
 		while i2 < Pab.size():
 			samples.append(Pab[i2])
+			sample_along.append(along[i2] if i2 < along.size() else 0.0)
 			i2 += step
 		# 保证前后左右上下的极值点被采到，悬停瞄准最前顶点时不会落空。
 		var ex := [Pab[0], Pab[0], Pab[0], Pab[0], Pab[0], Pab[0]]
-		for p3 in Pab:
-			if p3.x < ex[0].x: ex[0] = p3
-			if p3.x > ex[1].x: ex[1] = p3
-			if p3.y < ex[2].y: ex[2] = p3
-			if p3.y > ex[3].y: ex[3] = p3
-			if p3.z < ex[4].z: ex[4] = p3
-			if p3.z > ex[5].z: ex[5] = p3
-		for e in ex:
-			samples.append(e)
+		var exi := [0, 0, 0, 0, 0, 0]
+		for pi in Pab.size():
+			var p3: Vector3 = Pab[pi]
+			if p3.x < ex[0].x:
+				ex[0] = p3
+				exi[0] = pi
+			if p3.x > ex[1].x:
+				ex[1] = p3
+				exi[1] = pi
+			if p3.y < ex[2].y:
+				ex[2] = p3
+				exi[2] = pi
+			if p3.y > ex[3].y:
+				ex[3] = p3
+				exi[3] = pi
+			if p3.z < ex[4].z:
+				ex[4] = p3
+				exi[4] = pi
+			if p3.z > ex[5].z:
+				ex[5] = p3
+				exi[5] = pi
+		for kex in 6:
+			samples.append(ex[kex])
+			sample_along.append(along[exi[kex]] if exi[kex] < along.size() else 0.0)
 		_viscera_pick_cache.append({
 			"kind": kind,
 			"side": int(mesh_i.get_meta("organ_side", -1)),
 			"mesh": mesh_i,
 			"Pab": Pab,
 			"I": I,
+			"along": along,
 			"samples": samples,
+			"sample_along": sample_along,
 			"box": AABB(mn, mx - mn).grow(0.004),
 		})
 	_viscera_pick_ready = not _viscera_pick_cache.is_empty() or organ_meshes.is_empty()
@@ -852,9 +878,13 @@ func ray_pick_viscera_fast(origin: Vector3, dir: Vector3, kinds: PackedStringArr
 		if not _seg_aabb(o_ab, d_ab, 2.0, box):
 			continue
 		var samples: PackedVector3Array = recd["samples"]
+		var sample_along: PackedFloat32Array = recd["sample_along"] if recd.has("sample_along") else PackedFloat32Array()
 		var t_hit := -1.0
 		var best_d := rad
-		for p_ab in samples:
+		for si in samples.size():
+			if _sample_along_hidden(kind, sample_along, si):
+				continue
+			var p_ab: Vector3 = samples[si]
 			var w: Vector3 = p_ab - o_ab
 			var tt := w.dot(d_ab)
 			if tt <= 0.0:
@@ -920,8 +950,11 @@ func ray_pick_viscera(origin: Vector3, dir: Vector3, kinds: PackedStringArray = 
 			continue
 		var Pab: PackedVector3Array = recd["Pab"]
 		var I: PackedInt32Array = recd["I"]
+		var along_v: PackedFloat32Array = recd["along"] if recd.has("along") else PackedFloat32Array()
 		var t_hit := -1.0
 		for f in range(0, I.size() - 2, 3):
+			if _triangle_along_hidden(kind, along_v, I[f], I[f + 1], I[f + 2]):
+				continue
 			var a: Vector3 = Pab[I[f]]
 			var b: Vector3 = Pab[I[f + 1]]
 			var c: Vector3 = Pab[I[f + 2]]
@@ -1169,7 +1202,40 @@ func gut_hide_amount(kind: String, steps: int = 48) -> float:
 	return acc / float(maxi(mask.size(), 1))
 
 
+func is_gut_along_hidden(kind: String, along: float, thresh: float = 0.50) -> bool:
+	if kind != "small_intestine" and kind != "colon":
+		return false
+	var wins: PackedVector4Array = gut_eaten_windows(kind)
+	if wins.is_empty():
+		return false
+	var eat := 0.0
+	for w in wins:
+		if w.z <= 0.0 or w.y - w.x <= 1e-6:
+			continue
+		var fade := maxf((w.y - w.x) * 0.16, 0.012)
+		var k_lo := 1.0 if w.x <= 0.001 else smoothstep(w.x, w.x + fade, along)
+		var k_hi := 1.0 if w.y >= 0.999 else (1.0 - smoothstep(w.y - fade, w.y, along))
+		eat = maxf(eat, k_lo * k_hi * clampf(w.z, 0.0, 1.0))
+	return eat >= thresh
+
+
+func _sample_along_hidden(kind: String, sample_along: PackedFloat32Array, i: int) -> bool:
+	if sample_along.is_empty() or i < 0 or i >= sample_along.size():
+		return false
+	return is_gut_along_hidden(kind, sample_along[i])
+
+
+func _triangle_along_hidden(kind: String, along_v: PackedFloat32Array, ia: int, ib: int, ic: int) -> bool:
+	if along_v.is_empty():
+		return false
+	if ia < 0 or ib < 0 or ic < 0 or ia >= along_v.size() or ib >= along_v.size() or ic >= along_v.size():
+		return false
+	# 三个顶点都已隐藏才跳过，边界上仍可点到可见部分。
+	return is_gut_along_hidden(kind, along_v[ia]) and is_gut_along_hidden(kind, along_v[ib]) and is_gut_along_hidden(kind, along_v[ic])
+
+
 func gut_along_near(kind: String, world_pt: Vector3) -> float:
+
 	_update_frame()
 	var p_rest: Vector3 = (_frame.affine_inverse() * world_pt) + _navel_rest
 	var rec: Dictionary = _ensure_gut_along_cache(kind)

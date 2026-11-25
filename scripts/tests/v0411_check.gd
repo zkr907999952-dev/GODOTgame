@@ -220,11 +220,14 @@ func _check_uterus() -> void:
 	var out1: Vector3 = s.call("_cavity_outward") if s.has_method("_cavity_outward") else Vector3.UP
 	var peek1 := (fund1 - wound).dot(out1.normalized())
 	_ok(float(so.get("DAMP")) <= 0.72, "uterus physics damping is raised (DAMP=%.2f)" % float(so.get("DAMP")))
-	# 缓慢升档：0.4 秒满强度大约 +0.13 档，仍停在 1 档附近
+	# 短促一拉就要像肠子一样立刻跟上，不再靠十几秒加档。
 	var c0 := float(s.call("extract_charge", "uterus"))
-	s.call("debug_add_extract_charge", "uterus", 1.0, 0.4)
+	var f0: Vector3 = so.call("fundus_world")
+	s.call("debug_add_extract_charge", "uterus", 1.0, 0.15)
 	var c1 := float(s.call("extract_charge", "uterus"))
-	_ok(c1 > c0 and c1 < 1.35 and int(s.call("extract_level", "uterus")) == 1, "level ramps slowly (charge %.2f -> %.2f after 0.4s)" % [c0, c1])
+	var f1: Vector3 = so.call("fundus_world")
+	var moved := f1.distance_to(f0)
+	_ok(moved > 0.012 or c1 > c0 + 0.15 or float(so.call("exposed_length")) > 0.010, "a short pull moves the uterus immediately (moved %.1f mm, charge %.2f -> %.2f)" % [moved * 1000.0, c0, c1])
 	# 拉到 5 档：整颗子宫物理化，不是把宫颈拽到创口。
 	_advance_charge("uterus", 1.0, 14.0)
 	_ok(int(s.call("extract_level", "uterus")) == 5, "sustained pull reaches level 5 (charge=%.2f)" % float(s.call("extract_charge", "uterus")))
@@ -290,9 +293,11 @@ func _check_bladder() -> void:
 	var so: Node = s.call("soft_organ", "bladder")
 	_ok(so != null and bool(so.visible), "a soft-body bladder replaces the original")
 	var c0 := float(s.call("extract_charge", "bladder"))
-	s.call("debug_add_extract_charge", "bladder", 1.0, 0.4)
+	var b0: Vector3 = so.call("fundus_world")
+	s.call("debug_add_extract_charge", "bladder", 1.0, 0.15)
 	var c1 := float(s.call("extract_charge", "bladder"))
-	_ok(c1 > c0 and c1 < 1.35, "bladder level also ramps slowly (%.2f -> %.2f)" % [c0, c1])
+	var b1: Vector3 = so.call("fundus_world")
+	_ok(b1.distance_to(b0) > 0.010 or c1 > c0 + 0.15, "a short pull moves the bladder immediately (%.1f mm, charge %.2f -> %.2f)" % [b1.distance_to(b0) * 1000.0, c0, c1])
 	_advance_charge("bladder", 1.0, 14.0)
 	_ok(int(s.call("extract_level", "bladder")) == 5, "bladder reaches level 5")
 	_ok(bool(s.call("debug_putback_organ", "bladder")), "bladder put-back starts")
