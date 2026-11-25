@@ -7,23 +7,25 @@ class_name ProlapseParams
 @export var hymen_band: float = 0.010
 ## 下移小于这个值仍算 0 度（静止抖动）。
 @export var grade1_min: float = 0.004
-## IV 度时宫底最多伸出外口多少（悬挂的颈部长度）。
-@export var fundus_out_max: float = 0.014
+## IV 度时宫底最多伸出外口多少（悬挂的颈部长度）。t68u：0.014 → 0.05，最重时挂得更低。
+@export var fundus_out_max: float = 0.05
 
 @export_group("外形")
-## 外翻阴道套筒的壁厚（包在脱出物外面，黏膜朝外）。
+## 阴道壁厚（通道被撑开时贴在脱出物外的厚度）。
 @export var wall: float = 0.0032
-## 宫颈露在套筒外的长度（阴道穹窿附着在宫颈上的位置）。
+## 专用模型里宫颈段的长度（宫颈黏膜材质；之后是宫体材质）。
 @export var cervix_expose: float = 0.013
-## IV 度时外口处套筒颈部的最小半径。
+## IV 度时宫底到外口之间细颈（阴道穹窿的蒂）的半径。
 @export var neck_r: float = 0.010
+## 脱垂期间简化子宫链的节点数（宫颈 → 宫底）。
+@export var nodes: int = 5
 ## 截面半径按子宫网格分位数测得后再乘这个系数。
 @export var radius_scale: float = 1.0
 ## 截面取网格径向距离的分位数（0.5 = 平均外形，0.9 = 几乎包住整个网格）。
 @export var radius_quantile: float = 0.85
 
 @export_group("柔性悬挂")
-@export var iterations: int = 12
+@export var iterations: int = 6
 ## 体外每步（60 Hz）保留的速度：甩动后摆几秒才停。
 @export var air_damp: float = 0.986
 @export var max_speed: float = 5.0
@@ -31,6 +33,16 @@ class_name ProlapseParams
 @export var max_joint_bend: float = 0.40
 ## 外口处脱出物相对通道方向最多折多少（会阴是软的）。
 @export var max_portal_bend: float = 1.45
+
+@export_group("外口重解（性能）")
+## 外口截面变化至少这么多（米）才重解外阴。
+@export var introitus_r_step: float = 0.0005
+## 脱出方向变化：点积低于这个值（约 10°，低通后）才重解。
+@export var introitus_dir_dot: float = 0.985
+## 甩动中两次外阴重解之间至少隔几个物理帧。
+@export var introitus_cooldown: int = 10
+## 外口走向低通时间常数（秒）：甩动时外阴只跟平均走向重解。
+@export var introitus_dir_tau: float = 0.5
 
 @export_group("拖拽 / 复位")
 ## 拉力（目标超出可用长度的米数）换算成下移速度的增益（1/s）。

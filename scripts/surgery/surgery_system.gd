@@ -4800,7 +4800,7 @@ const FORCEPS_LONGPRESS := 1.0
 var forceps_clamps: int = 0
 var gut_update_usec: int = 0
 var _soft_organs: Dictionary = {}   # "uterus" / "bladder" -> SoftOrgan
-var _fc_kind: String = "gut"        # gut | soft | tube
+var _fc_kind: String = "gut"        # gut | soft | tube | prolapse | prolapse_out
 var _fc_soft_kind: String = ""
 var _fc_tube_side: int = -1
 var extraction_hint: String = ""
@@ -5070,6 +5070,12 @@ func _update_forceps_anim(dt: float) -> void:
 			var cam := get_viewport().get_camera_3d() if is_inside_tree() and get_viewport() else null
 			var d: Vector3 = (rope.get("hold_pos") - cam.global_position) if cam else Vector3.FORWARD
 			_place_forceps(rope.get("hold_pos"), d)
+	elif _fc_active and _fc_kind == "prolapse_out":
+		var pca := _prolapse_ctl()
+		if pca and int(pca.call("drive_node")) >= 0:
+			var np: Vector3 = (pca.call("node_positions") as PackedVector3Array)[int(pca.call("drive_node"))]
+			var cam4 := get_viewport().get_camera_3d() if is_inside_tree() and get_viewport() else null
+			_place_forceps(np, (np - cam4.global_position) if cam4 else Vector3.FORWARD)
 	elif _fc_active and _fc_kind == "soft":
 		var so_f := _soft_node(_fc_soft_kind)
 		if so_f:
@@ -5534,6 +5540,9 @@ func _begin_forceps(origin: Vector3, dir: Vector3, kinds: PackedStringArray = Pa
 		_fc_soft_kind = soft_kind
 		_start_forceps_grip(-1, dir)
 		return true
+	# 1c. t68u：已脱垂在阴道口外的子宫 → 夹住拖动 / 甩动（可往回推复位，也可再往外拉加重）。
+	if (kinds.is_empty() or kinds.has("uterus")) and _try_begin_prolapse_drag(origin, dir, rope_depth if bi >= 0 else 1e9):
+		return true
 	if bi >= 0:
 		var r2: Node = (_gut_pulls[bi] as Dictionary)["rope"]
 		var pts: PackedVector3Array = r2.call("points")
@@ -5718,6 +5727,12 @@ func _drag_forceps(origin: Vector3, dir: Vector3) -> void:
 	if _fc_kind == "prolapse":
 		_prolapse_forceps_to(tip, origin, dir)
 		return
+	if _fc_kind == "prolapse_out":
+		_fc_last = tip
+		var pco := _prolapse_ctl()
+		if pco:
+			pco.call("drive_to", tip)
+		return
 	if forceps_mode != "putback":
 		tip = _forceps_outward_tip(origin, dir, tip)
 	_fc_last = tip
@@ -5771,6 +5786,10 @@ func _forceps_hold(rope: Node, tip: Vector3, no_feed: bool = false, reach_min: f
 
 
 func _end_forceps() -> void:
+	if _fc_kind == "prolapse_out":
+		var pco := _prolapse_ctl()
+		if pco and str(pco.get("drive_source")) == "forceps":
+			pco.call("end_drive")
 	if _fc_kind == "prolapse":
 		var pc := _prolapse_ctl()
 		if pc:
@@ -5826,6 +5845,12 @@ func debug_forceps_drag_to(tip: Vector3) -> void:
 		var cam := get_viewport().get_camera_3d() if is_inside_tree() and get_viewport() else null
 		var o := cam.global_position if cam else tip + _cavity_outward() * 0.3
 		_prolapse_forceps_to(tip, o, (tip - o).normalized())
+		return
+	if _fc_kind == "prolapse_out":
+		_fc_last = tip
+		var pco := _prolapse_ctl()
+		if pco:
+			pco.call("drive_to", tip)
 		return
 	_fc_last = tip
 	if _fc_kind == "soft":
@@ -8732,6 +8757,26 @@ func _try_begin_prolapse_reduce(origin: Vector3, dir: Vector3) -> bool:
 	_prol_ray_o = origin
 	_prol_ray_d = d
 	pc.call("begin_surgery_reduce")
+	_start_forceps_grip(-1, dir)
+	_set_selected_organ("uterus")
+	return true
+
+
+## t68u：射线点到阴道口外悬垂的脱垂子宫 → 手术钳夹住拖动（与阴道互动的手拖同一驱动接口）。
+func _try_begin_prolapse_drag(origin: Vector3, dir: Vector3, max_t: float = 1e9) -> bool:
+	var pc := _prolapse_ctl()
+	if pc == null or not active:
+		return false
+	var pk: Dictionary = pc.call("ray_pick", origin, dir)
+	if pk.is_empty():
+		return false
+	var p: Vector3 = pk["point"]
+	if origin.distance_to(p) > max_t + 0.02 and max_t < 1e8:
+		return false
+	_fc_kind = "prolapse_out"
+	_fc_soft_kind = "uterus"
+	_fc_last = p
+	pc.call("begin_drive", "forceps", int(pk["node"]), p, true, true)
 	_start_forceps_grip(-1, dir)
 	_set_selected_organ("uterus")
 	return true

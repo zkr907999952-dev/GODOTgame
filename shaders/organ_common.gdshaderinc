@@ -189,17 +189,17 @@ vec2 stadium_ray(vec2 p, vec2 he, float cr) {
 	float L = length(p);
 	if (L < 1e-8) return vec2(0.0, h.y);
 	vec2 d = p / L;
-	vec2 flat = h - vec2(c);
+	vec2 flat_v = h - vec2(c);
 	if (abs(d.x) > 1e-8) {
 		float t_side = h.x / abs(d.x);
-		if (abs(t_side * d.y) <= flat.y + 1e-6) return d * t_side;
+		if (abs(t_side * d.y) <= flat_v.y + 1e-6) return d * t_side;
 	}
 	if (abs(d.y) > 1e-8) {
 		float t_tb = h.y / abs(d.y);
-		if (abs(t_tb * d.x) <= flat.x + 1e-6) return d * t_tb;
+		if (abs(t_tb * d.x) <= flat_v.x + 1e-6) return d * t_tb;
 	}
 	vec2 s = vec2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
-	vec2 cc = s * flat;
+	vec2 cc = s * flat_v;
 	float b = -2.0 * dot(d, cc);
 	float c0 = dot(cc, cc) - c * c;
 	float disc = b * b - 4.0 * c0;
@@ -471,7 +471,7 @@ vec3 canal_stretch(vec3 p) {
 }
 
 
-// 0.4.12 子宫脱垂：阴道上段内翻（双层折叠）+ 通道被下移的脱出物撑开。只写给阴道网格（prol_o.w = 1）。
+// 0.4.12 子宫脱垂：通道被下移的脱出物撑开（t68u 起不再内翻折叠）。只写给阴道网格（prol_o.w = 1）。
 // prol_o.xyz = 外口(ab)，w = 开关；prol_a.xyz = 外口→宫颈单位轴，w = 通道长；
 // prol_p.x = 下移量 descent，y = 宫颈尖的路径坐标（正 = 在外口里面），z = 子宫长，w = 阴道壁厚；
 // prol_r0 / prol_r1 = 子宫截面半径（宫颈尖 → 宫底均分 8 份），与 ProlapseController.mass_radius_at 同一公式。
@@ -520,15 +520,7 @@ vec4 prolapse_offset4(vec3 p) {
 	float r = length(radial);
 	if (r > 0.045) return vec4(0.0);
 	vec3 rdir = r > 1e-6 ? radial / r : normalize(cross(ax, abs(ax.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0)));
-	float a_fold = 0.5 * (L + tip);
-	if (s > a_fold && a_fold < L) {
-		// 内翻层：以折叠处为镜像贴到脱出物表面，宫颈端跟着宫颈尖走；跑到外口外面的部分收在外口圈上（体外由套筒网格表现）。
-		float s2 = 2.0 * a_fold - s;
-		float s2c = max(s2, 0.0);
-		float r_new = prol_radius(s2c - tip) + w + max(r - 0.006, 0.0) * 0.3;
-		vec3 np = prol_o.xyz + ax * s2c + rdir * r_new;
-		return vec4((np - p) * ramp, ramp);
-	}
+	// t68u 简化：不再做双层内翻折叠（体外也没有套筒），阴道只被下移的脱出物沿径向撑开。
 	float mr = prol_radius(s - tip);
 	if (mr <= 1e-5) return vec4(0.0);
 	float tgt = mr + 2.0 * w;

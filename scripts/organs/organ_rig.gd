@@ -726,16 +726,8 @@ func prolapse_offset_ab(p: Vector3) -> Vector4:
 	if r > 0.045:
 		return Vector4.ZERO
 	var rdir := radial / r if r > 1e-6 else ax.cross(Vector3.RIGHT if absf(ax.x) < 0.9 else Vector3.UP).normalized()
-	var a_fold := 0.5 * (L + tip)
+	# t68u：与着色器一样只做径向撑开，不再内翻折叠。
 	var pc: Node = _prolapse
-	if s > a_fold and a_fold < L:
-		var s2 := 2.0 * a_fold - s
-		var s2c := maxf(s2, 0.0)
-		var mr2 := float(pc.call("mass_radius_at", s2c - tip)) if pc else 0.0
-		var r_new := mr2 + w + maxf(r - 0.006, 0.0) * 0.3
-		var np := o + ax * s2c + rdir * r_new
-		var dv := (np - p) * ramp
-		return Vector4(dv.x, dv.y, dv.z, ramp)
 	var mr := float(pc.call("mass_radius_at", s - tip)) if pc else 0.0
 	if mr <= 1e-5:
 		return Vector4.ZERO

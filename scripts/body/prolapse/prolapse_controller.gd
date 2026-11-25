@@ -4,11 +4,13 @@ extends Node
 ## 状态：连续的脱垂量（宫颈沿阴道下移的距离 descent，0..descent_max，amount = 0..1），按宫颈相对
 ## 外口（处女膜）的位置分 0–IV 度；状态机 none / driven / hanging / reducing。
 ##
-## 解剖：子宫沿阴道往下（不是从腹部创口）。阴道上段内翻并被带出：体内为双层折叠
-## （着色器 prolapse_offset），体外为包住脱出物的外翻套筒（ProlapseSleeve，黏膜朝外），宫颈在最外端露出。
+## 解剖：子宫沿阴道往下（不是从腹部创口）。阴道在着色器里简化处理（prolapse_offset4）：通道被压短到
+## 宫颈当前位置、被脱出物撑开，不再做双层内翻折叠，也不再有体外外翻套筒（t68u 性能重做）。
 ## 外口 / 阴唇由 ProlapseMassInserter（VulvaInserter）按脱出物截面从里往外撑开，通道半径跟着下移。
 ##
-## 物理：沿用 SoftOrgan 的子宫网格与 GPU 蒙皮（external_drive），这里解算 6 个节点：
+## 模型：脱垂期间原子宫 / 宫颈 / 内膜 / 输卵管 / 卵巢网格隐藏，换成专用的低面数 ProlapseUterusModel
+## （宫颈 + 宫体 + IV 度时的细颈，复用原子宫 / 阴道材质）。
+## 物理：简化为 params.nodes（默认 5）个节点：
 ## 仍在体内的节点沿「外口 → 宫颈 → 子宫静止轴」的路径运动学放置；已出外口的节点是带惯性、重力的
 ## Verlet 链，锚在外口，关节限角（柔性悬挂），可被拖拽 / 甩动。
 ##
@@ -20,10 +22,9 @@ signal grade_changed(grade: int)
 signal state_changed(state: String)
 signal triggered(source: String)
 
-const SoftOrganScript := preload("res://scripts/surgery/soft_organ.gd")
+const ModelScript := preload("res://scripts/body/prolapse/prolapse_uterus_model.gd")
 const ParamsScript := preload("res://scripts/body/prolapse/prolapse_params.gd")
 const InserterScript := preload("res://scripts/body/prolapse/prolapse_mass_inserter.gd")
-const SleeveScript := preload("res://scripts/body/prolapse/prolapse_sleeve.gd")
 const BallRodTriggerScript := preload("res://scripts/body/prolapse/ball_rod_trigger.gd")
 
 const STATE_NONE := "none"
@@ -44,7 +45,11 @@ var floor_y: float = -1e9
 var last_step_usec: int = 0
 var drive_source: String = ""
 
-var _so: Node = null
+var _model: MeshInstance3D = null
+var _src_body_mat: Material = null
+var _src_cervix_mat: Material = null
+## 每帧各部分开销（微秒）：sim / model / introitus / deform。
+var prof_us: Dictionary = {}
 var _geo_ok := false
 var _n := 6
 var _sigma := PackedFloat32Array()      # 各节点的静止路径坐标（外口 = 0，向里为正）
@@ -68,7 +73,6 @@ var _O := Vector3.ZERO                  # 外口（世界）
 var _Ain := Vector3.UP                  # 外口 → 宫颈（世界，朝里）
 var _up := Vector3.FORWARD
 var _canal_L := 0.05                    # 外口到宫颈（posed 阴道中线）
-var _sleeve: MeshInstance3D = null
 var _inserter: RefCounted = null
 var _owns_introitus := false
 var _vel_hist: Array = []
@@ -186,12 +190,18 @@ func fundus_world() -> Vector3:
 	return _x[_n - 1] if _x.size() >= _n else _O
 
 
+## 脱垂专用子宫模型（断面小窗等拿去做拷贝）。旧接口名保留。
 func soft_organ() -> Node:
-	return _so
+	return _model
 
 
+func model() -> MeshInstance3D:
+	return _model
+
+
+## t68u：外翻套筒已移除，恒为 null（旧调用方兼容）。
 func sleeve() -> MeshInstance3D:
-	return _sleeve
+	return null
 
 
 func inserter() -> RefCounted:
@@ -225,7 +235,7 @@ func mass_radius_at(a: float) -> float:
 	return lerpf(float(_prof[i]), float(_prof[i + 1]), clampf(f - float(i), 0.0, 1.0))
 
 
-## 外口处（路径坐标 0）当前穿过的截面半径：宫颈 / 宫体截面 + 外翻阴道壁；IV 度后为套筒颈部。
+## 外口处（路径坐标 0）当前穿过的截面半径：宫颈 / 宫体截面 + 阴道壁；IV 度后为细颈。
 func portal_radius() -> float:
 	if _sigma.is_empty() or descent <= 0.0:
 		return 0.0
@@ -476,36 +486,33 @@ func _ensure_geometry() -> void:
 	if (gx * end_b).distance_to(cerv_w) < (gx * end_a).distance_to(cerv_w):
 		cerv_raw = end_b
 		fund_raw = end_a
-	var navel: Vector3 = organs.get("_navel_rest")
-	if _so == null or not is_instance_valid(_so):
-		_so = SoftOrganScript.new()
-		_so.name = "ProlapseUterus"
-		add_child(_so)
-	var adnex: Array = []
-	for k in ["tube", "ovary"]:
-		for m3 in organs.call("viscera_meshes", k):
-			adnex.append(m3)
-	var horns: Array = [navel, navel]
-	var meta: Dictionary = organs.get("meta")
-	if meta.has("tubes") and meta["tubes"] is Array:
-		var tb: Array = meta["tubes"]
-		for i in mini(2, tb.size()):
-			var h: Array = (tb[i] as Dictionary).get("horn", [])
-			if h.size() >= 3:
-				horns[i] = Vector3(float(h[0]), float(h[1]), float(h[2]))
-	_so.call("setup", "uterus", _frame, navel, ut, adnex, cerv_raw, fund_raw, horns)
-	var extra: Array = organs.call("viscera_meshes", "uterus_cavity")
-	if not extra.is_empty():
-		_so.call("add_hide_meshes", extra)
-	_rest_ab = _so.call("rest_nodes_ab")
-	_seg = _so.call("seg_rest_lengths")
-	_n = int(_so.call("node_count"))
-	if _rest_ab.size() != _n:
-		return
+	# t68u：不再借用 SoftOrgan（3839 顶点蒙皮 + 输卵管卵巢），直接在腹部坐标里放 N 个节点。
+	var inv := _frame.affine_inverse()
+	var cw := gx * cerv_raw
+	var fw := gx * fund_raw
+	_n = clampi(int(params.nodes), 3, 8)
+	_rest_ab = PackedVector3Array()
+	for i in _n:
+		_rest_ab.append(inv * cw.lerp(fw, float(i) / float(_n - 1)))
+	_seg = PackedFloat32Array()
+	for i1 in _n - 1:
+		_seg.append(_rest_ab[i1].distance_to(_rest_ab[i1 + 1]))
 	_U = 0.0
-	for s in _seg:
-		_U += float(s)
-	_build_profile()
+	for sg in _seg:
+		_U += float(sg)
+	var V := PackedVector3Array()
+	var xf := inv * gx
+	for p4 in P:
+		V.append(xf * p4)
+	_build_profile(V)
+	# 材质：宫体用原子宫材质，宫颈 / 细颈用原阴道（宫颈黏膜）材质。复制后关掉器官形变开关。
+	_src_body_mat = _dup_mat((src as MeshInstance3D).material_override)
+	var vg: Array = organs.call("viscera_meshes", "vagina")
+	for m5 in vg:
+		var mi5 := m5 as MeshInstance3D
+		if mi5 and mi5.material_override:
+			_src_cervix_mat = _dup_mat(mi5.material_override)
+			break
 	_x.resize(_n)
 	_q.resize(_n)
 	_out.resize(_n)
@@ -517,10 +524,23 @@ func _ensure_geometry() -> void:
 		_out[i2] = 0
 
 
-func _build_profile() -> void:
+func _dup_mat(m: Material) -> Material:
+	if m == null:
+		return null
+	var d := m.duplicate() as Material
+	if d is ShaderMaterial:
+		var sm := d as ShaderMaterial
+		sm.set_shader_parameter("is_uterus", false)
+		sm.set_shader_parameter("is_gut", false)
+		sm.set_shader_parameter("prol_o", Vector4.ZERO)
+		sm.set_shader_parameter("uterus_phys_on", 0.0)
+		sm.set_meta("prolapse_model", true)
+	return d
+
+
+func _build_profile(V: PackedVector3Array) -> void:
 	# 截面：静止网格顶点到子宫轴的径向距离，按轴向分箱取分位数。
 	_prof.resize(PROF_N)
-	var V: PackedVector3Array = _so.call("rest_vertices_ab")
 	var a0 := _rest_ab[0]
 	var a1 := _rest_ab[_n - 1]
 	var ax := (a1 - a0)
@@ -554,16 +574,30 @@ func _update_frame() -> void:
 
 
 ## 外口、通道方向与各节点静止路径坐标。路径：外口 → 宫颈尖（节点 0 静止位）→ 子宫静止轴。
-func _refresh_path() -> void:
+var _canal_ab := {}
+var _canal_cool := 0
+
+
+## 阴道通道（外口 / 宫颈 / 朝上）在腹部坐标里缓存，每 CANAL_REFRESH 个物理帧才重新拟合一次
+## （拟合要 CPU 蒙皮整根阴道，以前每帧都做）。
+const CANAL_REFRESH := 20
+
+
+func _refresh_path(force: bool = false) -> void:
 	if organs == null:
 		return
-	var canal: Dictionary = organs.call("vagina_canal")
-	if not canal.is_empty():
-		_O = canal["opening_world"]
-		var cw: Vector3 = canal["cervix_world"]
+	_canal_cool -= 1
+	if force or _canal_ab.is_empty() or _canal_cool <= 0:
+		var canal: Dictionary = organs.call("vagina_canal")
+		if not canal.is_empty():
+			var inv := _frame.affine_inverse()
+			_canal_ab = {"o": inv * (canal["opening_world"] as Vector3), "c": inv * (canal["cervix_world"] as Vector3), "up": canal.get("up_ab", Vector3(0, 0, 1))}
+		_canal_cool = CANAL_REFRESH
+	if not _canal_ab.is_empty():
+		_O = _frame * (_canal_ab["o"] as Vector3)
+		var cw: Vector3 = _frame * (_canal_ab["c"] as Vector3)
 		_canal_L = maxf(_O.distance_to(cw), 0.02)
-		var up_ab: Vector3 = canal.get("up_ab", Vector3(0, 0, 1))
-		_up = (_frame.basis * up_ab).normalized()
+		_up = (_frame.basis * (_canal_ab["up"] as Vector3)).normalized()
 	if not _geo_ok:
 		return
 	var r0 := _frame * _rest_ab[0]
@@ -606,8 +640,9 @@ func _ensure_active() -> void:
 	if not _geo_ok or state != STATE_NONE:
 		return
 	_update_frame()
-	_refresh_path()
-	_so.call("begin_external", _frame, _O, -_Ain)
+	_refresh_path(true)
+	_ensure_model()
+	_model.call("invalidate")
 	for k in ["uterus", "uterus_cavity", "tube", "ovary"]:
 		organs.call("set_kind_visible", k, false)
 	for i in _n:
@@ -616,13 +651,13 @@ func _ensure_active() -> void:
 		_out[i] = 0
 	_prev_frame = _frame
 	_has_prev = true
-	_ensure_sleeve()
+	_deform_sig = Vector4(-1, -1, -1, -1)
 	_set_state(STATE_HANGING)
 
 
 func _deactivate() -> void:
-	if _so and is_instance_valid(_so):
-		_so.call("end_external")
+	if _model and is_instance_valid(_model):
+		_model.visible = false
 	if organs:
 		for k in ["uterus", "uterus_cavity", "tube", "ovary"]:
 			organs.call("set_kind_visible", k, true)
@@ -631,8 +666,6 @@ func _deactivate() -> void:
 		if _owns_introitus and organs.get("vulva") != null and organs.vulva.has_method("set_inserter"):
 			organs.vulva.call("set_inserter", null)
 	_owns_introitus = false
-	if _sleeve:
-		_sleeve.visible = false
 	descent = 0.0
 	_drive_active = false
 	drive_source = ""
@@ -651,22 +684,14 @@ func _set_state(s: String) -> void:
 	state_changed.emit(s)
 
 
-func _ensure_sleeve() -> void:
-	if _sleeve and is_instance_valid(_sleeve):
+func _ensure_model() -> void:
+	if _model and is_instance_valid(_model):
 		return
-	_sleeve = SleeveScript.new()
-	_sleeve.name = "ProlapseSleeve"
-	add_child(_sleeve)
-	var vg: Array = organs.call("viscera_meshes", "vagina")
-	for m in vg:
-		var mi := m as MeshInstance3D
-		if mi and mi.material_override is ShaderMaterial:
-			var mat := (mi.material_override as ShaderMaterial).duplicate() as ShaderMaterial
-			mat.set_shader_parameter("prol_o", Vector4.ZERO)
-			mat.set_shader_parameter("is_uterus", false)
-			_sleeve.material_override = mat
-			break
-	_sleeve.visible = false
+	_model = ModelScript.new()
+	_model.name = "ProlapseUterusModel"
+	add_child(_model)
+	_model.call("set_materials", _src_body_mat, _src_cervix_mat)
+	_model.visible = false
 
 
 # ------------------------------------------------------------------ 每帧
@@ -679,6 +704,7 @@ func step(dt: float) -> void:
 	if state == STATE_NONE or not _geo_ok:
 		return
 	var t0 := Time.get_ticks_usec()
+	var t_sim := 0
 	dt = clampf(dt, 0.0, 1.0 / 30.0)
 	_update_frame()
 	if _has_prev:
@@ -707,8 +733,11 @@ func step(dt: float) -> void:
 		elif _drive_reduce and -e > float(params.reduce_deadband):
 			descent -= minf((-e - float(params.reduce_deadband)) * float(params.feed_gain) * dt, float(params.reduce_speed_max) * dt)
 	descent = clampf(descent, 0.0, dmax)
+	var ts := Time.get_ticks_usec()
 	_simulate(dt)
+	t_sim = Time.get_ticks_usec() - ts
 	_finish(dt)
+	prof_us["sim"] = t_sim
 	# 完全回位且没人抓着 → 退出（抓着时即使推回到 0 也保持，便于继续拉）。
 	if descent <= 1e-5 and not _drive_active and state != STATE_REDUCING:
 		_deactivate()
@@ -844,11 +873,16 @@ func _limit_angle(a: Vector3, b: Vector3, ci: int, max_ang: float, drv: int) -> 
 
 
 func _finish(dt: float) -> void:
-	_so.call("set", "floor_y", floor_y)
-	_so.call("step_external", maxf(dt, 1e-4), _frame, _x, _O, -_Ain)
-	_update_sleeve()
+	var t1 := Time.get_ticks_usec()
+	_update_model()
+	var t2 := Time.get_ticks_usec()
 	_update_introitus()
+	var t3 := Time.get_ticks_usec()
 	_push_deform()
+	var t4 := Time.get_ticks_usec()
+	prof_us["model"] = t2 - t1
+	prof_us["introitus"] = t3 - t2
+	prof_us["deform"] = t4 - t3
 	var g := grade_for_descent(descent)
 	if g != grade:
 		grade = g
@@ -857,91 +891,29 @@ func _finish(dt: float) -> void:
 		pass
 
 
-## 外翻套筒：外口里面一点 → 体外段链 → 宫颈（留出 cervix_expose 露在外面）。
-func _update_sleeve() -> void:
-	if _sleeve == null:
+## 专用子宫模型：宫颈尖 → 宫底沿节点（体内节点在阴道路径上，体外节点是悬挂链）；
+## IV 度宫底出外口后，接一段从宫底回到外口里面的细颈。
+func _update_model() -> void:
+	_ensure_model()
+	if _model == null:
 		return
-	var X := descent - float(_sigma[0])   # 体外的材料长度（外口到宫颈尖）
-	if X <= 0.002:
-		_sleeve.visible = false
-		return
-	var poly := PackedVector3Array()
-	var arcs := PackedFloat32Array()     # 每个折线点对应的子宫弧长（宫颈尖 = 0）
-	poly.append(_O + _Ain * 0.006)
-	arcs.append(X + 0.006)
-	poly.append(_O)
-	arcs.append(X)
-	var k := 0
-	while k < _n and _out[k] == 1:
-		k += 1
-	for i in range(k - 1, -1, -1):
-		poly.append(_x[i])
+	var inv := _frame.affine_inverse()
+	var arcs := PackedFloat32Array()
+	var nodes_ab := PackedVector3Array()
+	for i in _n:
 		arcs.append(_arc_of(i))
-	# 外口处的折角切圆（Chaikin 两次，端点不动）：粗套筒不会在折角内侧自相穿插。
-	for _ci in 2:
-		if poly.size() < 3:
-			break
-		var np := PackedVector3Array([poly[0]])
-		var na := PackedFloat32Array([arcs[0]])
-		for ci in poly.size() - 1:
-			if ci > 0:
-				np.append(poly[ci].lerp(poly[ci + 1], 0.25))
-				na.append(lerpf(arcs[ci], arcs[ci + 1], 0.25))
-			if ci < poly.size() - 2:
-				np.append(poly[ci].lerp(poly[ci + 1], 0.75))
-				na.append(lerpf(arcs[ci], arcs[ci + 1], 0.75))
-		np.append(poly[poly.size() - 1])
-		na.append(arcs[arcs.size() - 1])
-		poly = np
-		arcs = na
-	# 宫颈尖之前停在 cervix_expose 处。
-	var a_end := float(params.cervix_expose)
-	var centers := PackedVector3Array()
-	var radii := PackedFloat32Array()
-	var total := 0.0
-	var seglen := PackedFloat32Array()
-	for i2 in poly.size() - 1:
-		var l := poly[i2].distance_to(poly[i2 + 1])
-		seglen.append(l)
-		total += l
-	var step_len := clampf(total / 30.0, 0.004, 0.010)
-	var w := float(params.wall)
-	var neck := float(params.neck_r)
-	for i3 in poly.size() - 1:
-		var a_s := float(arcs[i3])
-		var a_e := float(arcs[i3 + 1])
-		var l2 := float(seglen[i3])
-		var nsub := maxi(1, int(ceil(l2 / step_len)))
-		for s in nsub:
-			var t := float(s) / float(nsub)
-			var a := lerpf(a_s, a_e, t)
-			if a < a_end:
-				break
-			var r := mass_radius_at(minf(a, _U * 0.999)) if a < _U else 0.0
-			if a >= _U * 0.92:
-				r = maxf(r, neck)
-			centers.append(poly[i3].lerp(poly[i3 + 1], t))
-			radii.append(r + w)
-			if centers.size() >= SleeveScript.MAX_RINGS - 1:
-				break
-	# 末端：穹窿附着在宫颈上，收口贴住宫颈（取平滑中线上弧长 = a_end 的点，和前面的环在同一条线上）。
-	var end_pos := _x[0] + ((_x[1] - _x[0]).normalized() if _n > 1 else -_Ain) * a_end
-	for i4 in poly.size() - 1:
-		var a0 := float(arcs[i4])
-		var a1 := float(arcs[i4 + 1])
-		if (a0 - a_end) * (a1 - a_end) <= 0.0 and absf(a1 - a0) > 1e-7:
-			end_pos = poly[i4].lerp(poly[i4 + 1], (a_end - a0) / (a1 - a0))
-			break
-	if not centers.is_empty() and centers[centers.size() - 1].distance_to(end_pos) < step_len * 0.5 and centers.size() > 2:
-		centers.remove_at(centers.size() - 1)
-		radii.remove_at(radii.size() - 1)
-	centers.append(end_pos)
-	radii.append(mass_radius_at(a_end) + w * 0.5)
-	_sleeve.call("rebuild", centers, radii, _up)
+		nodes_ab.append(inv * _x[i])
+	var neck := PackedVector3Array()
+	if float(_sigma[_n - 1]) - descent < 0.0:
+		neck.append(inv * _x[_n - 1])
+		neck.append(inv * _O)
+		neck.append(inv * (_O + _Ain * 0.008))
+	_model.call("rebuild", _frame, nodes_ab, arcs, Callable(self, "mass_radius_at"), _U, float(params.cervix_expose), neck, float(params.neck_r), (inv.basis * _up).normalized())
 
 
 ## 外口：脱出物截面从里往外撑开（VulvaInserter）。
 var _ins_last_r := 0.0
+var _ins_dir_f := Vector3.ZERO
 var _ins_last_dir := Vector3.ZERO
 var _ins_last_axis := Vector3.ZERO
 var _ins_cool := 0
@@ -969,15 +941,22 @@ func _update_introitus() -> void:
 		k += 1
 	if k > 0 and _x[k - 1].distance_to(_O) > 0.004:
 		out_dir = (_x[k - 1] - _O).normalized()
-	var out_ab := (inv.basis * out_dir).normalized()
-	# 外阴重解一次约几毫秒：只有截面变化 ≥ 0.25 mm 或走向变化 ≥ ~1.4° 才重解。
+	var out_raw := (inv.basis * out_dir).normalized()
+	# 走向低通（τ ≈ introitus_dir_tau）：甩动时外口不跟着每一摆重解，只跟平均走向。
+	if not _owns_introitus or _ins_dir_f.length_squared() < 0.5:
+		_ins_dir_f = out_raw
+	else:
+		var a := clampf(get_physics_process_delta_time() / maxf(float(params.introitus_dir_tau), 1e-3), 0.0, 1.0)
+		_ins_dir_f = _ins_dir_f.lerp(out_raw, a).normalized()
+	var out_ab := _ins_dir_f
+	# 外阴重解一次约几毫秒（t68u 放宽）：截面变化 ≥ 0.5 mm 或低通后的走向变化 ≥ ~10° 才重解。
 	_ins_cool = maxi(_ins_cool - 1, 0)
-	if _owns_introitus and absf(r - _ins_last_r) < 0.00025 and out_ab.dot(_ins_last_dir) > 0.9997 and axis_ab.dot(_ins_last_axis) > 0.9999:
+	if _owns_introitus and absf(r - _ins_last_r) < float(params.introitus_r_step) and out_ab.dot(_ins_last_dir) > float(params.introitus_dir_dot) and axis_ab.dot(_ins_last_axis) > 0.9995:
 		return
-	# 甩动中最多每 3 个物理帧重解一次（截面变化 > 1 mm 时立即重解，保证不穿模）。
-	if _owns_introitus and _ins_cool > 0 and absf(r - _ins_last_r) < 0.001:
+	# 甩动中最多每 introitus_cooldown 个物理帧重解一次（截面变化 > 1.5 mm 时立即重解，保证不穿模）。
+	if _owns_introitus and _ins_cool > 0 and absf(r - _ins_last_r) < 0.0015:
 		return
-	_ins_cool = 3
+	_ins_cool = int(params.introitus_cooldown)
 	_ins_last_axis = axis_ab
 	_inserter.call("setup_mass", r, axis_ab, up_ab, out_ab, Vector3.ZERO, 1.0)
 	var same_size := _owns_introitus and absf(r - _ins_last_r) < 1e-5
@@ -991,6 +970,9 @@ func _update_introitus() -> void:
 
 
 ## 阴道着色器：体内内翻折叠 + 通道撑开（只写给阴道网格）。
+var _deform_sig := Vector4(-1, -1, -1, -1)
+
+
 func _push_deform() -> void:
 	if organs == null or not organs.has_method("set_prolapse_deform"):
 		return
@@ -998,6 +980,12 @@ func _push_deform() -> void:
 	var o_ab := inv * _O
 	var a_ab := (inv.basis * _Ain).normalized()
 	var tip_sigma := float(_sigma[0]) - descent
+	# 参数在腹部坐标里：甩动 / 身体移动时不变，只有下移量或通道变了才重写（以前每帧遍历全部器官材质）。
+	var sig := Vector4(descent, o_ab.x + o_ab.y * 3.1 + o_ab.z * 7.3, a_ab.x + a_ab.y * 3.1 + a_ab.z * 7.3, _canal_L)
+	var dd := (sig - _deform_sig).abs()
+	if maxf(maxf(dd.x, dd.y), maxf(dd.z, dd.w)) < 0.00015:
+		return
+	_deform_sig = sig
 	organs.call("set_prolapse_deform", o_ab, a_ab, _canal_L, descent, tip_sigma, _U, float(params.wall), _prof)
 
 

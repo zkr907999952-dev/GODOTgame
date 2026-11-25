@@ -1,7 +1,8 @@
 extends "res://scripts/tests/v0411_check.gd"
-## 未发布（0.4.12 开发中，t66u）：子宫脱垂系统。分度阈值、宫颈 / 宫底相对外口的位置、
-## 阴道内翻（体内折叠 + 体外套筒）、外口撑开不穿模、柔性悬挂甩动衰减、触发 #1（长杆钢球）阈值、
-## 手术经创口先复位再扯出、复原、无 NaN、每帧开销。不打包。
+## 未发布（0.4.12 开发中，t66u / t68u）：子宫脱垂系统。分度阈值、宫颈 / 宫底相对外口的位置、
+## 专用简化子宫模型（替换原子宫 / 宫颈、复用原材质、连续且朝外、面数低）、阴道不再内翻 / 无套筒、
+## 外口撑开不穿模、IV 度垂得更低、柔性悬挂甩动衰减、手 / 手术钳 / 观察视角的手都能拖、
+## 触发 #1（长杆钢球）阈值、手术经创口先复位再扯出、复原、无 NaN、每帧开销。不打包。
 ##   godot --headless --path . -s res://scripts/tests/v0420_prolapse_check.gd
 
 var org: Node
@@ -44,8 +45,9 @@ func _run() -> void:
 	await _check_reset()
 	vm.call("exit")
 	await _frames(2)
+	await _check_observe_hand()
 	await _check_surgery()
-	_ok(_nan_seen == 0, "no NaN in prolapse nodes / sleeve during the whole run (%d)" % _nan_seen)
+	_ok(_nan_seen == 0, "no NaN in prolapse nodes / model during the whole run (%d)" % _nan_seen)
 	print("v0420_prolapse_check: fails=", fails)
 	quit(1 if fails > 0 else 0)
 
@@ -54,9 +56,11 @@ func _scan_nan() -> void:
 	for p in pc.call("node_positions"):
 		if not (p as Vector3).is_finite():
 			_nan_seen += 1
-	var sl = pc.call("sleeve")
-	if sl and sl.visible:
-		_nan_seen += int((sl.call("continuity_report") as Dictionary).get("nan", 0))
+	var md = pc.call("model")
+	if md and md.visible:
+		for c in md.call("ring_centers"):
+			if not (c as Vector3).is_finite():
+				_nan_seen += 1
 
 
 func _settle(n: int) -> void:
@@ -65,16 +69,50 @@ func _settle(n: int) -> void:
 		_scan_nan()
 
 
-# ------------------------------------------------------------------ 出生重合
+# ------------------------------------------------------------------ 专用模型：替换原子宫 / 宫颈
 func _check_spawn() -> void:
 	pc.call("set_amount", 0.0005)
 	await _settle(2)
-	_ok(bool(pc.call("is_active")), "a tiny descent activates the prolapse soft organ")
-	var so: Node = pc.call("soft_organ")
-	var off: Dictionary = so.call("spawn_offset") if so else {}
-	print("PROLAPSE spawn offset centroid=%.2f mm max=%.2f mm" % [float(off.get("centroid_mm", -1)), float(off.get("max_mm", -1))])
-	_ok(float(off.get("centroid_mm", 99)) < 1.0 and float(off.get("max_mm", 99)) < 2.0, "physics uterus coincides with the visible original at d≈0 (centroid %.2f mm, max %.2f mm)" % [float(off.get("centroid_mm", 99)), float(off.get("max_mm", 99))])
-	_ok(bool(org.call("kinds_hidden", "uterus")) if org.has_method("kinds_hidden") else true, "the original uterus is hidden while the prolapse soft organ is shown")
+	_ok(bool(pc.call("is_active")), "a tiny descent activates the prolapse")
+	var md = pc.call("model")
+	_ok(md != null and md.visible and pc.call("soft_organ") == md, "the dedicated prolapse uterus model is shown (soft_organ() returns it for the PiP)")
+	_ok(pc.call("sleeve") == null, "no everted vaginal sleeve any more")
+	var hid := true
+	if org.has_method("kinds_hidden"):
+		for k in ["uterus", "tube", "ovary"]:
+			hid = hid and bool(org.call("kinds_hidden", k))
+	_ok(hid, "the original uterus / tubes / ovaries are hidden while the model replaces them")
+	if md == null:
+		return
+	var ut: Array = org.call("viscera_meshes", "uterus")
+	var orig_v := 0
+	for m in ut:
+		var mi := m as MeshInstance3D
+		if mi and mi.mesh:
+			for si in mi.mesh.get_surface_count():
+				orig_v += (mi.mesh.surface_get_arrays(si)[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
+	var mv := int(md.get("vertex_count"))
+	print("PROLAPSE model: %d verts (original uterus %d), surfaces=%d" % [mv, orig_v, md.mesh.get_surface_count() if md.mesh else 0])
+	_ok(mv > 100 and mv < 700 and mv * 4 < orig_v, "the model is a simplified mesh (%d verts vs %d)" % [mv, orig_v])
+	# 复用原材质：宫体 = 原子宫材质，宫颈 = 原阴道（黏膜）材质（同一着色器、同一底色）。
+	var src_u := (ut[0] as MeshInstance3D).material_override as ShaderMaterial if not ut.is_empty() else null
+	var vg: Array = org.call("viscera_meshes", "vagina")
+	var src_v := (vg[0] as MeshInstance3D).material_override as ShaderMaterial if not vg.is_empty() else null
+	var mb := md.mesh.surface_get_material(1) as ShaderMaterial if md.mesh and md.mesh.get_surface_count() > 1 else null
+	var mc := md.mesh.surface_get_material(0) as ShaderMaterial if md.mesh and md.mesh.get_surface_count() > 0 else null
+	var same_u: bool = mb != null and src_u != null and mb.shader == src_u.shader and mb.get_shader_parameter("base_color") == src_u.get_shader_parameter("base_color")
+	var same_v: bool = mc != null and src_v != null and mc.shader == src_v.shader and mc.get_shader_parameter("base_color") == src_v.get_shader_parameter("base_color")
+	_ok(same_u and same_v, "the model reuses the original uterus / cervix materials (body=%s cervix=%s)" % [same_u, same_v])
+	# 刚激活时与原子宫重合：模型宫颈尖（弧长 0 的环心）≈ 原宫颈位置。
+	var cw: PackedVector3Array = md.call("ring_centers_world")
+	var arcs: PackedFloat32Array = md.call("ring_arcs")
+	var ci := 0
+	for i in arcs.size():
+		if absf(arcs[i]) < absf(arcs[ci]):
+			ci = i
+	var cerv: Vector3 = pc.call("cervix_world")
+	var off := cw[ci].distance_to(cerv) if not cw.is_empty() else 99.0
+	_ok(off < 0.002, "model cervix tip sits on the original cervix at d≈0 (%.2f mm)" % (off * 1000))
 	pc.call("reset")
 	await _settle(2)
 
@@ -123,9 +161,16 @@ func _check_grades() -> void:
 		if g >= 2:
 			_ok(pen < 0.001, "grade %d: no labia / vestibule penetration (%.2f mm)" % [g, pen * 1000])
 			_ok(ins_r >= mass_r + wall - 1e-4, "grade %d: introitus opened to ≥ the mass cross-section (%.1f ≥ %.1f mm)" % [g, ins_r * 1000, (mass_r + wall) * 1000])
-		if g >= 3:
-			_check_sleeve(g)
+		_check_model(g)
 		_check_vagina_deform(g)
+	# t68u：IV 度最大时宫底垂得更低（fundus_out_max 14 → 50 mm）。
+	pc.call("set_amount", 1.0)
+	await _settle(90)
+	var st2: Dictionary = pc.call("debug_state")
+	var O2: Vector3 = pc.call("introitus_world")
+	var f_drop := O2.y - (pc.call("fundus_world") as Vector3).y
+	print("PROLAPSE max: fundus %.1f mm outside along the path, %.1f mm below the introitus" % [-float(st2["fundus_sd"]) * 1000, f_drop * 1000])
+	_ok(float(st2["fundus_sd"]) < -0.035, "max grade IV: the uterus hangs low (fundus %.1f mm out, was ≤ 14 mm)" % (-float(st2["fundus_sd"]) * 1000))
 
 
 func _check_through_vagina() -> void:
@@ -150,23 +195,75 @@ func _check_through_vagina() -> void:
 	_ok(f_navel > 0.12, "grade IV: the fundus is far from the abdomen / wound (%.1f cm from the navel)" % (f_navel * 100))
 
 
-func _check_sleeve(g: int) -> void:
-	var sl = pc.call("sleeve")
-	_ok(sl != null and sl.visible, "grade %d: everted vaginal sleeve is shown outside" % g)
-	if sl == null:
+func _check_model(g: int) -> void:
+	var md = pc.call("model")
+	_ok(md != null and md.visible, "grade %d: prolapse model shown" % g)
+	if md == null:
 		return
-	var rep: Dictionary = sl.call("continuity_report")
-	var rings: Array = sl.call("rings")
+	var cw: PackedVector3Array = md.call("ring_centers_world")
+	var rr: PackedFloat32Array = md.call("ring_radii")
+	var max_gap := 0.0
+	for i in range(1, cw.size()):
+		max_gap = maxf(max_gap, cw[i].distance_to(cw[i - 1]))
+	# 绕序 / 法线：每个三角形的几何法线与顶点法线同向，且顶点法线背离中线（朝外）。
+	var wind_bad := 0
+	var wind_in := 0
+	var mxf: Transform3D = md.global_transform
 	var O: Vector3 = pc.call("introitus_world")
-	var c0: Vector3 = (rings[0] as Dictionary)["c"] if not rings.is_empty() else Vector3.INF
-	var cl: Vector3 = (rings[rings.size() - 1] as Dictionary)["c"] if not rings.is_empty() else Vector3.INF
+	var ain: Vector3 = pc.call("canal_axis_world")
+	var inward := 0
+	var tris := 0
+	var mesh: ArrayMesh = md.mesh
+	for si in mesh.get_surface_count():
+		var arr: Array = mesh.surface_get_arrays(si)
+		var V: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var N: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
+		var I: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+		for t in range(0, I.size(), 3):
+			var a := V[I[t]]
+			var b := V[I[t + 1]]
+			var c := V[I[t + 2]]
+			var gn := (b - a).cross(c - a)
+			if gn.length_squared() < 1e-14:
+				continue
+			tris += 1
+			var vn := N[I[t]] + N[I[t + 1]] + N[I[t + 2]]
+			# Godot 正面 = 顺时针：右手几何法线应与外法线相反。
+			if gn.dot(vn) > 0.0:
+				# 体内急弯（阴道 → 前倾宫体）内侧环会互相压叠，那里看不见；体外部分必须全部正面朝外。
+				var cen: Vector3 = mxf * ((a + b + c) / 3.0)
+				if (cen - O).dot(-ain) > 0.002:
+					wind_bad += 1
+				else:
+					wind_in += 1
+	var lc: PackedVector3Array = md.call("ring_centers")
+	var arr0: Array = mesh.surface_get_arrays(mesh.get_surface_count() - 1)
+	var V0: PackedVector3Array = arr0[Mesh.ARRAY_VERTEX]
+	var N0: PackedVector3Array = arr0[Mesh.ARRAY_NORMAL]
+	for vi in V0.size():
+		var best := 1e9
+		var bc := Vector3.ZERO
+		for c2 in lc:
+			var dd := c2.distance_squared_to(V0[vi])
+			if dd < best:
+				best = dd
+				bc = c2
+		if (V0[vi] - bc).length() > 0.003 and N0[vi].dot(V0[vi] - bc) < 0.0:
+			inward += 1
+	var arcs: PackedFloat32Array = md.call("ring_arcs")
+	var ci := 0
+	for i2 in arcs.size():
+		if absf(arcs[i2]) < absf(arcs[ci]):
+			ci = i2
 	var cerv: Vector3 = pc.call("cervix_world")
-	var expose := cl.distance_to(cerv)
-	print("PROLAPSE sleeve grade %d: rings=%d max_gap=%.1f mm inward_normals=%d wind_mismatch=%d nan=%d root→introitus=%.1f mm cervix exposed=%.1f mm" % [g, int(rep["rings"]), float(rep["max_gap"]) * 1000, int(rep["inward_normals"]), int(rep.get("wind_mismatch", -1)), int(rep["nan"]), c0.distance_to(O) * 1000, expose * 1000])
-	_ok(int(rep["rings"]) >= 4 and float(rep["max_gap"]) < 0.008 and int(rep["nan"]) == 0, "grade %d: sleeve is one continuous tube (no gaps / holes)" % g)
-	_ok(int(rep["inward_normals"]) == 0 and int(rep.get("wind_mismatch", 1)) == 0, "grade %d: sleeve mucosa faces outward (normals and winding)" % g)
-	_ok(c0.distance_to(O) < 0.008, "grade %d: sleeve starts at the introitus (%.1f mm)" % [g, c0.distance_to(O) * 1000])
-	_ok(expose > 0.008, "grade %d: cervix / os is exposed at the distal tip (%.1f mm past the sleeve)" % [g, expose * 1000])
+	var tip_off := cw[ci].distance_to(cerv)
+	print("PROLAPSE model grade %d: rings=%d verts=%d max_gap=%.1f mm wind_bad_outside=%d folded_inside=%d /%d inward_normals=%d cervix_tip_off=%.2f mm rebuilds=%d" % [g, cw.size(), int(md.get("vertex_count")), max_gap * 1000, wind_bad, wind_in, tris, inward, tip_off * 1000, int(md.get("rebuilds"))])
+	_ok(cw.size() >= 15 and max_gap < 0.012, "grade %d: model is one continuous tube (max ring gap %.1f mm)" % [g, max_gap * 1000])
+	_ok(wind_bad == 0 and inward == 0, "grade %d: model surface outside the body faces outward (winding %d bad, %d inward normals)" % [g, wind_bad, inward])
+	_ok(wind_in * 12 < tris, "grade %d: only a few triangles fold on the inner side of the in-body bend (%d / %d)" % [g, wind_in, tris])
+	_ok(tip_off < 0.003, "grade %d: model cervix follows the physics chain (%.2f mm)" % [g, tip_off * 1000])
+	if g >= 3:
+		_ok((cerv - O).dot(-ain) > 0.005, "grade %d: model cervix / os is outside the introitus" % g)
 
 
 func _check_vagina_deform(g: int) -> void:
@@ -209,8 +306,7 @@ func _check_vagina_deform(g: int) -> void:
 			continue
 		worst = minf(worst, rq - mr - w)
 	print("PROLAPSE vagina grade %d: inverted verts=%d / %d, min wall clearance to the mass=%.2f mm" % [g, inverted, V.size(), worst * 1000])
-	if g >= 2:
-		_ok(inverted > 0, "grade %d: upper vagina is inverted (folded over the descending mass)" % g)
+	_ok(inverted == 0, "grade %d: vagina is no longer inverted / folded (simplified, %d folded verts)" % [g, inverted])
 	_ok(worst >= -0.0002, "grade %d: the descending mass does not poke through the canal wall (clearance %.2f mm)" % [g, worst * 1000])
 
 
@@ -250,7 +346,14 @@ func _check_swing() -> void:
 	_ok(peak > 0.05, "a fling makes the hanging uterus swing (%.3f m/s)" % peak)
 	_ok(late < peak * 0.12, "the swing decays (%.4f m/s after 3 s, %.1f%% of peak)" % [late, late / maxf(peak, 1e-6) * 100.0])
 	_ok(max_stretch < 1.06, "flexible chain stays intact (max stretch %.3f)" % max_stretch)
-	_ok(usec / 240 < 3000, "prolapse step is cheap while swinging (%d µs avg)" % (usec / 240))
+	# t68u 前约 6400 µs；简化模型 + 外口低通 + 通道缓存后应在 2 ms 内（单独运行约 0.6–1.2 ms）。
+	_ok(usec / 240 < 2000, "prolapse step is cheap while swinging (%d µs avg)" % (usec / 240))
+	var md = pc.call("model")
+	var rb0 := int(md.get("rebuilds")) if md else 0
+	await _settle(30)
+	var rb1 := int(md.get("rebuilds")) if md else 0
+	print("PROLAPSE model rebuilds while settled: %d in 30 frames" % (rb1 - rb0))
+	_ok(rb1 - rb0 <= 10, "a settled hanging uterus mostly skips model rebuilds (%d / 30)" % (rb1 - rb0))
 
 
 # ------------------------------------------------------------------ 用手拖：可拉出 / 推回
@@ -398,21 +501,18 @@ func _check_pip() -> void:
 	await _frames(3)
 	var copies: Array = sec.get("_copies")
 	var has_so := false
-	var has_sleeve := false
 	var vag_on := false
 	for rec in copies:
 		var src: Node = rec["src"]
 		if src == pc.call("soft_organ"):
 			has_so = true
-		if src == pc.call("sleeve"):
-			has_sleeve = true
 		if str(rec.get("kind", "")) == "vagina":
 			var cut: ShaderMaterial = rec["cut"]
 			var po = cut.get_shader_parameter("prol_o")
 			if po is Vector4 and (po as Vector4).w > 0.5:
 				vag_on = true
-	_ok(has_so and has_sleeve, "PiP shows the prolapsed uterus and the everted sleeve (copies: uterus=%s sleeve=%s)" % [has_so, has_sleeve])
-	_ok(vag_on, "PiP vagina copies get the eversion uniforms")
+	_ok(has_so, "PiP shows the dedicated prolapse uterus model")
+	_ok(vag_on, "PiP vagina copies get the prolapse stretch uniforms")
 	var cam: Camera3D = sec.get("_long_cam")
 	var fund: Vector3 = pc.call("fundus_world")
 	var in_view := false
@@ -438,21 +538,72 @@ func _check_reset() -> void:
 	var u: Dictionary = org.call("prolapse_uniforms")
 	var vag: Array = org.call("viscera_meshes", "vagina")
 	var po = (vag[0] as MeshInstance3D).material_override.get_shader_parameter("prol_o") if not vag.is_empty() else Vector4.ZERO
-	var sl = pc.call("sleeve")
+	var md = pc.call("model")
 	var ut_vis := not bool(org.call("kinds_hidden", "uterus")) if org.has_method("kinds_hidden") else true
-	print("PROLAPSE reset: active=%s grade=%d descent=%.2f mm sleeve_visible=%s intro_mix=%.3f" % [pc.call("is_active"), int(pc.get("grade")), float(pc.get("descent")) * 1000, sl.visible if sl else false, float(org.vulva.get("_intro_mix"))])
+	print("PROLAPSE reset: active=%s grade=%d descent=%.2f mm model_visible=%s intro_mix=%.3f" % [pc.call("is_active"), int(pc.get("grade")), float(pc.get("descent")) * 1000, md.visible if md else false, float(org.vulva.get("_intro_mix"))])
 	_ok(not bool(pc.call("is_active")) and int(pc.get("grade")) == 0 and float(pc.get("descent")) == 0.0, "复原 restores the prolapse to grade 0")
-	_ok(u.is_empty() and (po == null or (po as Vector4).w < 0.5), "复原 clears the vagina eversion uniforms")
-	_ok(sl == null or not sl.visible, "复原 hides the sleeve")
+	_ok(u.is_empty() and (po == null or (po as Vector4).w < 0.5), "复原 clears the vagina prolapse uniforms")
+	_ok(md == null or not md.visible, "复原 hides the prolapse model")
 	_ok(ut_vis, "复原 shows the original uterus again")
 	_ok(float(org.vulva.get("_intro_mix")) < 1e-4, "复原 closes the introitus")
 
 
-# ------------------------------------------------------------------ 手术：先复位，再从创口扯出
+# ------------------------------------------------------------------ 观察 / 普通视角：手拖体外脱垂（t68u）
+func _check_observe_hand() -> void:
+	pc.call("set_amount", 0.6)
+	await _settle(40)
+	var d0 := float(pc.get("descent"))
+	var cam: Camera3D = player.call("get_camera")
+	var cerv: Vector3 = pc.call("cervix_world")
+	var origin := cam.global_position if cam else cerv + Vector3(0, 0, 0.4)
+	var ok := bool(player.call("debug_begin_prolapse_hand", origin, (cerv - origin).normalized()))
+	_ok(ok and str(pc.get("drive_source")) == "hand", "outside vagina mode the hand can grab the hanging uterus (src=%s)" % pc.get("drive_source"))
+	var ain: Vector3 = pc.call("canal_axis_world")
+	var down := -ain
+	for i in 50:
+		var tgt := cerv + down * 0.002 * float(i + 1)
+		player.call("debug_update_prolapse_hand", origin, (tgt - origin).normalized())
+		await _settle(1)
+	var d1 := float(pc.get("descent"))
+	player.call("_end_prolapse_hand")
+	await _settle(2)
+	print("PROLAPSE observe hand: descent %.1f → %.1f mm, driving after release=%s" % [d0 * 1000, d1 * 1000, pc.call("is_driving")])
+	_ok(d1 > d0 + 0.01, "the observe-view hand drag moves / pulls the prolapse (%.1f → %.1f mm)" % [d0 * 1000, d1 * 1000])
+	_ok(not bool(pc.call("is_driving")), "releasing the hand ends the drive")
+	pc.call("reset")
+	await _settle(2)
+
+
+# ------------------------------------------------------------------ 手术：钳子拖体外部分；经创口先复位，再扯出
 func _check_surgery() -> void:
 	await _open_wound()
 	pc.call("set_amount", 0.95)
 	await _settle(60)
+	# t68u：手术钳直接夹住阴道口外悬垂的子宫拖动（不经创口）。
+	s.call("set_tool", "forceps")
+	await _frames(2)
+	var n := int(pc.get("_n"))
+	var fund: Vector3 = (pc.call("node_positions") as PackedVector3Array)[n - 1]
+	var cam: Camera3D = player.call("get_camera")
+	var org0 := cam.global_position if cam else fund + Vector3(0, 0.2, 0.3)
+	var okf := bool(s.call("_begin_forceps", org0, (fund - org0).normalized()))
+	_ok(okf and str(s.get("_fc_kind")) == "prolapse_out" and str(pc.get("drive_source")) == "forceps", "forceps grabs the outside prolapse directly (kind=%s src=%s)" % [s.get("_fc_kind"), pc.get("drive_source")])
+	if okf:
+		var side: Vector3 = (pc.call("canal_axis_world") as Vector3).cross(Vector3.UP).normalized()
+		var dn := int(pc.call("drive_node"))
+		var p0: Vector3 = (pc.call("node_positions") as PackedVector3Array)[dn]
+		var tip0f: Vector3 = s.get("_fc_last")
+		for i in 30:
+			s.call("debug_forceps_drag_to", tip0f + side * 0.0015 * float(i + 1))
+			await _settle(1)
+		var p1: Vector3 = (pc.call("node_positions") as PackedVector3Array)[dn]
+		s.call("debug_forceps_end")
+		await _settle(2)
+		print("PROLAPSE forceps drag: node %d moved %.1f mm sideways, driving after release=%s" % [dn, (p1 - p0).dot(side) * 1000, pc.call("is_driving")])
+		_ok((p1 - p0).dot(side) > 0.015, "forceps drags the hanging uterus (%.1f mm)" % ((p1 - p0).dot(side) * 1000))
+		_ok(not bool(pc.call("is_driving")), "releasing the forceps ends the drive")
+	pc.call("set_amount", 0.95)
+	await _settle(30)
 	var d_start := float(pc.get("descent"))
 	_ok(int(pc.get("grade")) == 4, "prolapse set to IV before surgery (descent %.1f mm)" % (d_start * 1000))
 	s.call("set_tool", "forceps")

@@ -1064,6 +1064,9 @@ func _try_begin_interact(screen: Vector2) -> bool:
 			_interact_screen = screen
 			return true
 		return false
+	# t68u：观察 / 普通互动中点中阴道口外悬垂的脱垂子宫 → 用手拖、甩、推回（任何互动工具都可）。
+	if _try_begin_prolapse_hand(screen):
+		return true
 	if not _organs_live():
 		return false
 	var variants := pointer_variants(screen)
@@ -1272,6 +1275,9 @@ func debug_drag_active_surgery(origin: Vector3, dir: Vector3) -> bool:
 
 
 func _update_interact_drag(screen: Vector2) -> void:
+	if _prol_hand_rig:
+		_update_prolapse_hand(screen)
+		return
 	if _vagina_drag:
 		var vm := get_vagina_mode() if has_method("get_vagina_mode") else null
 		if vm and vm.has_method("update_tool_drag"):
@@ -1296,6 +1302,10 @@ func _update_interact_drag(screen: Vector2) -> void:
 
 
 func _end_interact() -> void:
+	if _prol_hand_rig:
+		_end_prolapse_hand()
+		_interact_held = false
+		return
 	if _vagina_drag:
 		var vm := get_vagina_mode() if has_method("get_vagina_mode") else null
 		if vm and vm.has_method("end_tool_drag"):
@@ -2148,6 +2158,82 @@ func _calc_aabb(n: Node) -> AABB:
 var touch_active: bool = false
 var _touch_surgery: bool = false
 var _vagina_drag: bool = false
+var _prol_hand_rig: Node = null
+var _prol_hand_plane := Vector3.ZERO
+var _prol_hand_off := Vector3.ZERO
+
+
+func _prolapse_of(rig: Node) -> Node:
+	if rig == null or not is_instance_valid(rig) or not rig.has_method("has_prolapse") or not bool(rig.call("has_prolapse")):
+		return null
+	return rig.call("prolapse")
+
+
+## t68u：点中任一角色体外的脱垂子宫就开始拖（与阴道互动的手拖同一驱动接口，可复位也可加重）。
+func _try_begin_prolapse_hand(screen: Vector2) -> bool:
+	if not is_inside_tree():
+		return false
+	var ray: Array = _screen_ray(screen)
+	return debug_begin_prolapse_hand(ray[0], ray[1])
+
+
+func debug_begin_prolapse_hand(origin: Vector3, dir: Vector3) -> bool:
+	var best_t := INF
+	var best_rig: Node = null
+	var best_hit := {}
+	for r in get_tree().get_nodes_in_group("organ_rigs"):
+		var pc := _prolapse_of(r)
+		if pc == null or not bool(pc.call("is_active")):
+			continue
+		var hit: Dictionary = pc.call("ray_pick", origin, dir)
+		if hit.is_empty():
+			continue
+		var t: float = origin.distance_to(hit["point"])
+		if t < best_t:
+			best_t = t
+			best_rig = r
+			best_hit = hit
+	if best_rig == null:
+		return false
+	var pc2 := _prolapse_of(best_rig)
+	var ni := int(best_hit["node"])
+	var nodes: PackedVector3Array = pc2.call("node_positions")
+	_prol_hand_plane = best_hit["point"]
+	_prol_hand_off = nodes[ni] - _prol_hand_plane
+	pc2.call("begin_drive", "hand", ni, nodes[ni], true)
+	_prol_hand_rig = best_rig
+	_interact_held = true
+	return true
+
+
+func _update_prolapse_hand(screen: Vector2) -> void:
+	var ray: Array = _screen_ray(screen)
+	debug_update_prolapse_hand(ray[0], ray[1])
+
+
+func debug_update_prolapse_hand(origin: Vector3, dir: Vector3) -> void:
+	var pc := _prolapse_of(_prol_hand_rig)
+	if pc == null:
+		_prol_hand_rig = null
+		return
+	var d := dir.normalized()
+	var n := -_camera.global_transform.basis.z if _camera else d
+	var den := d.dot(n)
+	if absf(den) < 1e-5:
+		return
+	var t := clampf((_prol_hand_plane - origin).dot(n) / den, 0.02, 3.0)
+	pc.call("drive_to", origin + d * t + _prol_hand_off)
+
+
+func _end_prolapse_hand() -> void:
+	var pc := _prolapse_of(_prol_hand_rig)
+	if pc and str(pc.get("drive_source")) == "hand":
+		pc.call("end_drive")
+	_prol_hand_rig = null
+
+
+func is_prolapse_hand_dragging() -> bool:
+	return _prol_hand_rig != null
 ## 已确认的指针坐标解释（-1 = 自动尝试多种）
 var _ptr_mode: int = -1
 ## 最近一次互动是否走了肚脐近距兜底（自检用）
