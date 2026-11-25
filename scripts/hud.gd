@@ -55,6 +55,9 @@ var _btn_cam_introitus: Button
 var _btn_cam_abdomen: Button
 var _vagina_bar: HBoxContainer
 var _vagina_tool_btns: Dictionary = {}
+var _ball_box: VBoxContainer
+var _ball_slider: HSlider
+var _ball_value: Label
 var _panel_settings: PanelContainer
 var _panel_interact: PanelContainer
 var _panel_camera: PanelContainer
@@ -4587,8 +4590,14 @@ func _build_vagina_ui(root: Control) -> void:
 		_vagina_tool_btns["speculum"] = _btn_tool_speculum
 	if _btn_spec_remove:
 		_vagina_bar.add_child(_btn_spec_remove)
-	# 预留空位（注册表里 reserved 的项目）。
-	for rec in [["ball_rod", "长柄金属球"], ["reserved_2", "预留"], ["reserved_3", "预留"]]:
+	# 长柄金属球：可用。其余仍是预留空位。
+	var ball := _make_chrome_button("长柄金属球")
+	ball.name = "VaginaTool_ball_rod"
+	ball.toggle_mode = true
+	ball.pressed.connect(func(): _on_vagina_tool_picked("ball_rod"))
+	_vagina_bar.add_child(ball)
+	_vagina_tool_btns["ball_rod"] = ball
+	for rec in [["reserved_2", "预留"], ["reserved_3", "预留"]]:
 		var slot := _make_chrome_button(rec[1])
 		slot.name = "VaginaTool_%s" % rec[0]
 		slot.disabled = true
@@ -4596,6 +4605,31 @@ func _build_vagina_ui(root: Control) -> void:
 		_vagina_bar.add_child(slot)
 		_vagina_tool_btns[rec[0]] = slot
 	root.add_child(_vagina_bar)
+	_ball_box = VBoxContainer.new()
+	_ball_box.name = "BallDiameterBox"
+	_ball_box.visible = false
+	_ball_box.add_theme_constant_override("separation", 4)
+	_ball_box.mouse_filter = Control.MOUSE_FILTER_STOP
+	var brow := HBoxContainer.new()
+	brow.add_theme_constant_override("separation", 8)
+	var bl := Label.new()
+	bl.text = "球直径"
+	bl.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	brow.add_child(bl)
+	_ball_value = Label.new()
+	_ball_value.text = "20 mm"
+	_ball_value.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	brow.add_child(_ball_value)
+	_ball_box.add_child(brow)
+	_ball_slider = HSlider.new()
+	_ball_slider.min_value = 12.0
+	_ball_slider.max_value = 32.0
+	_ball_slider.step = 0.5
+	_ball_slider.value = 20.0
+	_ball_slider.custom_minimum_size = Vector2(240, 22)
+	_ball_slider.value_changed.connect(_on_ball_diameter)
+	_ball_box.add_child(_ball_slider)
+	root.add_child(_ball_box)
 	_bind_vagina()
 
 
@@ -4696,6 +4730,8 @@ func _refresh_vagina_ui() -> void:
 			_speculum_box.visible = false
 		if _btn_spec_remove and not surgery_on:
 			_btn_spec_remove.visible = false
+		if _ball_box:
+			_ball_box.visible = false
 		return
 	var preset := str(vm.call("current_preset")) if vm else "free"
 	if _btn_cam_free:
@@ -4713,6 +4749,14 @@ func _refresh_vagina_ui() -> void:
 		_btn_tool_speculum.disabled = false
 		_btn_tool_speculum.set_pressed_no_signal(tool == "speculum")
 		_style_button(_btn_tool_speculum, tool == "speculum")
+	if _vagina_tool_btns.has("ball_rod"):
+		var bb: Button = _vagina_tool_btns["ball_rod"]
+		if bb:
+			bb.visible = true
+			bb.disabled = false
+			bb.modulate = Color(1, 1, 1, 1)
+			bb.set_pressed_no_signal(tool == "ball_rod")
+			_style_button(bb, tool == "ball_rod")
 	var s := _surgery()
 	var spec_in := s != null and s.has_method("is_speculum_present") and bool(s.call("is_speculum_present"))
 	var spec_ready := s != null and s.has_method("is_speculum_inserted") and bool(s.call("is_speculum_inserted"))
@@ -4730,3 +4774,28 @@ func _refresh_vagina_ui() -> void:
 				_speculum_slider.set_value_no_signal(ang)
 			if _speculum_value:
 				_speculum_value.text = "%.0f°" % ang
+
+	if _ball_box:
+		_ball_box.visible = tool == "ball_rod"
+		var bar_yb := st + (104.0 if touch_ui else 92.0)
+		if _speculum_box and _speculum_box.visible:
+			bar_yb += 48.0
+		_ball_box.position = Vector2(sl, bar_yb)
+		if touch_ui and _ball_slider:
+			_ball_slider.custom_minimum_size = Vector2(280, 32)
+		var ctl: Node = vm.call("tool_controller") if vm and vm.has_method("tool_controller") else null
+		if ctl and "diameter" in ctl and _ball_slider:
+			var mm := float(ctl.diameter) * 1000.0
+			if absf(_ball_slider.value - mm) > 0.25:
+				_ball_slider.set_value_no_signal(mm)
+			if _ball_value:
+				_ball_value.text = "%.0f mm" % mm
+
+
+func _on_ball_diameter(v: float) -> void:
+	var vm := _vagina()
+	var ctl: Node = vm.call("tool_controller") if vm and vm.has_method("tool_controller") else null
+	if ctl and ctl.has_method("set_diameter"):
+		ctl.call("set_diameter", v * 0.001)
+	if _ball_value:
+		_ball_value.text = "%.0f mm" % v

@@ -1592,7 +1592,8 @@ func _sync_envelope_inserter() -> void:
 	if _intro_mix < 1e-4 or _intro_hx < 1e-5:
 		_inserter = null
 		return
-	if _inserter != null and _inserter.has_method("configure"):
+	# 只回写椭圆/双叶插入物；自定义（球、以后的网格 SDF）自己管理 configure。
+	if _inserter != null and _inserter.has_method("uses_envelope_configure") and bool(_inserter.call("uses_envelope_configure")) and _inserter.has_method("configure"):
 		_inserter.configure(_intro_hx, _intro_hy, _intro_mix, _intro_axis, _intro_up, _intro_sep, ALONG_RANGE)
 		return
 	if _inserter != null:

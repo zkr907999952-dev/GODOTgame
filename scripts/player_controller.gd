@@ -1038,6 +1038,17 @@ func pick_interact_rig(origin: Vector3, dir: Vector3) -> Node:
 ## 目标可以是本体或任意分身（第一人称下用准星射线）。
 func _try_begin_interact(screen: Vector2) -> bool:
 	_last_interact_via_navel = false
+	var vm := get_vagina_mode() if has_method("get_vagina_mode") else null
+	if vm and bool(vm.call("is_active")):
+		# 阴道互动模式独占指针：有可拖工具就拖，否则不落到腹部拖拽。
+		if vm.has_method("begin_tool_drag"):
+			var ray_v: Array = _screen_ray(screen)
+			if bool(vm.call("begin_tool_drag", screen, ray_v[0], ray_v[1])):
+				_interact_held = true
+				_interact_screen = screen
+				_vagina_drag = true
+				return true
+		return false
 	var surg := active_surgery()
 	if surg and bool(surg.call("is_active")):
 		if not bool(surg.call("has_tool")):
@@ -1261,6 +1272,12 @@ func debug_drag_active_surgery(origin: Vector3, dir: Vector3) -> bool:
 
 
 func _update_interact_drag(screen: Vector2) -> void:
+	if _vagina_drag:
+		var vm := get_vagina_mode() if has_method("get_vagina_mode") else null
+		if vm and vm.has_method("update_tool_drag"):
+			var ray_v: Array = _screen_ray(screen)
+			vm.call("update_tool_drag", screen, ray_v[0], ray_v[1])
+		return
 	# 必须走 active_surgery：分身在检查床上手术时，本体的 _surgery 并未激活，
 	# 若把拖拽发给本体，切割预览会停在起点拉不出来。
 	if _drag_active_surgery_from_screen(screen):
@@ -1279,6 +1296,13 @@ func _update_interact_drag(screen: Vector2) -> void:
 
 
 func _end_interact() -> void:
+	if _vagina_drag:
+		var vm := get_vagina_mode() if has_method("get_vagina_mode") else null
+		if vm and vm.has_method("end_tool_drag"):
+			vm.call("end_tool_drag")
+		_vagina_drag = false
+		_interact_held = false
+		return
 	var surg_end := active_surgery()
 	if surg_end and bool(surg_end.call("is_active")):
 		surg_end.call("end_stroke")
@@ -2123,6 +2147,7 @@ func _calc_aabb(n: Node) -> AABB:
 ## 这里不再处理，避免与 touch_controls 的手指逻辑重复（同一次点按 = 两次互动）。
 var touch_active: bool = false
 var _touch_surgery: bool = false
+var _vagina_drag: bool = false
 ## 已确认的指针坐标解释（-1 = 自动尝试多种）
 var _ptr_mode: int = -1
 ## 最近一次互动是否走了肚脐近距兜底（自检用）

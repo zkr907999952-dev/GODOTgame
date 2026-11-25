@@ -3,6 +3,11 @@ extends RefCounted
 ## 不要在外阴脚本里为每种道具写特殊分支；实现本接口再 set_inserter 即可。
 class_name VulvaInserter
 
+## 外阴开合同步是否按椭圆/双叶的 configure(half_x, half_y, ...) 来写回。自定义插入物返回 false。
+func uses_envelope_configure() -> bool:
+	return false
+
+
 func is_active() -> bool:
 	return mix() > 1e-4
 

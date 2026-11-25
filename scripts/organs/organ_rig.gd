@@ -85,6 +85,12 @@ var _spec_d: Vector4 = Vector4.ZERO
 var _spec_u: Vector4 = Vector4.ZERO
 var _spec_m: Vector4 = Vector4.ZERO
 var _spec_spread: float = 0.0
+## 通道扩张环 / 子宫被球撑开（ab-local；dilate_p.x<=0 或 uter_ball.w<=0 关闭）
+var _dilate_o: Vector4 = Vector4.ZERO
+var _dilate_d: Vector4 = Vector4.ZERO
+var _dilate_p: Vector4 = Vector4.ZERO
+var _uter_ball: Vector4 = Vector4.ZERO
+var _uter_ball_p: Vector4 = Vector4.ZERO
 ## Cached rest-space canal (opening / cervix / axis), fitted once.
 var _canal_rest: Dictionary = {}
 var _gut_along_cache: Dictionary = {}
@@ -328,6 +334,105 @@ func clear_speculum_deform() -> void:
 			vulva.call("set_introitus_open", 0.0, 0.0, 0.0, Vector3(0, 1, 0), Vector3(0, 0, 1))
 		if absf(vulva.spread() - keep) < 0.03 or vulva.spread() <= keep + 0.02:
 			vulva.set_spread(0.0)
+
+
+## 通道扩张环：origin/axis 为腹部局部，depth 是球心沿轴距外口的距离，radius 是球半径。
+func set_canal_dilate(origin_ab: Vector3, axis_ab: Vector3, depth: float, radius: float, mixv: float, shaft_r: float = 0.004, residual: float = 0.0, cervix_depth: float = 0.0) -> void:
+	if mixv <= 1e-5 or radius <= 1e-6:
+		clear_canal_dilate()
+		return
+	var ax := axis_ab
+	if ax.length_squared() < 1e-8:
+		clear_canal_dilate()
+		return
+	ax = ax.normalized()
+	_dilate_o = Vector4(origin_ab.x, origin_ab.y, origin_ab.z, depth)
+	_dilate_d = Vector4(ax.x, ax.y, ax.z, maxf(radius, 0.001))
+	_dilate_p = Vector4(clampf(mixv, 0.0, 1.0), maxf(shaft_r, 0.0), clampf(residual, 0.0, 1.0), cervix_depth)
+	_push_dilate_uniforms()
+
+
+func clear_canal_dilate() -> void:
+	_dilate_o = Vector4.ZERO
+	_dilate_d = Vector4.ZERO
+	_dilate_p = Vector4.ZERO
+	_push_dilate_uniforms()
+
+
+## 与 shader dilate_target_radius 同一公式，给自检测通道在某深度的目标半径。
+func canal_dilate_radius_at(along: float) -> float:
+	var mixv := _dilate_p.x
+	var R := _dilate_d.w
+	if mixv <= 0.001 or R <= 1e-6:
+		return 0.0
+	var ball_s := _dilate_o.w
+	var shaft := maxf(_dilate_p.y, 0.0)
+	var residual := clampf(_dilate_p.z, 0.0, 1.0)
+	var ds := along - ball_s
+	var slice := 0.0
+	if absf(ds) <= R:
+		slice = sqrt(maxf(R * R - ds * ds, 0.0))
+	var target := slice
+	if along < ball_s and along > -0.03:
+		target = maxf(target, shaft)
+	if along < ball_s and residual > 0.001:
+		var wake := residual * R * exp(-maxf(ball_s - along, 0.0) / maxf(R * 2.6, 0.008))
+		target = maxf(target, shaft + wake)
+	return target
+
+
+func set_uterus_ball(center_ab: Vector3, radius: float, mixv: float, wall: float = 0.0028, max_r: float = 0.0) -> void:
+	if mixv <= 1e-5 or radius <= 1e-6:
+		clear_uterus_ball()
+		return
+	_uter_ball = Vector4(center_ab.x, center_ab.y, center_ab.z, maxf(radius, 0.001))
+	_uter_ball_p = Vector4(clampf(mixv, 0.0, 1.0), maxf(wall, 0.0), maxf(max_r, 0.0), 0.0)
+	_push_dilate_uniforms()
+
+
+func clear_uterus_ball() -> void:
+	_uter_ball = Vector4.ZERO
+	_uter_ball_p = Vector4.ZERO
+	_push_dilate_uniforms()
+
+
+func uterus_ball_distend() -> float:
+	# 撑开量：有效半径 × 混合。未进入宫腔时为 0。
+	if _uter_ball.w <= 1e-6 or _uter_ball_p.x <= 1e-5:
+		return 0.0
+	return _uter_ball.w * _uter_ball_p.x
+
+
+func _push_dilate_uniforms() -> void:
+	for m in _all_mats:
+		if m == null:
+			continue
+		m.set_shader_parameter("dilate_o", _dilate_o)
+		m.set_shader_parameter("dilate_d", _dilate_d)
+		m.set_shader_parameter("dilate_p", _dilate_p)
+		m.set_shader_parameter("uter_ball", _uter_ball)
+		# 宫腔（内膜）不额外加壁厚，子宫外膜加上壁厚，其它网格关掉球撑开。
+		var wall_p := _uter_ball_p
+		# 无法在这里按网格区分时先写统一值；下面按网格再覆盖。
+		m.set_shader_parameter("uter_ball_p", wall_p)
+	for mi in organ_meshes:
+		if mi == null or not is_instance_valid(mi):
+			continue
+		var mat := mi.material_override as ShaderMaterial
+		if mat == null:
+			continue
+		var kind := str(mi.get_meta("organ_kind", ""))
+		var is_cavity := kind == "uterus_cavity" or bool(mi.get_meta("is_cavity", false))
+		var is_ut := kind == "uterus" or is_cavity or bool(mi.get_meta("is_uterus", false))
+		if not is_ut or _uter_ball.w <= 1e-6:
+			mat.set_shader_parameter("uter_ball", Vector4.ZERO)
+			mat.set_shader_parameter("uter_ball_p", Vector4.ZERO)
+			continue
+		var p := _uter_ball_p
+		if is_cavity:
+			p.y = 0.0
+		mat.set_shader_parameter("uter_ball", _uter_ball)
+		mat.set_shader_parameter("uter_ball_p", p)
 
 
 ## 阴道开口 / 宫颈 / 轴（朝宫颈），同时给腹部局部和世界坐标。
@@ -2568,11 +2673,15 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("spec_d", _spec_d)
 		m.set_shader_parameter("spec_u", _spec_u)
 		m.set_shader_parameter("spec_m", _spec_m)
+		m.set_shader_parameter("dilate_o", _dilate_o)
+		m.set_shader_parameter("dilate_d", _dilate_d)
+		m.set_shader_parameter("dilate_p", _dilate_p)
 		m.set_shader_parameter("canal_stretch_on", _canal_stretch_on)
 		m.set_shader_parameter("canal_os_rest", _canal_os_rest)
 		m.set_shader_parameter("canal_os_now", _canal_os_now)
 		m.set_shader_parameter("canal_open_rest", _canal_open_rest)
 	_apply_uterus_phys_cut()
+	_push_dilate_uniforms()
 	var sq := tools.squeeze_target()
 	for m in _all_mats:
 		if sq.is_empty():

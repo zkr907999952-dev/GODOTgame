@@ -11,6 +11,8 @@ class_name VaginaTool
 @export var settings_kind: String = ""
 ## 可选：实现 VulvaInserter 的脚本路径。
 @export var inserter_script: String = ""
+## 可选：工具控制器（Node 脚本），负责模型、输入和物理。新工具挂上即可。
+@export var controller_script: String = ""
 
 
 func is_usable() -> bool:

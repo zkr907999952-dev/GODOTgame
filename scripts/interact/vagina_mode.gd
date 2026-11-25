@@ -26,6 +26,8 @@ var _saved_xray := false
 var _saved_xray_amount := 0.0
 var _xray_pushed := false
 var _anchor := Vector3.ZERO
+var _controller: Node
+var _view_jolt := Vector3.ZERO
 
 
 func setup(p: Node, o: Node, s: Node) -> void:
@@ -93,9 +95,11 @@ func exit() -> void:
 	if not active:
 		return
 	active = false
+	_teardown_controller()
 	tool_id = ""
 	camera_preset = PRESET_FREE
 	_restore_xray()
+	_view_jolt = Vector3.ZERO
 	if player and player.has_method("clear_orbit_anchor"):
 		player.call("clear_orbit_anchor")
 	if _resume_play_mode >= 0 and player and player.has_method("set_play_mode"):
@@ -123,6 +127,7 @@ func set_tool(id: String) -> void:
 			_activate_speculum()
 			tool_changed.emit(tool_id)
 			return
+		_teardown_controller()
 		tool_id = ""
 		tool_changed.emit(tool_id)
 		return
@@ -132,9 +137,12 @@ func set_tool(id: String) -> void:
 		var t = registry.get_tool(next)
 		if t and bool(t.reserved):
 			return
+	_teardown_controller()
 	tool_id = next
 	if tool_id == "speculum":
 		_activate_speculum()
+	elif tool_id != "":
+		_activate_controller(tool_id)
 	tool_changed.emit(tool_id)
 
 
@@ -151,6 +159,63 @@ func _activate_speculum() -> void:
 		surgery.call("ensure_tool", "speculum")
 	elif surgery.has_method("set_tool"):
 		surgery.call("set_tool", "speculum")
+
+
+func _activate_controller(id: String) -> void:
+	if registry == null:
+		return
+	var ttool = registry.get_tool(id)
+	if ttool == null:
+		return
+	var path := str(ttool.controller_script) if "controller_script" in ttool else ""
+	if path.is_empty():
+		return
+	var scr := load(path)
+	if scr == null:
+		return
+	_controller = scr.new()
+	_controller.name = "Tool_" + id
+	add_child(_controller)
+	if _controller.has_method("setup"):
+		_controller.call("setup", self, organs, player)
+	if _controller.has_method("activate"):
+		_controller.call("activate")
+
+
+func _teardown_controller() -> void:
+	if _controller == null:
+		return
+	if is_instance_valid(_controller):
+		if _controller.has_method("deactivate"):
+			_controller.call("deactivate")
+		_controller.queue_free()
+	_controller = null
+
+
+func tool_controller() -> Node:
+	return _controller if is_instance_valid(_controller) else null
+
+
+func begin_tool_drag(screen: Vector2, origin: Vector3, dir: Vector3) -> bool:
+	if not active or _controller == null or not is_instance_valid(_controller):
+		return false
+	if _controller.has_method("begin_drag"):
+		return bool(_controller.call("begin_drag", screen, origin, dir))
+	return false
+
+
+func update_tool_drag(screen: Vector2, origin: Vector3, dir: Vector3) -> void:
+	if _controller and is_instance_valid(_controller) and _controller.has_method("update_drag"):
+		_controller.call("update_drag", screen, origin, dir)
+
+
+func end_tool_drag() -> void:
+	if _controller and is_instance_valid(_controller) and _controller.has_method("end_drag"):
+		_controller.call("end_drag")
+
+
+func add_view_jolt(v: Vector3) -> void:
+	_view_jolt = v
 
 
 func set_camera_preset(preset: String, snap: bool = false) -> void:
@@ -305,6 +370,11 @@ func _apply_preset(snap: bool) -> void:
 		from_target = from_target.normalized()
 		dist = 0.68
 	_anchor = target
+	if _view_jolt.length_squared() > 1e-8:
+		target += _view_jolt
+		_view_jolt *= 0.72
+		if _view_jolt.length_squared() < 1e-6:
+			_view_jolt = Vector3.ZERO
 	if player and player.has_method("apply_orbit_pose"):
 		player.call("apply_orbit_pose", target, from_target, dist, snap)
 	last_step_usec = int(Time.get_ticks_usec() - t0)
@@ -349,4 +419,10 @@ func _process(_delta: float) -> void:
 	else:
 		var opening := introitus_world()
 		if opening.length_squared() > 1e-12 and player.has_method("set_orbit_anchor_world"):
-			player.call("set_orbit_anchor_world", opening.lerp(cervix_world(), 0.35))
+			var a := opening.lerp(cervix_world(), 0.35)
+			if _view_jolt.length_squared() > 1e-8:
+				a += _view_jolt
+				_view_jolt *= 0.72
+				if _view_jolt.length_squared() < 1e-6:
+					_view_jolt = Vector3.ZERO
+			player.call("set_orbit_anchor_world", a)

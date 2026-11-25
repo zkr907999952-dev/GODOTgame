@@ -12,8 +12,10 @@ func setup_defaults() -> void:
 	_items.clear()
 	_by_id.clear()
 	register(_make("speculum", "阴道扩张器", false, "speculum_angle"))
-	# 球杆在下一阶段挂上；这里先占位，避免工具栏以后挪位。
-	register(_make("ball_rod", "长柄金属球", true, "ball_diameter"))
+	var ball = _make("ball_rod", "长柄金属球", false, "ball_diameter")
+	ball.inserter_script = "res://scripts/body/vulva/sphere_inserter.gd"
+	ball.controller_script = "res://scripts/interact/ball_rod_tool.gd"
+	register(ball)
 	register(_make("reserved_2", "预留", true, ""))
 	register(_make("reserved_3", "预留", true, ""))
 

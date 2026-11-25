@@ -205,6 +205,95 @@ vec3 speculum_offset(vec3 p) {
 	return (radial / pr) * (pr * k - pr) * mixv * along_w;
 }
 
+// 阴道扩张环：跟着金属球沿轴线走，弹性，球过后回缩到杆径。
+// dilate_o.xyz = 外口(ab-local)，w = 球心沿轴深度（可负；w 同时作开关，mix 在 dilate_p.x）
+// dilate_d.xyz = 朝宫颈单位轴，w = 球半径
+// dilate_p.x = mix，y = 杆半径，z = 尾迹残留（0..1），w = 宫颈深度
+uniform vec4 dilate_o = vec4(0.0);
+uniform vec4 dilate_d = vec4(0.0);
+uniform vec4 dilate_p = vec4(0.0);
+
+// 与下面 CPU 的 OrganRig.canal_dilate_radius_at 保持同一公式。
+float dilate_target_radius(float along) {
+	float mixv = dilate_p.x;
+	float R = dilate_d.w;
+	if (mixv <= 0.001 || R <= 1e-6) return 0.0;
+	float ball_s = dilate_o.w;
+	float shaft = max(dilate_p.y, 0.0);
+	float residual = clamp(dilate_p.z, 0.0, 1.0);
+	float ds = along - ball_s;
+	float slice = 0.0;
+	if (abs(ds) <= R) {
+		slice = sqrt(max(R * R - ds * ds, 0.0));
+	}
+	float target = slice;
+	// 杆在球后方（向外口一侧）一直通到体外一点点。
+	if (along < ball_s && along > -0.03) {
+		target = max(target, shaft);
+	}
+	if (along < ball_s && residual > 0.001) {
+		float wake = residual * R * exp(-max(ball_s - along, 0.0) / max(R * 2.6, 0.008));
+		target = max(target, shaft + wake);
+	}
+	return target;
+}
+
+vec3 dilate_offset(vec3 p) {
+	float mixv = dilate_p.x;
+	float R = dilate_d.w;
+	if (mixv <= 0.001 || R <= 1e-6) return vec3(0.0);
+	vec3 o = dilate_o.xyz;
+	vec3 ax = dilate_d.xyz;
+	float al = length(ax);
+	if (al < 1e-5) return vec3(0.0);
+	ax /= al;
+	vec3 v = p - o;
+	float s = dot(v, ax);
+	float ball_s = dilate_o.w;
+	float smin = min(-0.03, ball_s - R - 0.012);
+	float smax = max(ball_s + R + 0.012, dilate_p.w + R * 0.4);
+	if (s < smin - 0.02 || s > smax + 0.02) return vec3(0.0);
+	float along_w = smoothstep(smin - 0.016, smin, s) * (1.0 - smoothstep(smax, smax + 0.016, s));
+	if (along_w < 0.01) return vec3(0.0);
+	vec3 radial = v - ax * s;
+	float pr = length(radial);
+	if (pr < 1e-6) return vec3(0.0);
+	float target = dilate_target_radius(s);
+	if (target <= pr) return vec3(0.0);
+	// 只推开紧贴通道的管壁，避免把远处组织吸过来。
+	float band = target + 0.022;
+	if (pr > band) return vec3(0.0);
+	float near = 1.0 - smoothstep(target, band, pr);
+	return (radial / pr) * (target - pr) * mixv * along_w * near;
+}
+
+// 子宫 / 宫腔被球撑开。uter_ball.xyz = 球心(ab)，w = 球半径（<=0 关闭）
+// uter_ball_p.x = mix，y = 额外壁厚（外膜），z = 最大允许膨胀半径
+uniform vec4 uter_ball = vec4(0.0);
+uniform vec4 uter_ball_p = vec4(0.0);
+
+vec3 uterus_ball_offset(vec3 p) {
+	float R = uter_ball.w;
+	float mixv = uter_ball_p.x;
+	if (R <= 1e-6 || mixv <= 0.001) return vec3(0.0);
+	float need = R + max(uter_ball_p.y, 0.0);
+	float cap = uter_ball_p.z;
+	if (cap > 1e-5) need = min(need, cap);
+	vec3 d = p - uter_ball.xyz;
+	float dist = length(d);
+	if (dist < 1e-6) return vec3(0.0, need * 0.25 * mixv, 0.0);
+	// 球体内的点推到表面上；球外近处轻轻鼓起，避免硬折。
+	if (dist < need) {
+		return (d / dist) * (need - dist) * mixv;
+	}
+	float soft = 0.012;
+	if (dist < need + soft) {
+		float k = 1.0 - smoothstep(need, need + soft, dist);
+		return (d / dist) * (soft * 0.35 * k) * mixv;
+	}
+	return vec3(0.0);
+}
+
 // 弹道通道（最多 4 条）：ball_a.xyz = 入射点(ab-local)，w = 半径；ball_b.xyz = 方向，w = 长度（<=0 关闭）
 uniform vec4 ball_a[4];
 uniform vec4 ball_b[4];

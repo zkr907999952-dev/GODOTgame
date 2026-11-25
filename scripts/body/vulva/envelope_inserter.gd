@@ -26,6 +26,10 @@ func configure(half_x: float, half_y: float, mixv: float, axis: Vector3, up: Vec
 			_up = u.normalized()
 
 
+func uses_envelope_configure() -> bool:
+	return true
+
+
 func mix() -> float:
 	return _mix
 

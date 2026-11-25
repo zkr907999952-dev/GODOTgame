@@ -132,10 +132,10 @@ func _check_toolbar(vm) -> void:
 		s.call("debug_finish_speculum_anim")
 		await _frames(2)
 	_ok(bool(s.call("is_speculum_inserted")), "speculum still seats in the canal from vagina mode")
-	# 预留位禁用。
+	# 长柄金属球已在下一阶段启用，本框架测试只确认格子还在。
 	var slots: Dictionary = hud.get("_vagina_tool_btns")
 	if slots.has("ball_rod"):
-		_ok(bool(slots["ball_rod"].disabled), "ball-rod slot is reserved and disabled in this milestone")
+		_ok(slots["ball_rod"] != null, "ball-rod slot remains on the vagina toolbar")
 	vm.call("exit")
 	await _frames(2)
 	if s.has_method("restore_body"):
