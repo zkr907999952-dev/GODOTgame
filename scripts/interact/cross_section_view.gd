@@ -906,6 +906,10 @@ func _place_panel() -> void:
 		# 只在阴道互动里显示入口；位置在小窗下方或工具栏右侧。
 		_btn_toggle.position = Vector2(vis.x - 88.0, (16.0 + h + 8.0) if visible_on else 16.0)
 		_btn_toggle.visible = _btn_toggle.visible and (tool == "ball_rod" or visible_on)
+	# T-17：位置交给 HUD 统一避让（避免压住右上角透视 / 工具栏）。
+	var hudn := _hud()
+	if hudn and hudn.has_method("layout_section_pip"):
+		hudn.call("layout_section_pip", _panel, _btn_toggle, visible_on)
 
 
 func deactivate() -> void:

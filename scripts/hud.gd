@@ -1,6 +1,7 @@
 extends CanvasLayer
 
 const TouchLayout := preload("res://scripts/ui/touch_layout.gd")
+const HudLayoutScript := preload("res://scripts/ui/hud_layout.gd")
 ## 中文 HUD：设置 / 互动 / 摄像机 面板（对齐网页 overlay 结构，精简版）。
 
 enum PanelId { NONE, SETTINGS, INTERACT, CAMERA, MAP, WEAPON, VEHICLE }
@@ -46,14 +47,15 @@ var _surgery_hint_t: float = 0.0
 var _btn_cut_straight: Button
 var _btn_cut_ring: Button
 var _btn_cut_confirm: Button
-var _surgery_bar: HBoxContainer
-var _surgery_cut_bar: HBoxContainer
+var _surgery_bar: HFlowContainer
+var _surgery_cut_bar: HFlowContainer
 var _btn_vagina_enter: Button
 var _btn_vagina_exit: Button
 var _btn_cam_free: Button
 var _btn_cam_introitus: Button
 var _btn_cam_abdomen: Button
-var _vagina_bar: HBoxContainer
+var _btn_section: Button
+var _vagina_bar: HFlowContainer
 var _vagina_tool_btns: Dictionary = {}
 var _ball_box: VBoxContainer
 var _prolapse_label: Label   # 0.4.12 子宫脱垂等级
@@ -201,6 +203,11 @@ var _layout_slider_val: Label
 var _layout_code_edit: LineEdit
 var _layout_status: Label
 var _layout_hint: Label
+
+var _layout_pack
+var _mode_slot := Rect2()
+var _vcam_slot := Rect2()
+var _pip_slot := Rect2()
 
 
 func setup(player: Node) -> void:
@@ -1506,6 +1513,7 @@ func _refresh_vehicle_touch() -> void:
 	if vs and not show_car:
 		vs.set("touch_car_accel", false)
 		vs.set("touch_car_brake", false)
+	_pack_touch_layout()
 
 
 func _make_chrome_button(text: String) -> Button:
@@ -2812,6 +2820,7 @@ func _process(_delta: float) -> void:
 			_zoom_slider.set_value_no_signal(d)
 			if _zoom_value:
 				_zoom_value.text = "%.2f" % d
+	_nudge_section_pip()
 
 
 func _on_sens_changed(v: float) -> void:
@@ -3156,8 +3165,13 @@ func _apply_layout() -> void:
 	if _btn_vehicle:
 		_btn_vehicle.position = Vector2(sl + (bw + 8.0) * 2.0, st)
 	var right_bar := _btn_camera.get_parent() as Control
+	var right_n := 0
+	for b in [_btn_xray, _btn_camera, _btn_interact]:
+		if b and b.visible:
+			right_n += 1
+	right_n = maxi(right_n, 1)
 	right_bar.offset_right = -sr
-	right_bar.offset_left = -sr - (bw * 3.0 + 16.0)
+	right_bar.offset_left = -sr - (bw * float(right_n) + 8.0 * float(maxi(right_n - 1, 0)))
 	right_bar.offset_top = st
 	right_bar.offset_bottom = st + bh
 	if has_method("_refresh_vehicle_touch"):
@@ -3226,6 +3240,7 @@ func _apply_layout() -> void:
 		_btn_sheet_close.visible = compact and open_p != null
 		if _btn_sheet_close.visible:
 			_btn_sheet_close.position = Vector2(v.x - _safe.z - 8.0 - 96.0, v.y + open_p.offset_top - 52.0)
+	_pack_touch_layout()
 
 
 # ------------------------------------------------------------------ 武器
@@ -3247,6 +3262,10 @@ func _bind_weapons() -> void:
 func toggle_weapon_panel() -> void:
 	# 武器菜单已并入互动，不再单独打开顶栏武器面板。
 	_toggle_panel(PanelId.INTERACT)
+
+
+func is_menu_open() -> bool:
+	return _open != PanelId.NONE or (_btn_sheet_close != null and _btn_sheet_close.visible)
 
 
 func is_map_open() -> bool:
@@ -4029,19 +4048,25 @@ func _refresh_bed_actions() -> void:
 	var s := _surgery()
 	var surgery_on := s != null and bool(s.call("is_active"))
 	var avail := vs != null and vs.has_method("bed_actions_available") and bool(vs.call("bed_actions_available")) and not is_map_open()
-	var show := avail and not surgery_on
+	var vagina_on := is_vagina_active()
+	var show := avail and not surgery_on and not vagina_on
 	debug_bed_action_visible = show
 	_btn_bed_action.visible = show
 	if not show:
 		_bed_action_panel.visible = false
+		_pack_touch_layout()
 		return
 	var sl := _safe.x + 16.0
 	var st := _safe.y + 16.0
-	var enter_w := 120.0 if touch_ui else 100.0
-	if _btn_surgery_enter and _btn_surgery_enter.visible:
-		enter_w = maxf(enter_w, _btn_surgery_enter.size.x)
 	_btn_bed_action.custom_minimum_size = Vector2(110, 40) if touch_ui else Vector2(88, 32)
-	_btn_bed_action.position = Vector2(sl + enter_w + 8.0, st + 56.0)
+	if not touch_ui:
+		var enter_w := 100.0
+		if _btn_surgery_enter and _btn_surgery_enter.visible:
+			enter_w = maxf(enter_w, _btn_surgery_enter.size.x)
+		var enter_x := sl + enter_w + 8.0
+		if _btn_vagina_enter and _btn_vagina_enter.visible:
+			enter_x = _btn_vagina_enter.position.x + maxf(_btn_vagina_enter.size.x, _btn_vagina_enter.custom_minimum_size.x) + 8.0
+		_btn_bed_action.position = Vector2(enter_x, st + 56.0)
 	var bs: Object = vs.get("bed_actions")
 	var busy := bs != null and bool(bs.call("busy"))
 	var act := str(bs.get("active_id")) if bs else ""
@@ -4074,7 +4099,9 @@ func _refresh_bed_actions() -> void:
 			stop.add_theme_font_size_override("font_size", 17 if touch_ui else 15)
 			stop.pressed.connect(_on_bed_action_pick.bind("__stop"))
 			_bed_action_box.add_child(stop)
-	_bed_action_panel.position = _btn_bed_action.position + Vector2(0.0, _btn_bed_action.size.y + 6.0)
+	if not touch_ui:
+		_bed_action_panel.position = _btn_bed_action.position + Vector2(0.0, _btn_bed_action.size.y + 6.0)
+	_pack_touch_layout()
 
 
 func _build_surgery_ui(root: Control) -> void:
@@ -4115,7 +4142,7 @@ func _build_surgery_ui(root: Control) -> void:
 	_btn_surgery_view.pressed.connect(_on_surgery_view)
 	root.add_child(_btn_surgery_view)
 
-	_surgery_bar = HBoxContainer.new()
+	_surgery_bar = HFlowContainer.new()
 	_surgery_bar.name = "SurgeryToolbar"
 	_surgery_bar.add_theme_constant_override("separation", 8)
 	_surgery_bar.visible = false
@@ -4184,7 +4211,7 @@ func _build_surgery_ui(root: Control) -> void:
 		slot.modulate = Color(1, 1, 1, 0.45)
 		_surgery_bar.add_child(slot)
 
-	_surgery_cut_bar = HBoxContainer.new()
+	_surgery_cut_bar = HFlowContainer.new()
 	_surgery_cut_bar.name = "SurgeryCutToolbar"
 	_surgery_cut_bar.add_theme_constant_override("separation", 8)
 	_surgery_cut_bar.visible = false
@@ -4373,28 +4400,32 @@ func _refresh_surgery_ui() -> void:
 		# T-11 / T-15：角色观察视角（站在地上）也显示，按下以当前站姿直接进入（不上检查床）。
 		var obs_s := g != null and g.has_method("can_enter_body_mode_from_observe") and bool(g.call("can_enter_body_mode_from_observe"))
 		_btn_surgery_enter.visible = (on_bed or obs_s) and not special and not is_map_open()
-		_btn_surgery_enter.position = Vector2(sl, st + 56.0)
 		_btn_surgery_enter.custom_minimum_size = Vector2(120, 40) if touch_ui else Vector2(100, 32)
+		if not touch_ui:
+			_btn_surgery_enter.position = Vector2(sl, st + 56.0)
 	if _btn_surgery_exit:
 		_btn_surgery_exit.visible = active
-		_btn_surgery_exit.position = Vector2(sl, st)
 		_btn_surgery_exit.custom_minimum_size = Vector2(160, 40) if touch_ui else Vector2(140, 32)
+		if not touch_ui:
+			_btn_surgery_exit.position = Vector2(sl, st)
 	if _btn_surgery_restore:
 		_btn_surgery_restore.visible = active
-		var ew := 160.0 if touch_ui else 140.0
-		if _btn_surgery_exit:
-			ew = maxf(ew, _btn_surgery_exit.size.x)
-		_btn_surgery_restore.position = Vector2(sl + ew + 8.0, st)
 		_btn_surgery_restore.custom_minimum_size = Vector2(88, 40) if touch_ui else Vector2(72, 32)
+		if not touch_ui:
+			var ew := 140.0
+			if _btn_surgery_exit:
+				ew = maxf(ew, _btn_surgery_exit.size.x)
+			_btn_surgery_restore.position = Vector2(sl + ew + 8.0, st)
 	if _btn_surgery_putback:
 		_btn_surgery_putback.visible = active
-		var rx := sl + (160.0 if touch_ui else 140.0) + 8.0
-		var rw := 88.0 if touch_ui else 72.0
-		if _btn_surgery_restore:
-			rx = _btn_surgery_restore.position.x
-			rw = maxf(_btn_surgery_restore.size.x, _btn_surgery_restore.custom_minimum_size.x)
 		_btn_surgery_putback.custom_minimum_size = Vector2(128, 40) if touch_ui else Vector2(96, 32)
-		_btn_surgery_putback.position = Vector2(rx + rw + 8.0, st)
+		if not touch_ui:
+			var rx := sl + 140.0 + 8.0
+			var rw := 72.0
+			if _btn_surgery_restore:
+				rx = _btn_surgery_restore.position.x
+				rw = maxf(_btn_surgery_restore.size.x, _btn_surgery_restore.custom_minimum_size.x)
+			_btn_surgery_putback.position = Vector2(rx + rw + 8.0, st)
 	if _btn_surgery_view:
 		_btn_surgery_view.visible = active
 		var first := false
@@ -4403,16 +4434,26 @@ func _refresh_surgery_ui() -> void:
 		elif _player and _player.has_method("is_display_mode"):
 			first = not bool(_player.call("is_display_mode"))
 		_btn_surgery_view.text = "切换·第三人称" if first else "切换·第一人称"
-		_btn_surgery_view.position = Vector2(v.x * 0.5 - 70.0, st)
+		if not touch_ui:
+			_btn_surgery_view.position = Vector2(v.x * 0.5 - 70.0, st)
 	if _surgery_bar:
 		_surgery_bar.visible = active
-		_surgery_bar.position = Vector2(sl, st + 48.0)
+		if not touch_ui:
+			_surgery_bar.position = Vector2(sl, st + 48.0)
 		if touch_ui:
 			for b in [_btn_tool_scalpel, _btn_tool_grab, _btn_tool_retractor, _btn_tool_forceps, _btn_tool_speculum, _btn_spec_remove, _btn_retr_remove, _btn_fc_pull, _btn_fc_back]:
 				if b:
 					b.custom_minimum_size = Vector2(maxf(b.custom_minimum_size.x, 80.0), 48.0)
 					b.add_theme_font_size_override("font_size", 16)
 			_surgery_bar.add_theme_constant_override("separation", 10)
+			# 触屏隐藏未启用的「缝合」占位，避免工具栏过宽重叠。
+			for c in _surgery_bar.get_children():
+				if c is Button and bool((c as Button).disabled) and (c as Button).text == "缝合":
+					(c as Button).visible = false
+		else:
+			for c in _surgery_bar.get_children():
+				if c is Button and (c as Button).text == "缝合":
+					(c as Button).visible = true
 	if active:
 		var tool := str(s.call("current_tool")) if s else ""
 		if _btn_tool_scalpel:
@@ -4442,7 +4483,8 @@ func _refresh_surgery_ui() -> void:
 			_btn_retr_remove.visible = s != null and s.has_method("selected_retractor") and int(s.call("selected_retractor")) >= 0
 		if _surgery_cut_bar:
 			_surgery_cut_bar.visible = tool == "scalpel"
-			_surgery_cut_bar.position = Vector2(sl, st + (104.0 if touch_ui else 92.0))
+			if not touch_ui:
+				_surgery_cut_bar.position = Vector2(sl, st + 92.0)
 			if touch_ui:
 				for b in [_btn_cut_straight, _btn_cut_ring, _btn_cut_confirm]:
 					if b:
@@ -4465,6 +4507,7 @@ func _refresh_surgery_ui() -> void:
 		if _organ_target_label:
 			_organ_target_label.visible = false
 	_refresh_vagina_ui()
+	_pack_touch_layout()
 
 
 func _sync_organ_target_label(s: Node, tool: String, sl: float, st: float, touch_ui: bool, v: Vector2) -> void:
@@ -4570,6 +4613,13 @@ func _build_vagina_ui(root: Control) -> void:
 	_btn_vagina_exit.pressed.connect(_on_vagina_exit)
 	root.add_child(_btn_vagina_exit)
 
+	_btn_section = _make_chrome_button("断面图")
+	_btn_section.name = "SectionToggleButton"
+	_btn_section.visible = false
+	_btn_section.toggle_mode = true
+	# 按下由 cross_section_view 在拿到此按钮后连接；这里只占位布局。
+	root.add_child(_btn_section)
+
 	_btn_cam_free = _make_chrome_button("自由视角")
 	_btn_cam_free.name = "VaginaCamFreeButton"
 	_btn_cam_free.toggle_mode = true
@@ -4583,7 +4633,7 @@ func _build_vagina_ui(root: Control) -> void:
 	_btn_cam_abdomen.toggle_mode = true
 	_btn_cam_abdomen.pressed.connect(func(): _on_vagina_preset("abdomen"))
 
-	_vagina_bar = HBoxContainer.new()
+	_vagina_bar = HFlowContainer.new()
 	_vagina_bar.name = "VaginaToolbar"
 	_vagina_bar.add_theme_constant_override("separation", 8)
 	_vagina_bar.visible = false
@@ -4724,24 +4774,40 @@ func _refresh_vagina_ui() -> void:
 	if _btn_vagina_enter:
 		var obs_v := g != null and g.has_method("can_enter_body_mode_from_observe") and bool(g.call("can_enter_body_mode_from_observe"))
 		_btn_vagina_enter.visible = (on_bed or obs_v) and not active and not surgery_on and not is_map_open()
-		var enter_x := sl + (128.0 if touch_ui else 112.0)
-		if _btn_surgery_enter and _btn_surgery_enter.visible:
-			enter_x = _btn_surgery_enter.position.x + maxf(_btn_surgery_enter.size.x, _btn_surgery_enter.custom_minimum_size.x) + 8.0
-		_btn_vagina_enter.position = Vector2(enter_x, st + 56.0)
 		_btn_vagina_enter.custom_minimum_size = Vector2(120, 40) if touch_ui else Vector2(100, 32)
+		if not touch_ui:
+			var enter_x := sl + 112.0
+			if _btn_surgery_enter and _btn_surgery_enter.visible:
+				enter_x = _btn_surgery_enter.position.x + maxf(_btn_surgery_enter.size.x, _btn_surgery_enter.custom_minimum_size.x) + 8.0
+			_btn_vagina_enter.position = Vector2(enter_x, st + 56.0)
 	if _btn_vagina_exit:
 		_btn_vagina_exit.visible = active
-		_btn_vagina_exit.position = Vector2(sl, st)
 		_btn_vagina_exit.custom_minimum_size = Vector2(160, 40) if touch_ui else Vector2(140, 32)
+		if not touch_ui:
+			_btn_vagina_exit.position = Vector2(sl, st)
+	if _btn_section:
+		# 断面图开关只在阴道互动里显示；具体何时可开由 cross_section_view 再收窄。
+		_btn_section.visible = active
+		if not active:
+			_btn_section.button_pressed = false
 	if _vagina_bar:
 		_vagina_bar.visible = active
-		_vagina_bar.position = Vector2(sl, st + 48.0)
+		if not touch_ui:
+			_vagina_bar.position = Vector2(sl, st + 48.0)
 		if touch_ui:
 			_vagina_bar.add_theme_constant_override("separation", 10)
 			for b in [_btn_cam_free, _btn_cam_introitus, _btn_cam_abdomen, _btn_tool_speculum, _btn_spec_remove]:
 				if b:
 					b.custom_minimum_size = Vector2(maxf(b.custom_minimum_size.x, 80.0), 48.0)
 					b.add_theme_font_size_override("font_size", 16)
+			# 触屏隐藏「预留」占位，减少工具栏换行和重叠。
+			for rec in ["reserved_2", "reserved_3"]:
+				if _vagina_tool_btns.has(rec) and _vagina_tool_btns[rec]:
+					_vagina_tool_btns[rec].visible = false
+		else:
+			for rec in ["reserved_2", "reserved_3"]:
+				if _vagina_tool_btns.has(rec) and _vagina_tool_btns[rec]:
+					_vagina_tool_btns[rec].visible = true
 	if not active:
 		if _speculum_box and not surgery_on:
 			_speculum_box.visible = false
@@ -4783,8 +4849,8 @@ func _refresh_vagina_ui() -> void:
 		_btn_spec_remove.visible = tool == "speculum" and spec_in
 	if _speculum_box:
 		_speculum_box.visible = tool == "speculum" and spec_ready
-		var bar_y := st + (104.0 if touch_ui else 92.0)
-		_speculum_box.position = Vector2(sl, bar_y)
+		if not touch_ui:
+			_speculum_box.position = Vector2(sl, st + 92.0)
 		if touch_ui and _speculum_slider:
 			_speculum_slider.custom_minimum_size = Vector2(280, 32)
 		if spec_ready and _speculum_slider and s.has_method("speculum_angle"):
@@ -4796,10 +4862,11 @@ func _refresh_vagina_ui() -> void:
 
 	if _ball_box:
 		_ball_box.visible = tool == "ball_rod"
-		var bar_yb := st + (104.0 if touch_ui else 92.0)
-		if _speculum_box and _speculum_box.visible:
-			bar_yb += 48.0
-		_ball_box.position = Vector2(sl, bar_yb)
+		if not touch_ui:
+			var bar_yb := st + 92.0
+			if _speculum_box and _speculum_box.visible:
+				bar_yb += 48.0
+			_ball_box.position = Vector2(sl, bar_yb)
 		if touch_ui and _ball_slider:
 			_ball_slider.custom_minimum_size = Vector2(280, 32)
 		var ctl: Node = vm.call("tool_controller") if vm and vm.has_method("tool_controller") else null
@@ -4852,3 +4919,429 @@ func _on_ball_diameter(v: float) -> void:
 		ctl.call("set_diameter", v * 0.001)
 	if _ball_value:
 		_ball_value.text = "%.0f mm" % v
+
+
+# ------------------------------------------------------------------ T-17 触屏按键避让布局
+func _hud_pack():
+	if _layout_pack == null:
+		_layout_pack = HudLayoutScript.new()
+	return _layout_pack
+
+
+func touch_mode_slot() -> Rect2:
+	return _mode_slot
+
+
+func touch_vcam_slot() -> Rect2:
+	return _vcam_slot
+
+
+func section_pip_slot() -> Rect2:
+	return _pip_slot
+
+
+## 断面小窗把自己摆到右上角之后，交给 HUD 再挪到已预留的空位，避免压住透视键。
+func layout_section_pip(panel: Control, toggle: Control, visible_on: bool) -> void:
+	if panel == null:
+		return
+	if not touch_ui:
+		return
+	if _pip_slot.size.x < 8.0 or _pip_slot.size.y < 8.0:
+		var L = _hud_pack()
+		var v := get_viewport().get_visible_rect().size if get_viewport() else Vector2(1280, 720)
+		L.begin(v, _safe, true)
+		_pip_slot = L.pip_rect(L.second_row_y(), panel.size.x > 240.0)
+	if visible_on and panel.visible:
+		panel.position = _pip_slot.position
+		panel.size = _pip_slot.size
+	if toggle and toggle != _btn_section and toggle.visible and not visible_on:
+		# 浮动开关：若 HUD 自己的断面按钮已显示，就藏起重复的那个。
+		if _btn_section and _btn_section.visible:
+			toggle.visible = false
+
+
+func _nudge_section_pip() -> void:
+	if not touch_ui or _root_ui == null:
+		return
+	var panel := _find_section_panel()
+	if panel and panel.visible and _pip_slot.size.x > 8.0:
+		if panel.position.distance_to(_pip_slot.position) > 1.0 or panel.size.distance_to(_pip_slot.size) > 1.0:
+			panel.position = _pip_slot.position
+			panel.size = _pip_slot.size
+	if _btn_section and _btn_section.visible:
+		var floating := _find_section_toggle()
+		if floating and floating != _btn_section:
+			floating.visible = false
+
+
+func _find_section_panel() -> Control:
+	var host := get_parent() if get_parent() else _root_ui
+	if host:
+		var n := host.find_child("CrossSectionPanel", true, false)
+		if n is Control:
+			return n
+	return _root_ui.find_child("CrossSectionPanel", true, false) if _root_ui else null
+
+
+func _find_section_toggle() -> Control:
+	var host := get_parent() if get_parent() else self
+	if host:
+		var n := host.find_child("VaginaSectionToggle", true, false)
+		if n is Control:
+			return n
+	return null
+
+
+func _pack_touch_layout() -> void:
+	if not touch_ui or _root_ui == null:
+		return
+	if _touch and bool(_touch.get("layout_edit")):
+		return
+	var v := get_viewport().get_visible_rect().size if get_viewport() else Vector2(1280, 720)
+	var L = _hud_pack()
+	L.begin(v, _safe, true)
+	_mode_slot = Rect2()
+	_vcam_slot = Rect2()
+	var cs: Vector2 = L.chrome_size()
+	var sl: float = L.left_x()
+	var st: float = L.top_y()
+	var sr: float = L.right_x()
+	# ---- 顶栏左侧
+	var x: float = sl
+	for pair in [[_btn_settings, "settings"], [_btn_map, "map"], [_btn_vehicle, "vehicle"]]:
+		var b: Button = pair[0]
+		if b and b.visible:
+			var r: Rect2 = L.claim(str(pair[1]), Rect2(Vector2(x, st), cs))
+			L.apply_to_control(b, r)
+			x = r.end.x + HudLayoutScript.GAP
+	var left_end: float = x
+	# ---- 顶栏右侧（只按可见按钮收宽度）
+	var rights: Array = []
+	for pair2 in [[_btn_xray, "xray"], [_btn_camera, "camera"], [_btn_interact, "interact"]]:
+		if pair2[0] and pair2[0].visible:
+			rights.append(pair2)
+	var right_w := 0.0
+	if not rights.is_empty():
+		right_w = float(rights.size()) * cs.x + float(maxi(rights.size() - 1, 0)) * HudLayoutScript.GAP
+	var obs_w := 0.0
+	if _btn_observe and _btn_observe.visible:
+		obs_w = cs.x + HudLayoutScript.GAP
+	var bar_left: float = sr - right_w
+	if _btn_observe and _btn_observe.visible:
+		var orc: Rect2 = L.claim("observe", Rect2(Vector2(bar_left - obs_w, st), cs))
+		_place_layout_btn(_btn_observe, "observe", orc.position, orc.size)
+		# 自定义布局后再次登记实际位置
+		L.claims.pop_back()
+		L.claim("observe", Rect2(_btn_observe.position, _btn_observe.size), true, false)
+		bar_left = _btn_observe.position.x + _btn_observe.size.x + HudLayoutScript.GAP
+	if _btn_camera:
+		var right_bar := _btn_camera.get_parent() as Control
+		if right_bar:
+			var vis_n := maxi(rights.size(), 0)
+			var bw := right_w if vis_n > 0 else 0.0
+			right_bar.offset_right = -(_safe.z + 16.0)
+			right_bar.offset_left = right_bar.offset_right - bw
+			right_bar.offset_top = st
+			right_bar.offset_bottom = st + cs.y
+	var rx: float = bar_left
+	for pair3 in rights:
+		var rr := Rect2(Vector2(rx, st), cs)
+		L.claim(str(pair3[1]), rr, true, false)
+		rx = rr.end.x + HudLayoutScript.GAP
+	var right_start: float = (sr - right_w - obs_w) if (right_w + obs_w) > 0.0 else sr
+	# ---- 第二行：退出 / 进入 / 检查床动作（从左）和载具键 / 人称 / 断面（从右）
+	var y2: float = L.second_row_y()
+	var left_items: Array = []
+	for rec in [
+		[_btn_surgery_exit, "surgery_exit", Vector2(160, 40)],
+		[_btn_surgery_restore, "surgery_restore", Vector2(88, 40)],
+		[_btn_surgery_putback, "surgery_putback", Vector2(128, 40)],
+		[_btn_vagina_exit, "vagina_exit", Vector2(160, 40)],
+		[_btn_surgery_enter, "surgery_enter", Vector2(120, 40)],
+		[_btn_vagina_enter, "vagina_enter", Vector2(120, 40)],
+		[_btn_bed_action, "bed_action", Vector2(110, 40)],
+	]:
+		var cb: Button = rec[0]
+		if cb and cb.visible:
+			var sz: Vector2 = rec[2]
+			sz.y = 40.0
+			sz.x = maxf(sz.x, cb.custom_minimum_size.x)
+			left_items.append({"id": rec[1], "size": sz, "ctrl": cb})
+	# 阴道互动时先在右上（顶栏下方）预留断面小窗，第二行右侧按键从预留区左侧排起。
+	var want_pip := is_vagina_active()
+	var sr_row: float = sr
+	_pip_slot = Rect2()
+	if want_pip:
+		_pip_slot = L.pip_rect(y2, true)
+		sr_row = _pip_slot.position.x - HudLayoutScript.GAP
+		if _btn_section and _btn_section.visible:
+			var tsz := Vector2(maxf(88.0, _btn_section.custom_minimum_size.x), 40.0)
+			var tpos := Vector2(_pip_slot.position.x - HudLayoutScript.GAP - tsz.x, y2)
+			if tpos.x < sl:
+				tpos = Vector2(_pip_slot.position.x, y2)
+				_pip_slot.position.y = y2 + tsz.y + HudLayoutScript.GAP
+			var tr: Rect2 = L.claim("section", Rect2(tpos, tsz))
+			L.apply_to_control(_btn_section, tr)
+			sr_row = minf(sr_row, tr.position.x - HudLayoutScript.GAP)
+		L.claim("section_pip", _pip_slot, true, false)
+	var left_pack: Dictionary = L.pack_row(left_items, Vector2(sl, y2), maxf(80.0, sr_row - sl - 8.0))
+	for rec2 in left_items:
+		var rid: String = rec2["id"]
+		if left_pack["rects"].has(rid):
+			L.apply_to_control(rec2["ctrl"], left_pack["rects"][rid])
+	var row2_h: float = float(left_pack.get("height", 0.0))
+	var row2_left_end: float = sl
+	if left_pack.has("end"):
+		row2_left_end = (left_pack["end"] as Vector2).x
+	# 右侧第二行
+	var right_items: Array = []
+	if _btn_surgery_view and _btn_surgery_view.visible:
+		right_items.append({"id": "surgery_view", "size": Vector2(160, 40), "ctrl": _btn_surgery_view, "layout_id": ""})
+	if _btn_gear and _btn_gear.visible:
+		right_items.append({"id": "gear", "size": Vector2(100, 48), "ctrl": _btn_gear, "layout_id": "gear"})
+	if _btn_place_clone and _btn_place_clone.visible:
+		right_items.append({"id": "place_clone", "size": Vector2(108, 48), "ctrl": _btn_place_clone, "layout_id": "place_clone"})
+	if _btn_enter_exit and _btn_enter_exit.visible:
+		right_items.append({"id": "enter", "size": Vector2(108, 48), "ctrl": _btn_enter_exit, "layout_id": "enter"})
+	var cursor: float = sr_row
+	var right_top: float = y2
+	for rec3 in right_items:
+		var sz3: Vector2 = rec3["size"]
+		cursor -= sz3.x
+		if cursor < row2_left_end + HudLayoutScript.GAP:
+			# 换到下一行靠右，避免和左侧第二行挤在一起。
+			right_top = y2 + maxf(row2_h, 40.0) + HudLayoutScript.GAP
+			cursor = sr_row - sz3.x
+			row2_h = maxf(row2_h, right_top + sz3.y - y2)
+		var r3: Rect2 = L.claim(str(rec3["id"]), Rect2(Vector2(cursor, right_top), sz3))
+		var lid := str(rec3.get("layout_id", ""))
+		if lid != "":
+			_place_layout_btn(rec3["ctrl"], lid, r3.position, r3.size)
+			# 用实际位置重登记
+			for i in range(L.claims.size() - 1, -1, -1):
+				if str(L.claims[i].get("id", "")) == str(rec3["id"]):
+					L.claims.remove_at(i)
+					break
+			r3 = L.claim(str(rec3["id"]), Rect2((rec3["ctrl"] as Control).position, (rec3["ctrl"] as Control).size), true, true)
+		else:
+			L.apply_to_control(rec3["ctrl"], r3)
+		cursor = r3.position.x - HudLayoutScript.GAP
+		row2_h = maxf(row2_h, r3.end.y - y2)
+	# 模式 / 载具人称：优先顶栏空隙，否则第二行中间。
+	var mode_sz := HudLayoutScript.MODE_SIZE
+	var gap_r: Rect2 = L.chrome_gap_rect(left_end, right_start, st + (cs.y - mode_sz.y) * 0.5, mode_sz)
+	var need_mode := _touch != null and _touch.visible and not is_surgery_active() and not is_vagina_active() and not is_map_open()
+	var in_drive := false
+	if _vehicle_system:
+		var occ = _vehicle_system.get("occupied")
+		var kind := ""
+		if occ and _vehicle_system.has_method("kind_of"):
+			kind = str(_vehicle_system.call("kind_of", occ))
+		in_drive = occ != null and kind in ["car", "plane"]
+	if need_mode and not in_drive:
+		if gap_r.size.x > 8.0:
+			_mode_slot = L.claim("mode", gap_r)
+		else:
+			var mx := clampf((row2_left_end + cursor) * 0.5 - mode_sz.x * 0.5, sl, sr - mode_sz.x)
+			var my: float = y2 if left_items.is_empty() and right_items.is_empty() else (y2 + row2_h + HudLayoutScript.GAP if cursor < row2_left_end + mode_sz.x else y2)
+			_mode_slot = L.claim("mode", Rect2(Vector2(mx, my), mode_sz))
+			row2_h = maxf(row2_h, _mode_slot.end.y - y2)
+	if _btn_vehicle_cam and _btn_vehicle_cam.visible:
+		var vsz := HudLayoutScript.VCAM_SIZE
+		var vgap: Rect2 = L.chrome_gap_rect(left_end, right_start, st + (cs.y - vsz.y) * 0.5, vsz)
+		if vgap.size.x > 8.0:
+			_vcam_slot = vgap
+		else:
+			_vcam_slot = Rect2(Vector2((sl + sr) * 0.5 - vsz.x * 0.5, y2 + row2_h + HudLayoutScript.GAP), vsz)
+		_place_layout_btn(_btn_vehicle_cam, "vcam", _vcam_slot.position, _vcam_slot.size)
+		_vcam_slot = L.claim("vcam", Rect2(_btn_vehicle_cam.position, _btn_vehicle_cam.size), true, true)
+		row2_h = maxf(row2_h, _vcam_slot.end.y - y2)
+	var below: float = st + cs.y + HudLayoutScript.GAP
+	if row2_h > 1.0:
+		below = y2 + row2_h + HudLayoutScript.GAP
+	# 状态提示：第二行被占用时下移；太矮就隐藏，避免和进入键叠字。
+	if _status and _status.visible:
+		var busy_row2 := not left_items.is_empty() or not right_items.is_empty()
+		if L.compact and busy_row2:
+			_status.visible = false
+		else:
+			var sy: float = below if busy_row2 else (st + cs.y + 8.0)
+			_status.position = Vector2(sl, sy)
+			_status.size = Vector2(maxf(80.0, minf(v.x * 0.45, right_start - sl - 8.0)), 0)
+			# 不登记为可点，不算重叠。
+			if busy_row2:
+				below = sy + 22.0
+	# 工具栏（可换行），给断面小窗让出右侧。
+	var pip_reserved := (_pip_slot.size.x + HudLayoutScript.GAP) if _pip_slot.size.x > 8.0 else 0.0
+	var bar_w := maxf(80.0, (sr - sl) - pip_reserved)
+	below = _pack_flow_bar(_surgery_bar, "surgery_bar", Vector2(sl, below), bar_w, L, below)
+	below = _pack_flow_bar(_surgery_cut_bar, "surgery_cut", Vector2(sl, below), bar_w, L, below)
+	below = _pack_flow_bar(_vagina_bar, "vagina_bar", Vector2(sl, below), bar_w, L, below)
+	if _speculum_box and _speculum_box.visible:
+		var ss := Vector2(280.0 if touch_ui else 240.0, 56.0)
+		ss.x = minf(ss.x, bar_w)
+		var srct: Rect2 = L.claim("speculum_slider", Rect2(Vector2(sl, below), ss))
+		_speculum_box.position = srct.position
+		_speculum_box.size = srct.size
+		below = srct.end.y + HudLayoutScript.GAP
+	if _ball_box and _ball_box.visible:
+		var bs := Vector2(280.0 if touch_ui else 240.0, 56.0)
+		bs.x = minf(bs.x, bar_w)
+		var brct: Rect2 = L.claim("ball_slider", Rect2(Vector2(sl, below), bs))
+		_ball_box.position = brct.position
+		_ball_box.size = brct.size
+		below = brct.end.y + HudLayoutScript.GAP
+	if _organ_target_label and _organ_target_label.visible:
+		_organ_target_label.position = Vector2(sl, below)
+		_organ_target_label.custom_minimum_size = Vector2(minf(360.0, bar_w), 0)
+		below += 28.0
+	if _prolapse_label:
+		_refresh_prolapse_label(sl, below)
+	# 检查床动作面板跟在按钮下面
+	if _bed_action_panel and _bed_action_panel.visible and _btn_bed_action and _btn_bed_action.visible:
+		_bed_action_panel.position = _btn_bed_action.position + Vector2(0.0, _btn_bed_action.size.y + 6.0)
+	# 载具驾驶键（右下），尊重自定义布局，再登记避让。
+	_pack_vehicle_cluster(L, sr, v.y - _safe.w)
+	if want_pip:
+		_nudge_section_pip()
+	# 地图侧栏箭头避开刘海
+	if _map_sidebar_arrow and _map_sidebar_arrow.visible and _map_sidebar:
+		var aoff := _safe.x
+		if _map_sidebar_open:
+			_map_sidebar_arrow.offset_left = 258.0 + aoff
+			_map_sidebar_arrow.offset_right = 286.0 + aoff
+		else:
+			_map_sidebar_arrow.offset_left = aoff
+			_map_sidebar_arrow.offset_right = 28.0 + aoff
+	# 触屏摇杆 / 右侧动作键登记，便于检测重叠（不改用户布局，只把 HUD 键挤开）。
+	_claim_touch_buttons(L)
+
+
+func _pack_flow_bar(bar: Control, id: String, origin: Vector2, width: float, L, below: float) -> float:
+	if bar == null or not bar.visible:
+		return below
+	bar.position = origin
+	bar.size = Vector2(width, 0)
+	bar.custom_minimum_size = Vector2(width, 0)
+	bar.reset_size()
+	bar.notification(Container.NOTIFICATION_SORT_CHILDREN)
+	var h := 0.0
+	for c in bar.get_children():
+		var ctl := c as Control
+		if ctl == null or not ctl.visible:
+			continue
+		var r := Rect2(bar.position + ctl.position, ctl.size)
+		if r.size.x < 2.0:
+			r.size = Vector2(maxf(ctl.custom_minimum_size.x, 80.0), maxf(ctl.custom_minimum_size.y, 40.0 if touch_ui else 32.0))
+		L.claim(id + ":" + (ctl.name if str(ctl.name) != "" else ctl.text if ctl is Button else "btn"), r, true, false)
+		h = maxf(h, ctl.position.y + maxf(ctl.size.y, ctl.custom_minimum_size.y))
+	if h < 8.0:
+		h = 48.0 if touch_ui else 32.0
+	bar.size.y = h
+	return origin.y + h + HudLayoutScript.GAP
+
+
+func _pack_vehicle_cluster(L, right: float, by: float) -> void:
+	for rec in [
+		[_btn_car_accel, "accel", Vector2(88, 52)],
+		[_btn_car_brake, "brake", Vector2(88, 52)],
+		[_btn_thrust_up, "thrust_up", Vector2(88, 48)],
+		[_btn_thrust_down, "thrust_down", Vector2(88, 48)],
+		[_btn_yaw_l, "yaw_l", Vector2(64, 40)],
+		[_btn_yaw_r, "yaw_r", Vector2(64, 40)],
+		[_thrust_lever, "thrust", Vector2(40, 180)],
+		[_thrust_bar, "thrust_bar", Vector2(48, 150)],
+	]:
+		var c: Control = rec[0]
+		if c == null or not c.visible:
+			continue
+		var def_pos := c.position
+		_place_layout_btn(c, str(rec[1]), def_pos, rec[2])
+		L.claim(str(rec[1]), Rect2(c.position, c.size), true, true)
+		# 若避让移动了，写回控件
+		var last: Dictionary = L.claims[L.claims.size() - 1]
+		if (last["rect"] as Rect2).position.distance_to(c.position) > 1.0:
+			L.apply_to_control(c, last["rect"])
+
+
+func _claim_touch_buttons(L) -> void:
+	if _touch == null or not _touch.visible:
+		return
+	if _touch.has_method("buttons"):
+		var btns: Dictionary = _touch.call("buttons")
+		for id in btns.keys():
+			var item = btns[id]
+			var r: Rect2 = item[0] if item is Array else item
+			if r.size.x < 2.0:
+				continue
+			# 模式 / 载具人称已由 slot 放置，这里用实际绘制矩形覆盖登记。
+			if id == "mode" and _mode_slot.size.x > 8.0:
+				r = _mode_slot
+			if id == "vcam" and _vcam_slot.size.x > 8.0:
+				r = _vcam_slot
+			# 已由 HUD 控件登记过的载具键跳过
+			var skip := false
+			for c in L.claims:
+				if str(c.get("id", "")) == str(id):
+					skip = true
+					break
+			if skip:
+				continue
+			L.claim("touch:" + str(id), r, true, false)
+	if _touch.has_method("_show_stick") and bool(_touch.call("_show_stick")) and _touch.has_method("stick_center"):
+		var c: Vector2 = _touch.call("stick_center")
+		var rad: float = float(_touch.call("stick_radius"))
+		L.claim("touch:stick", Rect2(c - Vector2(rad, rad), Vector2(rad * 2.0, rad * 2.0)), true, false)
+
+
+## 无头测试：收集当前可见的可交互矩形（含触屏绘制键），以及安全区越界。
+func debug_collect_interactive_rects() -> Dictionary:
+	var out := {"rects": [], "overlaps": [], "out_of_safe": []}
+	if _root_ui == null:
+		return out
+	# 先按当前可见控件打包，再用实际控件树重新登记，避免把预留空区算成重叠。
+	if touch_ui:
+		_pack_touch_layout()
+	var L = HudLayoutScript.new()
+	var vp := get_viewport().get_visible_rect().size if get_viewport() else Vector2(1280, 720)
+	L.begin(vp, _safe, touch_ui)
+	_collect_controls(_root_ui, L, "")
+	_claim_touch_buttons(L)
+	if _touch and _touch.has_method("zoom_visible") and bool(_touch.call("zoom_visible")) and _touch.has_method("zoom_rect"):
+		var zr: Rect2 = _touch.call("zoom_rect")
+		if zr.size.x > 2.0:
+			L.claim("touch:zoom", zr, true, false)
+	var panel := _find_section_panel()
+	if panel and panel.visible:
+		L.claim("section_pip", panel.get_global_rect(), true, false)
+	out["rects"] = L.claims.duplicate(true)
+	out["overlaps"] = L.interactive_overlaps()
+	out["out_of_safe"] = L.out_of_safe()
+	return out
+
+
+func _collect_controls(n: Node, L, path: String) -> void:
+	for ch in n.get_children():
+		var c := ch as Control
+		if c == null or not c.visible or not c.is_visible_in_tree():
+			continue
+		var id := path + "/" + str(c.name)
+		var interactive := c is BaseButton or c is Range or c is TextEdit or c is LineEdit or c is ItemList or c is OptionButton
+		# 忽略全屏忽略点击的容器、忽略鼠标的标签。
+		if interactive and c.mouse_filter != Control.MOUSE_FILTER_IGNORE:
+			var r := c.get_global_rect()
+			if r.size.x < 2.0 or r.size.y < 2.0:
+				r.size = Vector2(maxf(r.size.x, c.custom_minimum_size.x), maxf(r.size.y, c.custom_minimum_size.y))
+			if r.size.x >= 2.0 and r.size.y >= 2.0:
+				L.claim(id, r, true, false)
+		_collect_controls(c, L, id)
+
+
+func debug_interactive_overlap_report() -> PackedStringArray:
+	var d := debug_collect_interactive_rects()
+	var lines := PackedStringArray()
+	for hit in d["overlaps"]:
+		lines.append("overlap %s x %s" % [hit[0], hit[1]])
+	for hit in d["out_of_safe"]:
+		lines.append("out_of_safe %s" % hit[0])
+	return lines
