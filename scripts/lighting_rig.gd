@@ -139,9 +139,6 @@ func _build_room_lights() -> Node3D:
 	key.directional_shadow_max_distance = 12.0
 	key.directional_shadow_blend_splits = true
 	key.directional_shadow_pancake_size = 4.0
-	if OS.get_name() == "Android" or OS.has_feature("mobile"):
-		key.shadow_blur = 1.0
-		key.directional_shadow_max_distance = 10.0
 	g.add_child(key)
 	# 冷色侧补光（网页 #c8d0dc 0.32），不投影
 	g.add_child(_dir_light("Fill", c + Vector3(2.4, 1.6, -0.4), c, Color("#c8d0dc"), 0.3))
@@ -172,10 +169,6 @@ func _build_city_lights() -> Node3D:
 	sun.directional_shadow_split_3 = 0.45
 	sun.directional_shadow_max_distance = 90.0
 	sun.directional_shadow_blend_splits = true
-	if OS.get_name() == "Android" or OS.has_feature("mobile"):
-		sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
-		sun.directional_shadow_max_distance = 50.0
-		sun.shadow_blur = 1.0
 	g.add_child(sun)
 	g.add_child(_dir_light("SkyFill", Vector3(-50, 40, -30), Vector3.ZERO, Color("#8eb4d8"), 0.3))
 	return g

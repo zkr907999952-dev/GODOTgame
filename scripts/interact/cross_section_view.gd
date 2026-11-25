@@ -171,14 +171,13 @@ func _make_view(nm: String, is_long: bool) -> SubViewportContainer:
 	var box := SubViewportContainer.new()
 	box.name = nm + "Box"
 	box.stretch = true
-	box.custom_minimum_size = Vector2(128, 128)
+	box.custom_minimum_size = Vector2(170, 168)
 	var vp := SubViewport.new()
 	vp.name = nm
-	vp.size = Vector2i(128, 128)
+	vp.size = Vector2i(170, 168)
 	vp.transparent_bg = false
 	vp.handle_input_locally = false
 	vp.msaa_3d = Viewport.MSAA_DISABLED
-	vp.positional_shadow_atlas_size = 0
 	# 无头自检不跑第二路 3D 绘制，避免共享主世界时卡住；参数和节点仍创建。
 	if DisplayServer.get_name() == "headless":
 		vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
@@ -648,7 +647,6 @@ func _ensure_trans_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab: V
 		copy.skeleton = src.skeleton
 		copy.layers = SECTION_LAYER_TRANS
 		copy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		copy.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 		var cut := ShaderMaterial.new()
 		cut.shader = CUT_SHADER
 		cut.set_shader_parameter("tissue", rec["tissue"])
