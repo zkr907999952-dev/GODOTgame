@@ -1,5 +1,5 @@
 extends "res://scripts/tests/v0409b_check.gd"
-## 断面图网格剖切填充 / 平扫 / 宫底顶起 / 包住球和杆 / 延迟回缩 / 外口跟随 / 脱垂阴道余量。不打包。
+## 断面图网格剖切填充 / 平扫 / 宫底顶起 / 包住球和杆 / 延迟回缩 / 外口跟随 / 脱垂阴道余量 / 钢球入宫无粉色穿模面。不打包。
 ##   godot --headless --path . -s res://scripts/tests/v0424_check.gd
 
 
@@ -109,6 +109,21 @@ func _run() -> void:
 				_ok(int(m.get("vag_lumen", 0)) >= 4 or vl >= 24, "%s vagina lumen is hollow or shows peritoneal lining (%s lumen / %s cavity px)" % [which, m.get("vag_lumen", 0), m.get("cavity", 0)])
 			_ok(int(m.get("hand_bleed", 0)) == 0, "%s hands are not projected into the section (bleed=%s / %s)" % [which, m.get("hand_bleed", -1), m.get("hand_samples", 0)])
 		sec.call("set_view_mode", "both")
+		# t89u：钢球顶进子宫时，旧 section_cap 压平的粉色切面不应再盖住球体。
+		var tip_pk: Vector3 = ctl.call("tip_world")
+		var rad_pk: float = float(ctl.call("radius"))
+		var pink: Dictionary = sec.call("debug_pink_clip_face", tip_pk, rad_pk)
+		print("PINK FACE cap_attached=%s copies=%s worst_pink_frac=%.3f rod=%s views=%s" % [pink.get("cap_attached", -1), pink.get("copies", 0), float(pink.get("worst_pink_frac", 1.0)), pink.get("rod_samples", 0), pink.get("views", {})])
+		_ok(int(pink.get("cap_attached", 1)) == 0, "section copies do not attach the old flattened pink cap pass (%s / %s copies)" % [pink.get("cap_attached", -1), pink.get("copies", 0)])
+		_ok(int(pink.get("rod_samples", 0)) >= 8, "CPU fill samples the metal ball disk inside the uterus (%s)" % pink.get("rod_samples", 0))
+		_ok(float(pink.get("worst_pink_frac", 1.0)) < 0.08, "no pink tissue covering the ball interior in the section fill (worst frac=%.3f)" % float(pink.get("worst_pink_frac", 1.0)))
+		if str(DisplayServer.get_name()) != "headless":
+			for which_pk in ["long", "trans", "coronal"]:
+				var gp: Dictionary = sec.call("debug_gpu_ball_pink", which_pk, tip_pk, rad_pk)
+				print("GPU PINK %s ok=%s pink_frac=%.3f rod=%s n=%s reason=%s" % [which_pk, gp.get("ok", false), float(gp.get("pink_frac", 1.0)), gp.get("rod", 0), gp.get("n", 0), gp.get("reason", "")])
+				var rsn := str(gp.get("reason", ""))
+				if rsn not in ["no image", "empty or dummy renderer", "no rod disk", "rod disk too small"]:
+					_ok(bool(gp.get("ok", false)), "GPU %s ball disk is not covered by a pink clipping face (frac=%.3f)" % [which_pk, float(gp.get("pink_frac", 1.0))])
 		# 宫底顶起：继续深入时子宫沿轴平移，球不穿壁。
 		var contact: float = ctl.call("fundus_contact_depth")
 		_ok(contact > opening.distance_to(cerv), "fundus contact is deeper than the cervix (%.1f / %.1f mm)" % [contact * 1000.0, opening.distance_to(cerv) * 1000.0])

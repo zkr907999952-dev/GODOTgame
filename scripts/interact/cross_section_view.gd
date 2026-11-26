@@ -57,6 +57,8 @@ var _fill_tool = preload("res://scripts/interact/section_contour_fill.gd").new()
 var _fill_bucket_frame := -1
 var _fill_buckets: Array = []
 var _fill_key := ""
+var _fill_pts: Array = [Vector3.ZERO, Vector3.ZERO, Vector3.ZERO]
+var _fill_pts_valid := false
 var _fill_built_ms := 0
 
 
@@ -578,7 +580,8 @@ func _add_copy(src: MeshInstance3D, tissue: int, kind: String = "") -> void:
 	if kind == "skin":
 		cut.set_shader_parameter("exclude_limbs", 1.0)
 		cap.set_shader_parameter("exclude_limbs", 1.0)
-	cut.next_pass = cap
+	# t89u：切面填充只走真实轮廓网格。旧 section_cap 会把 14–20 mm 宫壁/内膜压平到剖切面上，钢球顶进子宫时这块粉色面会从球里穿出来。
+		cut.next_pass = null
 	copy.material_override = cut
 	src.add_child(copy)
 	# 与源网格同骨架、同变换；只给断面摄像机看。骨架路径相对拷贝自己重算（拷贝是源的子节点）。
@@ -888,7 +891,8 @@ func _ensure_trans_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab: V
 		if str(rec.get("kind", "")) == "skin":
 			cut.set_shader_parameter("exclude_limbs", 1.0)
 			cap.set_shader_parameter("exclude_limbs", 1.0)
-		cut.next_pass = cap
+		# t89u：切面填充只走真实轮廓网格。旧 section_cap 会把 14–20 mm 宫壁/内膜压平到剖切面上，钢球顶进子宫时这块粉色面会从球里穿出来。
+		cut.next_pass = null
 		copy.material_override = cut
 		src.add_child(copy)
 		if src.skeleton != NodePath():
@@ -944,7 +948,8 @@ func _ensure_coronal_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab:
 		if str(rec.get("kind", "")) == "skin":
 			cut.set_shader_parameter("exclude_limbs", 1.0)
 			cap.set_shader_parameter("exclude_limbs", 1.0)
-		cut.next_pass = cap
+		# t89u：切面填充只走真实轮廓网格。旧 section_cap 会把 14–20 mm 宫壁/内膜压平到剖切面上，钢球顶进子宫时这块粉色面会从球里穿出来。
+		cut.next_pass = null
 		copy.material_override = cut
 		src.add_child(copy)
 		if src.skeleton != NodePath():
@@ -1164,12 +1169,21 @@ func _fill_state_key(pl: Dictionary) -> String:
 
 
 func _sync_fills_if_needed(pl: Dictionary) -> void:
-	var key := _fill_state_key(pl)
+	# 用与上次重建点的距离做滞回，避免剖切点在 2 cm 分箱边界上每帧抖动导致全量重建。
+	var pts: Array = [pl.get("trans_p", Vector3.ZERO), pl.get("long_p", Vector3.ZERO), pl.get("coronal_p", Vector3.ZERO)]
 	var now := Time.get_ticks_msec()
-	if key == _fill_key and _fills.size() >= 3 and now - _fill_built_ms < 400:
+	var same := _fill_pts_valid and _fills.size() >= 3
+	if same:
+		for i in 3:
+			if (pts[i] as Vector3).distance_to(_fill_pts[i]) > 0.025:
+				same = false
+				break
+	if same and now - _fill_built_ms < 400:
 		return
 	_sync_fills(pl)
-	_fill_key = key
+	_fill_key = _fill_state_key(pl)
+	_fill_pts = pts
+	_fill_pts_valid = true
 	_fill_built_ms = now
 
 
@@ -1212,7 +1226,7 @@ func _sync_fills(pl: Dictionary) -> void:
 			half_h = cam.size * 0.52
 			var aspect := 170.0 / 168.0
 			half_w = half_h * aspect
-		var built: Dictionary = _fill_tool.build(pnt, n, right, up, half_w, half_h, buckets, limbs)
+		var built: Dictionary = _fill_tool.build(pnt, n, right, up, half_w, half_h, buckets, limbs, _insert_for_fill())
 		# 整张截面网略偏向相机，盖住几何切口的缝，但不做虚假色块。
 		var pull := -n * 0.0016
 		var verts: PackedVector3Array = built["verts"]
@@ -1234,7 +1248,20 @@ func _sync_fills(pl: Dictionary) -> void:
 		rec["plane_p"] = pnt
 
 
+func _insert_for_fill() -> Dictionary:
+	if mode and mode.has_method("tool_controller"):
+		var ctl = mode.call("tool_controller")
+		if ctl and ctl.has_method("fill_insert"):
+			var d = ctl.call("fill_insert")
+			if d is Dictionary:
+				return d
+		if ctl and ctl.has_method("tip_world") and ctl.has_method("radius"):
+			return {"center": ctl.call("tip_world"), "radius": float(ctl.call("radius")), "axis": Vector3.ZERO, "shaft_radius": 0.004, "shaft_len": 0.18}
+	return {}
+
+
 func _collect_fill_buckets() -> Array:
+
 	var frame := Engine.get_process_frames()
 	if frame == _fill_bucket_frame and not _fill_buckets.is_empty():
 		return _fill_buckets
@@ -1442,6 +1469,138 @@ func debug_fill_alignment(which: String) -> Dictionary:
 	out["facing"] = 1.0
 	# 2 mm 偏向相机，允许到 3.5 mm；三角数必须远大于一张四边形。
 	out["ok"] = out["plane_dist"] < 0.0035 and out["tris"] > 16
+	return out
+
+
+func debug_pink_clip_face(ball_world: Vector3, radius: float) -> Dictionary:
+	# t89u：钢球顶进子宫时，旧 section_cap 会在剖切面上留下穿模的粉色面。
+	# 确认拷贝不再挂 cap pass，并且球盘内部的 CPU 填充是金属杆色、不是宫壁/内膜粉。
+	var attached := 0
+	var ncopy := 0
+	for rec in _copies:
+		ncopy += 1
+		var cut = rec.get("cut")
+		if cut is ShaderMaterial and (cut as ShaderMaterial).next_pass != null:
+			attached += 1
+	_sync_fills(_planes())
+	var views := {}
+	var worst := 0.0
+	var rod_total := 0
+	for which in ["long", "trans", "coronal"]:
+		var rec: Dictionary = _fills.get(which, {})
+		var built: Dictionary = rec.get("built", {})
+		var rod := 0
+		var pink := 0
+		var n := 0
+		if not built.is_empty() and built.has("codes") and radius > 1e-5:
+			var inner := radius * 0.62
+			var step := maxf(inner * 0.16, 0.0008)
+			var x := -inner
+			while x <= inner + 1e-8:
+				var y := -inner
+				while y <= inner + 1e-8:
+					if x * x + y * y <= inner * inner:
+						# 在过球心、平行于该剖切面的圆盘上取样。
+						var o: Vector3 = built["origin"]
+						var ax: Vector3 = built["axis_x"]
+						var ay: Vector3 = built["axis_y"]
+						var nrm: Vector3 = ax.cross(ay)
+						if nrm.length_squared() > 1e-12:
+							nrm = nrm.normalized()
+							var p: Vector3 = ball_world - nrm * (ball_world - o).dot(nrm)
+							p += ax * x + ay * y
+							var code := int(_fill_tool.sample_code(built, p))
+							n += 1
+							if code == 8:
+								rod += 1
+							elif code == 4 or code == 5 or code == 6 or code == 7:
+								pink += 1
+					y += step
+				x += step
+		var frac := float(pink) / float(maxi(n, 1))
+		if rod >= 8 and frac > worst:
+			worst = frac
+		rod_total += rod
+		views[which] = {"n": n, "rod": rod, "pink": pink, "pink_frac": frac}
+	var out := {
+		"copies": ncopy,
+		"cap_attached": attached,
+		"views": views,
+		"worst_pink_frac": worst,
+		"rod_samples": rod_total,
+		"ok": attached == 0 and ncopy > 0 and rod_total >= 8 and worst < 0.08,
+	}
+	return out
+
+
+func debug_gpu_ball_pink(which: String, ball_world: Vector3, radius: float) -> Dictionary:
+	# 真实 GPU 回读：把球心投影到该剖切视口，只检查球体圆盘内部，不把整根杆的像素算进去。
+	var out := {
+		"which": which,
+		"ok": false,
+		"rod": 0,
+		"pink": 0,
+		"n": 0,
+		"pink_frac": 1.0,
+		"reason": "",
+		"display": str(DisplayServer.get_name()),
+		"renderer": str(RenderingServer.get_current_rendering_method()) if RenderingServer else "",
+	}
+	var cam := _cam_of(which)
+	var img: Image = debug_capture_section(which)
+	if img == null or img.get_width() < 8 or img.get_height() < 8:
+		out["reason"] = "no image"
+		return out
+	if cam == null or radius <= 1e-6:
+		out["reason"] = "no camera"
+		return out
+	img.convert(Image.FORMAT_RGBA8)
+	var w := img.get_width()
+	var h := img.get_height()
+	var sp: Vector2 = cam.unproject_position(ball_world)
+	var sp2: Vector2 = cam.unproject_position(ball_world + cam.global_transform.basis.x.normalized() * (radius * 0.62))
+	var rad := sp.distance_to(sp2)
+	if rad < 2.0:
+		out["reason"] = "rod disk too small"
+		return out
+	var rod_col := Color(0.78, 0.82, 0.86)
+	var pinks := [Color(0.70, 0.30, 0.40), Color(0.45, 0.16, 0.22), Color(0.91, 0.55, 0.60), Color(0.58, 0.24, 0.30)]
+	var n := 0
+	var rod := 0
+	var pink := 0
+	var r2 := rad * rad
+	var x0 := maxi(int(floor(sp.x - rad)), 0)
+	var x1 := mini(int(ceil(sp.x + rad)), w - 1)
+	var y0 := maxi(int(floor(sp.y - rad)), 0)
+	var y1 := mini(int(ceil(sp.y + rad)), h - 1)
+	for y in range(y0, y1 + 1):
+		for x in range(x0, x1 + 1):
+			var dx := float(x) + 0.5 - sp.x
+			var dy := float(y) + 0.5 - sp.y
+			if dx * dx + dy * dy > r2:
+				continue
+			n += 1
+			var c := img.get_pixel(x, y)
+			var d := absf(c.r - rod_col.r) + absf(c.g - rod_col.g) + absf(c.b - rod_col.b)
+			if d < 0.16:
+				rod += 1
+				continue
+			for pc in pinks:
+				var dp: Color = pc
+				var dd := absf(c.r - dp.r) + absf(c.g - dp.g) + absf(c.b - dp.b)
+				if dd < 0.14:
+					pink += 1
+					break
+	out["n"] = n
+	out["rod"] = rod
+	out["pink"] = pink
+	out["pink_frac"] = float(pink) / float(maxi(n, 1))
+	if n < 12 or rod < 8:
+		out["reason"] = "no rod disk"
+		return out
+	out["ok"] = out["pink_frac"] < 0.10
+	if not out["ok"]:
+		out["reason"] = "pink_frac=%.3f rod=%s n=%s" % [out["pink_frac"], rod, n]
 	return out
 
 
@@ -1690,6 +1849,8 @@ func _clear_fills() -> void:
 		if is_instance_valid(mi):
 			mi.queue_free()
 	_fills.clear()
+	_fill_key = ""
+	_fill_pts_valid = false
 	if _fill_root and is_instance_valid(_fill_root):
 		_fill_root.queue_free()
 	_fill_root = null

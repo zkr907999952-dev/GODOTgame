@@ -404,6 +404,38 @@ vec3 uterus_ball_offset(vec3 p) {
 	return vec3(0.0);
 }
 
+// t89u：片段是否落在钢球/杆的撑开体积内（不含宫壁额外厚度）。
+// 宫腔大三角弦会切过球体，看起来像穿模的粉色面；在 organ 着色器里丢掉这些片段。
+bool inside_uter_insert(vec3 p, float slop) {
+	float R = uter_ball.w;
+	float mixv = uter_ball_p.x;
+	if (R <= 1e-6 || mixv <= 0.001) return false;
+	float shaft = max(uter_ball_p.w, 0.0);
+	float capr = uter_ball_p.z;
+	vec3 c = uter_ball.xyz;
+	vec3 ax = uterus_ball_axis;
+	float al = length(ax);
+	vec3 d;
+	float need;
+	if (al > 1e-5 && shaft > 1e-5) {
+		ax /= al;
+		float slen = max(dilate_o.w, 0.0) + R;
+		vec3 a = c;
+		vec3 b = c - ax * slen;
+		vec3 ab = b - a;
+		float tt = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
+		vec3 q = a + ab * tt;
+		d = p - q;
+		float kball = 1.0 - smoothstep(0.0, max(R, 0.004), tt * slen);
+		need = mix(shaft, R, kball);
+	} else {
+		d = p - c;
+		need = R;
+	}
+	if (capr > 1e-5) need = min(need, capr);
+	return length(d) < need - slop;
+}
+
 
 // 弹道通道（最多 4 条）：ball_a.xyz = 入射点(ab-local)，w = 半径；ball_b.xyz = 方向，w = 长度（<=0 关闭）
 uniform vec4 ball_a[4];

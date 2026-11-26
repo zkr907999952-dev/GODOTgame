@@ -41,7 +41,7 @@ func color_of(code: int) -> Color:
 	return _PALETTE.get(code, Color(0, 0, 0, 0))
 
 
-func build(plane_pnt: Vector3, plane_n: Vector3, axis_x: Vector3, axis_y: Vector3, half_w: float, half_h: float, buckets: Array, limb_caps: Array) -> Dictionary:
+func build(plane_pnt: Vector3, plane_n: Vector3, axis_x: Vector3, axis_y: Vector3, half_w: float, half_h: float, buckets: Array, limb_caps: Array, insert: Dictionary = {}) -> Dictionary:
 	# buckets: Array of {kind, tissue, verts (world), idx}
 	# 返回 {verts, colors, indices, stats, origin, x, y, half_w, half_h, grid, codes, cell}
 	var n := plane_n.normalized()
@@ -124,6 +124,9 @@ func build(plane_pnt: Vector3, plane_n: Vector3, axis_x: Vector3, axis_y: Vector
 	_paint_organ(codes, gw, gh, hw, hh, organ_loops["prolapse_uterus"], C_UTER_W, C_UTER_L)
 	_paint_organ(codes, gw, gh, hw, hh, organ_loops["uterus_cavity"], C_UTER_L, C_UTER_L)
 	_paint_organ(codes, gw, gh, hw, hh, organ_loops["rod"], C_ROD, C_ROD)
+	# t89u：用球+杆的真实平面截形盖住宫壁/内膜填充，避免网格交线不完整时粉色切面从钢球里穿出来。
+	if not insert.is_empty() and float(insert.get("radius", 0.0)) > 1e-6:
+		_stamp_insert(codes, gw, gh, hw, hh, plane_pnt, x, y, insert)
 	# 网格 → 三角网（按行压缩成条带）
 	var mv := PackedVector3Array()
 	var mc := PackedColorArray()
@@ -435,7 +438,41 @@ func _cross(o: Vector2, a: Vector2, b: Vector2) -> float:
 	return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
 
 
+func _stamp_insert(codes: PackedInt32Array, gw: int, gh: int, hw: float, hh: float, origin: Vector3, ax: Vector3, ay: Vector3, insert: Dictionary) -> void:
+	var c: Vector3 = insert.get("center", Vector3.ZERO)
+	var R: float = float(insert.get("radius", 0.0))
+	if R <= 1e-6:
+		return
+	var inward: Vector3 = insert.get("axis", Vector3.ZERO)
+	if inward.length_squared() > 1e-12:
+		inward = inward.normalized()
+	else:
+		inward = Vector3.ZERO
+	var sr: float = float(insert.get("shaft_radius", 0.004))
+	var slen: float = float(insert.get("shaft_len", 0.18))
+	var cw := (hw * 2.0) / float(gw)
+	var ch := (hh * 2.0) / float(gh)
+	var a := c - inward * (R * 0.10)
+	var b := c - inward * (R * 0.10 + slen)
+	var ab := b - a
+	var ab2 := maxf(ab.dot(ab), 1e-12)
+	var slop := 0.0005
+	for row in gh:
+		var v := -hh + (float(row) + 0.5) * ch
+		for col in gw:
+			var u := -hw + (float(col) + 0.5) * cw
+			var p: Vector3 = origin + ax * u + ay * v
+			var inside := p.distance_to(c) <= R + slop
+			if not inside and inward != Vector3.ZERO and sr > 1e-6:
+				var t := clampf((p - a).dot(ab) / ab2, 0.0, 1.0)
+				if (p - (a + ab * t)).length() <= sr + slop:
+					inside = true
+			if inside:
+				codes[row * gw + col] = C_ROD
+
+
 func _paint_organ(codes: PackedInt32Array, gw: int, gh: int, hw: float, hh: float, loops: Array, wall_code: int, lumen_code: int) -> void:
+
 	if loops.is_empty():
 		return
 	# 按面积从大到小：大圈先涂壁，完全落在另一圈里的涂管腔。

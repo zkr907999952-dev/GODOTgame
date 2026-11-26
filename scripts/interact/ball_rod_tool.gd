@@ -416,6 +416,24 @@ func _sync_visual() -> void:
 		_shaft_mi.position = Vector3(0, 0, -(r * 0.12 + SHAFT_LEN * 0.5))
 
 
+func fill_insert() -> Dictionary:
+	# 断面填充用的钢球+杆解析截形（球心、向内轴、杆半径/长度）。
+	var ax := Vector3.ZERO
+	if _root and is_instance_valid(_root):
+		ax = _root.global_transform.basis.z.normalized()
+	else:
+		ax = _axis_world()
+		if ax.length_squared() > 1e-12:
+			ax = ax.normalized()
+	return {
+		"center": tip_world(),
+		"radius": radius(),
+		"axis": ax,
+		"shaft_radius": SHAFT_RADIUS,
+		"shaft_len": SHAFT_LEN,
+	}
+
+
 func _opening_world() -> Vector3:
 	if mode and mode.has_method("introitus_world"):
 		return mode.call("introitus_world")

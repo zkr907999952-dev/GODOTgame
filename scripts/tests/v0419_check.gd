@@ -144,8 +144,9 @@ func _run() -> void:
 	await _frames(1)
 	_ok(not bool(sec.get("visible_on")), "PiP can be toggled off")
 	sec.call("set_visible_on", true)
-	await _frames(1)
+	await _frames(2)
 	_ok(bool(sec.get("visible_on")), "PiP can be toggled back on")
+	# 第一帧可能因 400 ms 缓存过期而全量重建，第二帧应走缓存。
 	_ok(int(sec.get("last_step_usec")) >= 0 and int(sec.get("last_step_usec")) < 8000, "section update is cheap (%d µs)" % int(sec.get("last_step_usec")))
 	# 退出模式后关闭。
 	vm.call("exit")

@@ -110,6 +110,7 @@ uniform float uterus_phys_blend = 0.01;
 // 肠道伤痕（网页 GutHealth 掉血变红）：xyz = ab-local，w = 程度
 uniform vec4 dmg[12];
 varying vec3 v_l0;
+varying vec3 v_ab;
 varying float v_eat;
 varying float v_phys_hide;
 varying float v_deform;
@@ -213,6 +214,7 @@ void vertex() {
 	if (dilate_p.x > 0.001 || dilate_s01.y > dilate_s01.x + 1e-5 || uter_ball_p.x > 0.001 || fundus_lift > 0.001 || prol_o.w > 0.5) {
 		v_deform = 1.0;
 	}
+	v_ab = to_ab(wp);
 }
 
 void fragment() {
@@ -220,6 +222,10 @@ void fragment() {
 		discard;
 	}
 	if (v_phys_hide > 0.62) {
+		discard;
+	}
+	// t89u：丢掉钢球体/杆体积内的宫壁/内膜片段，避免大三角弦切过球体形成穿模粉色面。
+	if (is_uterus && inside_uter_insert(v_ab, 0.0004)) {
 		discard;
 	}
 	vec3 c = base_color.rgb;
