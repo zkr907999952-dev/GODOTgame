@@ -707,8 +707,19 @@ func _apply_deform() -> void:
 		if _inserter == null:
 			_inserter = InserterScript.new()
 		_inserter.configure(depth, r, SHAFT_RADIUS, axis_ab, up_ab, mixv, lat_ab)
+		# debug_set_depth 用 0.5 s 布置姿态，不把这段时间算进外口回缩。
+		var tick_dt := 0.0
+		if _debug_dt > 1e-5 and _debug_dt <= 0.05:
+			tick_dt = _debug_dt
+		elif _debug_dt <= 1e-5:
+			tick_dt = get_physics_process_delta_time() if is_inside_tree() else 0.016
+		if _inserter.has_method("tick"):
+			_inserter.call("tick", tick_dt)
 		if not _prolapse_owns_introitus() and not _speculum_owns_introitus():
-			organs.vulva.call("set_inserter", _inserter if mixv > 0.02 else null)
+			var keep := mixv > 0.02
+			if _inserter.has_method("is_active"):
+				keep = bool(_inserter.call("is_active"))
+			organs.vulva.call("set_inserter", _inserter if keep else null)
 	# 进入宫腔后撑开子宫和 UterusCavity。
 	uterus_distend = 0.0
 	if through_cervix and depth > cerv_s - r * 0.2 and organs.has_method("set_uterus_ball"):
@@ -997,7 +1008,16 @@ func _follow_cervix() -> void:
 	var din := (nodes[1] - nodes[0]).normalized()
 	if not din.is_finite() or din.length_squared() < 0.5:
 		din = _axis_world()
-	var pos := c + din * radius() * 0.6
+	# 球仍卡在宫颈，但往腹腔内侧（通道轴、远离正在下垂的宫体）挪开约一个半径，避免穿出宫壁。
+	var inward := _axis_world()
+	if inward.length_squared() < 1e-8:
+		inward = -din
+	inward = inward.normalized()
+	if organs and organs.get("_frame") != null:
+		var navel: Vector3 = (organs.get("_frame") as Transform3D).origin
+		if (navel - c).dot(inward) < 0.0:
+			inward = -inward
+	var pos := c + inward * (radius() + 0.003)
 	var z := din
 	var up := _up_world()
 	var x := up.cross(z)

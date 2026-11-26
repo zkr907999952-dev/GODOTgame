@@ -798,6 +798,26 @@ func _drive_pulling() -> bool:
 	return rel.dot(_Ain) < float(_sigma[_drive_node]) - 0.003
 
 
+
+func _apply_collision_corr(i: int, corr: Vector3, stiff: float = -1.0) -> void:
+	if i < 0 or i >= _n:
+		return
+	if not corr.is_finite() or corr.length_squared() < 1e-16:
+		return
+	var m := float(params.collision_impulse_max)
+	if m > 1e-8 and corr.length() > m:
+		corr = corr.normalized() * m
+	var s := float(params.collision_push) if stiff < 0.0 else stiff
+	corr *= clampf(s, 0.0, 1.0)
+	_x[i] += corr
+	_q[i] += corr * clampf(float(params.collision_vel_absorb), 0.0, 1.0)
+
+
+func _apply_collision_to(i: int, new_p: Vector3, stiff: float = -1.0) -> void:
+	if i < 0 or i >= _n:
+		return
+	_apply_collision_corr(i, new_p - _x[i], stiff)
+
 func _simulate(dt: float) -> void:
 	var k60 := dt * 60.0
 	var air := pow(float(params.air_damp), k60)
@@ -864,25 +884,27 @@ func _simulate(dt: float) -> void:
 		for j in range(k - 1, 0, -1):
 			var a_pt := _O if j == k - 1 else _x[j + 1]
 			_limit_angle(a_pt, _x[j], j - 1, float(params.max_joint_bend), drv)
-		# 不能回到会阴平面以内；不低于地面；不穿进大腿。
+		# 不能回到会阴平面以内；不低于地面；不穿进大腿。推出要吸收进 _q，避免轻飘乱抽。
 		for b2 in k:
 			if b2 == drv:
 				continue
 			var rel2 := _x[b2] - _O
 			var dn := rel2.dot(portal_out)
 			if dn < 0.0:
-				_x[b2] -= portal_out * dn
+				_apply_collision_corr(b2, -portal_out * dn)
 			if _x[b2].y < floor_y + 0.012:
-				_x[b2].y = floor_y + 0.012
-			_x[b2] = _push_out_thighs(_x[b2], _node_radius(b2))
+				_apply_collision_corr(b2, Vector3(0.0, floor_y + 0.012 - _x[b2].y, 0.0))
+			_apply_collision_to(b2, _push_out_thighs(_x[b2], _node_radius(b2)))
 		# 整段体外管（宫体段 + 宫底到外口的细颈）对大腿做胶囊-胶囊推出。
 		if hold != Vector3.INF:
 			hold = _push_out_thighs(hold, _node_radius(drv))
 			_x[drv] = hold
 		_resolve_tube_thighs(k)
 		if drv >= 0 and drv < k:
-			_x[drv] = _push_out_thighs(_x[drv], _node_radius(drv))
-	# 迭代后若仍陷入，再投影一次。已分开则不要每帧硬推，以免给 Verlet 链注入速度。
+			_apply_collision_to(drv, _push_out_thighs(_x[drv], _node_radius(drv)))
+			if hold != Vector3.INF:
+				hold = _x[drv]
+	# 迭代后若仍陷入，再略硬地推一次，同样吸收速度。
 	var still_in := false
 	for b3 in k:
 		if _point_thigh_clearance(_x[b3], _node_radius(b3)) < -1e-5:
@@ -890,7 +912,7 @@ func _simulate(dt: float) -> void:
 			break
 	if still_in:
 		for b4 in k:
-			_x[b4] = _push_out_thighs(_x[b4], _node_radius(b4))
+			_apply_collision_to(b4, _push_out_thighs(_x[b4], _node_radius(b4)), 0.85)
 		_resolve_tube_thighs(k)
 	for i3 in _n:
 		if not _x[i3].is_finite():
@@ -1247,9 +1269,9 @@ func _resolve_seg_thighs(ia: int, ib: int, rad: float) -> void:
 		var ws := wa + wb
 		if ws <= 1e-6:
 			continue
-		_x[ia] = pa + push * (wa / ws)
+		_apply_collision_corr(ia, push * (wa / ws))
 		if ib >= 0:
-			_x[ib] = pb + push * (wb / ws)
+			_apply_collision_corr(ib, push * (wb / ws))
 		pa = _x[ia]
 		pb = _O if ib < 0 else _x[ib]
 

@@ -1,6 +1,6 @@
 # 子宫脱垂系统
 
-子宫沿**阴道**下移、脱出（不是从腹部创口）：脱垂期间原子宫 / 宫颈 / 输卵管卵巢隐藏，换成一个**专用的简化子宫 + 宫颈模型**（复用原材质）；宫颈 / 宫口在最外端；阴道只被脱出物沿径向撑开（t68u 起不再内翻折叠，体外也没有外翻套筒）；外口和阴唇按脱出物截面被撑开。体外部分是柔性悬挂的物理链，会随重力和惯性甩动，手、手术钳、手术拿取工具都可以拖。
+子宫沿**阴道**下移、脱出（不是从腹部创口）：脱垂期间原子宫 / 宫颈 / 输卵管卵巢隐藏，换成一个**专用的简化子宫 + 宫颈模型**（复用原材质）；宫颈 / 宫口在最外端；阴道只被脱出物沿径向撑开（t68u 起不再内翻折叠，体外也没有外翻套筒）；外口和阴唇按脱出物截面被撑开。体外部分是柔性悬挂的物理链，会随重力和惯性甩动（加重空气阻尼，大腿/插入物推出吸收进上一帧位置，避免轻飘乱抽），手、手术钳、手术拿取工具都可以拖。
 
 > t68u 性能重做：原来的「SoftOrgan（3839 顶点 + GPU 蒙皮 + 输卵管卵巢）+ 体外套筒网格 + 阴道着色器双层折叠」太卡，改为下面的简化结构，甩动中控制器每帧开销约 5.3–6.3 ms → 0.55–1.25 ms（见文末）。
 
@@ -13,7 +13,7 @@
 | `scripts/body/prolapse/prolapse_trigger.gd` | `ProlapseTrigger`：触发源基类（扩展点） |
 | `scripts/body/prolapse/ball_rod_trigger.gd` | 触发 #1：长杆钢球扯出 |
 | `scripts/body/prolapse/prolapse_mass_inserter.gd` | `ProlapseMassInserter`：脱出物作为 VulvaInserter，从里往外撑开外口 |
-| `scripts/body/prolapse/prolapse_uterus_model.gd` | `ProlapseUterusModel`（t68u）：脱垂专用的简化子宫 + 宫颈网格（约 310–370 顶点，两个面） |
+| `scripts/body/prolapse/prolapse_uterus_model.gd` | `ProlapseUterusModel`（t68u）：脱垂专用的简化子宫 + 宫颈网格（平滑周向约 20 边，顶点数仍 < 700，两个面） |
 | `shaders/organ_common.gdshaderinc` | `prolapse_offset4()`：阴道通道被脱出物撑开（只对阴道网格开；t68u 去掉了内翻折叠） |
 | `scripts/tests/v0420_prolapse_check.gd` | 无头自检（全部数值，含每帧开销） |
 

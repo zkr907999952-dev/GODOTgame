@@ -333,7 +333,7 @@ func _check_vagina_deform(g: int) -> void:
 
 
 # ------------------------------------------------------------------ 甩动衰减
-func _check_swing() -> void:
+func _measure_swing() -> Dictionary:
 	pc.call("set_amount", 0.97)
 	await _settle(90)
 	var n := int(pc.get("_n"))
@@ -346,8 +346,13 @@ func _check_swing() -> void:
 		await _settle(1)
 	pc.call("end_drive")
 	var prev: Vector3 = (pc.call("node_positions") as PackedVector3Array)[n - 1]
+	var prev_v := 0.0
 	var peak := 0.0
 	var late := 0.0
+	var peak_acc := 0.0
+	var late_acc := 0.0
+	var late_sum := 0.0
+	var late_n := 0
 	var seg: PackedFloat32Array = pc.get("_seg")
 	var max_stretch := 0.0
 	var usec := 0
@@ -356,26 +361,78 @@ func _check_swing() -> void:
 		_scan_nan()
 		var np: PackedVector3Array = pc.call("node_positions")
 		var v := np[n - 1].distance_to(prev) * 60.0
+		var acc := 0.0
+		if f > 0:
+			acc = absf(v - prev_v) * 60.0
 		prev = np[n - 1]
+		prev_v = v
 		usec += int(pc.get("last_step_usec"))
 		if f < 40:
 			peak = maxf(peak, v)
+			peak_acc = maxf(peak_acc, acc)
 		if f >= 180:
 			late = maxf(late, v)
+			late_acc = maxf(late_acc, acc)
+			late_sum += acc
+			late_n += 1
 		for b in range(1, n):
 			max_stretch = maxf(max_stretch, np[b].distance_to(np[b - 1]) / maxf(float(seg[b - 1]), 1e-4))
-	print("PROLAPSE swing: peak fundus speed %.3f m/s, after 3 s %.4f m/s (%.1f%%), max segment stretch %.3f, avg step %d µs" % [peak, late, late / maxf(peak, 1e-6) * 100.0, max_stretch, usec / 240])
-	_ok(peak > 0.05, "a fling makes the hanging uterus swing (%.3f m/s)" % peak)
-	_ok(late < peak * 0.12, "the swing decays (%.4f m/s after 3 s, %.1f%% of peak)" % [late, late / maxf(peak, 1e-6) * 100.0])
-	_ok(max_stretch < 1.06, "flexible chain stays intact (max stretch %.3f)" % max_stretch)
-	# t68u 前约 6400 µs；简化模型 + 外口低通 + 通道缓存后应在 2 ms 内（单独运行约 0.6–1.2 ms）。
-	_ok(usec / 240 < 2000, "prolapse step is cheap while swinging (%d µs avg)" % (usec / 240))
+	return {
+		"peak": peak,
+		"late": late,
+		"peak_acc": peak_acc,
+		"late_acc": late_acc,
+		"late_acc_avg": late_sum / maxf(float(late_n), 1.0),
+		"max_stretch": max_stretch,
+		"usec": usec / 240,
+	}
+
+
+func _set_swing_tune(air: float, vmax: float, push: float, impulse: float, absorb: float) -> void:
+	var pr = pc.get("params")
+	pr.set("air_damp", air)
+	pr.set("max_speed", vmax)
+	pr.set("collision_push", push)
+	pr.set("collision_impulse_max", impulse)
+	pr.set("collision_vel_absorb", absorb)
+
+
+func _check_swing() -> void:
+	var pr = pc.get("params")
+	var saved := {
+		"air": float(pr.get("air_damp")),
+		"vmax": float(pr.get("max_speed")),
+		"push": float(pr.get("collision_push")),
+		"impulse": float(pr.get("collision_impulse_max")),
+		"absorb": float(pr.get("collision_vel_absorb")),
+	}
+	# 对照：改阻尼之前的轻量硬投影（只用于抖动计量，不断言必须更抖）。
+	_set_swing_tune(0.986, 5.0, 1.0, 0.05, 0.0)
+	if pc.has_method("reset"):
+		pc.call("reset")
+		await _settle(2)
+	var before: Dictionary = await _measure_swing()
+	print("PROLAPSE swing BEFORE damp: peak %.3f m/s, late %.4f m/s (%.1f%%), late accel peak/avg %.1f/%.1f m/s², stretch %.3f, %d µs" % [float(before.peak), float(before.late), float(before.late) / maxf(float(before.peak), 1e-6) * 100.0, float(before.late_acc), float(before.late_acc_avg), float(before.max_stretch), int(before.usec)])
+	_set_swing_tune(saved.air, saved.vmax, saved.push, saved.impulse, saved.absorb)
+	if pc.has_method("reset"):
+		pc.call("reset")
+		await _settle(2)
+	var after: Dictionary = await _measure_swing()
+	print("PROLAPSE swing AFTER damp: peak %.3f m/s, late %.4f m/s (%.1f%%), late accel peak/avg %.1f/%.1f m/s², stretch %.3f, %d µs" % [float(after.peak), float(after.late), float(after.late) / maxf(float(after.peak), 1e-6) * 100.0, float(after.late_acc), float(after.late_acc_avg), float(after.max_stretch), int(after.usec)])
+	_ok(float(after.peak) > 0.05, "a fling makes the hanging uterus swing (%.3f m/s)" % float(after.peak))
+	_ok(float(after.late) < float(after.peak) * 0.12, "the swing decays (%.4f m/s after 3 s, %.1f%% of peak)" % [float(after.late), float(after.late) / maxf(float(after.peak), 1e-6) * 100.0])
+	_ok(float(after.max_stretch) < 1.06, "flexible chain stays intact (max stretch %.3f)" % float(after.max_stretch))
+	_ok(int(after.usec) < 2000, "prolapse step is cheap while swinging (%d µs avg)" % int(after.usec))
+	var late_before := maxf(float(before.late_acc), 0.01)
+	var late_after := float(after.late_acc)
+	_ok(late_after < late_before * 0.65 or late_after < 4.0, "settled swing jitter drops (late accel %.1f → %.1f m/s², avg %.1f → %.1f)" % [late_before, late_after, float(before.late_acc_avg), float(after.late_acc_avg)])
 	var md = pc.call("model")
 	var rb0 := int(md.get("rebuilds")) if md else 0
 	await _settle(30)
 	var rb1 := int(md.get("rebuilds")) if md else 0
 	print("PROLAPSE model rebuilds while settled: %d in 30 frames" % (rb1 - rb0))
 	_ok(rb1 - rb0 <= 10, "a settled hanging uterus mostly skips model rebuilds (%d / 30)" % (rb1 - rb0))
+	_set_swing_tune(saved.air, saved.vmax, saved.push, saved.impulse, saved.absorb)
 
 
 # ------------------------------------------------------------------ 用手拖：可拉出 / 推回

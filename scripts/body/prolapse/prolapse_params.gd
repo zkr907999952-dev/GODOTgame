@@ -50,9 +50,15 @@ class_name ProlapseParams
 
 @export_group("柔性悬挂")
 @export var iterations: int = 6
-## 体外每步（60 Hz）保留的速度：甩动后摆几秒才停。
-@export var air_damp: float = 0.986
-@export var max_speed: float = 5.0
+## 体外每步（60 Hz）保留的速度：加重阻尼后仍能甩起来，两三秒内沉下来。
+@export var air_damp: float = 0.958
+@export var max_speed: float = 1.25
+## 大腿/插入物推出的刚度（1=硬投影）。略软一些，避免每帧把速度打进 Verlet。
+@export var collision_push: float = 0.50
+## 单次推出的最大位移（米）。
+@export var collision_impulse_max: float = 0.005
+## 把推出同时写进上一帧位置的比例：1=不注入速度，0=整段修正变成冲量。
+@export var collision_vel_absorb: float = 0.92
 ## 相邻两段最大夹角（弧度）。子宫是肌性器官，整体可弯但不软塌。
 @export var max_joint_bend: float = 0.40
 ## 外口处脱出物相对通道方向最多折多少（会阴是软的）。

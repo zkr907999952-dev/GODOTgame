@@ -773,6 +773,72 @@ func cavity_xray_alpha() -> float:
 	return 1.0
 
 
+## 立刻按当前透视开关刷新腹腔内壁 / 断面壁材质（不依赖手术模式是否激活）。
+func sync_lining_xray() -> void:
+	_xray_cached = -1
+	_update_cavity_visibility()
+
+
+func _sync_lining_xray_if_changed() -> void:
+	if _cavity_mi == null and _wall_mi == null:
+		return
+	var xr := 1 if _xray_on() else 0
+	if xr != _xray_cached:
+		_xray_cached = xr
+		_update_cavity_visibility()
+
+
+## 只读当前材质，不先刷新。用于确认离开手术 / 进阴道或断面后内壁仍跟上透视。
+func debug_lining_xray() -> Dictionary:
+	var out := {
+		"has_cavity": has_cavity(),
+		"visible": false,
+		"xray_on": _xray_on(),
+		"mat_xray": -1.0,
+		"alpha": 1.0,
+		"transparent": false,
+		"depth_disabled": false,
+		"wall_visible": false,
+		"wall_xray": -1.0,
+		"wall_alpha": 1.0,
+		"wall_transparent": false,
+	}
+	if _cavity_mi and is_instance_valid(_cavity_mi):
+		out["visible"] = _cavity_mi.visible
+		out.merge(_peek_shell_xray(_cavity_mi.material_override), true)
+	if _wall_mi and is_instance_valid(_wall_mi):
+		out["wall_visible"] = _wall_mi.visible
+		var w: Dictionary = _peek_shell_xray(_wall_mi.material_override)
+		out["wall_xray"] = float(w.get("mat_xray", -1.0))
+		out["wall_alpha"] = float(w.get("alpha", 1.0))
+		out["wall_transparent"] = bool(w.get("transparent", false))
+	return out
+
+
+func _peek_shell_xray(mat: Material) -> Dictionary:
+	var out := {"mat_xray": -1.0, "alpha": 1.0, "transparent": false, "depth_disabled": false}
+	if mat is ShaderMaterial:
+		var xm := mat as ShaderMaterial
+		var xr := float(xm.get_shader_parameter("xray"))
+		var col: Color = xm.get_shader_parameter("albedo_color")
+		out["mat_xray"] = xr
+		out["alpha"] = col.a
+		out["transparent"] = xr > 0.0 and col.a < 0.85
+		out["depth_disabled"] = true
+		return out
+	if mat is StandardMaterial3D:
+		var sm := mat as StandardMaterial3D
+		out["alpha"] = sm.albedo_color.a
+		out["transparent"] = (
+			sm.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED
+			and sm.albedo_color.a < 0.85
+			and sm.depth_draw_mode == BaseMaterial3D.DEPTH_DRAW_DISABLED
+		)
+		out["depth_disabled"] = sm.depth_draw_mode == BaseMaterial3D.DEPTH_DRAW_DISABLED
+		out["mat_xray"] = 1.0 if out["transparent"] else 0.0
+	return out
+
+
 func is_on_exam_bed() -> bool:
 	if player == null:
 		return false
@@ -3025,6 +3091,7 @@ func _rebuild_surgical_meshes(outer: Geom.MeshData, inner: Geom.MeshData, wall: 
 		_wall_mi.visible = wall.face_count() > 0
 		_apply_evert_weight()
 	_posed_dirty = true
+	_update_cavity_visibility()
 
 
 func _cavity_display_mesh() -> ArrayMesh:
@@ -3850,6 +3917,8 @@ func _navel_world() -> Vector3:
 func _process(dt: float) -> void:
 	if active and not body_mode_ok():
 		exit_surgery()
+	# 未进手术 / 无残留切口时也要跟着透视开关，否则腹腔内壁会保持不透明、挡住内脏。
+	_sync_lining_xray_if_changed()
 	if speculum:
 		var st0 := str(speculum.state)
 		speculum.step(dt)
@@ -3859,10 +3928,6 @@ func _process(dt: float) -> void:
 		return
 	if (active or persist) and not pose_locked:
 		_posed_dirty = true
-	var xr := 1 if _xray_on() else 0
-	if xr != _xray_cached:
-		_xray_cached = xr
-		_update_cavity_visibility()
 	_step_retr_release(dt)
 	var _tg0 := Time.get_ticks_usec()
 	_update_guts(dt)

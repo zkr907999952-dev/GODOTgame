@@ -10,6 +10,9 @@ var _along := 0.0
 var _lateral := Vector3.ZERO
 var _axis := Vector3(0, 1, 0)
 var _up := Vector3(0, 0, 1)
+const RECOIL_TAU := 0.9
+var _shown_r := 0.0
+var _shown_lat := Vector3.ZERO
 
 
 func configure(along: float, radius: float, shaft_r: float, axis: Vector3, up: Vector3, mixv: float, lateral: Vector3 = Vector3.ZERO) -> void:
@@ -25,6 +28,11 @@ func configure(along: float, radius: float, shaft_r: float, axis: Vector3, up: V
 		u = u - _axis * u.dot(_axis)
 		if u.length_squared() > 1e-8:
 			_up = u.normalized()
+	# 扩张立刻跟上当前截面，回缩留给 tick。
+	var inst := instant_slice_radius()
+	if inst >= _shown_r:
+		_shown_r = inst
+		_shown_lat = _lateral
 
 
 func mix() -> float:
@@ -43,8 +51,8 @@ func along() -> float:
 	return _along
 
 
-## 外口平面上的圆截面半径：球与该平面相交的切片，或球已通过后的杆径。
-func slice_radius() -> float:
+## 外口平面上球/杆的瞬时截面半径：球与该平面相交的切片，或球已通过后的杆径。
+func instant_slice_radius() -> float:
 	if _mix <= 1e-4:
 		return 0.0
 	if absf(_along) <= _radius:
@@ -54,20 +62,51 @@ func slice_radius() -> float:
 	return 0.0
 
 
+## 显示半径（瞬时扩张，回缩按 ~0.9 s 延迟）。
+func slice_radius() -> float:
+	return _shown_r
+
+
+func lateral() -> Vector3:
+	return _shown_lat
+
+
+func tick(dt: float) -> void:
+	var inst := instant_slice_radius()
+	if inst >= _shown_r - 1e-7:
+		_shown_r = inst
+	else:
+		var k := 1.0 - exp(-maxf(dt, 0.0) / RECOIL_TAU)
+		_shown_r = lerpf(_shown_r, inst, k)
+	var follow := inst > 1e-5 or _mix > 0.02
+	if follow:
+		_shown_lat = _lateral
+	else:
+		var k2 := 1.0 - exp(-maxf(dt, 0.0) / RECOIL_TAU)
+		_shown_lat = _shown_lat.lerp(Vector3.ZERO, k2)
+	if _shown_r < 1e-5:
+		_shown_r = 0.0
+		_shown_lat = Vector3.ZERO
+
+
+func is_active() -> bool:
+	return _mix > 1e-4 or _shown_r > 1e-5
+
+
 func envelope() -> Dictionary:
 	var r := slice_radius()
-	return {"half_x": r, "half_y": r, "blade_sep": 0.0, "axis": _axis, "up": _up}
+	return {"half_x": r, "half_y": r, "blade_sep": 0.0, "axis": _axis, "up": _up, "offset": _shown_lat}
 
 
 func _center(origin: Vector3, axis: Vector3) -> Vector3:
 	var ax := axis if axis.length_squared() > 1e-8 else _axis
 	if ax.length_squared() > 1e-8:
 		ax = ax.normalized()
-	return origin + ax * _along + _lateral
+	return origin + ax * _along + _shown_lat
 
 
 func project_out(p: Vector3, origin: Vector3, axis: Vector3, _up: Vector3) -> Vector3:
-	if _mix <= 1e-4:
+	if not is_active():
 		return p
 	var ax := axis if axis.length_squared() > 1e-8 else _axis
 	if ax.length_squared() < 1e-8:
@@ -96,7 +135,7 @@ func project_out(p: Vector3, origin: Vector3, axis: Vector3, _up: Vector3) -> Ve
 
 
 func penetration(p: Vector3, origin: Vector3, axis: Vector3, _up: Vector3) -> float:
-	if _mix <= 1e-4:
+	if not is_active():
 		return 0.0
 	var ax := axis if axis.length_squared() > 1e-8 else _axis
 	if ax.length_squared() < 1e-8:

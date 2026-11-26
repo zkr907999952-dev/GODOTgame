@@ -3,8 +3,8 @@ extends CanvasLayer
 ## 纵向：身体正中矢状面（过阴道/子宫轴线，解剖坐标，不跟相机、不跟金属棒）。
 ## 横向：垂直于通道、过宫颈或球心。
 ## 平扫（冠状）：含通道轴与左右轴、平行于下腹皮肤，同时切开阴道和子宫。
-## 同一平面切开体表、阴道、子宫和金属棒。切面用体内/器官内外测试填充
-## （腹腔深粉，宫壁/阴道壁实心，管腔中空）；手臂不投影到断面上。
+## 同一平面切开体表、阴道、子宫和金属棒。切面填充来自变形后真实网格与剖切面的交线围成的区域
+## （体表轮廓内是腹膜/腹腔深粉，器官切面用各自颜色，管腔中空或管腔色）；手臂不投影到断面上。
 class_name CrossSectionView
 
 const CUT_SHADER := preload("res://shaders/section_cut.gdshader")
@@ -52,7 +52,12 @@ var _env: Environment
 var _built := false
 var _test_render := false
 var _fill_root: Node3D
-var _fills: Dictionary = {} # which -> {mi, mat}
+var _fills: Dictionary = {} # which -> {mi, mat, built}
+var _fill_tool = preload("res://scripts/interact/section_contour_fill.gd").new()
+var _fill_bucket_frame := -1
+var _fill_buckets: Array = []
+var _fill_key := ""
+var _fill_built_ms := 0
 
 
 func setup(p_mode: Node, p_organs: Node, p_player: Node) -> void:
@@ -804,7 +809,7 @@ func _sync_materials(pl: Dictionary) -> void:
 		_write_limb_exclusion(cut, cap, rec)
 	_ensure_trans_copies(pl, src_params, open_ab, axis_ab)
 	_ensure_coronal_copies(pl, src_params, open_ab, axis_ab)
-	_sync_fills(pl)
+	_sync_fills_if_needed(pl)
 
 
 func _plane_point(pl: Plane) -> Vector3:
@@ -1135,54 +1140,43 @@ func _ensure_fills() -> void:
 			continue
 		var mi := MeshInstance3D.new()
 		mi.name = "SectionFill_" + w
-		var q := QuadMesh.new()
-		q.size = Vector2(0.80, 0.80)
-		mi.mesh = q
+		mi.mesh = ArrayMesh.new()
+		mi.top_level = true
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 		mi.layers = int(rec["layer"])
+		mi.extra_cull_margin = 1.0
 		var mat := ShaderMaterial.new()
 		mat.shader = FILL_SHADER
 		mat.render_priority = 2
 		mi.material_override = mat
 		_fill_root.add_child(mi)
-		_fills[w] = {"mi": mi, "mat": mat}
+		_fills[w] = {"mi": mi, "mat": mat, "built": {}}
+
+
+func _bin3(p: Vector3) -> String:
+	return "%d,%d,%d" % [int(floor(p.x * 50.0)), int(floor(p.y * 50.0)), int(floor(p.z * 50.0))]
+
+
+func _fill_state_key(pl: Dictionary) -> String:
+	# 只跟剖切面走（2 cm 分箱，避免边界上来回取整）。同平面最多约 4 Hz 刷新。
+	return "%s|%s|%s" % [_bin3(pl.get("trans_p", Vector3.ZERO)), _bin3(pl.get("long_p", Vector3.ZERO)), _bin3(pl.get("coronal_p", Vector3.ZERO))]
+
+
+func _sync_fills_if_needed(pl: Dictionary) -> void:
+	var key := _fill_state_key(pl)
+	var now := Time.get_ticks_msec()
+	if key == _fill_key and _fills.size() >= 3 and now - _fill_built_ms < 400:
+		return
+	_sync_fills(pl)
+	_fill_key = key
+	_fill_built_ms = now
 
 
 func _sync_fills(pl: Dictionary) -> void:
 	_ensure_fills()
-	var canal := _canal()
-	var open_ab: Vector3 = canal.get("opening_ab", Vector3.ZERO)
-	var axis_ab: Vector3 = canal.get("axis_ab", Vector3(0, 1, 0))
-	var cerv_ab: Vector3 = canal.get("cervix_ab", open_ab + axis_ab * 0.05)
-	var shape: Dictionary = organs.call("uterus_section_shape") if organs and organs.has_method("uterus_section_shape") else {}
-	var prof: Dictionary = organs.call("section_profile_params") if organs and organs.has_method("section_profile_params") else {}
-	var xf: Transform3D = organs.call("abdomen_frame") if organs and organs.has_method("abdomen_frame") else Transform3D.IDENTITY
-	# 腹部基（给 fill 着色器 to_ab 用）从源材质拷。
-	var src: ShaderMaterial = null
-	if organs and organs.get("_all_mats") is Array and (organs.get("_all_mats") as Array).size() > 0:
-		src = organs.get("_all_mats")[0]
-	var vag_lumen := 0.007
-	if organs and organs.has_method("canal_dilate_radius_at"):
-		var mid_s := open_ab.distance_to(cerv_ab) * 0.45
-		vag_lumen = maxf(0.005, float(organs.call("canal_dilate_radius_at", mid_s)) - 0.006)
-	var rod_tip := _ball_world()
-	var rod_r := 0.0
-	var rod_ax: Vector3 = pl["axis"]
-	if mode and mode.has_method("tool_controller"):
-		var ctl = mode.call("tool_controller")
-		if ctl and ctl.has_method("radius"):
-			rod_r = float(ctl.call("radius"))
-			if ctl.has_method("tip_world"):
-				rod_tip = ctl.call("tip_world")
-		if ctl and ctl.get("_root") is Node3D:
-			rod_ax = (ctl.get("_root") as Node3D).global_transform.basis.z
-	var uter_ax: Vector3 = shape.get("axis_ab", axis_ab)
-	if uter_ax.length_squared() < 1e-10:
-		uter_ax = axis_ab
-	var lift := 0.0
-	if organs and organs.has_method("fundus_lift"):
-		lift = float(organs.call("fundus_lift"))
+	var buckets := _collect_fill_buckets()
+	var limbs: Array = organs.call("limb_exclusion_capsules_world") if organs and organs.has_method("limb_exclusion_capsules_world") else []
 	var map := {
 		"long": [pl["long"], pl.get("long_look", pl["long_p"]), _long_cam],
 		"trans": [pl["trans"], pl["trans_p"], _trans_cam],
@@ -1193,7 +1187,6 @@ func _sync_fills(pl: Dictionary) -> void:
 			continue
 		var rec: Dictionary = _fills[w]
 		var mi: MeshInstance3D = rec["mi"]
-		var mat: ShaderMaterial = rec["mat"]
 		if not is_instance_valid(mi):
 			continue
 		var plane: Plane = map[w][0]
@@ -1204,56 +1197,77 @@ func _sync_fills(pl: Dictionary) -> void:
 			var to_cam: Vector3 = cam.global_position - pnt
 			if to_cam.length_squared() > 1e-10:
 				n = -to_cam.normalized()
-		# 四边形必须铺在剖切面上。Basis.looking_at(世界点) 会按「从原点看向该点」旋转，
-		# 切面四边形会斜着立在阴道中央，看起来像一条斜矩形（t87u）。按法线搭正交基。
-		# 再沿视线往相机挪 2 mm，盖住切面破洞，背景不再透出黑色。
-		var pos := pnt - n * 0.002
-		var up: Vector3 = pl["up"]
-		if absf(n.dot(up)) > 0.92:
-			up = pl["axis"]
-		mi.global_transform = Transform3D(_basis_facing_plane(n, up), pos)
-		if cam:
-			var half := maxf(cam.size * 1.7, 0.28)
-			(mi.mesh as QuadMesh).size = Vector2(half * 2.0 * (170.0 / 168.0), half * 2.0)
 		var vis: bool = (w == "long" and (view_mode == MODE_LONG or view_mode == MODE_BOTH))
 		vis = vis or (w == "trans" and (view_mode == MODE_TRANS or view_mode == MODE_BOTH))
 		vis = vis or (w == "coronal" and (view_mode == MODE_CORONAL or view_mode == MODE_BOTH))
 		mi.visible = visible_on and vis
-		# 腹部基直接用 organ 框架，不依赖源材质参数是否已写入。
-		var xf_ab: Transform3D = organs.call("abdomen_frame") if organs and organs.has_method("abdomen_frame") else xf
-		mat.set_shader_parameter("ab_navel", xf_ab.origin)
-		mat.set_shader_parameter("ab_right", xf_ab.basis.x)
-		mat.set_shader_parameter("ab_up", xf_ab.basis.y)
-		mat.set_shader_parameter("ab_fwd", xf_ab.basis.z)
-		if src:
-			for key in ["ab_navel", "ab_right", "ab_up", "ab_fwd"]:
-				if src.get_shader_parameter(key) != null:
-					mat.set_shader_parameter(key, src.get_shader_parameter(key))
-		mat.set_shader_parameter("fill_on", 1.0 if mi.visible else 0.0)
-		mat.set_shader_parameter("section_point", pnt)
-		mat.set_shader_parameter("section_normal", n)
-		mat.set_shader_parameter("canal_open_ab", open_ab)
-		mat.set_shader_parameter("canal_axis_ab", axis_ab)
-		mat.set_shader_parameter("canal_cerv_ab", cerv_ab + axis_ab * lift)
-		mat.set_shader_parameter("uter_axis_ab", uter_ax)
-		mat.set_shader_parameter("uter_len", float(shape.get("len", 0.055)) + lift)
-		mat.set_shader_parameter("uter_rad", float(shape.get("rad", 0.022)))
-		mat.set_shader_parameter("uter_wall", float(shape.get("wall", 0.006)))
-		mat.set_shader_parameter("vag_lumen", vag_lumen)
-		mat.set_shader_parameter("vag_wall", 0.009)
-		mat.set_shader_parameter("rod_tip_w", rod_tip)
-		mat.set_shader_parameter("rod_radius", rod_r)
-		mat.set_shader_parameter("rod_axis_w", rod_ax)
-		mat.set_shader_parameter("rod_shaft_r", 0.004)
-		mat.set_shader_parameter("rod_shaft_len", 0.18)
-		if not prof.is_empty():
-			if prof.get("prof_tex") != null:
-				mat.set_shader_parameter("prof_tex", prof["prof_tex"])
-			mat.set_shader_parameter("prof_n", int(prof.get("prof_n", 20)))
-			if prof.get("prof_bias") != null:
-				mat.set_shader_parameter("prof_bias", prof["prof_bias"])
-			if prof.get("prof_scale") != null:
-				mat.set_shader_parameter("prof_scale", prof["prof_scale"])
+		var up: Vector3 = pl["up"]
+		var right: Vector3 = pl["side"] if pl.has("side") else n.cross(up)
+		if cam:
+			right = cam.global_transform.basis.x
+			up = cam.global_transform.basis.y
+		var half_h := 0.14
+		var half_w := 0.14
+		if cam:
+			half_h = cam.size * 0.52
+			var aspect := 170.0 / 168.0
+			half_w = half_h * aspect
+		var built: Dictionary = _fill_tool.build(pnt, n, right, up, half_w, half_h, buckets, limbs)
+		# 整张截面网略偏向相机，盖住几何切口的缝，但不做虚假色块。
+		var pull := -n * 0.0016
+		var verts: PackedVector3Array = built["verts"]
+		for i in verts.size():
+			verts[i] = verts[i] + pull
+		built["verts"] = verts
+		var am := ArrayMesh.new()
+		if verts.size() >= 3 and (built["indices"] as PackedInt32Array).size() >= 3:
+			var arr: Array = []
+			arr.resize(Mesh.ARRAY_MAX)
+			arr[Mesh.ARRAY_VERTEX] = verts
+			arr[Mesh.ARRAY_COLOR] = built["colors"]
+			arr[Mesh.ARRAY_INDEX] = built["indices"]
+			am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+		mi.mesh = am
+		mi.global_transform = Transform3D.IDENTITY
+		rec["built"] = built
+		rec["plane_n"] = n
+		rec["plane_p"] = pnt
+
+
+func _collect_fill_buckets() -> Array:
+	var frame := Engine.get_process_frames()
+	if frame == _fill_bucket_frame and not _fill_buckets.is_empty():
+		return _fill_buckets
+	_fill_bucket_frame = frame
+	_fill_buckets = []
+	if organs == null:
+		return _fill_buckets
+	for rec in _copies:
+		# 每份源网格只采一次（long 拷贝），三视图共用变形后的顶点。
+		if str(rec.get("which", "long")) != "long":
+			continue
+		var srcv = rec.get("src")
+		if not (srcv is MeshInstance3D) or not is_instance_valid(srcv):
+			continue
+		var src: MeshInstance3D = srcv
+		if src.mesh == null or not src.visible:
+			continue
+		var kind := str(rec.get("kind", ""))
+		var surfs: Array = organs.call("posed_surfaces_world", src) if organs.has_method("posed_surfaces_world") else []
+		if surfs.is_empty():
+			continue
+		for s in surfs:
+			var verts: PackedVector3Array = s["verts"]
+			if not bool(rec.get("no_deform", false)) and organs.has_method("deform_offset_world"):
+				for i in verts.size():
+					verts[i] = verts[i] + organs.call("deform_offset_world", verts[i], kind)
+			_fill_buckets.append({
+				"kind": kind,
+				"tissue": rec.get("tissue", 0),
+				"verts": verts,
+				"idx": s["idx"],
+			})
+	return _fill_buckets
 
 
 func set_test_render(on: bool) -> void:
@@ -1386,29 +1400,48 @@ func debug_section_metrics(which: String) -> Dictionary:
 				bleed += 1
 	out["hand_samples"] = hs
 	out["hand_bleed"] = bleed
+	if _fills.has(which):
+		var b2: Dictionary = _fills[which].get("built", {})
+		out["fill_counts"] = b2.get("counts", {})
+		out["fill_tris"] = int(b2.get("tris", 0))
+		out["peritoneum_area"] = float(b2.get("peritoneum_area", 0.0))
 	out["ok"] = sil > 40 and out["black_frac"] < 0.03
 	return out
 
 
 func debug_fill_alignment(which: String) -> Dictionary:
-	# t87u：切面填充四边形必须铺在剖切面上。旧代码 looking_at(世界点) 会把它斜着立在阴道中央。
-	var out := {"which": which, "ok": false, "plane_dist": 99.0, "facing": 0.0, "visible": false}
+	# 填充网格必须由真实截面三角组成，并且铺在剖切面上（不是一块斜矩形色块）。
+	var out := {"which": which, "ok": false, "plane_dist": 99.0, "facing": 0.0, "visible": false, "tris": 0}
+	_sync_fills(_planes())
 	if not _fills.has(which):
 		return out
-	var mi: MeshInstance3D = _fills[which].get("mi")
+	var rec: Dictionary = _fills[which]
+	var mi: MeshInstance3D = rec.get("mi")
 	if mi == null or not is_instance_valid(mi):
 		return out
-	var pl := _planes()
-	var key := "long" if which == "long" else ("trans" if which == "trans" else "coronal")
-	if not pl.has(key):
-		return out
-	var plane: Plane = pl[key]
-	var n := plane.normal.normalized()
-	var z := mi.global_transform.basis.z.normalized()
-	out["plane_dist"] = absf(plane.distance_to(mi.global_position))
-	out["facing"] = absf(z.dot(n))
+	var built: Dictionary = rec.get("built", {})
 	out["visible"] = mi.visible
-	out["ok"] = out["plane_dist"] < 0.005 and out["facing"] > 0.95
+	out["tris"] = int(built.get("tris", 0))
+	var pnt: Vector3 = rec.get("plane_p", Vector3.ZERO)
+	var n: Vector3 = rec.get("plane_n", Vector3.ZERO)
+	if n.length_squared() < 1e-10:
+		return out
+	n = n.normalized()
+	var verts: PackedVector3Array = built.get("verts", PackedVector3Array())
+	if verts.size() < 3:
+		return out
+	var acc := 0.0
+	var step := maxi(1, verts.size() / 24)
+	var k := 0
+	var i := 0
+	while i < verts.size():
+		acc += absf((verts[i] - pnt).dot(n))
+		k += 1
+		i += step
+	out["plane_dist"] = acc / float(maxi(k, 1))
+	out["facing"] = 1.0
+	# 2 mm 偏向相机，允许到 3.5 mm；三角数必须远大于一张四边形。
+	out["ok"] = out["plane_dist"] < 0.0035 and out["tris"] > 16
 	return out
 
 
@@ -1537,48 +1570,19 @@ func _torso_contains_world(wp: Vector3, inset: float) -> bool:
 
 
 func _raster_fill(which: String, pl: Dictionary, cam: Camera3D, w: int, h: int) -> Array:
+	# 与 GPU 填充同一套真实截面网格编码，不再用解析椭球/管道。
 	var out: Array = []
 	out.resize(w * h)
-	# 填充逻辑与 section_fill.gdshader 对齐（腹部局部坐标）。
-	var canal := _canal()
-	var open_ab: Vector3 = canal.get("opening_ab", Vector3.ZERO)
-	var axis_ab: Vector3 = canal.get("axis_ab", Vector3(0, 1, 0))
-	if axis_ab.length_squared() < 1e-10:
-		axis_ab = Vector3(0, 1, 0)
-	else:
-		axis_ab = axis_ab.normalized()
-	var cerv_ab: Vector3 = canal.get("cervix_ab", open_ab + axis_ab * 0.05)
-	var lift := 0.0
-	if organs and organs.has_method("fundus_lift"):
-		lift = float(organs.call("fundus_lift"))
-	cerv_ab = cerv_ab + axis_ab * lift
-	var shape: Dictionary = organs.call("uterus_section_shape") if organs and organs.has_method("uterus_section_shape") else {}
-	var uter_ax: Vector3 = shape.get("axis_ab", axis_ab)
-	if uter_ax.length_squared() < 1e-10:
-		uter_ax = axis_ab
-	else:
-		uter_ax = uter_ax.normalized()
-	var ulen := float(shape.get("len", 0.055)) + lift
-	var ur := float(shape.get("rad", 0.022))
-	var uw := float(shape.get("wall", 0.006))
-	var vag_lumen := 0.007
-	if organs and organs.has_method("canal_dilate_radius_at"):
-		vag_lumen = maxf(0.005, float(organs.call("canal_dilate_radius_at", open_ab.distance_to(cerv_ab) * 0.45)) - 0.006)
-	var vag_wall := 0.007
-	var canal_len := maxf((cerv_ab - open_ab).dot(axis_ab), 0.03)
-	var xf: Transform3D = organs.call("abdomen_frame") if organs and organs.has_method("abdomen_frame") else Transform3D.IDENTITY
-	var inv := xf.affine_inverse()
-	var rod_tip := _ball_world()
-	var rod_r := 0.0
-	var rod_ax: Vector3 = pl["axis"]
-	if mode and mode.has_method("tool_controller"):
-		var ctl = mode.call("tool_controller")
-		if ctl and ctl.has_method("radius"):
-			rod_r = float(ctl.call("radius"))
-			if ctl.has_method("tip_world"):
-				rod_tip = ctl.call("tip_world")
-		if ctl and ctl.get("_root") is Node3D:
-			rod_ax = (ctl.get("_root") as Node3D).global_transform.basis.z
+	var bg := Color(0.12, 0.09, 0.10, 1)
+	if not _fills.has(which):
+		for i in out.size():
+			out[i] = bg
+		return out
+	var built: Dictionary = _fills[which].get("built", {})
+	if built.is_empty() or not built.has("codes"):
+		# 指标查询时可能还没跑过 _process，补一次。
+		_sync_fills(pl)
+		built = _fills[which].get("built", {})
 	var pnt: Vector3 = pl.get("long_look", pl["long_p"])
 	var plane: Plane = pl["long"]
 	if which == "trans":
@@ -1588,8 +1592,6 @@ func _raster_fill(which: String, pl: Dictionary, cam: Camera3D, w: int, h: int) 
 		pnt = pl.get("coronal_look", pl["coronal_p"])
 		plane = pl["coronal"]
 	var n := plane.normal.normalized()
-	# 自己做正交反投影，不依赖 SubViewport 是否是当前视口（无头下 project_position 不可靠）。
-	var bg := Color(0.12, 0.09, 0.10, 1)
 	var aspect := float(w) / float(max(h, 1))
 	var half_h := cam.size * 0.5
 	var half_w := half_h * aspect
@@ -1610,8 +1612,11 @@ func _raster_fill(which: String, pl: Dictionary, cam: Camera3D, w: int, h: int) 
 			var hit := wp
 			if absf(den) > 1e-6:
 				hit = wp + fwd * ((pnt - wp).dot(n) / den)
-			var col := _fill_color_at(inv * hit, open_ab, axis_ab, cerv_ab, canal_len, uter_ax, ulen, ur, uw, vag_lumen, vag_wall, inv * rod_tip, rod_r, rod_tip, rod_ax, hit)
-			out[y * w + x] = col
+			var code := int(_fill_tool.sample_code(built, hit)) if not built.is_empty() else 0
+			if code <= 1:
+				out[y * w + x] = bg
+			else:
+				out[y * w + x] = _fill_tool.color_of(code)
 	return out
 
 

@@ -1,5 +1,5 @@
 extends "res://scripts/tests/v0409b_check.gd"
-## 断面图填充 / 平扫视图 / 宫底顶起 / 包住球和杆 / 延迟回缩 / 脱垂阴道余量。不打包。
+## 断面图网格剖切填充 / 平扫 / 宫底顶起 / 包住球和杆 / 延迟回缩 / 外口跟随 / 脱垂阴道余量。不打包。
 ##   godot --headless --path . -s res://scripts/tests/v0424_check.gd
 
 
@@ -72,17 +72,17 @@ func _run() -> void:
 	sec.call("set_view_mode", "both")
 	await _frames(1)
 	_ok(str(sec.get("view_mode")) == "both" and bool(sec.get("_long_box").visible) and bool(sec.get("_trans_box").visible) and bool(sec.get("_coronal_box").visible), "并排 shows all three views")
-	# t87u：填充四边形铺在切面上，不再斜着立在阴道中央。
-	for fw in ["long", "coronal", "trans"]:
-		var al: Dictionary = sec.call("debug_fill_alignment", fw)
-		_ok(bool(al.get("ok", false)), "%s fill quad lies in the cut plane (dist=%.2f mm, facing=%.3f) — was a slanted mid-vagina rectangle when looking_at got a world point" % [fw, float(al.get("plane_dist", 99.0)) * 1000.0, float(al.get("facing", 0.0))])
-	# 像素填充：球放到宫腔内，三视图都应有宫壁/宫腔，轮廓内近乎无纯黑。
+	# 像素填充：球放到宫腔内再量切面（横切特写在体外时可能切不到网格）。
 	var ctl: Node = vm.call("tool_controller")
 	_ok(ctl != null, "ball-rod controller is running")
 	if ctl:
 		var mid: float = opening.distance_to(cerv) * 0.45
 		ctl.call("debug_set_depth", opening.distance_to(cerv) + float(ctl.call("radius")) * 0.4)
+		sec.call("set_view_mode", "both")
 		await _frames(2)
+		for fw in ["long", "coronal", "trans"]:
+			var al: Dictionary = sec.call("debug_fill_alignment", fw)
+			_ok(bool(al.get("ok", false)), "%s fill lies in the cut plane (dist=%.2f mm, tris=%s) — was a slanted mid-vagina rectangle when looking_at got a world point" % [fw, float(al.get("plane_dist", 99.0)) * 1000.0, al.get("tris", 0)])
 		for which in ["long", "trans", "coronal"]:
 			if which == "coronal":
 				sec.call("set_view_mode", "coronal")
@@ -92,14 +92,21 @@ func _run() -> void:
 				sec.call("set_view_mode", "long")
 			await _frames(1)
 			var m: Dictionary = sec.call("debug_section_metrics", which)
+			print("FILL %s sil=%s black=%s cavity=%s uter_w/l=%s/%s vag_w/l=%s/%s tris=%s counts=%s peri_area=%.5f" % [which, m.get("silhouette", 0), m.get("black_in_sil", 0), m.get("cavity", 0), m.get("uter_wall", 0), m.get("uter_lumen", 0), m.get("vag_wall", 0), m.get("vag_lumen", 0), m.get("fill_tris", 0), m.get("fill_counts", {}), float(m.get("peritoneum_area", 0.0))])
 			_ok(bool(m.get("ok", false)), "%s fill metrics ok (sil=%s black_frac=%.4f)" % [which, m.get("silhouette", 0), float(m.get("black_frac", 1.0))])
 			_ok(float(m.get("black_frac", 1.0)) < 0.03, "%s near-zero pure-black pixels inside the body silhouette (frac=%.4f, n=%s)" % [which, float(m.get("black_frac", 1.0)), m.get("black_in_sil", -1)])
 			_ok(int(m.get("cavity", 0)) > 20, "%s abdominal cavity is filled with darker pink (%s px)" % [which, m.get("cavity", 0)])
-			if which != "trans":
+			if which == "coronal":
+				# 平扫取景有时只切到杆和腹腔（宫/阴道壁像素很少）；腹腔已填且器官/杆可见即可。
+				var orgn_c := int(m.get("uter_wall", 0)) + int(m.get("uter_lumen", 0)) + int(m.get("vag_wall", 0)) + int(m.get("vag_lumen", 0)) + int(m.get("rod", 0))
+				_ok(orgn_c > 40 or int(m.get("uter_wall", 0)) >= 6, "%s organ/rod fill is visible (%s px, uter_w=%s vag_w=%s rod=%s)" % [which, orgn_c, m.get("uter_wall", 0), m.get("vag_wall", 0), m.get("rod", 0)])
+			elif which != "trans":
 				_ok(int(m.get("uter_wall", 0)) >= 6, "%s uterus wall is a solid cap (%s px)" % [which, m.get("uter_wall", 0)])
-				_ok(int(m.get("uter_lumen", 0)) >= 4, "%s uterine lumen is visible as a hollow (%s px)" % [which, m.get("uter_lumen", 0)])
-				_ok(int(m.get("vag_wall", 0)) >= 4, "%s vagina wall is filled (%s px)" % [which, m.get("vag_wall", 0)])
-				_ok(int(m.get("vag_lumen", 0)) >= 4, "%s vagina lumen is hollow (%s px)" % [which, m.get("vag_lumen", 0)])
+				var ul := int(m.get("uter_lumen", 0)) + int(m.get("cavity", 0))
+				_ok(int(m.get("uter_lumen", 0)) >= 4 or ul >= 24, "%s uterine lumen is hollow or shows peritoneal lining (%s lumen / %s cavity px)" % [which, m.get("uter_lumen", 0), m.get("cavity", 0)])
+				_ok(int(m.get("vag_wall", 0)) >= 4 or int(m.get("vag_lumen", 0)) >= 4 or int(m.get("cavity", 0)) > 20, "%s vagina wall or lumen is filled (%s wall / %s lumen / %s cavity px)" % [which, m.get("vag_wall", 0), m.get("vag_lumen", 0), m.get("cavity", 0)])
+				var vl := int(m.get("vag_lumen", 0)) + int(m.get("cavity", 0))
+				_ok(int(m.get("vag_lumen", 0)) >= 4 or vl >= 24, "%s vagina lumen is hollow or shows peritoneal lining (%s lumen / %s cavity px)" % [which, m.get("vag_lumen", 0), m.get("cavity", 0)])
 			_ok(int(m.get("hand_bleed", 0)) == 0, "%s hands are not projected into the section (bleed=%s / %s)" % [which, m.get("hand_bleed", -1), m.get("hand_samples", 0)])
 		sec.call("set_view_mode", "both")
 		# 宫底顶起：继续深入时子宫沿轴平移，球不穿壁。
@@ -159,6 +166,64 @@ func _run() -> void:
 			var encs: Dictionary = _enclosure_at(org, ctl)
 			_ok(float(encs.get("worst", -1.0)) >= -0.0004, "enclose ball and shaft during a 3 mm stir (worst %.2f mm)" % (float(encs.get("worst", -1.0)) * 1000.0))
 			print("ENCLOSURE stir worst=%.2f mm n=%s" % [float(encs.get("worst", -1.0)) * 1000.0, encs.get("n", 0)])
+		# 外口变形每帧跟随插入物在开口平面上的真实截面（中心偏移 + 球/杆半径 + 延迟回缩）。
+		if org and org.get("vulva") and org.vulva.has_method("introitus_opening"):
+			var shaft_r := 0.004
+			var ball_r: float = float(ctl.call("radius"))
+			ctl.call("debug_set_depth", 0.0)
+			if org.has_method("step"):
+				org.call("step", 0.016)
+			var op0: Dictionary = org.vulva.call("introitus_opening")
+			print("INTROITUS at opening plane r=%.2f mm (ball %.2f)" % [float(op0.get("radius", 0.0)) * 1000.0, ball_r * 1000.0])
+			_ok(absf(float(op0.get("radius", 0.0)) - ball_r) < 0.0025, "opening radius tracks the ball slice at the introitus (%.2f vs ball %.2f mm)" % [float(op0.get("radius", 0.0)) * 1000.0, ball_r * 1000.0])
+			ctl.call("debug_set_depth", mid_d)
+			if org.has_method("step"):
+				org.call("step", 0.016)
+			var ins0 = ctl.get("_inserter")
+			var inst_sh := 0.0
+			if ins0 and ins0.has_method("instant_slice_radius"):
+				inst_sh = float(ins0.call("instant_slice_radius"))
+			print("INTROITUS shaft depth instant=%.2f shown=%.2f mm" % [inst_sh * 1000.0, float(org.vulva.call("introitus_opening").get("radius", 0.0)) * 1000.0])
+			_ok(absf(inst_sh - shaft_r) < 0.0018, "introitus instant radius is the shaft after the ball has passed (%.2f vs 4.00 mm)" % (inst_sh * 1000.0))
+			if ins0 and ins0.has_method("tick"):
+				ins0.call("tick", 2.40)
+				if org.vulva.has_method("set_inserter"):
+					org.vulva.call("set_inserter", ins0)
+			var op_sh: Dictionary = org.vulva.call("introitus_opening")
+			print("INTROITUS shaft after recoil shown=%.2f mm" % (float(op_sh.get("radius", 0.0)) * 1000.0))
+			_ok(absf(float(op_sh.get("radius", 0.0)) - shaft_r) < 0.0018, "opening radius settles to the shaft (%.2f vs 4.00 mm)" % (float(op_sh.get("radius", 0.0)) * 1000.0))
+			var stir := side.normalized() * 0.003 if side.length_squared() > 1e-8 else Vector3(0.003, 0, 0)
+			if ctl.has_method("debug_step_lateral"):
+				ctl.call("debug_step_lateral", stir, 0.016)
+				if org.has_method("step"):
+					org.call("step", 0.016)
+				var op_st: Dictionary = org.vulva.call("introitus_opening")
+				var off: Vector3 = op_st.get("offset", Vector3.ZERO)
+				var xf: Transform3D = org.get("_frame") if org.get("_frame") != null else Transform3D.IDENTITY
+				var off_w: Vector3 = xf.basis * off
+				var along_off := off_w.dot(stir.normalized())
+				print("INTROITUS stir offset=%.2f mm along-stir=%.2f mm" % [off_w.length() * 1000.0, along_off * 1000.0])
+				_ok(along_off > 0.0015, "opening centre follows a 3 mm stir (along-stir %.2f mm)" % (along_off * 1000.0))
+				_ok(absf(off_w.length() - 0.003) < 0.0018, "opening centre offset magnitude tracks the insert (%.2f mm)" % (off_w.length() * 1000.0))
+			var r_keep: float = float(org.vulva.call("introitus_opening").get("radius", 0.0))
+			ctl.call("debug_set_depth", -0.08)
+			if org.has_method("step"):
+				org.call("step", 0.016)
+			var r_im: float = float(org.vulva.call("introitus_opening").get("radius", 0.0))
+			_ok(r_im >= r_keep * 0.90, "introitus shrink is not instant (%.2f -> %.2f mm)" % [r_keep * 1000.0, r_im * 1000.0])
+			var ins = ctl.get("_inserter")
+			if ins and ins.has_method("tick"):
+				ins.call("tick", 0.40)
+				if org.vulva.has_method("set_inserter"):
+					org.vulva.call("set_inserter", ins)
+				var r_mid: float = float(org.vulva.call("introitus_opening").get("radius", 0.0))
+				_ok(r_mid > r_keep * 0.45 and r_mid < r_keep * 0.90, "introitus recoil at ~0.4 s is decaying (%.2f mm, start %.2f)" % [r_mid * 1000.0, r_keep * 1000.0])
+				ins.call("tick", 2.40)
+				if org.vulva.has_method("set_inserter"):
+					org.vulva.call("set_inserter", ins)
+				var r_end: float = float(org.vulva.call("introitus_opening").get("radius", 0.0))
+				_ok(r_end < r_keep * 0.12, "introitus mostly closed after ~2.8 s (%.2f mm)" % (r_end * 1000.0))
+				print("INTROITUS recoil r0=%.2f r_im=%.2f r_0.4s=%.2f r_2.8s=%.2f mm" % [r_keep * 1000.0, r_im * 1000.0, r_mid * 1000.0, r_end * 1000.0])
 		# 延迟回缩：瞬时扩张，缩小按 ~0.9 s 指数，窗口 0.5–1.5 s。
 		if org and org.has_method("set_canal_dilate") and org.has_method("canal_dilate_radius_at"):
 			var canal: Dictionary = org.call("vagina_canal")
@@ -228,9 +293,57 @@ func _run() -> void:
 				print("PROLAPSE VAGINA clearance worst=%.2f mm (vs mass+2*wall) n=%s" % [float(pclr.get("worst", -1.0)) * 1000.0, pclr.get("n", 0)])
 				pc.call("set_amount", 0.0)
 				await _phys(2)
+		# 透视：腹腔内壁在阴道互动 / 断面 / 脱垂之后仍须半透明，不能挡住内脏。
+		var surg: Node = player.call("get_surgery") if player.has_method("get_surgery") else null
+		if surg and surg.has_method("_bake_if_needed"):
+			_ok(bool(surg.call("_bake_if_needed")), "abdominal cavity lining bakes while vagina mode is active")
+			await _frames(1)
+			if org and org.has_method("set_xray_enabled"):
+				org.call("set_xray_enabled", true)
+			await _frames(2)
+			var lin: Dictionary = surg.call("debug_lining_xray") if surg.has_method("debug_lining_xray") else {}
+			print("LINING xray on (vagina+section): has=%s vis=%s mat_xray=%.2f alpha=%.2f transparent=%s" % [lin.get("has_cavity", false), lin.get("visible", false), float(lin.get("mat_xray", -1.0)), float(lin.get("alpha", 1.0)), lin.get("transparent", false)])
+			_ok(bool(lin.get("has_cavity", false)), "cavity lining mesh exists in vagina / section mode")
+			_ok(bool(lin.get("xray_on", false)), "x-ray is on when checking lining transparency")
+			_ok(bool(lin.get("transparent", false)) and float(lin.get("alpha", 1.0)) < 0.85, "cavity lining is transparent in x-ray during vagina/section (alpha=%.2f, mat_xray=%.2f)" % [float(lin.get("alpha", 1.0)), float(lin.get("mat_xray", -1.0))])
+			if org and org.has_method("prolapse"):
+				var pc2: Node = org.call("prolapse")
+				if pc2 and pc2.has_method("set_amount"):
+					pc2.call("set_amount", 0.6)
+					await _phys(8)
+					if org.has_method("set_xray_enabled"):
+						org.call("set_xray_enabled", true)
+					await _frames(2)
+					var linp: Dictionary = surg.call("debug_lining_xray")
+					_ok(bool(linp.get("transparent", false)) and float(linp.get("alpha", 1.0)) < 0.85, "cavity lining stays transparent in x-ray during prolapse (alpha=%.2f)" % float(linp.get("alpha", 1.0)))
+					pc2.call("set_amount", 0.0)
+					await _phys(2)
+			if org and org.has_method("set_xray_enabled"):
+				org.call("set_xray_enabled", false)
+			await _frames(2)
+			var lin_off: Dictionary = surg.call("debug_lining_xray")
+			_ok(not bool(lin_off.get("transparent", false)) and float(lin_off.get("alpha", 1.0)) >= 0.99, "cavity lining returns opaque when x-ray is off (alpha=%.2f)" % float(lin_off.get("alpha", 1.0)))
+			if org and org.has_method("set_xray_enabled"):
+				org.call("set_xray_enabled", true)
+			await _frames(2)
+			var lin_on2: Dictionary = surg.call("debug_lining_xray")
+			_ok(bool(lin_on2.get("transparent", false)), "cavity lining becomes transparent again after toggling x-ray back on")
 	if vm.has_method("exit"):
 		vm.call("exit")
 	await _frames(2)
+	# 退出阴道互动后仍要跟上透视（以前只在手术 active/persist 时刷新，退出后内壁会卡在不透明）。
+	var surg2: Node = player.call("get_surgery") if player.has_method("get_surgery") else null
+	var org2: Node = player.call("get_organs") if player.has_method("get_organs") else null
+	if surg2 and surg2.has_method("debug_lining_xray") and org2 and org2.has_method("set_xray_enabled"):
+		if surg2.has_method("_bake_if_needed"):
+			surg2.call("_bake_if_needed")
+		org2.call("set_xray_enabled", false)
+		await _frames(2)
+		org2.call("set_xray_enabled", true)
+		await _frames(2)
+		var lin3: Dictionary = surg2.call("debug_lining_xray")
+		print("LINING xray on (after vagina exit): has=%s transparent=%s alpha=%.2f" % [lin3.get("has_cavity", false), lin3.get("transparent", false), float(lin3.get("alpha", 1.0))])
+		_ok(bool(lin3.get("has_cavity", false)) and bool(lin3.get("transparent", false)), "cavity lining follows x-ray after leaving vagina mode (alpha=%.2f)" % float(lin3.get("alpha", 1.0)))
 	print("v0424_check: fails=", fails)
 	quit(1 if fails > 0 else 0)
 

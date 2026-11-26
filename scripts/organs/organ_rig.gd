@@ -1152,6 +1152,86 @@ func _posed_organ_world(mi: MeshInstance3D) -> PackedVector3Array:
 	return out
 
 
+func posed_mesh_world(mi: MeshInstance3D) -> PackedVector3Array:
+	return _posed_organ_world(mi)
+
+
+## 各表面蒙皮后的世界坐标顶点 + 索引（断面求交用）。
+func posed_surfaces_world(mi: MeshInstance3D) -> Array:
+	var out: Array = []
+	if mi == null or mi.mesh == null:
+		return out
+	# 多表面共用同一套骨骼姿态。先按表面 0 的逻辑算绑定矩阵，再对每个表面蒙皮。
+	for si in mi.mesh.get_surface_count():
+		var arr: Array = mi.mesh.surface_get_arrays(si)
+		if arr.is_empty() or arr[Mesh.ARRAY_VERTEX] == null:
+			continue
+		var P: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+		var world := PackedVector3Array()
+		world.resize(P.size())
+		var bones = arr[Mesh.ARRAY_BONES]
+		var wts = arr[Mesh.ARRAY_WEIGHTS]
+		var skin: Skin = mi.skin
+		if _skel == null or skin == null or bones == null or wts == null or bones.size() < P.size() * 4:
+			var xf: Transform3D = mi.global_transform
+			for i in P.size():
+				world[i] = xf * P[i]
+		else:
+			var xfs: Array = []
+			xfs.resize(skin.get_bind_count())
+			var skel_xf := _skel.global_transform
+			for bi in skin.get_bind_count():
+				var bone_i := _skel.find_bone(str(skin.get_bind_name(bi)))
+				if bone_i < 0:
+					bone_i = skin.get_bind_bone(bi)
+				if bone_i >= 0 and bone_i < _skel.get_bone_count():
+					xfs[bi] = skel_xf * _skel.get_bone_global_pose(bone_i) * skin.get_bind_pose(bi)
+				else:
+					xfs[bi] = skel_xf
+			for i2 in P.size():
+				var acc := Vector3.ZERO
+				var wsum := 0.0
+				for k in 4:
+					var w: float = wts[i2 * 4 + k]
+					if w <= 1e-8:
+						continue
+					var bind_i: int = bones[i2 * 4 + k]
+					if bind_i >= 0 and bind_i < xfs.size():
+						acc += w * ((xfs[bind_i] as Transform3D) * P[i2])
+						wsum += w
+				if wsum > 1e-8:
+					world[i2] = acc / wsum
+				else:
+					world[i2] = mi.global_transform * P[i2]
+		if idx.is_empty():
+			idx.resize(P.size())
+			for j in P.size():
+				idx[j] = j
+		out.append({"verts": world, "idx": idx})
+	return out
+
+
+## 与器官着色器同一套腹部变形（世界空间位移），给断面求交用。
+func deform_offset_world(p_world: Vector3, kind: String) -> Vector3:
+	if _frame == Transform3D.IDENTITY:
+		_update_frame()
+	var l: Vector3 = _frame.affine_inverse() * p_world
+	var off := Vector3.ZERO
+	if kind == "skin" or kind == "flaps" or kind == "rod" or kind == "prolapse_uterus" or kind == "sleeve":
+		return Vector3.ZERO
+	# 与 organ.gdshader 顺序接近：搅动 → 扩张 → 宫体胶囊 → 宫底顶起 → 脱垂撑开。
+	off += canal_stir_offset_at(l)
+	off += dilate_offset_at(l + off)
+	if kind == "uterus" or kind == "uterus_cavity":
+		off += uterus_ball_offset_at(l + off)
+	off += fundus_lift_offset_at(l + off)
+	if kind == "vagina":
+		var po := prolapse_offset_ab(l + off)
+		off += Vector3(po.x, po.y, po.z)
+	return _frame.basis * off
+
+
 func _fit_vagina_canal_posed() -> Dictionary:
 	var stamp := Engine.get_process_frames()
 	if stamp == _canal_posed_stamp and not _canal_posed.is_empty():
@@ -2047,14 +2127,25 @@ func reset_peristalsis() -> void:
 
 func set_xray_enabled(on: bool) -> void:
 	xray_enabled = on
+	_notify_xray_changed()
 
 
 func toggle_xray() -> void:
 	xray_enabled = not xray_enabled
+	_notify_xray_changed()
 
 
 func set_xray_amount(v: float) -> void:
 	xray_amount = clampf(v, 0.0, 1.0)
+	_notify_xray_changed()
+
+
+func _notify_xray_changed() -> void:
+	if not _all_mats.is_empty():
+		_push_uniforms()
+	var surg := _surgery()
+	if surg and surg.has_method("sync_lining_xray"):
+		surg.call("sync_lining_xray")
 
 
 func effective_xray() -> float:
@@ -3348,6 +3439,14 @@ func _push_uniforms() -> void:
 		m.set_shader_parameter("fist_bulge", fb[0])
 		m.set_shader_parameter("fist_lean", fb[1])
 		m.set_shader_parameter("fist_par", fpar)
+	# 手术腹腔内壁 / 断面壁等后注册材质也要带透视开关，重建后不会漏掉。
+	for m in _all_mats:
+		if m in _skin_mats:
+			continue
+		m.set_shader_parameter("xray", xr)
+		m.set_shader_parameter("xray_sphere_ab", _xray_sphere_ab)
+		m.set_shader_parameter("xray_sphere_r", _xray_sphere_r)
+		m.set_shader_parameter("xray_sphere_k", _xray_sphere_k)
 	var fist_on := tools != null and bool(tools.fist_enabled) and float(tools.fist_depth) > 0.01
 	for m in _organ_mats:
 		m.set_shader_parameter("organ_contain", 1 if fist_on else 0)

@@ -32,8 +32,10 @@ void fragment() {
 	ROUGHNESS = roughness;
 	METALLIC = metallic;
 	SPECULAR = 0.28;
+	// 透视开着时整袋半透明。depth_draw_opaque 只在 ALPHA==1 时写深度，
+	// 因此 0.32 不会把袋里的内脏挡住。xray 用开关（>0 即开），不要按强度混回不透明。
 	if (xray > 0.001) {
-		ALPHA = mix(1.0, 0.32, clamp(xray, 0.0, 1.0));
+		ALPHA = 0.32;
 	} else {
 		ALPHA = albedo_color.a;
 	}

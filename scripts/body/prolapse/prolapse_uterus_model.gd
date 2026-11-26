@@ -8,14 +8,14 @@ extends MeshInstance3D
 ## 面 1 = 宫体 + 细颈（同一色系，交接处没有子宫红 / 阴道粉的硬边）。
 ##
 ## 网格建在腹部局部坐标里，节点变换 = 腹部坐标系：身体移动 / 呼吸时不用重建，只有链形状变了才重建
-## （约 27 环 × 13 点，比原子宫 3839 顶点 + GPU 蒙皮 + 输卵管卵巢轻得多）。
+## （约 20 边 × ~27 环，平滑法线；仍远轻于原子宫 3839 顶点 + GPU 蒙皮 + 输卵管卵巢）。
 class_name ProlapseUterusModel
 
-const SIDES := 12
+const SIDES := 20
 const BODY_RINGS := 14
-const CERVIX_RINGS := 3
-const NECK_RINGS := 4
-const DOME_FRACS := [0.93, 0.72, 0.42, 0.0]
+const CERVIX_RINGS := 5
+const NECK_RINGS := 5
+const DOME_FRACS := [0.95, 0.78, 0.52, 0.0]
 const OS_DIMPLE := 0.0025
 const REBUILD_EPS := 0.00008
 

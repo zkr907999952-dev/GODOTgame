@@ -39,8 +39,16 @@ func set_inserter(ins: RefCounted) -> void:
 	var sep := float(env.get("blade_sep", 0.0))
 	var ax: Vector3 = env.get("axis", Vector3(0, 1, 0))
 	var up: Vector3 = env.get("up", Vector3(0, 0, 1))
-	set_introitus_open(hx, hy, float(ins.call("mix")), ax, up, 0.0, sep)
-	_custom_ins = _inserter != null and not _inserter.has_method("configure") and _inserter.has_method("project_out") and _inserter.has_method("penetration")
+	var lat: Vector3 = env.get("offset", Vector3.ZERO)
+	if lat is Vector3:
+		pass
+	else:
+		lat = Vector3.ZERO
+	# 无插入物时 mix 也可能因延迟回缩仍 > 0；用截面半径决定开合。
+	var mixv := float(ins.call("mix"))
+	if hx <= 1e-5 and hy <= 1e-5:
+		mixv = 0.0
+	set_introitus_open(hx, hy, mixv, ax, up, 0.0, sep, lat)
 	_active_inserter = ins
 
 

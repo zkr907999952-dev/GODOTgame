@@ -52,6 +52,7 @@ var _intro_mix := 0.0
 var _intro_axis := Vector3(0, 1, 0)
 var _intro_up := Vector3(0, 0, 1)
 var _intro_sep := 0.0
+var _intro_lat: Vector3 = Vector3.ZERO
 var _intro_angle := 0.0
 var _soft_P := [PackedVector3Array(), PackedVector3Array()]
 var _rest_edges := [PackedInt32Array(), PackedInt32Array()]
@@ -403,7 +404,7 @@ func refresh_insert() -> void:
 		_commit()
 
 
-func set_introitus_open(half_x: float, half_y: float, mix: float, axis: Vector3 = Vector3.ZERO, up: Vector3 = Vector3.ZERO, angle_deg: float = 0.0, blade_sep: float = 0.0) -> void:
+func set_introitus_open(half_x: float, half_y: float, mix: float, axis: Vector3 = Vector3.ZERO, up: Vector3 = Vector3.ZERO, angle_deg: float = 0.0, blade_sep: float = 0.0, offset: Vector3 = Vector3.ZERO) -> void:
 	var m := clampf(mix, 0.0, 1.0)
 	var hx := maxf(half_x, 0.0)
 	var hy := maxf(half_y, 0.0)
@@ -420,7 +421,8 @@ func set_introitus_open(half_x: float, half_y: float, mix: float, axis: Vector3 
 	u = u.normalized()
 	var sep := maxf(blade_sep, 0.0)
 	var ang := angle_deg
-	if absf(m - _intro_mix) < 1e-4 and absf(hx - _intro_hx) < 1e-5 and absf(hy - _intro_hy) < 1e-5 and absf(sep - _intro_sep) < 1e-5 and absf(ang - _intro_angle) < 1e-3 and ax.dot(_intro_axis) > 0.999 and u.dot(_intro_up) > 0.999:
+	var lat := offset - ax * offset.dot(ax)
+	if absf(m - _intro_mix) < 1e-4 and absf(hx - _intro_hx) < 1e-5 and absf(hy - _intro_hy) < 1e-5 and absf(sep - _intro_sep) < 1e-5 and absf(ang - _intro_angle) < 1e-3 and ax.dot(_intro_axis) > 0.999 and u.dot(_intro_up) > 0.999 and lat.distance_to(_intro_lat) < 1e-5:
 		return
 	_intro_mix = m
 	_intro_hx = hx
@@ -429,9 +431,23 @@ func set_introitus_open(half_x: float, half_y: float, mix: float, axis: Vector3 
 	_intro_up = u
 	_intro_sep = sep
 	_intro_angle = ang
+	_intro_lat = lat
+	_cf_ready = false
 	_sync_envelope_inserter()
 	if ok:
 		_commit()
+
+
+## 外口当前撑开（绑定/腹部局部）：半径、中心相对休息口的偏移。
+func introitus_opening() -> Dictionary:
+	return {
+		"radius": maxf(_intro_hx, _intro_hy),
+		"half_x": _intro_hx,
+		"half_y": _intro_hy,
+		"offset": _intro_lat,
+		"mix": _intro_mix,
+		"center": _mouth_center() + _intro_lat,
+	}
 
 
 ## 当前外口在 side / up 平面上的半宽、半高（绑定空间，已含 introitus 撑开）。
@@ -1726,7 +1742,7 @@ func _repair_dress_flips(P: PackedVector3Array) -> void:
 
 func _sync_envelope_inserter() -> void:
 	_sync_envelope_inserter_inner()
-	_custom_ins = _inserter != null and not _inserter.has_method("configure") and _inserter.has_method("project_out") and _inserter.has_method("penetration")
+	_custom_ins = _inserter != null and _inserter.has_method("project_out") and not (_inserter.has_method("uses_envelope_configure") and bool(_inserter.call("uses_envelope_configure")))
 
 
 func _sync_envelope_inserter_inner() -> void:
@@ -1830,6 +1846,9 @@ func _closest_out_metal(x: float, y: float, hx: float, hh: float, cy: float) -> 
 
 func _cache_intro_frame() -> void:
 	_cf_c = _mouth_center()
+	# 椭圆/叶片包络把偏移加到中心；球/杆的 project_out 自己含 offset，这里不加以免叠两次。
+	if not _custom_ins:
+		_cf_c += _intro_lat
 	var b: Array = _intro_basis()
 	_cf_ax = b[0]
 	_cf_up = b[1]
@@ -1940,11 +1959,11 @@ func _bone_posed(si: int, i: int) -> Vector3:
 	var iw := _insert_w(si, i)
 	if iw <= 1e-5:
 		return p
-	var c := _mouth_center()
+	var c := _mouth_center() if _custom_ins else (_mouth_center() + _intro_lat)
 	# 只把已经进到叶片包络里的顶点撑到截面上；外侧皮肤不被吸进去。
 	if not _inside_hull(p, c):
 		return p
-	var tgt := _envelope_point(p, c)
+	var tgt: Vector3 = _inserter.project_out(p, _mouth_center(), _intro_axis, _intro_up) if _custom_ins else _envelope_point(p, c)
 	var ax := _intro_axis.normalized() if _intro_axis.length_squared() > 1e-8 else (opening - vulva).normalized()
 	var fa := clampf(1.0 - absf((p - c).dot(ax)) / 0.045, 0.0, 1.0)
 	return p.lerp(tgt, minf(1.0, iw * 1.15) * _intro_mix * fa)
