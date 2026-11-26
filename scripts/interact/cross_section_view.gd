@@ -1,20 +1,26 @@
 extends CanvasLayer
 ## 断面图辅助小窗。默认在选中长柄金属球时于右上角打开。
 ## 纵向：身体正中矢状面（过阴道/子宫轴线，解剖坐标，不跟相机、不跟金属棒）。
-## 横向：垂直于通道、过宫颈或球心。同一平面同时切开体表、阴道、子宫和金属棒，
-## 真正裁剪几何并平涂切面（不是把背面投影到平面上）。正交摄像机正对切面。
+## 横向：垂直于通道、过宫颈或球心。
+## 平扫（冠状）：含通道轴与左右轴、平行于下腹皮肤，同时切开阴道和子宫。
+## 同一平面切开体表、阴道、子宫和金属棒。切面用体内/器官内外测试填充
+## （腹腔深粉，宫壁/阴道壁实心，管腔中空）；手臂不投影到断面上。
 class_name CrossSectionView
 
 const CUT_SHADER := preload("res://shaders/section_cut.gdshader")
 const CAP_SHADER := preload("res://shaders/section_cap.gdshader")
-# 15 / 16 未被角色补光、第一人称头、脏器补光占用。18 是 FP_HEAD_LAYER，
+const FILL_SHADER := preload("res://shaders/section_fill.gdshader")
+# 15 / 16 未被角色补光、第一人称头、脏器补光占用。18 是 FP_HEAD_LAYER。
+# 13 同样空闲（14 是皮肤贴花，17 是角色补光）。
 # 主相机第三人称看得到，所以以前的断面拷贝白面会漏进主视图。
 const SECTION_LAYER_LONG := 1 << 15
 const SECTION_LAYER_TRANS := 1 << 16
-const SECTION_LAYER := SECTION_LAYER_LONG | SECTION_LAYER_TRANS
+const SECTION_LAYER_CORONAL := 1 << 13
+const SECTION_LAYER := SECTION_LAYER_LONG | SECTION_LAYER_TRANS | SECTION_LAYER_CORONAL
 const MODE_BOTH := "both"
 const MODE_LONG := "long"
 const MODE_TRANS := "trans"
+const MODE_CORONAL := "coronal"
 
 var mode: Node
 var organs: Node
@@ -29,17 +35,24 @@ var _panel: PanelContainer
 var _row: HBoxContainer
 var _long_vp: SubViewport
 var _trans_vp: SubViewport
+var _coronal_vp: SubViewport
 var _long_box: SubViewportContainer
 var _trans_box: SubViewportContainer
+var _coronal_box: SubViewportContainer
 var _long_cam: Camera3D
 var _trans_cam: Camera3D
+var _coronal_cam: Camera3D
 var _btn_toggle: Button
 var _btn_long: Button
 var _btn_trans: Button
+var _btn_coronal: Button
 var _btn_both: Button
 var _copies: Array = []
 var _env: Environment
 var _built := false
+var _test_render := false
+var _fill_root: Node3D
+var _fills: Dictionary = {} # which -> {mi, mat}
 
 
 func setup(p_mode: Node, p_organs: Node, p_player: Node) -> void:
@@ -67,7 +80,7 @@ func toggle() -> void:
 
 
 func set_view_mode(m: String) -> void:
-	if m != MODE_LONG and m != MODE_TRANS and m != MODE_BOTH:
+	if m != MODE_LONG and m != MODE_TRANS and m != MODE_CORONAL and m != MODE_BOTH:
 		m = MODE_BOTH
 	view_mode = m
 	_layout_views()
@@ -81,6 +94,11 @@ func longitudinal_plane() -> Plane:
 func transverse_plane() -> Plane:
 	var pl := _planes()
 	return pl["trans"]
+
+
+func coronal_plane() -> Plane:
+	var pl := _planes()
+	return pl["coronal"]
 
 
 func section_center() -> Vector3:
@@ -125,17 +143,21 @@ func _ensure_ui() -> void:
 	bar.add_child(title)
 	_btn_long = _chip("纵向", func(): set_view_mode(MODE_LONG))
 	_btn_trans = _chip("横向", func(): set_view_mode(MODE_TRANS))
+	_btn_coronal = _chip("平扫", func(): set_view_mode(MODE_CORONAL))
 	_btn_both = _chip("并排", func(): set_view_mode(MODE_BOTH))
 	bar.add_child(_btn_long)
 	bar.add_child(_btn_trans)
+	bar.add_child(_btn_coronal)
 	bar.add_child(_btn_both)
 	_row = HBoxContainer.new()
 	_row.add_theme_constant_override("separation", 6)
 	col.add_child(_row)
-	_long_box = _make_view("LongSection", true)
-	_trans_box = _make_view("TransSection", false)
+	_long_box = _make_view("LongSection", SECTION_LAYER_LONG, 0.18)
+	_trans_box = _make_view("TransSection", SECTION_LAYER_TRANS, 0.09)
+	_coronal_box = _make_view("CoronalSection", SECTION_LAYER_CORONAL, 0.20)
 	_row.add_child(_long_box)
 	_row.add_child(_trans_box)
+	_row.add_child(_coronal_box)
 	# 挂到 HUD 根上，和其它工具条同一层。
 	var hud := _hud()
 	var host: Node = hud
@@ -164,12 +186,12 @@ func _chip(text: String, cb: Callable) -> Button:
 	b.text = text
 	b.toggle_mode = true
 	b.focus_mode = Control.FOCUS_NONE
-	b.custom_minimum_size = Vector2(48, 24)
+	b.custom_minimum_size = Vector2(44, 24)
 	b.pressed.connect(cb)
 	return b
 
 
-func _make_view(nm: String, is_long: bool) -> SubViewportContainer:
+func _make_view(nm: String, layer_bit: int, cam_size: float) -> SubViewportContainer:
 	var box := SubViewportContainer.new()
 	box.name = nm + "Box"
 	box.stretch = true
@@ -180,8 +202,8 @@ func _make_view(nm: String, is_long: bool) -> SubViewportContainer:
 	vp.transparent_bg = false
 	vp.handle_input_locally = false
 	vp.msaa_3d = Viewport.MSAA_DISABLED
-	# 无头自检不跑第二路 3D 绘制，避免共享主世界时卡住；参数和节点仍创建。
-	if DisplayServer.get_name() == "headless":
+	# 无头自检默认不跑第二路 3D 绘制，避免共享主世界时卡住；像素自检可 set_test_render(true)。
+	if DisplayServer.get_name() == "headless" and not _test_render:
 		vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	else:
 		vp.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE
@@ -189,19 +211,22 @@ func _make_view(nm: String, is_long: bool) -> SubViewportContainer:
 	var cam := Camera3D.new()
 	cam.name = nm + "Cam"
 	cam.projection = Camera3D.PROJECTION_ORTHOGONAL
-	cam.size = 0.18 if is_long else 0.09
+	cam.size = cam_size
 	cam.near = 0.01
 	cam.far = 0.8
-	cam.cull_mask = SECTION_LAYER_LONG if is_long else SECTION_LAYER_TRANS
+	cam.cull_mask = layer_bit
 	cam.environment = _env
 	cam.current = true
 	vp.add_child(cam)
-	if is_long:
+	if layer_bit == SECTION_LAYER_LONG:
 		_long_vp = vp
 		_long_cam = cam
-	else:
+	elif layer_bit == SECTION_LAYER_TRANS:
 		_trans_vp = vp
 		_trans_cam = cam
+	else:
+		_coronal_vp = vp
+		_coronal_cam = cam
 	return box
 
 
@@ -247,21 +272,27 @@ func _layout_views() -> void:
 		_long_box.visible = view_mode == MODE_LONG or view_mode == MODE_BOTH
 	if _trans_box:
 		_trans_box.visible = view_mode == MODE_TRANS or view_mode == MODE_BOTH
+	if _coronal_box:
+		_coronal_box.visible = view_mode == MODE_CORONAL or view_mode == MODE_BOTH
 	if _btn_long:
 		_btn_long.set_pressed_no_signal(view_mode == MODE_LONG)
 	if _btn_trans:
 		_btn_trans.set_pressed_no_signal(view_mode == MODE_TRANS)
+	if _btn_coronal:
+		_btn_coronal.set_pressed_no_signal(view_mode == MODE_CORONAL)
 	if _btn_both:
 		_btn_both.set_pressed_no_signal(view_mode == MODE_BOTH)
-	var live := DisplayServer.get_name() != "headless"
+	var live := DisplayServer.get_name() != "headless" or _test_render
 	if _long_vp:
 		_long_vp.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE if (live and _long_box and _long_box.visible and visible_on) else SubViewport.UPDATE_DISABLED
 	if _trans_vp:
 		_trans_vp.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE if (live and _trans_box and _trans_box.visible and visible_on) else SubViewport.UPDATE_DISABLED
+	if _coronal_vp:
+		_coronal_vp.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE if (live and _coronal_box and _coronal_box.visible and visible_on) else SubViewport.UPDATE_DISABLED
 
 
 func _bind_worlds() -> void:
-	if DisplayServer.get_name() == "headless":
+	if DisplayServer.get_name() == "headless" and not _test_render:
 		return
 	var main_vp := get_viewport()
 	if main_vp == null and player:
@@ -271,7 +302,7 @@ func _bind_worlds() -> void:
 	var w: World3D = main_vp.world_3d
 	if w == null:
 		return
-	for vp in [_long_vp, _trans_vp]:
+	for vp in [_long_vp, _trans_vp, _coronal_vp]:
 		if vp:
 			vp.world_3d = w
 
@@ -283,8 +314,9 @@ func _rebuild_copies() -> void:
 	# 同一剖切面切开：体表（躯干皮肤）、阴道、子宫/宫腔、外阴、金属棒。
 	if organs.get("skin_meshes") is Array:
 		for mi in organs.skin_meshes:
-			if mi is MeshInstance3D:
+			if mi is MeshInstance3D and not _is_excluded_skin(mi):
 				_add_copy(mi, 0, "skin")
+	_ensure_fills()
 	if organs.has_method("viscera_meshes"):
 		for kind in ["vagina", "uterus", "uterus_cavity"]:
 			var arr: Array = organs.call("viscera_meshes", kind)
@@ -341,7 +373,7 @@ var _iso_done := false
 
 func _isolate_main_cameras() -> void:
 	# 从所有非断面摄像机清掉 15/16 层，主视图就不会画到断面拷贝的白切面。
-	var hide := SECTION_LAYER_LONG | SECTION_LAYER_TRANS
+	var hide := SECTION_LAYER_LONG | SECTION_LAYER_TRANS | SECTION_LAYER_CORONAL
 	if _iso_done and player and player.has_method("get_camera"):
 		var cam0 = player.get_camera()
 		if cam0 is Camera3D and (int(cam0.cull_mask) & hide) == 0:
@@ -358,12 +390,12 @@ func _isolate_main_cameras() -> void:
 		vp = get_viewport()
 	if vp:
 		var cam2 := vp.get_camera_3d()
-		if cam2 and cam2 != _long_cam and cam2 != _trans_cam:
+		if cam2 and cam2 != _long_cam and cam2 != _trans_cam and cam2 != _coronal_cam:
 			cam2.cull_mask = cam2.cull_mask & ~hide
 
 
 func debug_isolation() -> Dictionary:
-	var hide := SECTION_LAYER_LONG | SECTION_LAYER_TRANS
+	var hide := SECTION_LAYER_LONG | SECTION_LAYER_TRANS | SECTION_LAYER_CORONAL
 	var main_mask := 0
 	if player and player.has_method("get_camera"):
 		var cam = player.get_camera()
@@ -400,12 +432,14 @@ func debug_isolation() -> Dictionary:
 		"main_sees_section": (main_mask & hide) != 0,
 		"long_cam_mask": int(_long_cam.cull_mask) if _long_cam else 0,
 		"trans_cam_mask": int(_trans_cam.cull_mask) if _trans_cam else 0,
+		"coronal_cam_mask": int(_coronal_cam.cull_mask) if _coronal_cam else 0,
+		"coronal_layer": SECTION_LAYER_CORONAL,
 		"long_copies": long_n,
 		"trans_copies": trans_n,
 		"unique_materials": unique,
 		"shared_source_material": shared,
 		"source_section_on": src_section_on,
-		"layers_distinct": _long_cam != null and _trans_cam != null and (_long_cam.cull_mask & _trans_cam.cull_mask) == 0,
+		"layers_distinct": _long_cam != null and _trans_cam != null and _coronal_cam != null and (_long_cam.cull_mask & _trans_cam.cull_mask) == 0 and (_long_cam.cull_mask & _coronal_cam.cull_mask) == 0 and (_trans_cam.cull_mask & _coronal_cam.cull_mask) == 0,
 	}
 
 
@@ -431,18 +465,25 @@ func debug_section_state() -> Dictionary:
 			uter_n += 1
 		elif k == "vagina":
 			vag_n += 1
+	var coronal_pl: Plane = pl["coronal"]
 	var long_look_dot := 0.0
 	var trans_look_dot := 0.0
+	var coronal_look_dot := 0.0
 	if _long_cam:
 		long_look_dot = absf((-_long_cam.global_transform.basis.z).normalized().dot(long_pl.normal.normalized()))
 	if _trans_cam:
 		trans_look_dot = absf((-_trans_cam.global_transform.basis.z).normalized().dot(trans_pl.normal.normalized()))
+	if _coronal_cam:
+		coronal_look_dot = absf((-_coronal_cam.global_transform.basis.z).normalized().dot(coronal_pl.normal.normalized()))
+	var limbs: Array = organs.call("limb_exclusion_capsules_world") if organs and organs.has_method("limb_exclusion_capsules_world") else []
 	return {
 		"long_normal": long_pl.normal,
 		"trans_normal": trans_pl.normal,
+		"coronal_normal": coronal_pl.normal,
 		"long_p": pl["long_p"],
 		"long_look": pl.get("long_look", pl["long_p"]),
 		"trans_p": pl["trans_p"],
+		"coronal_p": pl.get("coronal_p", pl["long_look"]),
 		"opening": pl["opening"],
 		"cervix": pl.get("cervix", Vector3.ZERO),
 		"axis": pl["axis"],
@@ -451,6 +492,9 @@ func debug_section_state() -> Dictionary:
 		"long_dist_cervix": absf(long_pl.distance_to(pl.get("cervix", pl["opening"]))),
 		"long_cam_along_normal": long_look_dot,
 		"trans_cam_along_normal": trans_look_dot,
+		"coronal_cam_along_normal": coronal_look_dot,
+		"limb_capsules": limbs.size(),
+		"hands_excluded": true,
 		"kinds": kinds,
 		"rod_copies": rod_n,
 		"skin_copies": skin_n,
@@ -500,7 +544,7 @@ func _cap_thickness_for(tissue: int, kind: String) -> float:
 func _add_copy(src: MeshInstance3D, tissue: int, kind: String = "") -> void:
 	if src == null or src.mesh == null:
 		return
-	if src.name.begins_with("Section_") or src.name.begins_with("SectionT_"):
+	if src.name.begins_with("Section_") or src.name.begins_with("SectionT_") or src.name.begins_with("SectionC_") or src.name.begins_with("SectionFill"):
 		return
 	# 已为该源建过纵向拷贝则跳过。
 	for rec0 in _copies:
@@ -526,6 +570,9 @@ func _add_copy(src: MeshInstance3D, tissue: int, kind: String = "") -> void:
 	cap.set_shader_parameter("tissue", tissue)
 	cap.set_shader_parameter("stylize_layers", 0.0)
 	cap.set_shader_parameter("cap_thickness", thick)
+	if kind == "skin":
+		cut.set_shader_parameter("exclude_limbs", 1.0)
+		cap.set_shader_parameter("exclude_limbs", 1.0)
 	cut.next_pass = cap
 	copy.material_override = cut
 	src.add_child(copy)
@@ -559,6 +606,11 @@ func _set_copies_visible(on: bool) -> void:
 		if is_instance_valid(src) and src is Node3D:
 			src_on = (src as Node3D).visible
 		c.visible = on and src_on
+	for k in _fills.keys():
+		var recf: Dictionary = _fills[k]
+		var mi = recf.get("mi")
+		if is_instance_valid(mi):
+			mi.visible = on
 
 
 func _ball_world() -> Vector3:
@@ -646,9 +698,20 @@ func _planes() -> Dictionary:
 		trans_p = tip
 	var long_pl := Plane(long_n, long_n.dot(long_p))
 	var trans_pl := Plane(axis, axis.dot(trans_p))
+	# 平扫 / 冠状：面内含通道轴与左右轴，平行于下腹皮肤，过宫颈（从而同时切开阴道与子宫）。
+	var cor_n := up
+	var cor_p := cervix if cervix.length_squared() > 1e-12 else (opening + axis * 0.06)
+	# 投影到轴线上，避免轻微侧偏带走平面。
+	var axis_origin := opening
+	cor_p = axis_origin + axis * (cor_p - axis_origin).dot(axis)
+	var cor_look := opening.lerp(cor_p, 0.55)
+	if cervix.length_squared() > 1e-12:
+		cor_look = opening.lerp(cervix, 0.62)
+	var cor_pl := Plane(cor_n, cor_n.dot(cor_p))
 	return {
 		"long": long_pl,
 		"trans": trans_pl,
+		"coronal": cor_pl,
 		"opening": opening,
 		"cervix": cervix,
 		"axis": axis,
@@ -657,6 +720,8 @@ func _planes() -> Dictionary:
 		"long_p": long_p,
 		"long_look": long_look,
 		"trans_p": trans_p,
+		"coronal_p": cor_p,
+		"coronal_look": cor_look,
 	}
 
 
@@ -721,15 +786,25 @@ func _sync_materials(pl: Dictionary) -> void:
 		_apply_shared_deform(cut, cap, src_params, rec)
 		_apply_prolapse_uniforms(rec)
 		# 默认先写纵向；_ensure_split_copies 会给横向单独的拷贝。
-		var plane: Plane = pl["long"] if rec.get("which", "long") == "long" else pl["trans"]
-		var pnt: Vector3 = pl["long_p"] if rec.get("which", "long") == "long" else pl["trans_p"]
+		var which := str(rec.get("which", "long"))
+		var plane: Plane = pl["long"]
+		var pnt: Vector3 = pl["long_p"]
+		if which == "trans":
+			plane = pl["trans"]
+			pnt = pl["trans_p"]
+		elif which == "coronal":
+			plane = pl["coronal"]
+			pnt = pl["coronal_p"]
 		for m in [cut, cap]:
 			m.set_shader_parameter("section_on", 1.0)
 			m.set_shader_parameter("section_point", pnt)
 			m.set_shader_parameter("section_normal", plane.normal)
 			m.set_shader_parameter("canal_open_ab", open_ab)
 			m.set_shader_parameter("canal_axis_ab", axis_ab)
+		_write_limb_exclusion(cut, cap, rec)
 	_ensure_trans_copies(pl, src_params, open_ab, axis_ab)
+	_ensure_coronal_copies(pl, src_params, open_ab, axis_ab)
+	_sync_fills(pl)
 
 
 func _plane_point(pl: Plane) -> Vector3:
@@ -750,6 +825,8 @@ func _deform_keys(rec: Dictionary) -> Array:
 		"uter_ball", "uter_ball_p",
 		"stir_off", "stir_p",
 		"uter_str", "uter_str_pivot", "uter_str_from", "uter_str_to", "uter_str_len",
+		"fundus_lift", "fundus_open_ab", "fundus_cerv_ab", "fundus_axis_ab",
+		"canal_stretch_on", "canal_os_rest", "canal_os_now", "canal_open_rest",
 		"drag_grab", "drag_off", "drag_radius", "dent", "dent_off",
 		"ab_navel", "ab_right", "ab_up", "ab_fwd",
 	]
@@ -803,6 +880,9 @@ func _ensure_trans_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab: V
 		var thick := _cap_thickness_for(int(rec["tissue"]), str(rec.get("kind", "")))
 		cut.set_shader_parameter("cap_thickness", thick)
 		cap.set_shader_parameter("cap_thickness", thick)
+		if str(rec.get("kind", "")) == "skin":
+			cut.set_shader_parameter("exclude_limbs", 1.0)
+			cap.set_shader_parameter("exclude_limbs", 1.0)
 		cut.next_pass = cap
 		copy.material_override = cut
 		src.add_child(copy)
@@ -820,6 +900,59 @@ func _ensure_trans_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab: V
 		_copies.append(e)
 
 
+func _ensure_coronal_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab: Vector3, axis_ab: Vector3) -> void:
+	var has_c := false
+	for rec in _copies:
+		if rec.get("which", "long") == "coronal":
+			has_c = true
+			_write_plane(rec, pl["coronal"], pl["coronal_p"], src_params, open_ab, axis_ab)
+	if has_c:
+		return
+	if view_mode != MODE_CORONAL and view_mode != MODE_BOTH:
+		return
+	var extras: Array = []
+	for rec in _copies:
+		if rec.get("which", "long") != "long":
+			continue
+		var srcv = rec["src"]
+		if not is_instance_valid(srcv):
+			continue
+		var src: MeshInstance3D = srcv
+		var copy := MeshInstance3D.new()
+		copy.name = "SectionC_" + src.name
+		copy.mesh = src.mesh
+		copy.skin = src.skin
+		copy.skeleton = src.skeleton
+		copy.layers = SECTION_LAYER_CORONAL
+		copy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var cut := ShaderMaterial.new()
+		cut.shader = CUT_SHADER
+		cut.set_shader_parameter("tissue", rec["tissue"])
+		cut.set_shader_parameter("stylize_layers", 0.0)
+		var cap := ShaderMaterial.new()
+		cap.shader = CAP_SHADER
+		cap.set_shader_parameter("tissue", rec["tissue"])
+		cap.set_shader_parameter("stylize_layers", 0.0)
+		var thick := _cap_thickness_for(int(rec["tissue"]), str(rec.get("kind", "")))
+		cut.set_shader_parameter("cap_thickness", thick)
+		cap.set_shader_parameter("cap_thickness", thick)
+		if str(rec.get("kind", "")) == "skin":
+			cut.set_shader_parameter("exclude_limbs", 1.0)
+			cap.set_shader_parameter("exclude_limbs", 1.0)
+		cut.next_pass = cap
+		copy.material_override = cut
+		src.add_child(copy)
+		if src.skeleton != NodePath():
+			var sk3 := src.get_node_or_null(src.skeleton)
+			if sk3:
+				copy.skeleton = copy.get_path_to(sk3)
+		var nrec := {"copy": copy, "src": src, "cut": cut, "cap": cap, "tissue": rec["tissue"], "which": "coronal", "no_deform": rec.get("no_deform", false), "kind": rec.get("kind", "")}
+		extras.append(nrec)
+		_write_plane(nrec, pl["coronal"], pl["coronal_p"], src_params, open_ab, axis_ab)
+	for e in extras:
+		_copies.append(e)
+
+
 func _write_plane(rec: Dictionary, plane: Plane, pnt: Vector3, src_params: ShaderMaterial, open_ab: Vector3, axis_ab: Vector3) -> void:
 	_apply_shared_deform(rec["cut"], rec["cap"], src_params, rec)
 	_apply_prolapse_uniforms(rec)
@@ -829,6 +962,7 @@ func _write_plane(rec: Dictionary, plane: Plane, pnt: Vector3, src_params: Shade
 		m.set_shader_parameter("section_normal", plane.normal)
 		m.set_shader_parameter("canal_open_ab", open_ab)
 		m.set_shader_parameter("canal_axis_ab", axis_ab)
+	_write_limb_exclusion(rec["cut"], rec["cap"], rec)
 
 
 func _place_cameras(pl: Dictionary) -> void:
@@ -868,18 +1002,33 @@ func _place_cameras(pl: Dictionary) -> void:
 			tup = side
 		_trans_cam.global_transform = Transform3D(Basis().looking_at(-from2, tup), c2 + from2)
 		_trans_cam.size = 0.09
-	# 两路摄像机都在各自 SubViewport 里，world_3d 已指向主世界。
+	# 平扫正交摄像机沿腹侧法线正对冠状切面，框住外口到子宫。
+	if _coronal_cam and (view_mode == MODE_CORONAL or view_mode == MODE_BOTH):
+		var c3: Vector3 = pl.get("coronal_look", pl["coronal_p"])
+		var from3 := up * 0.22
+		var cup := axis
+		if absf(from3.normalized().dot(axis)) > 0.92:
+			cup = side
+		_coronal_cam.global_transform = Transform3D(Basis().looking_at(-from3, cup), c3 + from3)
+		_coronal_cam.size = 0.22
+	# 各路摄像机都在各自 SubViewport 里，world_3d 已指向主世界。
 	if _long_cam:
 		_flip_plane_to_camera(_long_cam, "long")
 	if _trans_cam:
 		_flip_plane_to_camera(_trans_cam, "trans")
+	if _coronal_cam:
+		_flip_plane_to_camera(_coronal_cam, "coronal")
 
 
 func _flip_plane_to_camera(cam: Camera3D, which: String) -> void:
 	# 平面位置保持解剖位置；这里只选定裁剪朝向：着色器丢掉 s<0，
 	# 所以法线指向被丢掉的一侧 = 相机这一侧的反方向，切面正对正交相机。
 	var pl := _planes()
-	var pnt: Vector3 = pl["long_look"] if which == "long" else pl["trans_p"]
+	var pnt: Vector3 = pl["long_look"]
+	if which == "trans":
+		pnt = pl["trans_p"]
+	elif which == "coronal":
+		pnt = pl.get("coronal_look", pl["coronal_p"])
 	var to_cam := cam.global_position - pnt
 	if to_cam.length_squared() < 1e-10:
 		return
@@ -896,7 +1045,8 @@ func _place_panel() -> void:
 		return
 	var vp := _panel.get_viewport()
 	var vis := vp.get_visible_rect().size if vp else Vector2(1280, 720)
-	var w := 360.0 if view_mode == MODE_BOTH else 188.0
+	var nviews := 3 if view_mode == MODE_BOTH else 1
+	var w := 188.0 if nviews == 1 else 546.0
 	var h := 210.0
 	_panel.position = Vector2(vis.x - w - 16.0, 16.0)
 	_panel.size = Vector2(w, h)
@@ -908,15 +1058,491 @@ func _place_panel() -> void:
 		_btn_toggle.visible = _btn_toggle.visible and (tool == "ball_rod" or visible_on)
 
 
+
+func _is_excluded_skin(mi: MeshInstance3D) -> bool:
+	if mi == null:
+		return true
+	var low := mi.name.to_lower()
+	if "fistarm" in low or low == "fistarm":
+		return true
+	for k in ["hand", "finger", "forearm", "wrist", "thumb", "index", "middle", "ring", "little", "pinky"]:
+		if k in low:
+			return true
+	return false
+
+
+func _write_limb_exclusion(cut: ShaderMaterial, cap: ShaderMaterial, rec: Dictionary) -> void:
+	if str(rec.get("kind", "")) != "skin":
+		return
+	var caps: Array = organs.call("limb_exclusion_capsules_world") if organs and organs.has_method("limb_exclusion_capsules_world") else []
+	var n := mini(caps.size(), 8)
+	var a := PackedVector3Array()
+	var b := PackedVector3Array()
+	var r := PackedFloat32Array()
+	a.resize(8)
+	b.resize(8)
+	r.resize(8)
+	for i in 8:
+		if i < n:
+			a[i] = caps[i]["a"]
+			b[i] = caps[i]["b"]
+			r[i] = float(caps[i]["r"])
+		else:
+			a[i] = Vector3.ZERO
+			b[i] = Vector3.ZERO
+			r[i] = 0.0
+	for m2 in [cut, cap]:
+		m2.set_shader_parameter("exclude_limbs", 1.0)
+		m2.set_shader_parameter("limb_a", a)
+		m2.set_shader_parameter("limb_b", b)
+		m2.set_shader_parameter("limb_r", r)
+		m2.set_shader_parameter("limb_count", n)
+
+
+func _ensure_fills() -> void:
+	if _fill_root == null or not is_instance_valid(_fill_root):
+		_fill_root = Node3D.new()
+		_fill_root.name = "SectionFills"
+		if organs:
+			organs.add_child(_fill_root)
+		else:
+			add_child(_fill_root)
+	for rec in [
+		{"which": "long", "layer": SECTION_LAYER_LONG},
+		{"which": "trans", "layer": SECTION_LAYER_TRANS},
+		{"which": "coronal", "layer": SECTION_LAYER_CORONAL},
+	]:
+		var w := str(rec["which"])
+		if _fills.has(w) and is_instance_valid(_fills[w].get("mi")):
+			continue
+		var mi := MeshInstance3D.new()
+		mi.name = "SectionFill_" + w
+		var q := QuadMesh.new()
+		q.size = Vector2(0.55, 0.55)
+		mi.mesh = q
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+		mi.layers = int(rec["layer"])
+		var mat := ShaderMaterial.new()
+		mat.shader = FILL_SHADER
+		mat.render_priority = -1
+		mi.material_override = mat
+		_fill_root.add_child(mi)
+		_fills[w] = {"mi": mi, "mat": mat}
+
+
+func _sync_fills(pl: Dictionary) -> void:
+	_ensure_fills()
+	var canal := _canal()
+	var open_ab: Vector3 = canal.get("opening_ab", Vector3.ZERO)
+	var axis_ab: Vector3 = canal.get("axis_ab", Vector3(0, 1, 0))
+	var cerv_ab: Vector3 = canal.get("cervix_ab", open_ab + axis_ab * 0.05)
+	var shape: Dictionary = organs.call("uterus_section_shape") if organs and organs.has_method("uterus_section_shape") else {}
+	var prof: Dictionary = organs.call("section_profile_params") if organs and organs.has_method("section_profile_params") else {}
+	var xf: Transform3D = organs.call("abdomen_frame") if organs and organs.has_method("abdomen_frame") else Transform3D.IDENTITY
+	# 腹部基（给 fill 着色器 to_ab 用）从源材质拷。
+	var src: ShaderMaterial = null
+	if organs and organs.get("_all_mats") is Array and (organs.get("_all_mats") as Array).size() > 0:
+		src = organs.get("_all_mats")[0]
+	var vag_lumen := 0.007
+	if organs and organs.has_method("canal_dilate_radius_at"):
+		var mid_s := open_ab.distance_to(cerv_ab) * 0.45
+		vag_lumen = maxf(0.005, float(organs.call("canal_dilate_radius_at", mid_s)) - 0.006)
+	var rod_tip := _ball_world()
+	var rod_r := 0.0
+	var rod_ax: Vector3 = pl["axis"]
+	if mode and mode.has_method("tool_controller"):
+		var ctl = mode.call("tool_controller")
+		if ctl and ctl.has_method("radius"):
+			rod_r = float(ctl.call("radius"))
+			if ctl.has_method("tip_world"):
+				rod_tip = ctl.call("tip_world")
+		if ctl and ctl.get("_root") is Node3D:
+			rod_ax = (ctl.get("_root") as Node3D).global_transform.basis.z
+	var uter_ax: Vector3 = shape.get("axis_ab", axis_ab)
+	if uter_ax.length_squared() < 1e-10:
+		uter_ax = axis_ab
+	var lift := 0.0
+	if organs and organs.has_method("fundus_lift"):
+		lift = float(organs.call("fundus_lift"))
+	var map := {
+		"long": [pl["long"], pl.get("long_look", pl["long_p"]), _long_cam],
+		"trans": [pl["trans"], pl["trans_p"], _trans_cam],
+		"coronal": [pl["coronal"], pl.get("coronal_look", pl["coronal_p"]), _coronal_cam],
+	}
+	for w in map.keys():
+		if not _fills.has(w):
+			continue
+		var rec: Dictionary = _fills[w]
+		var mi: MeshInstance3D = rec["mi"]
+		var mat: ShaderMaterial = rec["mat"]
+		if not is_instance_valid(mi):
+			continue
+		var plane: Plane = map[w][0]
+		var pnt: Vector3 = map[w][1]
+		var cam: Camera3D = map[w][2]
+		var n := plane.normal.normalized()
+		if cam:
+			var to_cam: Vector3 = cam.global_position - pnt
+			if to_cam.length_squared() > 1e-10:
+				n = -to_cam.normalized()
+		# 四边形略偏向相机，盖住切面黑空洞，金属棒/组织拷贝仍可画在前面。
+		var pos := pnt - n * 0.00045
+		var up: Vector3 = pl["up"]
+		if absf(n.dot(up)) > 0.92:
+			up = pl["axis"]
+		mi.global_transform = Transform3D(Basis().looking_at(pos + n, up), pos)
+		var vis: bool = (w == "long" and (view_mode == MODE_LONG or view_mode == MODE_BOTH))
+		vis = vis or (w == "trans" and (view_mode == MODE_TRANS or view_mode == MODE_BOTH))
+		vis = vis or (w == "coronal" and (view_mode == MODE_CORONAL or view_mode == MODE_BOTH))
+		mi.visible = visible_on and vis
+		if src:
+			for key in ["ab_navel", "ab_right", "ab_up", "ab_fwd"]:
+				if src.get_shader_parameter(key) != null:
+					mat.set_shader_parameter(key, src.get_shader_parameter(key))
+		mat.set_shader_parameter("fill_on", 1.0 if mi.visible else 0.0)
+		mat.set_shader_parameter("section_point", pnt)
+		mat.set_shader_parameter("section_normal", n)
+		mat.set_shader_parameter("canal_open_ab", open_ab)
+		mat.set_shader_parameter("canal_axis_ab", axis_ab)
+		mat.set_shader_parameter("canal_cerv_ab", cerv_ab + axis_ab * lift)
+		mat.set_shader_parameter("uter_axis_ab", uter_ax)
+		mat.set_shader_parameter("uter_len", float(shape.get("len", 0.055)) + lift)
+		mat.set_shader_parameter("uter_rad", float(shape.get("rad", 0.022)))
+		mat.set_shader_parameter("uter_wall", float(shape.get("wall", 0.006)))
+		mat.set_shader_parameter("vag_lumen", vag_lumen)
+		mat.set_shader_parameter("vag_wall", 0.009)
+		mat.set_shader_parameter("rod_tip_w", rod_tip)
+		mat.set_shader_parameter("rod_radius", rod_r)
+		mat.set_shader_parameter("rod_axis_w", rod_ax)
+		mat.set_shader_parameter("rod_shaft_r", 0.004)
+		mat.set_shader_parameter("rod_shaft_len", 0.18)
+		if not prof.is_empty():
+			if prof.get("prof_tex") != null:
+				mat.set_shader_parameter("prof_tex", prof["prof_tex"])
+			mat.set_shader_parameter("prof_n", int(prof.get("prof_n", 20)))
+			if prof.get("prof_bias") != null:
+				mat.set_shader_parameter("prof_bias", prof["prof_bias"])
+			if prof.get("prof_scale") != null:
+				mat.set_shader_parameter("prof_scale", prof["prof_scale"])
+
+
+func set_test_render(on: bool) -> void:
+	_test_render = on
+	if on:
+		_bind_worlds()
+	_layout_views()
+
+
+func debug_capture_section(which: String) -> Image:
+	# 无头或离屏回读小窗像素。未启用 test_render 或纹理为空时返回 null。
+	var vp: SubViewport = _vp_of(which)
+	if vp == null:
+		return null
+	var tex := vp.get_texture()
+	if tex == null:
+		return null
+	return tex.get_image()
+
+
+func debug_section_metrics(which: String) -> Dictionary:
+	# CPU 栅格化与填充着色器相同的体内/器官测试，不依赖 GPU，供无头自检。
+	var pl := _planes()
+	var cam: Camera3D = _cam_of(which)
+	var out := {
+		"which": which,
+		"ok": false,
+		"px": 0,
+		"silhouette": 0,
+		"black_in_sil": 0,
+		"black_frac": 1.0,
+		"cavity": 0,
+		"uter_wall": 0,
+		"uter_lumen": 0,
+		"vag_wall": 0,
+		"vag_lumen": 0,
+		"rod": 0,
+		"hand_bleed": 0,
+		"hand_samples": 0,
+	}
+	if cam == null:
+		return out
+	var w := 170
+	var h := 168
+	var colors := _raster_fill(which, pl, cam, w, h)
+	if colors.is_empty():
+		return out
+	var sil := 0
+	var black := 0
+	var cavity := 0
+	var uw := 0
+	var ul := 0
+	var vw := 0
+	var vl := 0
+	var rod := 0
+	var palette := {
+		"cavity": Color(0.48, 0.20, 0.26),
+		"uter_wall": Color(0.70, 0.30, 0.40),
+		"uter_lumen": Color(0.45, 0.16, 0.22),
+		"vag_wall": Color(0.91, 0.55, 0.60),
+		"skin": Color(0.91, 0.75, 0.66),
+		"vag_lumen": Color(0.58, 0.24, 0.30),
+		"rod": Color(0.78, 0.82, 0.86),
+	}
+	for i in colors.size():
+		var c: Color = colors[i]
+		var luma := c.r * 0.3 + c.g * 0.6 + c.b * 0.1
+		var is_bg := luma < 0.14 and c.r < 0.18 and c.g < 0.16
+		if not is_bg:
+			sil += 1
+			if c.r < 0.08 and c.g < 0.08 and c.b < 0.08:
+				black += 1
+			var best := ""
+			var best_d := 0.08
+			for k in palette.keys():
+				var pc: Color = palette[k]
+				var d := absf(c.r - pc.r) + absf(c.g - pc.g) + absf(c.b - pc.b)
+				if d < best_d:
+					best_d = d
+					best = str(k)
+			if best == "cavity":
+				cavity += 1
+			elif best == "uter_wall":
+				uw += 1
+			elif best == "uter_lumen":
+				ul += 1
+			elif best == "vag_wall":
+				vw += 1
+			elif best == "vag_lumen":
+				vl += 1
+			elif best == "rod":
+				rod += 1
+	out["px"] = colors.size()
+	out["silhouette"] = sil
+	out["black_in_sil"] = black
+	out["black_frac"] = float(black) / float(maxi(sil, 1))
+	out["cavity"] = cavity
+	out["uter_wall"] = uw
+	out["uter_lumen"] = ul
+	out["vag_wall"] = vw
+	out["vag_lumen"] = vl
+	out["rod"] = rod
+	# 手臂：胶囊在画面上且在体表轮廓外的采样不得被组织色填上。
+	var bleed := 0
+	var hs := 0
+	var limbs: Array = organs.call("limb_exclusion_capsules_world") if organs and organs.has_method("limb_exclusion_capsules_world") else []
+	for li in limbs:
+		var a: Vector3 = li["a"]
+		var b: Vector3 = li["b"]
+		var rr: float = float(li["r"])
+		for k in 6:
+			var wp: Vector3 = a.lerp(b, float(k) / 5.0)
+			var scr := cam.unproject_position(wp)
+			if scr.x < 0.0 or scr.y < 0.0 or scr.x >= float(w) or scr.y >= float(h):
+				continue
+			# 点在体表轮廓外才算“手露在断面里”。
+			if _torso_contains_world(wp, 0.0):
+				continue
+			hs += 1
+			var ix := int(scr.x)
+			var iy := int(scr.y)
+			var c2: Color = colors[iy * w + ix]
+			var luma2 := c2.r * 0.3 + c2.g * 0.6 + c2.b * 0.1
+			if luma2 >= 0.16:
+				bleed += 1
+	out["hand_samples"] = hs
+	out["hand_bleed"] = bleed
+	out["ok"] = sil > 40 and out["black_frac"] < 0.03
+	return out
+
+
+func _vp_of(which: String) -> SubViewport:
+	if which == "trans":
+		return _trans_vp
+	if which == "coronal":
+		return _coronal_vp
+	return _long_vp
+
+
+func _cam_of(which: String) -> Camera3D:
+	if which == "trans":
+		return _trans_cam
+	if which == "coronal":
+		return _coronal_cam
+	return _long_cam
+
+
+func _torso_contains_world(wp: Vector3, inset: float) -> bool:
+	if organs == null or not organs.has_method("abdomen_frame") or not organs.has_method("torso_profile_at_ab"):
+		return false
+	var xf: Transform3D = organs.call("abdomen_frame")
+	var l: Vector3 = xf.affine_inverse() * wp
+	var pr: Vector3 = organs.call("torso_profile_at_ab", l.y)
+	var hx := pr.x - inset
+	var zf := pr.y - inset
+	var zb := pr.z + inset
+	if hx < 0.02:
+		return false
+	return absf(l.x) <= hx and l.z <= zf and l.z >= zb
+
+
+func _raster_fill(which: String, pl: Dictionary, cam: Camera3D, w: int, h: int) -> Array:
+	var out: Array = []
+	out.resize(w * h)
+	# 填充逻辑与 section_fill.gdshader 对齐（腹部局部坐标）。
+	var canal := _canal()
+	var open_ab: Vector3 = canal.get("opening_ab", Vector3.ZERO)
+	var axis_ab: Vector3 = canal.get("axis_ab", Vector3(0, 1, 0))
+	if axis_ab.length_squared() < 1e-10:
+		axis_ab = Vector3(0, 1, 0)
+	else:
+		axis_ab = axis_ab.normalized()
+	var cerv_ab: Vector3 = canal.get("cervix_ab", open_ab + axis_ab * 0.05)
+	var lift := 0.0
+	if organs and organs.has_method("fundus_lift"):
+		lift = float(organs.call("fundus_lift"))
+	cerv_ab = cerv_ab + axis_ab * lift
+	var shape: Dictionary = organs.call("uterus_section_shape") if organs and organs.has_method("uterus_section_shape") else {}
+	var uter_ax: Vector3 = shape.get("axis_ab", axis_ab)
+	if uter_ax.length_squared() < 1e-10:
+		uter_ax = axis_ab
+	else:
+		uter_ax = uter_ax.normalized()
+	var ulen := float(shape.get("len", 0.055)) + lift
+	var ur := float(shape.get("rad", 0.022))
+	var uw := float(shape.get("wall", 0.006))
+	var vag_lumen := 0.007
+	if organs and organs.has_method("canal_dilate_radius_at"):
+		vag_lumen = maxf(0.005, float(organs.call("canal_dilate_radius_at", open_ab.distance_to(cerv_ab) * 0.45)) - 0.006)
+	var vag_wall := 0.007
+	var canal_len := maxf((cerv_ab - open_ab).dot(axis_ab), 0.03)
+	var xf: Transform3D = organs.call("abdomen_frame") if organs and organs.has_method("abdomen_frame") else Transform3D.IDENTITY
+	var inv := xf.affine_inverse()
+	var rod_tip := _ball_world()
+	var rod_r := 0.0
+	var rod_ax: Vector3 = pl["axis"]
+	if mode and mode.has_method("tool_controller"):
+		var ctl = mode.call("tool_controller")
+		if ctl and ctl.has_method("radius"):
+			rod_r = float(ctl.call("radius"))
+			if ctl.has_method("tip_world"):
+				rod_tip = ctl.call("tip_world")
+		if ctl and ctl.get("_root") is Node3D:
+			rod_ax = (ctl.get("_root") as Node3D).global_transform.basis.z
+	var pnt: Vector3 = pl.get("long_look", pl["long_p"])
+	var plane: Plane = pl["long"]
+	if which == "trans":
+		pnt = pl["trans_p"]
+		plane = pl["trans"]
+	elif which == "coronal":
+		pnt = pl.get("coronal_look", pl["coronal_p"])
+		plane = pl["coronal"]
+	var n := plane.normal.normalized()
+	# 自己做正交反投影，不依赖 SubViewport 是否是当前视口（无头下 project_position 不可靠）。
+	var bg := Color(0.12, 0.09, 0.10, 1)
+	var aspect := float(w) / float(max(h, 1))
+	var half_h := cam.size * 0.5
+	var half_w := half_h * aspect
+	var origin := cam.global_position
+	var right := cam.global_transform.basis.x
+	var upv := cam.global_transform.basis.y
+	var fwd := -cam.global_transform.basis.z
+	if fwd.length_squared() < 1e-12:
+		fwd = -n
+	else:
+		fwd = fwd.normalized()
+	for y in h:
+		for x in w:
+			var sx := ((float(x) + 0.5) / float(w) - 0.5) * 2.0 * half_w
+			var sy := (0.5 - (float(y) + 0.5) / float(h)) * 2.0 * half_h
+			var wp := origin + right * sx + upv * sy
+			var den := fwd.dot(n)
+			var hit := wp
+			if absf(den) > 1e-6:
+				hit = wp + fwd * ((pnt - wp).dot(n) / den)
+			var col := _fill_color_at(inv * hit, open_ab, axis_ab, cerv_ab, canal_len, uter_ax, ulen, ur, uw, vag_lumen, vag_wall, inv * rod_tip, rod_r, rod_tip, rod_ax, hit)
+			out[y * w + x] = col
+	return out
+
+
+func _fill_color_at(l: Vector3, open_ab: Vector3, ax: Vector3, cerv: Vector3, canal_len: float, uax: Vector3, ulen: float, ur: float, uwall: float, vlumen: float, vwall: float, rod_ab: Vector3, rod_r: float, rod_tip_w: Vector3, rod_ax_w: Vector3, wp: Vector3) -> Color:
+	if rod_r > 1e-5 and l.distance_to(rod_ab) <= rod_r + 0.0004:
+		return Color(0.78, 0.82, 0.86)
+	if rod_r > 1e-5 and rod_ax_w.length_squared() > 1e-10:
+		var rd := rod_ax_w.normalized()
+		var tsh := clampf(-(wp - rod_tip_w).dot(rd), 0.0, 0.18)
+		var dsh := ((wp - rod_tip_w) + rd * tsh).length()
+		if dsh <= 0.0043 and tsh > rod_r * 0.35:
+			return Color(0.78, 0.82, 0.86)
+	var along := (l - open_ab).dot(ax)
+	var lat := (l - open_ab) - ax * along
+	var pr := lat.length()
+	var u0 := cerv + uax * (ulen * 0.52)
+	var du := l - u0
+	var ua := du.dot(uax)
+	var urad := du - uax * ua
+	var q_out := (ua * ua) / pow(ulen * 0.52, 2.0) + urad.length_squared() / (ur * ur)
+	var rin := maxf(ur - uwall, 0.006)
+	var lin := maxf(ulen * 0.52 - uwall, 0.012)
+	var q_in := (ua * ua) / (lin * lin) + urad.length_squared() / (rin * rin)
+	if q_out <= 1.0 and q_in >= 1.0:
+		return Color(0.70, 0.30, 0.40)
+	if q_in < 1.0:
+		return Color(0.45, 0.16, 0.22)
+	var along_vag := along >= -0.012 and along <= canal_len + 0.006
+	if along_vag and pr >= vlumen and pr <= vlumen + vwall:
+		return Color(0.91, 0.55, 0.60)
+	if along_vag and pr < vlumen:
+		return Color(0.58, 0.24, 0.30)
+	if _torso_contains_ab(l, 0.010):
+		return Color(0.48, 0.20, 0.26)
+	if _torso_contains_ab(l, 0.0):
+		return Color(0.91, 0.75, 0.66)
+	return Color(0.12, 0.09, 0.10)
+
+
+func _torso_contains_ab(l: Vector3, inset: float) -> bool:
+	if organs == null or not organs.has_method("torso_profile_at_ab"):
+		return false
+	if organs.has_method("section_profile_params"):
+		var prm: Dictionary = organs.call("section_profile_params")
+		if prm.get("prof_bias") != null and prm.get("prof_scale") != null:
+			var bias: Vector4 = prm["prof_bias"]
+			var scale: Vector4 = prm["prof_scale"]
+			var y0 := bias.x - 0.04
+			var y1 := bias.x + scale.x + 0.02
+			if l.y < y0 or l.y > y1:
+				return false
+	var pr: Vector3 = organs.call("torso_profile_at_ab", l.y)
+	var hx := pr.x - inset
+	if hx < 0.02:
+		return false
+	return absf(l.x) <= hx and l.z <= (pr.y - inset) and l.z >= (pr.z + inset)
+
+
 func deactivate() -> void:
 	set_visible_on(false)
 	_clear_copies()
+	_clear_fills()
 	if _btn_toggle:
 		_btn_toggle.visible = false
 
 
+func _clear_fills() -> void:
+	for k in _fills.keys():
+		var rec: Dictionary = _fills[k]
+		var mi = rec.get("mi")
+		if is_instance_valid(mi):
+			mi.queue_free()
+	_fills.clear()
+	if _fill_root and is_instance_valid(_fill_root):
+		_fill_root.queue_free()
+	_fill_root = null
+
+
 func _exit_tree() -> void:
 	_clear_copies()
+	_clear_fills()
 	if _panel and is_instance_valid(_panel):
 		_panel.queue_free()
 	if _btn_toggle and is_instance_valid(_btn_toggle) and _btn_toggle.get_parent() != self:

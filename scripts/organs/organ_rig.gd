@@ -113,6 +113,12 @@ var _uterus_phys_origin: Vector3 = Vector3.ZERO
 var _uterus_phys_axis: Vector3 = Vector3(0, 1, 0)
 var _uterus_phys_blend: float = 0.007
 
+# 钢球顶到宫底后的轴向顶起（米）；默认 0，与手术取出用的 canal_stretch 分开。
+var _fundus_lift: float = 0.0
+var _fundus_open_ab: Vector3 = Vector3.ZERO
+var _fundus_cerv_ab: Vector3 = Vector3.ZERO
+var _fundus_axis_ab: Vector3 = Vector3(0, 1, 0)
+
 # 拳交脏器软体（弹簧）：杆参数与子宫位移滞后于拳头
 var _rod_reach_s: float = 0.0
 var _rod_dir_s: Vector3 = Vector3(0, 1, 0)
@@ -553,6 +559,137 @@ func uterus_straighten_offset_at(p_ab: Vector3) -> Vector3:
 	return q2 - q
 
 
+
+func set_fundus_lift(lift_m: float, open_ab: Vector3, cerv_ab: Vector3, axis_ab: Vector3) -> void:
+	_fundus_lift = maxf(lift_m, 0.0)
+	_fundus_open_ab = open_ab
+	_fundus_cerv_ab = cerv_ab
+	if axis_ab.length_squared() < 1e-10:
+		_fundus_axis_ab = Vector3(0, 1, 0)
+	else:
+		_fundus_axis_ab = axis_ab.normalized()
+	_push_dilate_uniforms()
+
+
+func clear_fundus_lift() -> void:
+	_fundus_lift = 0.0
+	_push_dilate_uniforms()
+
+
+func fundus_lift() -> float:
+	return _fundus_lift
+
+
+func fundus_lift_offset_at(p_ab: Vector3) -> Vector3:
+	if _fundus_lift <= 1e-6:
+		return Vector3.ZERO
+	var ax := _fundus_axis_ab
+	if ax.length_squared() < 1e-10:
+		return Vector3.ZERO
+	ax = ax.normalized()
+	var L := maxf((_fundus_cerv_ab - _fundus_open_ab).dot(ax), 0.02)
+	var s := (p_ab - _fundus_open_ab).dot(ax)
+	var tt := 0.0
+	if s <= 0.0:
+		tt = 0.0
+	elif s >= L:
+		tt = 1.0
+	else:
+		var u := s / L
+		tt = u * u * (3.0 - 2.0 * u)
+	var mid := _fundus_open_ab + ax * clampf(s, 0.0, L + 0.08)
+	var rad := p_ab.distance_to(mid)
+	var rw := 1.0 - smoothstep(0.038, 0.070, rad)
+	if s > L:
+		rw = maxf(rw, 1.0 - smoothstep(0.045, 0.080, rad))
+	if rw <= 1e-5:
+		return Vector3.ZERO
+	return ax * _fundus_lift * tt * rw
+
+
+func torso_profile_at_ab(y_rel: float) -> Vector3:
+	return _profile_at(y_rel)
+
+
+func section_profile_params() -> Dictionary:
+	# 给断面填充着色器复用透视窗口同一张 RGBA8 剖面纹理。
+	if _prof_tex == null and meta.has("profile"):
+		# 确保纹理已建（皮肤安装时会建；若没有，用第一份皮肤材质路径建一次）。
+		if not _skin_mats.is_empty() and _skin_mats[0] is ShaderMaterial:
+			_set_profile_params(_skin_mats[0])
+	if _prof_tex == null:
+		return {}
+	var m: ShaderMaterial = _skin_mats[0] if (not _skin_mats.is_empty() and _skin_mats[0] is ShaderMaterial) else null
+	if m == null:
+		return {"prof_tex": _prof_tex, "prof_n": 20}
+	return {
+		"prof_tex": _prof_tex,
+		"prof_n": int(m.get_shader_parameter("prof_n") or 20),
+		"prof_bias": m.get_shader_parameter("prof_bias"),
+		"prof_scale": m.get_shader_parameter("prof_scale"),
+	}
+
+
+func limb_exclusion_capsules_world() -> Array:
+	# 前臂到指尖，不包含上臂近肩段，以免矢状面切掉肩部轮廓。
+	var out: Array = []
+	if _skel == null:
+		return out
+	var pairs := [
+		["L_Forearm_a", "L_Hand_a", 0.042],
+		["R_Forearm_a", "R_Hand_a", 0.042],
+		["L_Hand_a", "L_Middle_a", 0.038],
+		["R_Hand_a", "R_Middle_a", 0.038],
+		["L_Hand_a", "L_Thumb_a", 0.030],
+		["R_Hand_a", "R_Thumb_a", 0.030],
+		["L_Hand_a", "L_Index_a", 0.030],
+		["R_Hand_a", "R_Index_a", 0.030],
+	]
+	var xf := _skel.global_transform
+	for rec in pairs:
+		var ia := _skel.find_bone(str(rec[0]))
+		var ib := _skel.find_bone(str(rec[1]))
+		if ia < 0 or ib < 0:
+			continue
+		var a: Vector3 = xf * _skel.get_bone_global_pose(ia).origin
+		var b: Vector3 = xf * _skel.get_bone_global_pose(ib).origin
+		if not a.is_finite() or not b.is_finite():
+			continue
+		out.append({"a": a, "b": b, "r": float(rec[2])})
+		if out.size() >= 8:
+			break
+	return out
+
+
+func uterus_section_shape() -> Dictionary:
+	# 断面填充用的宫体椭圆：宫颈 + 当前（可已拉直）宫轴 + 休息尺寸。
+	var canal: Dictionary = vagina_canal() if has_method("vagina_canal") else {}
+	var cerv: Vector3 = canal.get("cervix_ab", Vector3.ZERO)
+	var ax := uterus_rest_axis_ab()
+	if _uter_str > 0.05 and _uter_str_to.length_squared() > 1e-10:
+		ax = ax.lerp(_uter_str_to.normalized(), clampf(_uter_str, 0.0, 1.0))
+		if ax.length_squared() > 1e-10:
+			ax = ax.normalized()
+	var mn := Vector3(-0.023, 0.933, 0.016)
+	var mx := Vector3(0.023, 0.992, 0.071)
+	if meta.get("uterus") is Dictionary:
+		var u: Dictionary = meta["uterus"]
+		if u.get("min") is Array and (u["min"] as Array).size() >= 3:
+			mn = Vector3(float(u["min"][0]), float(u["min"][1]), float(u["min"][2]))
+		if u.get("max") is Array and (u["max"] as Array).size() >= 3:
+			mx = Vector3(float(u["max"][0]), float(u["max"][1]), float(u["max"][2]))
+	elif _uterus_aabb.size.length() > 1e-4:
+		mn = _uterus_aabb.position
+		mx = _uterus_aabb.position + _uterus_aabb.size
+	var size := mx - mn
+	var ulen := maxf(size.length() * 0.72, maxf(size.y, 0.04))
+	var ur := maxf(maxf(size.x, size.z) * 0.52, 0.016)
+	var wall := 0.006
+	if meta.get("uterus_cavity") is Dictionary:
+		wall = maxf(float((meta["uterus_cavity"] as Dictionary).get("wall_m", 0.0028)) + 0.003, 0.005)
+	return {"cervix_ab": cerv, "axis_ab": ax, "len": ulen, "rad": ur, "wall": wall}
+
+
 func speculum_offset_ab(p_ab: Vector3) -> Vector3:
 	# 与 organ_common.speculum_offset 同一公式，供包络/位移自检。
 	var depth := _spec_o.w
@@ -618,6 +755,10 @@ func _push_dilate_uniforms() -> void:
 		m.set_shader_parameter("uter_str_to", _uter_str_to)
 		m.set_shader_parameter("uter_str_len", _uter_str_len)
 		m.set_shader_parameter("uter_ball", _uter_ball)
+		m.set_shader_parameter("fundus_lift", _fundus_lift)
+		m.set_shader_parameter("fundus_open_ab", _fundus_open_ab)
+		m.set_shader_parameter("fundus_cerv_ab", _fundus_cerv_ab)
+		m.set_shader_parameter("fundus_axis_ab", _fundus_axis_ab)
 		# 宫腔（内膜）不额外加壁厚，子宫外膜加上壁厚，其它网格关掉球撑开。
 		var wall_p := _uter_ball_p
 		# 无法在这里按网格区分时先写统一值；下面按网格再覆盖。

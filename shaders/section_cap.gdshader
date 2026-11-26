@@ -1,7 +1,7 @@
 // 断面图切割填充：真正的几何裁剪后，只把跨越剖切面的那一层压平，形成组织色平切面。
 // 不是把整个背面投影到平面上（空腔 / 开口子宫 / 离面的金属棒会被投影撕碎并涂黑）。
 shader_type spatial;
-render_mode blend_mix, depth_draw_opaque, cull_front, unshaded, shadows_disabled;
+render_mode blend_mix, depth_draw_opaque, cull_disabled, unshaded, shadows_disabled;
 
 #include "res://shaders/organ_common.gdshaderinc"
 
@@ -15,6 +15,11 @@ uniform vec3 canal_axis_ab = vec3(0.0, 1.0, 0.0);
 uniform float stylize_layers = 1.0;
 // 参与切面填充的最大深度（米）。薄壁（皮肤/宫壁）用小值，实心金属棒用大于半径的值。
 uniform float cap_thickness = 0.016;
+uniform float exclude_limbs = 0.0;
+uniform vec3 limb_a[8];
+uniform vec3 limb_b[8];
+uniform float limb_r[8];
+uniform int limb_count = 0;
 
 varying vec3 v_world;
 varying vec3 v_ab;
@@ -25,6 +30,8 @@ void vertex() {
 	vec3 l = to_ab(wp);
 	vec3 off = strike_offset(l) + drag_offset(l) + dent_offset(l) + speculum_offset(l) + dilate_offset(l) + canal_stir_offset(l) + uterus_straighten_offset(l) + uterus_ball_offset(l);
 	off += prolapse_offset4(l + off).xyz;
+	off += canal_stretch(l + off);
+	off += fundus_lift_offset(l + off);
 	vec3 off_w = ab_dir_to_world(off);
 	VERTEX += inverse(mat3(MODEL_MATRIX)) * off_w;
 	wp += off_w;
@@ -60,6 +67,22 @@ vec3 tissue_color(int id) {
 	return cap_color.rgb;
 }
 
+
+bool in_excluded_limb(vec3 wp) {
+	if (exclude_limbs < 0.5 || limb_count < 1) return false;
+	int n = min(limb_count, 8);
+	for (int i = 0; i < n; i++) {
+		vec3 a = limb_a[i];
+		vec3 b = limb_b[i];
+		float r = limb_r[i] + 0.008;
+		vec3 ab = b - a;
+		float den = dot(ab, ab);
+		float u = den > 1e-10 ? clamp(dot(wp - a, ab) / den, 0.0, 1.0) : 0.0;
+		if (length(wp - (a + ab * u)) <= r) return true;
+	}
+	return false;
+}
+
 void fragment() {
 	if (section_on > 0.5) {
 		// 只画原来就在被裁侧、且贴近切面的片段 = 真实交线处的平切填充。
@@ -70,6 +93,9 @@ void fragment() {
 		if (v_s < -cap_thickness) {
 			discard;
 		}
+	}
+	if (in_excluded_limb(v_world)) {
+		discard;
 	}
 	int id = tissue;
 	if (stylize_layers > 0.5 && tissue == 3) {

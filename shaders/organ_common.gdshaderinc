@@ -578,3 +578,37 @@ vec3 uterus_straighten_offset(vec3 p) {
 	return q2 - q;
 }
 
+// 插入物顶到宫底后，子宫沿通道轴向深处平移，阴道从外口到宫颈按比例拉长。
+// fundus_lift = 平移距离（米）；默认 0，不影响手术 / 脱垂。
+uniform float fundus_lift = 0.0;
+uniform vec3 fundus_open_ab = vec3(0.0);
+uniform vec3 fundus_cerv_ab = vec3(0.0);
+uniform vec3 fundus_axis_ab = vec3(0.0, 1.0, 0.0);
+
+vec3 fundus_lift_offset(vec3 p) {
+	if (fundus_lift <= 1e-6) return vec3(0.0);
+	vec3 ax = fundus_axis_ab;
+	float al = length(ax);
+	if (al < 1e-5) return vec3(0.0);
+	ax /= al;
+	vec3 openp = fundus_open_ab;
+	vec3 cerv = fundus_cerv_ab;
+	float L = max(dot(cerv - openp, ax), 0.02);
+	float s = dot(p - openp, ax);
+	float t = 0.0;
+	if (s <= 0.0) t = 0.0;
+	else if (s >= L) t = 1.0;
+	else {
+		float u = s / L;
+		t = u * u * (3.0 - 2.0 * u);
+	}
+	vec3 mid = openp + ax * clamp(s, 0.0, L + 0.08);
+	float rad = length(p - mid);
+	float rw = 1.0 - smoothstep(0.038, 0.070, rad);
+	if (s > L) {
+		rw = max(rw, 1.0 - smoothstep(0.045, 0.080, rad));
+	}
+	if (rw <= 1e-5) return vec3(0.0);
+	return ax * fundus_lift * t * rw;
+}
+

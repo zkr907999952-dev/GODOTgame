@@ -57,6 +57,8 @@ var _prev_tip: Vector3 = Vector3.ZERO
 var _have_prev_tip := false
 var _stir_world: Vector3 = Vector3.ZERO
 var _straighten := 0.0
+var _fundus_lift := 0.0
+const FUNDUS_LIFT_MAX := 0.045
 var _debug_dt := 0.0
 
 
@@ -81,6 +83,7 @@ func activate() -> void:
 	_have_prev_tip = false
 	_stir_world = Vector3.ZERO
 	_straighten = 0.0
+	_fundus_lift = 0.0
 	if _root:
 		_root.visible = true
 	_sync_pose(0.0)
@@ -95,6 +98,7 @@ func deactivate() -> void:
 	cervix_pressure = 0.0
 	residual = 0.0
 	uterus_distend = 0.0
+	_fundus_lift = 0.0
 	if organs:
 		if organs.has_method("clear_canal_dilate"):
 			organs.call("clear_canal_dilate")
@@ -104,6 +108,8 @@ func deactivate() -> void:
 			organs.call("clear_canal_stir")
 		if organs.has_method("clear_uterus_straighten"):
 			organs.call("clear_uterus_straighten")
+		if organs.has_method("clear_fundus_lift"):
+			organs.call("clear_fundus_lift")
 		if organs.get("vulva") and organs.vulva.has_method("set_inserter") and not _prolapse_owns_introitus():
 			organs.vulva.call("set_inserter", null)
 	if _root:
@@ -260,6 +266,70 @@ func debug_stir_offset() -> Vector3:
 
 func debug_straighten() -> float:
 	return _straighten
+
+
+func debug_fundus_lift() -> float:
+	return _fundus_lift
+
+
+func fundus_contact_depth() -> float:
+	return _fundus_contact_depth()
+
+
+func debug_push_depth(desired: float, dt: float = 0.05) -> void:
+	# 测试：走闸门之后的深度逻辑（含宫底顶起），可连推多帧。
+	_debug_dt = maxf(dt, 1e-4)
+	apply_desired_depth(desired, _debug_dt)
+	_debug_dt = 0.0
+
+
+func _fundus_contact_depth() -> float:
+	# 休息网格上的宫底内侧（沿通道轴），球心触壁深度。不含当前顶起。
+	var r := radius()
+	var wall := 0.0032
+	if organs and organs.get("meta") is Dictionary and (organs.meta as Dictionary).has("uterus_cavity"):
+		var uc = organs.meta["uterus_cavity"]
+		if uc is Dictionary:
+			wall = maxf(float(uc.get("wall_m", wall)), 0.0025) + 0.0006
+	var cerv := _cervix_depth()
+	var fund := _fundus_world()
+	var uter_len := _cervix_world().distance_to(fund)
+	if uter_len < 0.02:
+		uter_len = maxf(_uterus_rest_len(), 0.04)
+	# 前倾未拉直时，沿通道能走到的宫底更近；拉直后取满长。
+	var along := cerv + uter_len * lerpf(0.78, 1.0, _straighten)
+	return along - wall - r
+
+
+func _update_fundus_lift(desired: float, dt: float) -> void:
+	var contact0 := _fundus_contact_depth()
+	var want := 0.0
+	if through_cervix and not caught and desired > contact0:
+		want = clampf(desired - contact0, 0.0, FUNDUS_LIFT_MAX)
+	if dt <= 1e-5:
+		dt = 0.016
+	var k := 1.0 - exp(-dt * 10.0)
+	_fundus_lift = lerpf(_fundus_lift, want, k)
+	if _fundus_lift < 1e-5:
+		_fundus_lift = 0.0
+	if through_cervix and not caught:
+		var wall_d := contact0 + _fundus_lift
+		if depth > wall_d:
+			depth = wall_d
+	if organs == null:
+		return
+	if _fundus_lift > 1e-5 and organs.has_method("set_fundus_lift"):
+		var opening_ab := Vector3.ZERO
+		var cerv_ab := Vector3.ZERO
+		var axis_ab := Vector3(0, 1, 0)
+		if organs.has_method("vagina_canal"):
+			var canal: Dictionary = organs.call("vagina_canal")
+			opening_ab = canal.get("opening_ab", opening_ab)
+			cerv_ab = canal.get("cervix_ab", cerv_ab)
+			axis_ab = canal.get("axis_ab", axis_ab)
+		organs.call("set_fundus_lift", _fundus_lift, opening_ab, cerv_ab, axis_ab)
+	elif organs.has_method("clear_fundus_lift"):
+		organs.call("clear_fundus_lift")
 
 
 func debug_add_pressure(p: float) -> void:
@@ -477,7 +547,8 @@ func _apply_depth_gate(desired: float, dt: float) -> void:
 	last_pull_force = 0.0
 	var cerv := _cervix_depth()
 	var r := radius()
-	var max_in := cerv + r * 0.55 + maxf(_opening_world().distance_to(_fundus_world()), _uterus_rest_len()) * (0.85 + 0.12 * _straighten)
+	var contact0 := _fundus_contact_depth()
+	var max_in := contact0 + FUNDUS_LIFT_MAX + 0.002
 	var min_out := -0.06 - r
 	desired = clampf(desired, min_out, max_in)
 	var gate_start := cerv - r * 0.85
@@ -524,6 +595,8 @@ func _apply_depth_gate(desired: float, dt: float) -> void:
 			if pulling and desired < gate_start and cervix_pressure >= cervix_threshold() * 0.85:
 				_do_breakthrough(false, cerv, r)
 	depth = clampf(depth, min_out, max_in)
+	_update_fundus_lift(desired, dt)
+	depth = clampf(depth, min_out, minf(max_in, _fundus_contact_depth() + _fundus_lift + 1e-4))
 	# 球过后通道慢慢回缩。
 	var target_res := 0.35 if (depth > r * 0.5 or through_cervix) else 0.0
 	residual = lerpf(residual, target_res, clampf(dt * 2.2, 0.0, 1.0))
@@ -599,9 +672,12 @@ func _apply_deform() -> void:
 			organs.call("clear_canal_stir")
 		if organs.has_method("clear_uterus_straighten"):
 			organs.call("clear_uterus_straighten")
+		if organs.has_method("clear_fundus_lift"):
+			organs.call("clear_fundus_lift")
 		uterus_distend = 0.0
 		_stir_world = Vector3.ZERO
 		_straighten = 0.0
+		_fundus_lift = 0.0
 		return
 	var canal: Dictionary = organs.call("vagina_canal")
 	if canal.is_empty():
@@ -760,6 +836,8 @@ func _ball_wall_clearance() -> float:
 				var p_ab: Vector3 = xf.affine_inverse() * (gxf * P[i])
 				if organs.has_method("uterus_straighten_offset_at"):
 					p_ab += organs.call("uterus_straighten_offset_at", p_ab)
+				if organs.has_method("fundus_lift_offset_at"):
+					p_ab += organs.call("fundus_lift_offset_at", p_ab)
 				# 与 uterus_ball_offset 相同：球内点被推到 need 半径。
 				var need := r
 				var d := p_ab - tip_ab
