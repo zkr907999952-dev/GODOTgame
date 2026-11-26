@@ -145,8 +145,15 @@ func _check_vagina_standing() -> void:
 	var fund: Vector3 = pc.call("fundus_world")
 	var cerv2: Vector3 = pc.call("cervix_world")
 	var O2: Vector3 = pc.call("introitus_world")
-	print("STANDING prolapse: cervix %.1f cm and fundus %.1f cm below the opening, grade %d" % [(O2.y - cerv2.y) * 100, (O2.y - fund.y) * 100, int(pc.get("grade"))])
-	_ok(int(pc.get("grade")) == 4 and cerv2.y < O2.y - 0.03, "standing prolapse hangs down from the vaginal opening (cervix %.1f cm below)" % ((O2.y - cerv2.y) * 100))
+	var st: Dictionary = pc.call("debug_state") if pc.has_method("debug_state") else {}
+	var drop_c := (O2.y - cerv2.y) * 100
+	var drop_f := (O2.y - fund.y) * 100
+	var ant := float(st.get("fundus_anterior", 0.0))
+	var tcl := float(st.get("thigh_clearance", 1.0))
+	print("STANDING prolapse: cervix %.1f cm and fundus %.1f cm below the opening, grade %d, anterior %.1f mm, thigh_clear %.2f mm" % [drop_c, drop_f, int(pc.get("grade")), ant * 1000, tcl * 1000])
+	# 两腿之间或被顶到腿前面都可以，只要向下垂、不卡进腿里、不被腿根托住。
+	_ok(int(pc.get("grade")) == 4 and cerv2.y < O2.y - 0.03, "standing prolapse hangs down from the vaginal opening (cervix %.1f cm below, %s of the thighs)" % [drop_c, "in front" if ant > 0.01 else "between / at"])
+	_ok(tcl >= -0.001, "standing prolapse does not clip into the thighs (clearance %.2f mm)" % (tcl * 1000))
 	_ok(fund.y > player.global_position.y, "the hanging uterus stays above the floor")
 	pc.call("reset")
 	await _settle(3)

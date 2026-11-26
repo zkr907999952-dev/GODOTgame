@@ -34,10 +34,13 @@ class_name ProlapseParams
 @export var mucosa_roughness: float = 0.30
 
 @export_group("大腿碰撞")
-## 跟随 L/R_UpperLeg_a → Foreleg_a 的胶囊半径（与 CharacterHitboxes 大腿段一致）。
-@export var thigh_r: float = 0.075
-## 髋关节端内缩，避免胶囊吃到会阴 / 外口。
-@export var thigh_hip_inset: float = 0.048
+## 胶囊半径。轴再向外偏 thigh_lateral_offset，外侧仍接近 75 mm 命中箱，
+## 内侧更瘦，站姿两腿之间留出脱垂悬垂的通道，避免把子宫托在腿根上。
+@export var thigh_r: float = 0.058
+## 胶囊轴相对股骨向外（离开正中面）偏移，加厚外侧、打开内侧间隙。
+@export var thigh_lateral_offset: float = 0.015
+## 髋关节端内缩，避免胶囊吃到会阴 / 外口；髋端按开口圆柱处理，没有能托住子宫的球面帽。
+@export var thigh_hip_inset: float = 0.055
 ## 脱出物表面相对胶囊再留的空隙。
 @export var thigh_margin: float = 0.003
 ## 截面半径按子宫网格分位数测得后再乘这个系数。

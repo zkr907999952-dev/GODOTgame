@@ -129,6 +129,10 @@ func _hang_and_swing(tag: String) -> void:
 	pc.call("set_amount", 0.97)
 	await _settle(50)
 	_ok(int(pc.get("grade")) == 4, "%s: grade IV hanging" % tag)
+	var st: Dictionary = pc.call("debug_state")
+	print("PROLAPSE hang %s: cervix %.1f cm and fundus %.1f cm below the opening, anterior %.1f mm" % [tag, float(st.get("cervix_drop", 0.0)) * 100, float(st.get("fundus_drop", 0.0)) * 100, float(st.get("fundus_anterior", 0.0)) * 1000])
+	if tag.begins_with("standing"):
+		_ok(float(st.get("cervix_drop", 0.0)) > 0.03, "%s: hangs down fully (cervix %.1f cm below the opening, between or in front of the thighs)" % [tag, float(st.get("cervix_drop", 0.0)) * 100])
 	_check_colors(tag)
 	_assert_no_thigh_sink(tag + " settled")
 	var n := int(pc.get("_n"))

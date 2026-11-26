@@ -880,12 +880,16 @@ func _simulate(dt: float) -> void:
 		_resolve_tube_thighs(k)
 		if drv >= 0 and drv < k:
 			_x[drv] = _push_out_thighs(_x[drv], _node_radius(drv))
-	# 迭代结束后再投影一次，清掉长度/驱动约束留下的亚毫米穿透。
+	# 迭代后若仍陷入，再投影一次。已分开则不要每帧硬推，以免给 Verlet 链注入速度。
+	var still_in := false
 	for b3 in k:
-		_x[b3] = _push_out_thighs(_x[b3], _node_radius(b3))
-	_resolve_tube_thighs(k)
-	for b4 in k:
-		_x[b4] = _push_out_thighs(_x[b4], _node_radius(b4))
+		if _point_thigh_clearance(_x[b3], _node_radius(b3)) < -1e-5:
+			still_in = true
+			break
+	if still_in:
+		for b4 in k:
+			_x[b4] = _push_out_thighs(_x[b4], _node_radius(b4))
+		_resolve_tube_thighs(k)
 	for i3 in _n:
 		if not _x[i3].is_finite():
 			_x[i3] = _path(float(_sigma[i3]) - descent)
@@ -980,18 +984,49 @@ func _refresh_thigh_caps() -> void:
 	var xf := sk.global_transform
 	var r := float(params.thigh_r)
 	var inset := float(params.thigh_hip_inset)
+	var off := float(params.thigh_lateral_offset)
+	var hips := PackedVector3Array()
+	var knees := PackedVector3Array()
+	var names: Array = []
 	for s in 2:
 		var ia := int(_thigh_bi[s * 2])
 		var ib := int(_thigh_bi[s * 2 + 1])
 		if ia < 0 or ib < 0:
 			continue
-		var a: Vector3 = xf * sk.get_bone_global_pose(ia).origin
-		var b: Vector3 = xf * sk.get_bone_global_pose(ib).origin
-		var ab := b - a
-		var L := ab.length()
-		if L > 1e-4 and inset > 0.0:
-			a = a + ab * (minf(inset, L * 0.35) / L)
-		_thigh_caps.append({"a": a, "b": b, "r": r, "name": "L" if s == 0 else "R"})
+		hips.append(xf * sk.get_bone_global_pose(ia).origin)
+		knees.append(xf * sk.get_bone_global_pose(ib).origin)
+		names.append("L" if s == 0 else "R")
+	var mid := Vector3.ZERO
+	if hips.size() == 2:
+		mid = (hips[0] + hips[1]) * 0.5
+	for i in hips.size():
+		var hip: Vector3 = hips[i]
+		var knee: Vector3 = knees[i]
+		var axis := knee - hip
+		var alen := axis.length()
+		if alen > 1e-6:
+			axis /= alen
+		else:
+			axis = Vector3.DOWN
+		var a: Vector3 = hip
+		if inset > 0.0 and alen > 1e-4:
+			a = hip + axis * minf(inset, alen * 0.35)
+		# 左右方向用骨盆髋关节连线（内缩前），不要用内缩后的点，避免检查床屈髋时把胶囊偏进悬垂通道。
+		var side := hip - mid
+		side -= axis * side.dot(axis)
+		if side.length_squared() < 1e-8:
+			side = axis.cross(_frame.basis.x if _frame.basis.x.length_squared() > 1e-8 else Vector3.RIGHT)
+		if side.length_squared() < 1e-8:
+			side = Vector3.RIGHT
+		side = side.normalized()
+		# 保证 side 指向这一侧的外侧（离开正中面）。
+		if hips.size() == 2 and side.dot(hip - mid) < 0.0:
+			side = -side
+		var b: Vector3 = knee
+		if off != 0.0 and hips.size() == 2:
+			a += side * off
+			b += side * off
+		_thigh_caps.append({"a": a, "b": b, "r": r, "name": names[i], "axis": axis, "side": side})
 
 
 func thigh_capsules() -> Array:
@@ -1011,22 +1046,49 @@ func thigh_clearance() -> float:
 		if _out.size() <= i or _out[i] == 0:
 			continue
 		best = minf(best, _point_thigh_clearance(_x[i], _node_radius(i)))
-	# 细颈中线
+	# 细颈靠宫底的一半：靠近外口的一段必须回到两腿之间，不计入“卡进腿里”。
 	if not _sigma.is_empty() and float(_sigma[_n - 1]) - descent < 0.0:
 		var fund := _x[_n - 1]
-		for t in 3:
-			var u := float(t + 1) / 4.0
+		for t in 2:
+			var u := float(t + 1) / 6.0
 			best = minf(best, _point_thigh_clearance(fund.lerp(_O, u), float(params.neck_r)))
 	return best
 
 
 func _point_thigh_clearance(p: Vector3, rad: float) -> float:
+	# 与推出一致：按开口圆柱（垂直腿轴的径向距离）量间隙，髋端球面帽不算在内，
+	# 否则悬在两腿之间会被帽顶判成“陷入”。
 	var best := 1.0
 	var extra := rad + float(params.thigh_margin)
 	for cap in _thigh_caps:
-		var c: Vector3 = _closest_on_seg(p, cap["a"], cap["b"])
-		best = minf(best, p.distance_to(c) - float(cap["r"]) - extra)
+		best = minf(best, _cyl_clearance(p, cap) - extra)
 	return best
+
+
+func _cyl_clearance(p: Vector3, cap: Dictionary) -> float:
+	var hit: Dictionary = _shaft_proj(p, cap)
+	if not bool(hit["hit"]):
+		return 1.0
+	return float(hit["dist"]) - float(cap["r"])
+
+
+## 开口圆柱：髋端（a）敞开。投影在髋端之前（会阴 / 悬垂空间）不算碰撞，避免髋端圆盘把子宫托住。
+func _shaft_proj(p: Vector3, cap: Dictionary) -> Dictionary:
+	var a: Vector3 = cap["a"]
+	var b: Vector3 = cap["b"]
+	var axis: Vector3 = cap["axis"] if cap.has("axis") else (b - a).normalized()
+	var ab := b - a
+	var denom := ab.length_squared()
+	if denom < 1e-12:
+		return {"hit": false, "c": a, "dist": 1.0}
+	var t := (p - a).dot(ab) / denom
+	if t < 0.0:
+		return {"hit": false, "c": a, "dist": 1.0}
+	t = minf(t, 1.0)
+	var c := a + ab * t
+	var d := p - c
+	var d_perp := d - axis * d.dot(axis)
+	return {"hit": true, "c": c, "d_perp": d_perp, "dist": d_perp.length(), "axis": axis}
 
 
 func _closest_on_seg(p: Vector3, a: Vector3, b: Vector3) -> Vector3:
@@ -1041,35 +1103,123 @@ func _push_out_thighs(p: Vector3, rad: float) -> Vector3:
 	if _thigh_caps.is_empty():
 		return p
 	var q := p
-	var extra := rad + float(params.thigh_margin)
+	var need_extra := rad + float(params.thigh_margin)
 	for _k in 2:
 		for cap in _thigh_caps:
-			var a: Vector3 = cap["a"]
-			var b: Vector3 = cap["b"]
-			var c := _closest_on_seg(q, a, b)
-			var d := q - c
-			var need := float(cap["r"]) + extra
-			var dist := d.length()
-			if dist >= need:
-				continue
-			if dist < 1e-8:
-				var n := (b - a).cross(Vector3.UP)
-				if n.length_squared() < 1e-10:
-					n = (b - a).cross(Vector3.RIGHT)
-				if n.length_squared() < 1e-10:
-					n = Vector3.FORWARD
-				d = n.normalized()
-				dist = 1.0
-			q = c + d * (need / dist)
+			q = _thigh_correction(q, cap, float(cap["r"]) + need_extra)
+	# 被两腿同时夹住、侧向推不出去时，顶到腿前面再往下垂；只接触一条腿时只侧向推。
+	if _is_thigh_squeeze(q, rad):
+		q = _escape_ventral(q, rad)
 	return q
+
+
+func _is_thigh_squeeze(p: Vector3, rad: float) -> bool:
+	if _thigh_caps.size() < 2:
+		return false
+	var extra := rad + float(params.thigh_margin)
+	var n := 0
+	for cap in _thigh_caps:
+		if _cyl_clearance(p, cap) < extra - 1e-5:
+			n += 1
+	return n >= 2
+
+
+func _ventral_dir() -> Vector3:
+	# 腹前（腹部坐标 +Z）。两腿时取垂直于腿轴和左右连线、朝腹侧的方向。
+	var v := _frame.basis.z
+	if _thigh_caps.size() == 2:
+		var ax: Vector3 = (_thigh_caps[0]["axis"] as Vector3) + (_thigh_caps[1]["axis"] as Vector3)
+		if ax.length_squared() > 1e-8:
+			ax = ax.normalized()
+			var lr: Vector3 = _thigh_caps[1]["a"] - _thigh_caps[0]["a"]
+			var n := lr.cross(ax)
+			if n.length_squared() > 1e-8:
+				n = n.normalized()
+				if v.length_squared() > 1e-8 and n.dot(v) < 0.0:
+					n = -n
+				v = n
+	if v.length_squared() < 1e-8:
+		v = _up if _up.length_squared() > 1e-8 else Vector3.FORWARD
+	return v.normalized()
+
+
+func _escape_ventral(p: Vector3, rad: float) -> Vector3:
+	var v := _ventral_dir()
+	var up := Vector3.UP
+	if gravity.length_squared() > 1e-8:
+		up = -gravity.normalized()
+	# 仰卧时腹侧朝上：沿腹侧推等于托起来。去掉逆重力分量，几乎只剩向上则放弃，让器官靠重力落下。
+	var lift := v.dot(up)
+	if lift > 0.0:
+		v -= up * lift
+	if v.length() < 0.35:
+		return p
+	v = v.normalized()
+	var extra := rad + float(params.thigh_margin)
+	var t_need := 0.0
+	for cap in _thigh_caps:
+		var need := float(cap["r"]) + extra
+		var axis: Vector3 = cap["axis"]
+		var c := _closest_on_seg(p, cap["a"], cap["b"])
+		var d_perp := (p - c) - axis * (p - c).dot(axis)
+		var v_perp := v - axis * v.dot(axis)
+		var A := v_perp.length_squared()
+		if A < 1e-12:
+			continue
+		var B := 2.0 * d_perp.dot(v_perp)
+		var C := d_perp.length_squared() - need * need
+		if C >= -1e-10:
+			continue
+		var disc := B * B - 4.0 * A * C
+		if disc < 0.0:
+			continue
+		var t := (-B + sqrt(disc)) / (2.0 * A)
+		if t > t_need:
+			t_need = t
+	if t_need <= 0.0:
+		return p
+	t_need = minf(t_need + 0.001, 0.12)
+	return p + v * t_need
+
+
+## 只沿垂直于腿轴的方向推出（站姿主要是左右），去掉逆重力分量，
+## 大腿不能把子宫托起来：可以顺着往下掉，也可以被侧面挤开。
+func _thigh_correction(p: Vector3, cap: Dictionary, need: float) -> Vector3:
+	var hit: Dictionary = _shaft_proj(p, cap)
+	if not bool(hit["hit"]):
+		return p
+	var dist := float(hit["dist"])
+	if dist >= need:
+		return p
+	var c: Vector3 = hit["c"]
+	var d_perp: Vector3 = hit["d_perp"]
+	var axis: Vector3 = hit["axis"]
+	var n: Vector3
+	if dist < 1e-8:
+		n = cap["side"] if cap.has("side") else axis.cross(Vector3.UP)
+		if n.length_squared() < 1e-10:
+			n = Vector3.RIGHT
+		n = n.normalized()
+	else:
+		n = d_perp / dist
+	var corr := (c + n * need) - p
+	# 无摩擦下滑：修正不得把点往上抬（否则会变成搁板）。
+	var up := Vector3.UP
+	if gravity.length_squared() > 1e-8:
+		up = -gravity.normalized()
+	var lift := corr.dot(up)
+	if lift > 0.0:
+		corr -= up * lift
+	return p + corr
 
 
 func _resolve_tube_thighs(k: int) -> void:
 	if _thigh_caps.is_empty() or k < 1:
 		return
-	# 外口 → 最靠近外口的体外节点（IV 度时就是细颈：宫底 → 外口）。
-	var pr := maxf(_node_radius(k - 1), float(params.neck_r) if k >= _n else 0.008)
-	_resolve_seg_thighs(k - 1, -1, pr)
+	# 只处理子宫本体段。IV 度宫底→外口的细颈一头钉在外口，若当刚体去撞腿，
+	# 每帧会把宫底硬拽开，悬挂甩动无法衰减。细颈是视觉连接，本体被顶到腿前即可。
+	if k < _n:
+		_resolve_seg_thighs(k - 1, -1, maxf(_node_radius(k - 1), 0.008))
 	for b in range(1, k):
 		_resolve_seg_thighs(b - 1, b, maxf(_node_radius(b - 1), _node_radius(b)))
 
@@ -1077,20 +1227,13 @@ func _resolve_tube_thighs(k: int) -> void:
 func _resolve_seg_thighs(ia: int, ib: int, rad: float) -> void:
 	var pa := _x[ia]
 	var pb := _O if ib < 0 else _x[ib]
+	var need := rad + float(params.thigh_margin)
 	for cap in _thigh_caps:
 		var pr: Array = _seg_closest(pa, pb, cap["a"], cap["b"])
-		var d: Vector3 = pr[0] - pr[1]
-		var dist := d.length()
-		var need := float(cap["r"]) + rad + float(params.thigh_margin)
-		if dist >= need:
+		var q := _thigh_correction(pr[0], cap, float(cap["r"]) + need)
+		var push: Vector3 = q - pr[0]
+		if push.length_squared() < 1e-16:
 			continue
-		if dist < 1e-8:
-			var n := (pb - pa).cross(Vector3.UP)
-			if n.length_squared() < 1e-10:
-				n = Vector3.FORWARD
-			d = n.normalized()
-			dist = 1.0
-		var push := d * ((need - dist) / dist)
 		var ab := pb - pa
 		var s := 0.5
 		if ab.length_squared() > 1e-12:
@@ -1258,10 +1401,24 @@ func _push_deform() -> void:
 	organs.call("set_prolapse_deform", o_ab, a_ab, _canal_L, descent, tip_sigma, _U, float(params.wall), _prof)
 
 
+func _fundus_anterior() -> float:
+	# 宫底相对两腿中线沿腹侧的有符号距离：正 = 在腿前面。
+	if _x.is_empty() or _thigh_caps.size() < 2:
+		if _thigh_caps.is_empty():
+			_refresh_thigh_caps()
+		if _x.is_empty() or _thigh_caps.size() < 2:
+			return 0.0
+	var mid: Vector3 = (_thigh_caps[0]["a"] + _thigh_caps[1]["a"]) * 0.5
+	return (fundus_world() - mid).dot(_ventral_dir())
+
+
 func debug_state() -> Dictionary:
 	return {
 		"state": state, "grade": grade, "amount": amount(), "descent": descent, "descent_max": descent_max(),
 		"cervix_sd": cervix_signed_distance(), "fundus_sd": fundus_signed_distance(), "out": outside_count(),
 		"portal_r": portal_radius(), "canal_L": _canal_L, "sigma0": float(_sigma[0]) if not _sigma.is_empty() else 0.0,
 		"U": _U, "prof": _prof, "thigh_clearance": thigh_clearance(),
+		"cervix_drop": (_O.y - cervix_world().y) if not _x.is_empty() else 0.0,
+		"fundus_drop": (_O.y - fundus_world().y) if not _x.is_empty() else 0.0,
+		"fundus_anterior": _fundus_anterior(),
 	}
