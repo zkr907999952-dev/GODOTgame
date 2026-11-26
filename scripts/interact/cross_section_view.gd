@@ -1099,6 +1099,24 @@ func _write_limb_exclusion(cut: ShaderMaterial, cap: ShaderMaterial, rec: Dictio
 		m2.set_shader_parameter("limb_count", n)
 
 
+func _basis_facing_plane(n: Vector3, up: Vector3) -> Basis:
+	# QuadMesh 在 XY 平面，正面朝 +Z，让 +Z 指向相机（-n；n 已是背离相机的切面法线）。
+	var z := -n
+	if z.length_squared() < 1e-12:
+		z = Vector3(0, 0, 1)
+	else:
+		z = z.normalized()
+	var y := up - z * up.dot(z)
+	if y.length_squared() < 1e-8:
+		y = Vector3.UP - z * Vector3.UP.dot(z)
+	if y.length_squared() < 1e-8:
+		y = Vector3.RIGHT - z * Vector3.RIGHT.dot(z)
+	y = y.normalized()
+	var x := y.cross(z).normalized()
+	y = z.cross(x).normalized()
+	return Basis(x, y, z)
+
+
 func _ensure_fills() -> void:
 	if _fill_root == null or not is_instance_valid(_fill_root):
 		_fill_root = Node3D.new()
@@ -1118,14 +1136,14 @@ func _ensure_fills() -> void:
 		var mi := MeshInstance3D.new()
 		mi.name = "SectionFill_" + w
 		var q := QuadMesh.new()
-		q.size = Vector2(0.55, 0.55)
+		q.size = Vector2(0.80, 0.80)
 		mi.mesh = q
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 		mi.layers = int(rec["layer"])
 		var mat := ShaderMaterial.new()
 		mat.shader = FILL_SHADER
-		mat.render_priority = -1
+		mat.render_priority = 2
 		mi.material_override = mat
 		_fill_root.add_child(mi)
 		_fills[w] = {"mi": mi, "mat": mat}
@@ -1186,16 +1204,27 @@ func _sync_fills(pl: Dictionary) -> void:
 			var to_cam: Vector3 = cam.global_position - pnt
 			if to_cam.length_squared() > 1e-10:
 				n = -to_cam.normalized()
-		# 四边形略偏向相机，盖住切面黑空洞，金属棒/组织拷贝仍可画在前面。
-		var pos := pnt - n * 0.00045
+		# 四边形必须铺在剖切面上。Basis.looking_at(世界点) 会按「从原点看向该点」旋转，
+		# 切面四边形会斜着立在阴道中央，看起来像一条斜矩形（t87u）。按法线搭正交基。
+		# 再沿视线往相机挪 2 mm，盖住切面破洞，背景不再透出黑色。
+		var pos := pnt - n * 0.002
 		var up: Vector3 = pl["up"]
 		if absf(n.dot(up)) > 0.92:
 			up = pl["axis"]
-		mi.global_transform = Transform3D(Basis().looking_at(pos + n, up), pos)
+		mi.global_transform = Transform3D(_basis_facing_plane(n, up), pos)
+		if cam:
+			var half := maxf(cam.size * 1.7, 0.28)
+			(mi.mesh as QuadMesh).size = Vector2(half * 2.0 * (170.0 / 168.0), half * 2.0)
 		var vis: bool = (w == "long" and (view_mode == MODE_LONG or view_mode == MODE_BOTH))
 		vis = vis or (w == "trans" and (view_mode == MODE_TRANS or view_mode == MODE_BOTH))
 		vis = vis or (w == "coronal" and (view_mode == MODE_CORONAL or view_mode == MODE_BOTH))
 		mi.visible = visible_on and vis
+		# 腹部基直接用 organ 框架，不依赖源材质参数是否已写入。
+		var xf_ab: Transform3D = organs.call("abdomen_frame") if organs and organs.has_method("abdomen_frame") else xf
+		mat.set_shader_parameter("ab_navel", xf_ab.origin)
+		mat.set_shader_parameter("ab_right", xf_ab.basis.x)
+		mat.set_shader_parameter("ab_up", xf_ab.basis.y)
+		mat.set_shader_parameter("ab_fwd", xf_ab.basis.z)
 		if src:
 			for key in ["ab_navel", "ab_right", "ab_up", "ab_fwd"]:
 				if src.get_shader_parameter(key) != null:
@@ -1235,14 +1264,19 @@ func set_test_render(on: bool) -> void:
 
 
 func debug_capture_section(which: String) -> Image:
-	# 无头或离屏回读小窗像素。未启用 test_render 或纹理为空时返回 null。
+	# 无头 Dummy 渲染器没有可回读的纹理。
+	if DisplayServer.get_name() == "headless":
+		return null
 	var vp: SubViewport = _vp_of(which)
 	if vp == null:
 		return null
 	var tex := vp.get_texture()
 	if tex == null:
 		return null
-	return tex.get_image()
+	var img: Image = tex.get_image()
+	if img == null or img.get_width() < 2:
+		return null
+	return img
 
 
 func debug_section_metrics(which: String) -> Dictionary:
@@ -1353,6 +1387,122 @@ func debug_section_metrics(which: String) -> Dictionary:
 	out["hand_samples"] = hs
 	out["hand_bleed"] = bleed
 	out["ok"] = sil > 40 and out["black_frac"] < 0.03
+	return out
+
+
+func debug_fill_alignment(which: String) -> Dictionary:
+	# t87u：切面填充四边形必须铺在剖切面上。旧代码 looking_at(世界点) 会把它斜着立在阴道中央。
+	var out := {"which": which, "ok": false, "plane_dist": 99.0, "facing": 0.0, "visible": false}
+	if not _fills.has(which):
+		return out
+	var mi: MeshInstance3D = _fills[which].get("mi")
+	if mi == null or not is_instance_valid(mi):
+		return out
+	var pl := _planes()
+	var key := "long" if which == "long" else ("trans" if which == "trans" else "coronal")
+	if not pl.has(key):
+		return out
+	var plane: Plane = pl[key]
+	var n := plane.normal.normalized()
+	var z := mi.global_transform.basis.z.normalized()
+	out["plane_dist"] = absf(plane.distance_to(mi.global_position))
+	out["facing"] = absf(z.dot(n))
+	out["visible"] = mi.visible
+	out["ok"] = out["plane_dist"] < 0.005 and out["facing"] > 0.95
+	return out
+
+
+func debug_gpu_section_metrics(which: String) -> Dictionary:
+	# 真实 GPU 回读小窗像素。无纹理 / Dummy 渲染时 ok=false, renderer 标明原因。
+	var out := {
+		"which": which,
+		"ok": false,
+		"renderer": str(RenderingServer.get_current_rendering_method()) if RenderingServer else "",
+		"display": str(DisplayServer.get_name()),
+		"px": 0,
+		"silhouette": 0,
+		"black_in_sil": 0,
+		"black_frac": 1.0,
+		"cavity": 0,
+		"uter_wall": 0,
+		"uter_lumen": 0,
+		"vag_wall": 0,
+		"vag_lumen": 0,
+		"rod": 0,
+		"reason": "",
+	}
+	var img: Image = debug_capture_section(which)
+	if img == null or img.get_width() < 8 or img.get_height() < 8:
+		out["reason"] = "no image"
+		return out
+	img.convert(Image.FORMAT_RGBA8)
+	var w := img.get_width()
+	var h := img.get_height()
+	var sil := 0
+	var black := 0
+	var cavity := 0
+	var uw := 0
+	var ul := 0
+	var vw := 0
+	var vl := 0
+	var rod := 0
+	var palette := {
+		"cavity": Color(0.48, 0.20, 0.26),
+		"uter_wall": Color(0.70, 0.30, 0.40),
+		"uter_lumen": Color(0.45, 0.16, 0.22),
+		"vag_wall": Color(0.91, 0.55, 0.60),
+		"skin": Color(0.91, 0.75, 0.66),
+		"vag_lumen": Color(0.58, 0.24, 0.30),
+		"rod": Color(0.78, 0.82, 0.86),
+	}
+	for y in h:
+		for x in w:
+			var c := img.get_pixel(x, y)
+			var luma := c.r * 0.3 + c.g * 0.6 + c.b * 0.1
+			var is_bg := luma < 0.14 and c.r < 0.18 and c.g < 0.16
+			if is_bg:
+				continue
+			sil += 1
+			if c.r < 0.08 and c.g < 0.08 and c.b < 0.08:
+				black += 1
+			var best := ""
+			var best_d := 0.10
+			for k in palette.keys():
+				var pc: Color = palette[k]
+				var d := absf(c.r - pc.r) + absf(c.g - pc.g) + absf(c.b - pc.b)
+				if d < best_d:
+					best_d = d
+					best = str(k)
+			if best == "cavity":
+				cavity += 1
+			elif best == "uter_wall":
+				uw += 1
+			elif best == "uter_lumen":
+				ul += 1
+			elif best == "vag_wall":
+				vw += 1
+			elif best == "vag_lumen":
+				vl += 1
+			elif best == "rod":
+				rod += 1
+	out["px"] = w * h
+	out["silhouette"] = sil
+	out["black_in_sil"] = black
+	out["black_frac"] = float(black) / float(maxi(sil, 1))
+	out["cavity"] = cavity
+	out["uter_wall"] = uw
+	out["uter_lumen"] = ul
+	out["vag_wall"] = vw
+	out["vag_lumen"] = vl
+	out["rod"] = rod
+	if sil < 30:
+		out["reason"] = "empty or dummy renderer"
+		return out
+	var organ_fill := cavity + uw + ul + vw + vl
+	# 平扫小窗有时几乎只切到阴道/子宫，腹腔像素很少；无纯黑且有器官填充即视为成功。
+	out["ok"] = out["black_frac"] < 0.05 and organ_fill > 40
+	if not out["ok"]:
+		out["reason"] = "black_frac=%.4f cavity=%s organ_fill=%s" % [out["black_frac"], cavity, organ_fill]
 	return out
 
 

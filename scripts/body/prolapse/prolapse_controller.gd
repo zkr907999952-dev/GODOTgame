@@ -246,11 +246,13 @@ func portal_radius() -> float:
 		return 0.0
 	var a := descent - float(_sigma[0])   # 外口处对应的子宫弧长
 	var w := float(params.wall)
+	# 与阴道撑开一致：截面半径 + 壁 + 4 mm 余量，外口不比管腔更紧。
+	var margin := 0.004
 	if _prof.is_empty() or a < -float(_prof[0]):
 		return 0.0
 	if a >= _U * 0.92:
-		return maxf(float(params.neck_r), mass_radius_at(_U * 0.92)) + w
-	return mass_radius_at(a) + w * 2.0
+		return maxf(float(params.neck_r), mass_radius_at(_U * 0.92)) + w + margin
+	return mass_radius_at(a) + w * 2.0 + margin
 
 
 # ------------------------------------------------------------------ 触发源

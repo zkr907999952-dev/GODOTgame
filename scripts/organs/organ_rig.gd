@@ -93,6 +93,14 @@ var _dilate_p: Vector4 = Vector4.ZERO
 var _dilate_lat: Vector3 = Vector3.ZERO
 var _uter_ball: Vector4 = Vector4.ZERO
 var _uter_ball_p: Vector4 = Vector4.ZERO
+var _uter_ball_axis: Vector3 = Vector3.ZERO
+## 通道扩张延迟回缩：沿轴 32 档显示半径（瞬时扩张，~0.9s 指数回缩）。
+const DILATE_BINS := 32
+const DILATE_RECOIL_TAU := 0.9
+const PROLAPSE_VAGINA_MARGIN := 0.004
+var _dilate_shown: PackedFloat32Array = PackedFloat32Array()
+var _dilate_s0: float = 0.0
+var _dilate_s1: float = 0.0
 var _stir_off: Vector3 = Vector3.ZERO
 var _stir_p: Vector4 = Vector4.ZERO
 var _uter_str: float = 0.0
@@ -375,17 +383,19 @@ func set_canal_dilate(origin_ab: Vector3, axis_ab: Vector3, depth: float, radius
 
 
 func clear_canal_dilate() -> void:
-	if _dilate_o == Vector4.ZERO and _dilate_d == Vector4.ZERO and _dilate_p == Vector4.ZERO and _dilate_lat == Vector3.ZERO:
-		return
-	_dilate_o = Vector4.ZERO
-	_dilate_d = Vector4.ZERO
+	# 关掉瞬时目标，保留轴线，让显示半径按延迟回缩掉。
+	if _dilate_p.x <= 1e-5 and _dilate_s1 - _dilate_s0 < 1e-5:
+		if _dilate_o == Vector4.ZERO and _dilate_d == Vector4.ZERO and _dilate_lat == Vector3.ZERO:
+			return
 	_dilate_p = Vector4.ZERO
 	_dilate_lat = Vector3.ZERO
+	if _dilate_s1 - _dilate_s0 < 1e-5:
+		_dilate_o = Vector4.ZERO
+		_dilate_d = Vector4.ZERO
 	_push_dilate_uniforms()
 
 
-## 与 shader dilate_target_radius 同一公式，给自检测通道在某深度的目标半径。
-func canal_dilate_radius_at(along: float) -> float:
+func _dilate_instant_radius_at(along: float) -> float:
 	var mixv := _dilate_p.x
 	var R := _dilate_d.w
 	if mixv <= 0.001 or R <= 1e-6:
@@ -398,27 +408,161 @@ func canal_dilate_radius_at(along: float) -> float:
 	if absf(ds) <= R:
 		slice = sqrt(maxf(R * R - ds * ds, 0.0))
 	var target := slice
-	if along < ball_s and along > -0.03:
+	if along < ball_s and along > -0.04:
 		target = maxf(target, shaft)
 	if along < ball_s and residual > 0.001:
-		var wake := residual * R * exp(-maxf(ball_s - along, 0.0) / maxf(R * 2.6, 0.008))
+		var wake := residual * R * exp(-maxf(ball_s - along, 0.0) / maxf(R * 3.2, 0.01))
 		target = maxf(target, shaft + wake)
 	return target
 
 
-func set_uterus_ball(center_ab: Vector3, radius: float, mixv: float, wall: float = 0.0028, max_r: float = 0.0) -> void:
+func _dilate_shown_at(along: float) -> float:
+	if _dilate_shown.size() != DILATE_BINS or _dilate_s1 - _dilate_s0 < 1e-5:
+		return 0.0
+	var u := clampf((along - _dilate_s0) / (_dilate_s1 - _dilate_s0), 0.0, 1.0)
+	var f := u * float(DILATE_BINS - 1)
+	var i := clampi(int(floor(f)), 0, DILATE_BINS - 2)
+	return lerpf(_dilate_shown[i], _dilate_shown[i + 1], clampf(f - float(i), 0.0, 1.0))
+
+
+## 与 shader dilate_target_radius 同一公式（含延迟回缩后的显示半径）。
+func canal_dilate_radius_at(along: float) -> float:
+	return maxf(_dilate_instant_radius_at(along), _dilate_shown_at(along))
+
+
+func _tick_dilate_recoil(dt: float) -> void:
+	if _dilate_shown.size() != DILATE_BINS:
+		_dilate_shown.resize(DILATE_BINS)
+		_dilate_shown.fill(0.0)
+	var R := _dilate_d.w
+	var ball_s := _dilate_o.w
+	var active := _dilate_p.x > 0.001 and R > 1e-6
+	if active:
+		var smin := minf(-0.04, ball_s - R - 0.02)
+		var smax := maxf(ball_s + R + 0.02, _dilate_p.w + R + 0.02)
+		_dilate_s0 = smin
+		_dilate_s1 = smax
+	elif _dilate_s1 - _dilate_s0 < 1e-5:
+		return
+	var k_down := 1.0 - exp(-maxf(dt, 0.0) / DILATE_RECOIL_TAU)
+	var any := 0.0
+	var changed := false
+	for i in DILATE_BINS:
+		var along := lerpf(_dilate_s0, _dilate_s1, float(i) / float(DILATE_BINS - 1))
+		var inst := _dilate_instant_radius_at(along)
+		var cur := _dilate_shown[i]
+		var nxt := inst if inst >= cur - 1e-7 else lerpf(cur, inst, k_down)
+		if absf(nxt - cur) > 1e-6:
+			changed = true
+		_dilate_shown[i] = nxt
+		any = maxf(any, nxt)
+	if any < 1e-5 and not active:
+		_dilate_shown.fill(0.0)
+		_dilate_s0 = 0.0
+		_dilate_s1 = 0.0
+		_dilate_o = Vector4.ZERO
+		_dilate_d = Vector4.ZERO
+		changed = true
+	if changed:
+		_push_dilate_uniforms()
+
+
+func dilate_offset_at(p: Vector3) -> Vector3:
+	# 与 shader dilate_offset 同一公式，给穿模检测用。
+	var mixv := maxf(_dilate_p.x, 0.0)
+	var R := _dilate_d.w
+	if (mixv <= 0.001 or R <= 1e-6) and _dilate_s1 - _dilate_s0 < 1e-5:
+		return Vector3.ZERO
+	if R <= 1e-6:
+		return Vector3.ZERO
+	var o := Vector3(_dilate_o.x, _dilate_o.y, _dilate_o.z)
+	var ax := Vector3(_dilate_d.x, _dilate_d.y, _dilate_d.z)
+	if ax.length_squared() < 1e-10:
+		return Vector3.ZERO
+	ax = ax.normalized()
+	var v := p - o
+	var s := v.dot(ax)
+	var ball_s := _dilate_o.w
+	var smin := minf(-0.04, ball_s - R - 0.02)
+	var smax := maxf(ball_s + R + 0.02, _dilate_p.w + R + 0.02)
+	if s < smin - 0.035 or s > smax + 0.035:
+		return Vector3.ZERO
+	var along_w := smoothstep(smin - 0.03, smin + 0.004, s) * (1.0 - smoothstep(smax - 0.004, smax + 0.03, s))
+	if along_w < 0.01:
+		return Vector3.ZERO
+	var radial := v - ax * s - _dilate_lat
+	var pr := radial.length()
+	var rdir := radial / pr if pr > 1e-6 else ax.cross(Vector3.RIGHT if absf(ax.x) < 0.9 else Vector3.UP).normalized()
+	var target := canal_dilate_radius_at(s)
+	if target <= pr:
+		return Vector3.ZERO
+	var band := target + 0.040
+	if pr > band:
+		return Vector3.ZERO
+	var near := 1.0 - smoothstep(target, band, pr)
+	near = near * near * (3.0 - 2.0 * near)
+	var mix_eff := mixv if mixv > 0.001 else 1.0
+	return rdir * (target - pr) * mix_eff * along_w * near
+
+
+func set_uterus_ball(center_ab: Vector3, radius: float, mixv: float, wall: float = 0.0028, max_r: float = 0.0, shaft_r: float = 0.0, axis_ab: Vector3 = Vector3.ZERO) -> void:
 	if mixv <= 1e-5 or radius <= 1e-6:
 		clear_uterus_ball()
 		return
 	_uter_ball = Vector4(center_ab.x, center_ab.y, center_ab.z, maxf(radius, 0.001))
-	_uter_ball_p = Vector4(clampf(mixv, 0.0, 1.0), maxf(wall, 0.0), maxf(max_r, 0.0), 0.0)
+	_uter_ball_p = Vector4(clampf(mixv, 0.0, 1.0), maxf(wall, 0.0), maxf(max_r, 0.0), maxf(shaft_r, 0.0))
+	_uter_ball_axis = axis_ab.normalized() if axis_ab.length_squared() > 1e-8 else Vector3.ZERO
 	_push_dilate_uniforms()
 
 
 func clear_uterus_ball() -> void:
 	_uter_ball = Vector4.ZERO
 	_uter_ball_p = Vector4.ZERO
+	_uter_ball_axis = Vector3.ZERO
 	_push_dilate_uniforms()
+
+
+func uterus_ball_offset_at(p: Vector3) -> Vector3:
+	# 与 shader uterus_ball_offset 同一公式。
+	var R := _uter_ball.w
+	var mixv := _uter_ball_p.x
+	if R <= 1e-6 or mixv <= 0.001:
+		return Vector3.ZERO
+	var wall := maxf(_uter_ball_p.y, 0.0)
+	var cap := _uter_ball_p.z
+	var shaft := maxf(_uter_ball_p.w, 0.0)
+	var c := Vector3(_uter_ball.x, _uter_ball.y, _uter_ball.z)
+	var ax := _uter_ball_axis
+	var d: Vector3
+	var need := 0.0
+	if ax.length_squared() > 1e-10 and shaft > 1e-5:
+		ax = ax.normalized()
+		var slen := maxf(_dilate_o.w, 0.0) + R
+		var a := c
+		var b := c - ax * slen
+		var ab := b - a
+		var tt := clampf((p - a).dot(ab) / maxf(ab.length_squared(), 1e-8), 0.0, 1.0)
+		var q := a + ab * tt
+		d = p - q
+		var kball := 1.0 - smoothstep(0.0, maxf(R, 0.004), tt * slen)
+		need = lerpf(shaft, R, kball) + wall
+	else:
+		d = p - c
+		need = R + wall
+	if cap > 1e-5:
+		need = minf(need, cap)
+	var dist := d.length()
+	if dist < 1e-6:
+		var fb := ax * need * 0.25 if ax.length_squared() > 1e-10 else Vector3(0, need * 0.25, 0)
+		return fb * mixv
+	if dist < need:
+		return (d / dist) * (need - dist) * mixv
+	var soft := 0.016
+	if dist < need + soft:
+		var k := 1.0 - smoothstep(need, need + soft, dist)
+		k = k * k * (3.0 - 2.0 * k)
+		return (d / dist) * (soft * 0.40 * k) * mixv
+	return Vector3.ZERO
 
 
 func uterus_ball_distend() -> float:
@@ -739,6 +883,17 @@ func speculum_offset_ab(p_ab: Vector3) -> Vector3:
 	return (side * (hit.x - xu) + up * (hit.y - yu)) * mixv * along_w
 
 
+func _dilate_shown_vec4s() -> PackedVector4Array:
+	var out := PackedVector4Array()
+	out.resize(8)
+	if _dilate_shown.size() != DILATE_BINS:
+		return out
+	for i in 8:
+		var b := i * 4
+		out[i] = Vector4(_dilate_shown[b], _dilate_shown[b + 1], _dilate_shown[b + 2], _dilate_shown[b + 3])
+	return out
+
+
 func _push_dilate_uniforms() -> void:
 	for m in _all_mats:
 		if m == null:
@@ -755,6 +910,9 @@ func _push_dilate_uniforms() -> void:
 		m.set_shader_parameter("uter_str_to", _uter_str_to)
 		m.set_shader_parameter("uter_str_len", _uter_str_len)
 		m.set_shader_parameter("uter_ball", _uter_ball)
+		m.set_shader_parameter("uterus_ball_axis", _uter_ball_axis)
+		m.set_shader_parameter("dilate_sh", _dilate_shown_vec4s())
+		m.set_shader_parameter("dilate_s01", Vector2(_dilate_s0, _dilate_s1))
 		m.set_shader_parameter("fundus_lift", _fundus_lift)
 		m.set_shader_parameter("fundus_open_ab", _fundus_open_ab)
 		m.set_shader_parameter("fundus_cerv_ab", _fundus_cerv_ab)
@@ -781,6 +939,7 @@ func _push_dilate_uniforms() -> void:
 			p.y = 0.0
 		mat.set_shader_parameter("uter_ball", _uter_ball)
 		mat.set_shader_parameter("uter_ball_p", p)
+		mat.set_shader_parameter("uterus_ball_axis", _uter_ball_axis)
 
 
 # ------------------------------------------------------------------ 0.4.12 子宫脱垂
@@ -873,18 +1032,20 @@ func prolapse_offset_ab(p: Vector3) -> Vector4:
 		return Vector4.ZERO
 	var radial := v - ax * s
 	var r := radial.length()
-	if r > 0.045:
+	if r > 0.085:
 		return Vector4.ZERO
 	var rdir := radial / r if r > 1e-6 else ax.cross(Vector3.RIGHT if absf(ax.x) < 0.9 else Vector3.UP).normalized()
 	# t68u：与着色器一样只做径向撑开，不再内翻折叠。
+	# t86u：内径 = 脱出物截面 + 双倍壁厚 + 4 mm 余量。
 	var pc: Node = _prolapse
 	var mr := float(pc.call("mass_radius_at", s - tip)) if pc else 0.0
 	if mr <= 1e-5:
 		return Vector4.ZERO
-	var tgt := mr + 2.0 * w
+	var tgt := mr + 2.0 * w + PROLAPSE_VAGINA_MARGIN
 	if tgt <= r:
 		return Vector4.ZERO
-	var near := 1.0 - smoothstep(tgt, tgt + 0.02, r)
+	var near := 1.0 - smoothstep(tgt, tgt + 0.028, r)
+	near = near * near * (3.0 - 2.0 * near)
 	var dv2 := rdir * (tgt - r) * near * ramp
 	return Vector4(dv2.x, dv2.y, dv2.z, 0.0)
 
@@ -2749,6 +2910,7 @@ func step(delta: float) -> void:
 		last_step_usec = 0
 		return
 	var dt := minf(delta, 0.05)
+	_tick_dilate_recoil(dt)
 	if frozen:
 		_apply_organ_visibility()
 		_update_frame()

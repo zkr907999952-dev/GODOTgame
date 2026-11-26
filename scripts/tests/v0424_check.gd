@@ -1,5 +1,5 @@
 extends "res://scripts/tests/v0409b_check.gd"
-## 断面图填充 / 平扫视图 / 宫底顶起。不打包。
+## 断面图填充 / 平扫视图 / 宫底顶起 / 包住球和杆 / 延迟回缩 / 脱垂阴道余量。不打包。
 ##   godot --headless --path . -s res://scripts/tests/v0424_check.gd
 
 
@@ -72,6 +72,10 @@ func _run() -> void:
 	sec.call("set_view_mode", "both")
 	await _frames(1)
 	_ok(str(sec.get("view_mode")) == "both" and bool(sec.get("_long_box").visible) and bool(sec.get("_trans_box").visible) and bool(sec.get("_coronal_box").visible), "并排 shows all three views")
+	# t87u：填充四边形铺在切面上，不再斜着立在阴道中央。
+	for fw in ["long", "coronal", "trans"]:
+		var al: Dictionary = sec.call("debug_fill_alignment", fw)
+		_ok(bool(al.get("ok", false)), "%s fill quad lies in the cut plane (dist=%.2f mm, facing=%.3f) — was a slanted mid-vagina rectangle when looking_at got a world point" % [fw, float(al.get("plane_dist", 99.0)) * 1000.0, float(al.get("facing", 0.0))])
 	# 像素填充：球放到宫腔内，三视图都应有宫壁/宫腔，轮廓内近乎无纯黑。
 	var ctl: Node = vm.call("tool_controller")
 	_ok(ctl != null, "ball-rod controller is running")
@@ -127,8 +131,229 @@ func _run() -> void:
 		await _frames(2)
 		var lift2: float = ctl.call("debug_fundus_lift")
 		_ok(lift2 < 0.003, "uterus recovers when the rod is withdrawn (lift=%.2f mm)" % (lift2 * 1000.0))
+		# 包住球和杆：多深度 + 一次搅动，内壁相对插入物的有符号间隙 ≥ 0。
+		var org: Node = player.call("get_organs")
+		var samples := [
+			opening.distance_to(cerv) * 0.45,
+			opening.distance_to(cerv) + float(ctl.call("radius")) * 0.6,
+			contact - 0.004,
+		]
+		for dpt in samples:
+			ctl.call("debug_set_depth", dpt)
+			if org and org.has_method("step"):
+				org.call("step", 0.016)
+			var enc: Dictionary = _enclosure_at(org, ctl)
+			_ok(int(enc.get("n", 0)) > 20, "enclosure sampled %s canal/uterus verts at depth %.1f mm" % [enc.get("n", 0), dpt * 1000.0])
+			_ok(float(enc.get("worst", -1.0)) >= -0.0004, "vagina+uterus enclose ball and shaft at depth %.1f mm (worst clearance %.2f mm, at %s)" % [dpt * 1000.0, float(enc.get("worst", -1.0)) * 1000.0, enc.get("where", "")])
+			print("ENCLOSURE depth=%.1f mm worst=%.2f mm n=%s ball=%.2f shaft=%.2f" % [dpt * 1000.0, float(enc.get("worst", -1.0)) * 1000.0, enc.get("n", 0), float(enc.get("ball", 0.0)) * 1000.0, float(enc.get("shaft", 0.0)) * 1000.0])
+		var mid_d: float = samples[0]
+		ctl.call("debug_set_depth", mid_d)
+		var side := axis.cross(Vector3.UP)
+		if side.length_squared() < 1e-8:
+			side = axis.cross(Vector3.RIGHT)
+		side = side.normalized() * 0.003
+		if ctl.has_method("debug_step_lateral"):
+			ctl.call("debug_step_lateral", side, 0.05)
+			if org and org.has_method("step"):
+				org.call("step", 0.016)
+			var encs: Dictionary = _enclosure_at(org, ctl)
+			_ok(float(encs.get("worst", -1.0)) >= -0.0004, "enclose ball and shaft during a 3 mm stir (worst %.2f mm)" % (float(encs.get("worst", -1.0)) * 1000.0))
+			print("ENCLOSURE stir worst=%.2f mm n=%s" % [float(encs.get("worst", -1.0)) * 1000.0, encs.get("n", 0)])
+		# 延迟回缩：瞬时扩张，缩小按 ~0.9 s 指数，窗口 0.5–1.5 s。
+		if org and org.has_method("set_canal_dilate") and org.has_method("canal_dilate_radius_at"):
+			var canal: Dictionary = org.call("vagina_canal")
+			var oab: Vector3 = canal.get("opening_ab", Vector3.ZERO)
+			var aab: Vector3 = canal.get("axis_ab", Vector3(0, 1, 0))
+			var along_r := float(canal.get("length", 0.06)) * 0.45
+			org.call("set_canal_dilate", oab, aab, along_r + 0.02, 0.012, 1.0, 0.0065, 0.0, float(canal.get("length", 0.06)))
+			org.call("_tick_dilate_recoil", 0.016)
+			var r0: float = org.call("canal_dilate_radius_at", along_r)
+			_ok(r0 >= 0.006, "recoil: instant dilate at mid-canal is at least the shaft clearance (%.2f mm)" % (r0 * 1000.0))
+			org.call("clear_canal_dilate")
+			var r_im: float = org.call("canal_dilate_radius_at", along_r)
+			_ok(r_im >= r0 * 0.95, "recoil: shrink is not instant (%.2f -> %.2f mm right after clear)" % [r0 * 1000.0, r_im * 1000.0])
+			org.call("_tick_dilate_recoil", 0.40)
+			var r_mid: float = org.call("canal_dilate_radius_at", along_r)
+			_ok(r_mid > r0 * 0.45 and r_mid < r0 * 0.90, "recoil: ~0.4 s later radius is decaying exponentially (%.2f mm, start %.2f, expect ~67%%)" % [r_mid * 1000.0, r0 * 1000.0])
+			org.call("_tick_dilate_recoil", 2.40)
+			var r_end: float = org.call("canal_dilate_radius_at", along_r)
+			_ok(r_end < r0 * 0.12, "recoil: ~2.8 s later radius has mostly recovered (%.2f mm)" % (r_end * 1000.0))
+			print("RECOIL r0=%.2f r_im=%.2f r_0.4s=%.2f r_2.8s=%.2f mm" % [r0 * 1000.0, r_im * 1000.0, r_mid * 1000.0, r_end * 1000.0])
+		# GPU 回读（xvfb / 有窗口时硬断言；headless Dummy 没有可用图像则记录原因）。
+		sec.call("set_test_render", true)
+		ctl.call("debug_set_depth", opening.distance_to(cerv) + float(ctl.call("radius")) * 0.4)
+		await _frames(3)
+		var gpu_any := false
+		for which_g in ["long", "trans", "coronal"]:
+			if which_g == "coronal":
+				sec.call("set_view_mode", "coronal")
+			elif which_g == "trans":
+				sec.call("set_view_mode", "trans")
+			else:
+				sec.call("set_view_mode", "long")
+			await _frames(2)
+			var gm: Dictionary = sec.call("debug_gpu_section_metrics", which_g)
+			print("GPU %s display=%s renderer=%s sil=%s black_frac=%.4f cavity=%s uter_wall=%s vag_wall=%s reason=%s" % [which_g, gm.get("display", ""), gm.get("renderer", ""), gm.get("silhouette", 0), float(gm.get("black_frac", 1.0)), gm.get("cavity", 0), gm.get("uter_wall", 0), gm.get("vag_wall", 0), gm.get("reason", "")])
+			if int(gm.get("silhouette", 0)) > 30:
+				gpu_any = true
+				_ok(float(gm.get("black_frac", 1.0)) < 0.05, "GPU %s near-zero black inside silhouette (frac=%.4f, sil=%s)" % [which_g, float(gm.get("black_frac", 1.0)), gm.get("silhouette", 0)])
+				if which_g == "long":
+					_ok(int(gm.get("cavity", 0)) > 10, "GPU %s abdominal cavity fill is visible (%s px)" % [which_g, gm.get("cavity", 0)])
+				else:
+					var orgn := int(gm.get("cavity", 0)) + int(gm.get("uter_wall", 0)) + int(gm.get("uter_lumen", 0)) + int(gm.get("vag_wall", 0)) + int(gm.get("vag_lumen", 0))
+					_ok(orgn > 40, "GPU %s organ/cavity fill is visible (%s px, cavity=%s)" % [which_g, orgn, gm.get("cavity", 0)])
+			elif str(DisplayServer.get_name()) != "headless" and str(gm.get("reason", "")) != "no image" and str(gm.get("reason", "")) != "empty or dummy renderer":
+				_ok(false, "GPU %s fill readback failed (%s, sil=%s black_frac=%.4f)" % [which_g, gm.get("reason", ""), gm.get("silhouette", 0), float(gm.get("black_frac", 1.0))])
+		if str(DisplayServer.get_name()) != "headless":
+			_ok(gpu_any, "GPU section fill rendered in at least one view")
+		sec.call("set_test_render", false)
+		# 脱垂：阴道内壁相对子宫截面至少有 ~3 mm 余量。
+		if org and org.has_method("prolapse"):
+			ctl.call("debug_set_depth", -0.08)
+			await _frames(2)
+			var pc: Node = org.call("prolapse")
+			if pc and pc.has_method("set_amount"):
+				var thr: Dictionary = pc.call("grade_thresholds") if pc.has_method("grade_thresholds") else {}
+				var dm := float(thr.get("descent_max", 0.12))
+				var dd: Dictionary = thr.get("descent", {})
+				var mid3 := 0.75
+				if dd.has(3) and dd.has(4):
+					mid3 = ((float(dd[3]) + float(dd[4])) * 0.5) / maxf(dm, 1e-4)
+				pc.call("set_amount", mid3)
+				for _k in 45:
+					await _phys(1)
+				var pclr: Dictionary = _prolapse_vagina_clearance(org, pc)
+				_ok(int(pclr.get("n", 0)) > 8, "prolapse clearance sampled %s vagina verts" % pclr.get("n", 0))
+				_ok(float(pclr.get("worst", -1.0)) >= 0.003, "prolapse: vaginal lumen stays ≥ organ radius + 3 mm margin (worst %.2f mm, n=%s)" % [float(pclr.get("worst", -1.0)) * 1000.0, pclr.get("n", 0)])
+				print("PROLAPSE VAGINA clearance worst=%.2f mm (vs mass+2*wall) n=%s" % [float(pclr.get("worst", -1.0)) * 1000.0, pclr.get("n", 0)])
+				pc.call("set_amount", 0.0)
+				await _phys(2)
 	if vm.has_method("exit"):
 		vm.call("exit")
 	await _frames(2)
 	print("v0424_check: fails=", fails)
 	quit(1 if fails > 0 else 0)
+
+
+func _enclosure_at(org: Node, ctl: Node) -> Dictionary:
+	var out := {"n": 0, "worst": 1.0, "ball": 1.0, "shaft": 1.0, "where": ""}
+	if org == null or ctl == null or not org.has_method("viscera_meshes"):
+		return out
+	var canal: Dictionary = org.call("vagina_canal") if org.has_method("vagina_canal") else {}
+	if canal.is_empty():
+		return out
+	var opening: Vector3 = canal.get("opening_ab", Vector3.ZERO)
+	var axis: Vector3 = canal.get("axis_ab", Vector3(0, 1, 0))
+	if axis.length_squared() < 1e-10:
+		return out
+	axis = axis.normalized()
+	var fr: Transform3D = org.get("_frame") if org.get("_frame") != null else Transform3D.IDENTITY
+	var inv := fr.affine_inverse()
+	var tip_w: Vector3 = ctl.call("tip_world")
+	var tip_ab: Vector3 = inv * tip_w
+	var r: float = float(ctl.call("radius"))
+	var shaft_r: float = 0.004
+	var depth: float = float(ctl.get("depth"))
+	var lat: Vector3 = Vector3.ZERO
+	if org.has_method("canal_dilate_lateral"):
+		lat = org.call("canal_dilate_lateral")
+	for kind in ["vagina", "uterus", "uterus_cavity"]:
+		var meshes: Array = org.call("viscera_meshes", kind)
+		for mi in meshes:
+			if mi == null or mi.mesh == null:
+				continue
+			var arr: Array = mi.mesh.surface_get_arrays(0)
+			var V: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+			var gx: Transform3D = mi.global_transform
+			var is_cav: bool = str(kind) == "uterus_cavity"
+			for v in V:
+				var l: Vector3 = inv * (gx * v)
+				# 与 organ.gdshader 同一顺序：先搅动，再扩张/宫腔胶囊/宫底顶起。
+				var off := Vector3.ZERO
+				if org.has_method("canal_stir_offset_at"):
+					off += org.call("canal_stir_offset_at", l)
+				if org.has_method("dilate_offset_at"):
+					off += org.call("dilate_offset_at", l + off)
+				if org.has_method("uterus_ball_offset_at") and kind != "vagina":
+					var ub: Vector3 = org.call("uterus_ball_offset_at", l + off)
+					if is_cav:
+						# 宫腔 GPU 不加壁厚，CPU 统一值含壁厚；按比例去掉多余壁厚。
+						var wall := 0.0028
+						var need := r + wall
+						if need > 1e-5:
+							ub *= r / need
+					off += ub
+				if org.has_method("fundus_lift_offset_at"):
+					off += org.call("fundus_lift_offset_at", l + off)
+				var q := l + off
+				var to_ball := q - tip_ab
+				var d_ball := to_ball.length() - r
+				var rod_ax := axis
+				var tsh := clampf(-(q - tip_ab).dot(rod_ax), 0.0, maxf(depth + r, 0.0))
+				var d_shaft := 1.0
+				if tsh > r * 0.35:
+					d_shaft = ((q - tip_ab) + rod_ax * tsh).length() - shaft_r
+				var s0 := (l - opening).dot(axis)
+				var pr0 := ((l - opening) - axis * s0).length()
+				var slice := 0.0
+				var ds := s0 - depth
+				if absf(ds) <= r:
+					slice = sqrt(maxf(r * r - ds * ds, 0.0))
+				var need_r := slice
+				if s0 < depth and s0 > -0.04:
+					need_r = maxf(need_r, shaft_r)
+				if need_r <= 1e-5:
+					continue
+				if pr0 > need_r + 0.045:
+					continue
+				out["n"] = int(out["n"]) + 1
+				if d_ball < float(out["ball"]):
+					out["ball"] = d_ball
+				if d_shaft < float(out["shaft"]):
+					out["shaft"] = d_shaft
+				var w := minf(d_ball, d_shaft)
+				if w < float(out["worst"]):
+					out["worst"] = w
+					out["where"] = "%s s=%.1f mm" % [kind, s0 * 1000.0]
+	return out
+
+
+func _prolapse_vagina_clearance(org: Node, pc: Node) -> Dictionary:
+	var out := {"n": 0, "worst": 1.0}
+	if org == null or pc == null or not org.has_method("viscera_meshes"):
+		return out
+	var vag: Array = org.call("viscera_meshes", "vagina")
+	if vag.is_empty():
+		return out
+	var u: Dictionary = org.call("prolapse_uniforms") if org.has_method("prolapse_uniforms") else {}
+	if u.is_empty():
+		return out
+	var fr: Transform3D = org.get("_frame") if org.get("_frame") != null else Transform3D.IDENTITY
+	var inv := fr.affine_inverse()
+	var o4: Vector4 = u["prol_o"]
+	var a4: Vector4 = u["prol_a"]
+	var p4: Vector4 = u["prol_p"]
+	var o := Vector3(o4.x, o4.y, o4.z)
+	var ax := Vector3(a4.x, a4.y, a4.z).normalized()
+	var tip := p4.y
+	var w := p4.w
+	var mi: MeshInstance3D = vag[0]
+	var arr: Array = mi.mesh.surface_get_arrays(0)
+	var V: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	var gx: Transform3D = mi.global_transform
+	for v in V:
+		var l: Vector3 = inv * (gx * v)
+		var r4: Vector4 = org.call("prolapse_offset_ab", l)
+		var q := l + Vector3(r4.x, r4.y, r4.z)
+		var sq := (q - o).dot(ax)
+		if sq < 0.0 or sq > a4.w:
+			continue
+		var mr := float(pc.call("mass_radius_at", sq - tip))
+		if mr <= 1e-5:
+			continue
+		var rq := ((q - o) - ax * sq).length()
+		# 相对「截面 + 双倍壁厚」的余量，目标是再多 4 mm。
+		var clr := rq - mr - 2.0 * w
+		out["n"] = int(out["n"]) + 1
+		out["worst"] = minf(float(out["worst"]), clr)
+	return out

@@ -10,6 +10,7 @@ const DIAMETER_MIN := 0.012
 const DIAMETER_MAX := 0.032
 const DIAMETER_DEFAULT := 0.020
 const SHAFT_RADIUS := 0.004
+const SHAFT_CLEARANCE := 0.0065  # 杆半径 + 2.5 mm，管壁始终包住杆
 const SHAFT_LEN := 0.18
 const OS_REST_R := 0.0049
 
@@ -58,7 +59,7 @@ var _have_prev_tip := false
 var _stir_world: Vector3 = Vector3.ZERO
 var _straighten := 0.0
 var _fundus_lift := 0.0
-const FUNDUS_LIFT_MAX := 0.045
+const FUNDUS_LIFT_MAX := 0.080
 var _debug_dt := 0.0
 
 
@@ -297,8 +298,9 @@ func _fundus_contact_depth() -> float:
 	if uter_len < 0.02:
 		uter_len = maxf(_uterus_rest_len(), 0.04)
 	# 前倾未拉直时，沿通道能走到的宫底更近；拉直后取满长。
-	var along := cerv + uter_len * lerpf(0.78, 1.0, _straighten)
-	return along - wall - r
+	# 触壁再提前 3 mm，并在未拉直时更早开始顶起，避免球穿出宫底。
+	var along := cerv + uter_len * lerpf(0.62, 0.92, _straighten)
+	return along - wall - r - 0.003
 
 
 func _update_fundus_lift(desired: float, dt: float) -> void:
@@ -308,7 +310,7 @@ func _update_fundus_lift(desired: float, dt: float) -> void:
 		want = clampf(desired - contact0, 0.0, FUNDUS_LIFT_MAX)
 	if dt <= 1e-5:
 		dt = 0.016
-	var k := 1.0 - exp(-dt * 10.0)
+	var k := 1.0 - exp(-dt * 18.0)
 	_fundus_lift = lerpf(_fundus_lift, want, k)
 	if _fundus_lift < 1e-5:
 		_fundus_lift = 0.0
@@ -699,7 +701,7 @@ func _apply_deform() -> void:
 		lat_ab = xf0.basis.inverse() * lateral
 	if organs.has_method("set_canal_dilate"):
 		var res := residual + cervix_pulse * 0.45
-		organs.call("set_canal_dilate", opening_ab, axis_ab, depth, r, mixv, SHAFT_RADIUS, res, cerv_s, lat_ab)
+		organs.call("set_canal_dilate", opening_ab, axis_ab, depth, r, mixv, SHAFT_CLEARANCE, res, cerv_s, lat_ab)
 	# 阴唇 / 外口：VulvaInserter。扩张器在位时由叶片包络占用外口，避免每帧和扩张器抢写（否则会反复重建皮瓣）。
 	if organs.get("vulva") and organs.vulva.has_method("set_inserter"):
 		if _inserter == null:
@@ -717,8 +719,8 @@ func _apply_deform() -> void:
 			var uc = organs.meta["uterus_cavity"]
 			if uc is Dictionary:
 				wall = float(uc.get("wall_m", wall))
-		var max_r := 0.028
-		organs.call("set_uterus_ball", center_ab, r, mixv, wall, max_r)
+		# 不设 28 mm 半径上限（否则球加壁厚会顶穿宫壁）；杆段用胶囊包住。
+		organs.call("set_uterus_ball", center_ab, r, mixv, wall, 0.0, SHAFT_CLEARANCE, axis_ab)
 		uterus_distend = r * mixv
 	elif organs.has_method("clear_uterus_ball"):
 		organs.call("clear_uterus_ball")

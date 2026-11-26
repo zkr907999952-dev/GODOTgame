@@ -265,7 +265,26 @@ uniform vec4 dilate_p = vec4(0.0);
 uniform vec3 dilate_lat = vec3(0.0);
 
 // 与下面 CPU 的 OrganRig.canal_dilate_radius_at 保持同一公式。
-float dilate_target_radius(float along) {
+// dilate_p.y 已含杆的撑开余量。dilate_sh[8] / dilate_s01 是延迟回缩的显示半径（沿轴 32 档）。
+uniform vec4 dilate_sh[8];
+uniform vec2 dilate_s01 = vec2(0.0); // x=s0, y=s1；y<=x 则关闭采样
+
+float dilate_shown_at(float along) {
+	float s0 = dilate_s01.x;
+	float s1 = dilate_s01.y;
+	if (s1 - s0 < 1e-5) return 0.0;
+	float u = clamp((along - s0) / (s1 - s0), 0.0, 1.0);
+	float f = u * 31.0;
+	int i = clamp(int(floor(f)), 0, 30);
+	int j = i + 1;
+	int ia = i / 4;
+	int ib = j / 4;
+	float a = dilate_sh[ia][i - ia * 4];
+	float b = dilate_sh[ib][j - ib * 4];
+	return mix(a, b, clamp(f - float(i), 0.0, 1.0));
+}
+
+float dilate_instant_radius(float along) {
 	float mixv = dilate_p.x;
 	float R = dilate_d.w;
 	if (mixv <= 0.001 || R <= 1e-6) return 0.0;
@@ -278,21 +297,26 @@ float dilate_target_radius(float along) {
 		slice = sqrt(max(R * R - ds * ds, 0.0));
 	}
 	float target = slice;
-	// 杆在球后方（向外口一侧）一直通到体外一点点。
-	if (along < ball_s && along > -0.03) {
+	// 杆在球后方（向外口一侧，进入宫腔后也含宫颈段）一直有撑开体积。
+	if (along < ball_s && along > -0.04) {
 		target = max(target, shaft);
 	}
 	if (along < ball_s && residual > 0.001) {
-		float wake = residual * R * exp(-max(ball_s - along, 0.0) / max(R * 2.6, 0.008));
+		float wake = residual * R * exp(-max(ball_s - along, 0.0) / max(R * 3.2, 0.01));
 		target = max(target, shaft + wake);
 	}
 	return target;
 }
 
+float dilate_target_radius(float along) {
+	return max(dilate_instant_radius(along), dilate_shown_at(along));
+}
+
 vec3 dilate_offset(vec3 p) {
-	float mixv = dilate_p.x;
+	float mixv = max(dilate_p.x, 0.0);
 	float R = dilate_d.w;
-	if (mixv <= 0.001 || R <= 1e-6) return vec3(0.0);
+	if ((mixv <= 0.001 || R <= 1e-6) && dilate_s01.y - dilate_s01.x < 1e-5) return vec3(0.0);
+	if (R <= 1e-6) return vec3(0.0);
 	vec3 o = dilate_o.xyz;
 	vec3 ax = dilate_d.xyz;
 	float al = length(ax);
@@ -301,21 +325,29 @@ vec3 dilate_offset(vec3 p) {
 	vec3 v = p - o;
 	float s = dot(v, ax);
 	float ball_s = dilate_o.w;
-	float smin = min(-0.03, ball_s - R - 0.012);
-	float smax = max(ball_s + R + 0.012, dilate_p.w + R * 0.4);
-	if (s < smin - 0.02 || s > smax + 0.02) return vec3(0.0);
-	float along_w = smoothstep(smin - 0.016, smin, s) * (1.0 - smoothstep(smax, smax + 0.016, s));
+	float smin = min(-0.04, ball_s - R - 0.02);
+	float smax = max(ball_s + R + 0.02, dilate_p.w + R + 0.02);
+	if (s < smin - 0.035 || s > smax + 0.035) return vec3(0.0);
+	float along_w = smoothstep(smin - 0.03, smin + 0.004, s) * (1.0 - smoothstep(smax - 0.004, smax + 0.03, s));
 	if (along_w < 0.01) return vec3(0.0);
 	vec3 radial = v - ax * s - dilate_lat;
 	float pr = length(radial);
-	if (pr < 1e-6) return vec3(0.0);
+	vec3 rdir;
+	if (pr < 1e-6) {
+		rdir = normalize(cross(ax, abs(ax.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0)));
+		pr = 0.0;
+	} else {
+		rdir = radial / pr;
+	}
 	float target = dilate_target_radius(s);
 	if (target <= pr) return vec3(0.0);
-	// 只推开紧贴通道的管壁，避免把远处组织吸过来。
-	float band = target + 0.022;
+	// 更宽、更平滑的径向衰减，避免宫颈/管壁交接处撕面。
+	float band = target + 0.040;
 	if (pr > band) return vec3(0.0);
 	float near = 1.0 - smoothstep(target, band, pr);
-	return (radial / pr) * (target - pr) * mixv * along_w * near;
+	near = near * near * (3.0 - 2.0 * near);
+	float mix_eff = mixv > 0.001 ? mixv : 1.0;
+	return rdir * (target - pr) * mix_eff * along_w * near;
 }
 
 // 子宫 / 宫腔被球撑开。uter_ball.xyz = 球心(ab)，w = 球半径（<=0 关闭）
@@ -323,27 +355,55 @@ vec3 dilate_offset(vec3 p) {
 uniform vec4 uter_ball = vec4(0.0);
 uniform vec4 uter_ball_p = vec4(0.0);
 
+uniform vec3 uterus_ball_axis = vec3(0.0);
+
 vec3 uterus_ball_offset(vec3 p) {
 	float R = uter_ball.w;
 	float mixv = uter_ball_p.x;
 	if (R <= 1e-6 || mixv <= 0.001) return vec3(0.0);
-	float need = R + max(uter_ball_p.y, 0.0);
+	float wall = max(uter_ball_p.y, 0.0);
 	float cap = uter_ball_p.z;
+	float shaft = max(uter_ball_p.w, 0.0);
+	vec3 c = uter_ball.xyz;
+	vec3 ax = uterus_ball_axis;
+	float al = length(ax);
+	vec3 d;
+	float need;
+	if (al > 1e-5 && shaft > 1e-5) {
+		// 胶囊：球心 + 沿杆轴向外口一侧的杆段，宫壁始终包住球和杆。
+		ax /= al;
+		float slen = max(dilate_o.w, 0.0) + R;
+		vec3 a = c;
+		vec3 b = c - ax * slen;
+		vec3 ab = b - a;
+		float t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
+		vec3 q = a + ab * t;
+		d = p - q;
+		// 近球端用球半径，杆段用杆半径，交接处平滑。
+		float kball = 1.0 - smoothstep(0.0, max(R, 0.004), t * slen);
+		need = mix(shaft, R, kball) + wall;
+	} else {
+		d = p - c;
+		need = R + wall;
+	}
 	if (cap > 1e-5) need = min(need, cap);
-	vec3 d = p - uter_ball.xyz;
 	float dist = length(d);
-	if (dist < 1e-6) return vec3(0.0, need * 0.25 * mixv, 0.0);
-	// 球体内的点推到表面上；球外近处轻轻鼓起，避免硬折。
+	if (dist < 1e-6) {
+		vec3 fb = al > 1e-5 ? ax * need * 0.25 : vec3(0.0, need * 0.25, 0.0);
+		return fb * mixv;
+	}
 	if (dist < need) {
 		return (d / dist) * (need - dist) * mixv;
 	}
-	float soft = 0.012;
+	float soft = 0.016;
 	if (dist < need + soft) {
 		float k = 1.0 - smoothstep(need, need + soft, dist);
-		return (d / dist) * (soft * 0.35 * k) * mixv;
+		k = k * k * (3.0 - 2.0 * k);
+		return (d / dist) * (soft * 0.40 * k) * mixv;
 	}
 	return vec3(0.0);
 }
+
 
 // 弹道通道（最多 4 条）：ball_a.xyz = 入射点(ab-local)，w = 半径；ball_b.xyz = 方向，w = 长度（<=0 关闭）
 uniform vec4 ball_a[4];
@@ -518,14 +578,16 @@ vec4 prolapse_offset4(vec3 p) {
 	if (s < -0.012 || s > L + 0.03) return vec4(0.0);
 	vec3 radial = v - ax * s;
 	float r = length(radial);
-	if (r > 0.045) return vec4(0.0);
+	if (r > 0.085) return vec4(0.0);
 	vec3 rdir = r > 1e-6 ? radial / r : normalize(cross(ax, abs(ax.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0)));
 	// t68u 简化：不再做双层内翻折叠（体外也没有套筒），阴道只被下移的脱出物沿径向撑开。
+	// t86u：管腔内径 = 子宫/宫颈截面半径 + 壁厚 + 4 mm 余量，避免脱垂子宫穿出阴道壁。
 	float mr = prol_radius(s - tip);
 	if (mr <= 1e-5) return vec4(0.0);
-	float tgt = mr + 2.0 * w;
+	float tgt = mr + 2.0 * w + 0.004;
 	if (tgt <= r) return vec4(0.0);
-	float near = 1.0 - smoothstep(tgt, tgt + 0.02, r);
+	float near = 1.0 - smoothstep(tgt, tgt + 0.028, r);
+	near = near * near * (3.0 - 2.0 * near);
 	return vec4(rdir * (tgt - r) * near * ramp, 0.0);
 }
 

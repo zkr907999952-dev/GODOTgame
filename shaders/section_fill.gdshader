@@ -1,12 +1,12 @@
-// 断面图平面填充：按体内/器官内外测试给切面着色（不依赖闭合网格的薄壳投影）。
-// 腹腔/盆腔：深粉；阴道壁与宫壁实心着色，管腔/宫腔保持中空（更深的腔色，不是背景黑）。
+// 断面图平面填充（Mobile 友好：不引用 organ_common，避免多余 uniform / 特性导致真机编译失败）。
+// 腹腔/盆腔深粉；宫壁与阴道壁实心，管腔中空。四边形必须铺在剖切面上。
 shader_type spatial;
 render_mode blend_mix, depth_draw_opaque, cull_disabled, unshaded, shadows_disabled;
 
-#include "res://shaders/organ_common.gdshaderinc"
-
-uniform vec3 section_point = vec3(0.0);
-uniform vec3 section_normal = vec3(0.0, 0.0, 1.0);
+uniform vec3 ab_navel = vec3(0.0, 1.06, 0.11);
+uniform vec3 ab_right = vec3(1.0, 0.0, 0.0);
+uniform vec3 ab_up = vec3(0.0, 1.0, 0.0);
+uniform vec3 ab_fwd = vec3(0.0, 0.0, 1.0);
 uniform vec3 canal_open_ab = vec3(0.0);
 uniform vec3 canal_axis_ab = vec3(0.0, 1.0, 0.0);
 uniform vec3 canal_cerv_ab = vec3(0.0);
@@ -15,7 +15,7 @@ uniform float uter_len = 0.055;
 uniform float uter_rad = 0.022;
 uniform float uter_wall = 0.006;
 uniform float vag_lumen = 0.007;
-uniform float vag_wall = 0.007;
+uniform float vag_wall = 0.009;
 uniform vec3 rod_tip_w = vec3(0.0);
 uniform float rod_radius = 0.0;
 uniform vec3 rod_axis_w = vec3(0.0, 1.0, 0.0);
@@ -31,6 +31,11 @@ varying vec3 v_world;
 
 void vertex() {
 	v_world = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
+
+vec3 to_ab(vec3 w) {
+	vec3 d = w - ab_navel;
+	return vec3(dot(d, ab_right), dot(d, ab_up), dot(d, ab_fwd));
 }
 
 vec4 prof_sample(int i) {
@@ -57,8 +62,10 @@ vec3 torso_profile(float y) {
 }
 
 bool torso_inside(vec3 l, float inset) {
+	// 没有剖面纹理时仍用腹盆腔椭球兜底，避免切面内部露出背景黑。
 	if (prof_n < 2) {
-		return false;
+		vec3 q = vec3(l.x / max(0.13 - inset, 0.04), l.y / 0.18, (l.z - 0.02) / max(0.09 - inset, 0.03));
+		return dot(q, q) <= 1.0;
 	}
 	vec4 a0 = prof_sample(0);
 	vec4 a1 = prof_sample(max(prof_n - 1, 0));
@@ -79,15 +86,6 @@ void fragment() {
 	if (fill_on < 0.5) {
 		discard;
 	}
-	vec3 n = section_normal;
-	float nl = length(n);
-	if (nl < 1e-5) {
-		discard;
-	}
-	n /= nl;
-	if (abs(dot(v_world - section_point, n)) > 0.003) {
-		discard;
-	}
 	vec3 l = to_ab(v_world);
 	vec3 ax = canal_axis_ab;
 	float al = length(ax);
@@ -101,8 +99,7 @@ void fragment() {
 	float canal_len = max(dot(cerv - openp, ax), 0.03);
 	vec3 v = l - openp;
 	float along = dot(v, ax);
-	vec3 latv = v - ax * along;
-	float pr = length(latv);
+	float pr = length(v - ax * along);
 	vec3 col = vec3(-1.0);
 
 	vec3 rod_ab = to_ab(rod_tip_w);
@@ -110,10 +107,8 @@ void fragment() {
 		col = vec3(0.78, 0.82, 0.86);
 	} else if (rod_radius > 1e-5 && length(rod_axis_w) > 1e-5) {
 		vec3 rd = normalize(rod_axis_w);
-		vec3 wp = v_world;
-		vec3 ro = rod_tip_w;
-		float tsh = clamp(-dot(wp - ro, rd), 0.0, rod_shaft_len);
-		float dsh = length((wp - ro) + rd * tsh);
+		float tsh = clamp(-dot(v_world - rod_tip_w, rd), 0.0, rod_shaft_len);
+		float dsh = length((v_world - rod_tip_w) + rd * tsh);
 		if (dsh <= rod_shaft_r + 0.0003 && tsh > rod_radius * 0.35) {
 			col = vec3(0.78, 0.82, 0.86);
 		}
@@ -140,10 +135,7 @@ void fragment() {
 	bool in_uter_lumen = q_in < 1.0;
 	float vl = max(vag_lumen, 0.003);
 	float vw = max(vag_wall, 0.004);
-	float vag_lo = -0.012;
-	float vag_hi = canal_len + 0.002;
-	bool along_vag = along >= vag_lo && along <= vag_hi;
-	// 宫颈处让子宫优先，阴道只画到宫口前。
+	bool along_vag = along >= -0.012 && along <= canal_len + 0.002;
 	if (along > canal_len - 0.002) {
 		along_vag = along_vag && !in_uter_wall && !in_uter_lumen;
 	}

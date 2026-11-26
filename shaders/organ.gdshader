@@ -112,6 +112,7 @@ uniform vec4 dmg[12];
 varying vec3 v_l0;
 varying float v_eat;
 varying float v_phys_hide;
+varying float v_deform;
 
 float pulse(float along, vec3 clk, float amp) {
 	float n = max(0.2, peri_waves);
@@ -208,6 +209,10 @@ void vertex() {
 			VERTEX += inverse(mat3(MODEL_MATRIX)) * dw;
 		}
 	}
+	v_deform = 0.0;
+	if (dilate_p.x > 0.001 || dilate_s01.y > dilate_s01.x + 1e-5 || uter_ball_p.x > 0.001 || fundus_lift > 0.001 || prol_o.w > 0.5) {
+		v_deform = 1.0;
+	}
 }
 
 void fragment() {
@@ -222,6 +227,17 @@ void fragment() {
 		c = texture(albedo_tex, UV).rgb * base_color.rgb;
 		NORMAL_MAP = texture(normal_tex, UV).rgb;
 		NORMAL_MAP_DEPTH = normal_scale;
+	}
+	if (v_deform > 0.5) {
+		// 扩张/脱垂后用屏幕空间导数重算法线，避免原 NORMAL/NORMAL_MAP 和变形后的面打架、破面发黑。
+		vec3 ng = normalize(cross(dFdx(VERTEX), dFdy(VERTEX)));
+		if (length(ng) > 1e-5) {
+			if (dot(ng, NORMAL) < 0.0) {
+				ng = -ng;
+			}
+			NORMAL = ng;
+		}
+		NORMAL_MAP_DEPTH = 0.0;
 	}
 	float hurt = 0.0;
 	for (int i = 0; i < 12; i++) {
