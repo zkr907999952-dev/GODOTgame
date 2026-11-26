@@ -9,7 +9,8 @@ extends Node
 ## 外口 / 阴唇由 ProlapseMassInserter（VulvaInserter）按脱出物截面从里往外撑开，通道半径跟着下移。
 ##
 ## 模型：脱垂期间原子宫 / 宫颈 / 内膜 / 输卵管 / 卵巢网格隐藏，换成专用的低面数 ProlapseUterusModel
-## （宫颈 + 宫体 + IV 度时的细颈，复用原子宫 / 阴道材质）。
+## （宫颈 + 宫体 + IV 度时的细颈；整段统一用阴道黏膜材质，再染成更红润湿润的肉色）。
+## 体外节点与细颈对跟随大腿骨骼的廉价胶囊做推出，避免卡进腿里。
 ## 物理：简化为 params.nodes（默认 5）个节点：
 ## 仍在体内的节点沿「外口 → 宫颈 → 子宫静止轴」的路径运动学放置；已出外口的节点是带惯性、重力的
 ## Verlet 链，锚在外口，关节限角（柔性悬挂），可被拖拽 / 甩动。
@@ -76,6 +77,10 @@ var _canal_L := 0.05                    # 外口到宫颈（posed 阴道中线�
 var _inserter: RefCounted = null
 var _owns_introitus := false
 var _vel_hist: Array = []
+var _skel: Skeleton3D = null
+var _thigh_bi := PackedInt32Array()   # L_Upper, L_Fore, R_Upper, R_Fore
+var _thigh_caps: Array = []           # [{a, b, r}]，每步刷新一次
+
 
 
 func _init() -> void:
@@ -505,14 +510,22 @@ func _ensure_geometry() -> void:
 	for p4 in P:
 		V.append(xf * p4)
 	_build_profile(V)
-	# 材质：宫体用原子宫材质，宫颈 / 细颈用原阴道（宫颈黏膜）材质。复制后关掉器官形变开关。
+	# 材质：整段（宫体 + 宫颈 + 细颈）都用原阴道黏膜材质，再染成更红润、更湿润的肉色。
+	# 贴图细节保留；宫颈只比宫体略深，没有子宫红 / 阴道粉的硬边。
 	_src_body_mat = _dup_mat((src as MeshInstance3D).material_override)
+	var vag_mat: Material = null
 	var vg: Array = organs.call("viscera_meshes", "vagina")
 	for m5 in vg:
 		var mi5 := m5 as MeshInstance3D
 		if mi5 and mi5.material_override:
-			_src_cervix_mat = _dup_mat(mi5.material_override)
+			vag_mat = mi5.material_override
 			break
+	if vag_mat:
+		_src_body_mat = _tint_mucosa(_dup_mat(vag_mat), false)
+		_src_cervix_mat = _tint_mucosa(_dup_mat(vag_mat), true)
+	else:
+		_src_body_mat = _tint_mucosa(_src_body_mat, false)
+		_src_cervix_mat = _tint_mucosa(_src_body_mat, true)
 	_x.resize(_n)
 	_q.resize(_n)
 	_out.resize(_n)
@@ -536,6 +549,38 @@ func _dup_mat(m: Material) -> Material:
 		sm.set_shader_parameter("uterus_phys_on", 0.0)
 		sm.set_meta("prolapse_model", true)
 	return d
+
+
+func _tint_mucosa(m: Material, cervix: bool) -> Material:
+	if m == null:
+		return null
+	if not (m is ShaderMaterial):
+		return m
+	var sm := m as ShaderMaterial
+	var use_tex := bool(sm.get_shader_parameter("use_tex"))
+	if cervix:
+		sm.set_shader_parameter("base_color", params.cervix_tex_tint if use_tex else params.cervix_solid)
+	else:
+		sm.set_shader_parameter("base_color", params.mucosa_tex_tint if use_tex else params.mucosa_solid)
+	sm.set_shader_parameter("wet", float(params.mucosa_wet))
+	sm.set_shader_parameter("roughness", float(params.mucosa_roughness))
+	return sm
+
+
+func mucosa_look() -> Dictionary:
+	var body := _src_body_mat as ShaderMaterial
+	var cerv := _src_cervix_mat as ShaderMaterial
+	return {
+		"body": body,
+		"cervix": cerv,
+		"body_color": body.get_shader_parameter("base_color") if body else Color.BLACK,
+		"cervix_color": cerv.get_shader_parameter("base_color") if cerv else Color.BLACK,
+		"wet": body.get_shader_parameter("wet") if body else 0.0,
+		"roughness": body.get_shader_parameter("roughness") if body else 1.0,
+		"use_tex": bool(body.get_shader_parameter("use_tex")) if body else false,
+		"tex": body.get_shader_parameter("albedo_tex") if body else null,
+		"shader": body.shader if body else null,
+	}
 
 
 func _build_profile(V: PackedVector3Array) -> void:
@@ -757,6 +802,7 @@ func _simulate(dt: float) -> void:
 	var vmax := float(params.max_speed) * dt
 	var drv := _drive_node if _drive_active else -1
 	var portal_out := -_Ain
+	_refresh_thigh_caps()
 	for i in _n:
 		var sp := float(_sigma[i]) - descent
 		if sp >= 0.0:
@@ -816,7 +862,7 @@ func _simulate(dt: float) -> void:
 		for j in range(k - 1, 0, -1):
 			var a_pt := _O if j == k - 1 else _x[j + 1]
 			_limit_angle(a_pt, _x[j], j - 1, float(params.max_joint_bend), drv)
-		# 不能回到会阴平面以内；不低于地面。
+		# 不能回到会阴平面以内；不低于地面；不穿进大腿。
 		for b2 in k:
 			if b2 == drv:
 				continue
@@ -826,8 +872,20 @@ func _simulate(dt: float) -> void:
 				_x[b2] -= portal_out * dn
 			if _x[b2].y < floor_y + 0.012:
 				_x[b2].y = floor_y + 0.012
+			_x[b2] = _push_out_thighs(_x[b2], _node_radius(b2))
+		# 整段体外管（宫体段 + 宫底到外口的细颈）对大腿做胶囊-胶囊推出。
 		if hold != Vector3.INF:
+			hold = _push_out_thighs(hold, _node_radius(drv))
 			_x[drv] = hold
+		_resolve_tube_thighs(k)
+		if drv >= 0 and drv < k:
+			_x[drv] = _push_out_thighs(_x[drv], _node_radius(drv))
+	# 迭代结束后再投影一次，清掉长度/驱动约束留下的亚毫米穿透。
+	for b3 in k:
+		_x[b3] = _push_out_thighs(_x[b3], _node_radius(b3))
+	_resolve_tube_thighs(k)
+	for b4 in k:
+		_x[b4] = _push_out_thighs(_x[b4], _node_radius(b4))
 	for i3 in _n:
 		if not _x[i3].is_finite():
 			_x[i3] = _path(float(_sigma[i3]) - descent)
@@ -870,6 +928,217 @@ func _limit_angle(a: Vector3, b: Vector3, ci: int, max_ang: float, drv: int) -> 
 	axis = axis.normalized()
 	var nd := din.rotated(axis, max_ang)
 	_x[ci] = b + nd * lo
+
+
+func _node_radius(i: int) -> float:
+	# 宫底端点截面会收到 0，碰撞用靠近宫底的体半径，避免只把细尖推出、宫体还陷在腿里。
+	var a := _arc_of(i)
+	var a_hi := _U * 0.90
+	var a0 := clampf(a - 0.010, 0.0, a_hi)
+	var a1 := clampf(a, 0.0, a_hi)
+	var a2 := clampf(a + 0.010, 0.0, a_hi)
+	return maxf(maxf(mass_radius_at(a0), mass_radius_at(a1)), maxf(mass_radius_at(a2), 0.008))
+
+
+func _ensure_skel() -> Skeleton3D:
+	if _skel != null and is_instance_valid(_skel):
+		return _skel
+	_skel = null
+	_thigh_bi = PackedInt32Array()
+	if organs == null:
+		return null
+	var s = organs.get("_skel")
+	if s is Skeleton3D:
+		_skel = s
+	else:
+		var n: Node = organs.get_parent()
+		while n:
+			if n is Skeleton3D:
+				_skel = n
+				break
+			if n.has_method("get_skeleton"):
+				var g = n.call("get_skeleton")
+				if g is Skeleton3D:
+					_skel = g
+					break
+			n = n.get_parent()
+	if _skel:
+		_thigh_bi = PackedInt32Array([
+			_skel.find_bone("L_UpperLeg_a"),
+			_skel.find_bone("L_Foreleg_a"),
+			_skel.find_bone("R_UpperLeg_a"),
+			_skel.find_bone("R_Foreleg_a"),
+		])
+	return _skel
+
+
+func _refresh_thigh_caps() -> void:
+	_thigh_caps = []
+	var sk := _ensure_skel()
+	if sk == null or _thigh_bi.size() < 4:
+		return
+	var xf := sk.global_transform
+	var r := float(params.thigh_r)
+	var inset := float(params.thigh_hip_inset)
+	for s in 2:
+		var ia := int(_thigh_bi[s * 2])
+		var ib := int(_thigh_bi[s * 2 + 1])
+		if ia < 0 or ib < 0:
+			continue
+		var a: Vector3 = xf * sk.get_bone_global_pose(ia).origin
+		var b: Vector3 = xf * sk.get_bone_global_pose(ib).origin
+		var ab := b - a
+		var L := ab.length()
+		if L > 1e-4 and inset > 0.0:
+			a = a + ab * (minf(inset, L * 0.35) / L)
+		_thigh_caps.append({"a": a, "b": b, "r": r, "name": "L" if s == 0 else "R"})
+
+
+func thigh_capsules() -> Array:
+	if _thigh_caps.is_empty():
+		_refresh_thigh_caps()
+	return _thigh_caps
+
+
+## 体外节点（含截面半径）相对大腿胶囊的最小间隙：正 = 在外，负 = 陷入。
+func thigh_clearance() -> float:
+	if _thigh_caps.is_empty():
+		_refresh_thigh_caps()
+	if _thigh_caps.is_empty() or _x.is_empty():
+		return 1.0
+	var best := 1.0
+	for i in _n:
+		if _out.size() <= i or _out[i] == 0:
+			continue
+		best = minf(best, _point_thigh_clearance(_x[i], _node_radius(i)))
+	# 细颈中线
+	if not _sigma.is_empty() and float(_sigma[_n - 1]) - descent < 0.0:
+		var fund := _x[_n - 1]
+		for t in 3:
+			var u := float(t + 1) / 4.0
+			best = minf(best, _point_thigh_clearance(fund.lerp(_O, u), float(params.neck_r)))
+	return best
+
+
+func _point_thigh_clearance(p: Vector3, rad: float) -> float:
+	var best := 1.0
+	var extra := rad + float(params.thigh_margin)
+	for cap in _thigh_caps:
+		var c: Vector3 = _closest_on_seg(p, cap["a"], cap["b"])
+		best = minf(best, p.distance_to(c) - float(cap["r"]) - extra)
+	return best
+
+
+func _closest_on_seg(p: Vector3, a: Vector3, b: Vector3) -> Vector3:
+	var ab := b - a
+	var denom := ab.length_squared()
+	if denom < 1e-12:
+		return a
+	return a + ab * clampf((p - a).dot(ab) / denom, 0.0, 1.0)
+
+
+func _push_out_thighs(p: Vector3, rad: float) -> Vector3:
+	if _thigh_caps.is_empty():
+		return p
+	var q := p
+	var extra := rad + float(params.thigh_margin)
+	for _k in 2:
+		for cap in _thigh_caps:
+			var a: Vector3 = cap["a"]
+			var b: Vector3 = cap["b"]
+			var c := _closest_on_seg(q, a, b)
+			var d := q - c
+			var need := float(cap["r"]) + extra
+			var dist := d.length()
+			if dist >= need:
+				continue
+			if dist < 1e-8:
+				var n := (b - a).cross(Vector3.UP)
+				if n.length_squared() < 1e-10:
+					n = (b - a).cross(Vector3.RIGHT)
+				if n.length_squared() < 1e-10:
+					n = Vector3.FORWARD
+				d = n.normalized()
+				dist = 1.0
+			q = c + d * (need / dist)
+	return q
+
+
+func _resolve_tube_thighs(k: int) -> void:
+	if _thigh_caps.is_empty() or k < 1:
+		return
+	# 外口 → 最靠近外口的体外节点（IV 度时就是细颈：宫底 → 外口）。
+	var pr := maxf(_node_radius(k - 1), float(params.neck_r) if k >= _n else 0.008)
+	_resolve_seg_thighs(k - 1, -1, pr)
+	for b in range(1, k):
+		_resolve_seg_thighs(b - 1, b, maxf(_node_radius(b - 1), _node_radius(b)))
+
+
+func _resolve_seg_thighs(ia: int, ib: int, rad: float) -> void:
+	var pa := _x[ia]
+	var pb := _O if ib < 0 else _x[ib]
+	for cap in _thigh_caps:
+		var pr: Array = _seg_closest(pa, pb, cap["a"], cap["b"])
+		var d: Vector3 = pr[0] - pr[1]
+		var dist := d.length()
+		var need := float(cap["r"]) + rad + float(params.thigh_margin)
+		if dist >= need:
+			continue
+		if dist < 1e-8:
+			var n := (pb - pa).cross(Vector3.UP)
+			if n.length_squared() < 1e-10:
+				n = Vector3.FORWARD
+			d = n.normalized()
+			dist = 1.0
+		var push := d * ((need - dist) / dist)
+		var ab := pb - pa
+		var s := 0.5
+		if ab.length_squared() > 1e-12:
+			s = clampf((pr[0] - pa).dot(ab) / ab.length_squared(), 0.0, 1.0)
+		var wa := 1.0 - s
+		var wb := 0.0 if ib < 0 else s
+		if ib < 0:
+			wa = 1.0
+		var ws := wa + wb
+		if ws <= 1e-6:
+			continue
+		_x[ia] = pa + push * (wa / ws)
+		if ib >= 0:
+			_x[ib] = pb + push * (wb / ws)
+		pa = _x[ia]
+		pb = _O if ib < 0 else _x[ib]
+
+
+func _seg_closest(p1: Vector3, q1: Vector3, p2: Vector3, q2: Vector3) -> Array:
+	var d1 := q1 - p1
+	var d2 := q2 - p2
+	var r := p1 - p2
+	var a := d1.dot(d1)
+	var e := d2.dot(d2)
+	var f := d2.dot(r)
+	var s := 0.0
+	var t := 0.0
+	if a <= 1e-12 and e <= 1e-12:
+		return [p1, p2]
+	if a <= 1e-12:
+		t = clampf(f / e, 0.0, 1.0)
+	else:
+		var c := d1.dot(r)
+		if e <= 1e-12:
+			s = clampf(-c / a, 0.0, 1.0)
+		else:
+			var b := d1.dot(d2)
+			var denom := a * e - b * b
+			if absf(denom) > 1e-12:
+				s = clampf((b * f - c * e) / denom, 0.0, 1.0)
+			t = (b * s + f) / e
+			if t < 0.0:
+				t = 0.0
+				s = clampf(-c / a, 0.0, 1.0)
+			elif t > 1.0:
+				t = 1.0
+				s = clampf((b - c) / a, 0.0, 1.0)
+	return [p1 + d1 * s, p2 + d2 * t]
 
 
 func _finish(dt: float) -> void:
@@ -994,5 +1263,5 @@ func debug_state() -> Dictionary:
 		"state": state, "grade": grade, "amount": amount(), "descent": descent, "descent_max": descent_max(),
 		"cervix_sd": cervix_signed_distance(), "fundus_sd": fundus_signed_distance(), "out": outside_count(),
 		"portal_r": portal_radius(), "canal_L": _canal_L, "sigma0": float(_sigma[0]) if not _sigma.is_empty() else 0.0,
-		"U": _U, "prof": _prof,
+		"U": _U, "prof": _prof, "thigh_clearance": thigh_clearance(),
 	}

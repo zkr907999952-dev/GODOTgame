@@ -4,7 +4,8 @@ extends MeshInstance3D
 ## 沿脱垂链（宫颈尖 → 宫底）的中线生成一根低面数的管：截面 = 原子宫网格测得的 8 段剖面
 ## （与外口撑开、阴道着色器同一公式 mass_radius_at），宫颈尖是带宫口小凹的圆顶，宫底收口；
 ## IV 度宫底出了外口后，宫底到外口之间接一段细颈（阴道穹窿的蒂）。
-## 两个面：宫颈 + 细颈用原阴道（黏膜）材质，宫体用原子宫材质（都复制自原网格，颜色 / 贴图不变）。
+## 两个面都用阴道黏膜材质再统一染成更红润、湿润的肉色：面 0 = 宫颈（宫口周围略深），
+## 面 1 = 宫体 + 细颈（同一色系，交接处没有子宫红 / 阴道粉的硬边）。
 ##
 ## 网格建在腹部局部坐标里，节点变换 = 腹部坐标系：身体移动 / 呼吸时不用重建，只有链形状变了才重建
 ## （约 27 环 × 13 点，比原子宫 3839 顶点 + GPU 蒙皮 + 输卵管卵巢轻得多）。
@@ -16,8 +17,6 @@ const CERVIX_RINGS := 3
 const NECK_RINGS := 4
 const DOME_FRACS := [0.93, 0.72, 0.42, 0.0]
 const OS_DIMPLE := 0.0025
-## IV 度：宫体弧长超过 U × 这个比例后（宫底过渡 + 细颈）用阴道黏膜材质。
-const NECK_PINK_FROM := 0.88
 const REBUILD_EPS := 0.00008
 
 var vertex_count := 0
@@ -163,7 +162,7 @@ func rebuild(frame: Transform3D, nodes_ab: PackedVector3Array, arcs: PackedFloat
 				nx = q.normalized()
 		bxs[i3] = nx
 		bys[i3] = tans[i3].cross(nx).normalized()
-	# ---- 两个面：0 = 宫颈 + 细颈（黏膜），1 = 宫体
+	# ---- 两个面：0 = 宫颈（略深），1 = 宫体 + 细颈（统一红润黏膜）
 	var v0 := PackedVector3Array()
 	var n0 := PackedVector3Array()
 	var u0 := PackedVector2Array()
@@ -173,12 +172,11 @@ func rebuild(frame: Transform3D, nodes_ab: PackedVector3Array, arcs: PackedFloat
 	var u1 := PackedVector2Array()
 	var i1 := PackedInt32Array()
 	var W := SIDES + 1
-	var neck_from := U * NECK_PINK_FROM if has_neck else U
 	var prev_surf := -1
 	for k4 in R - 1:
 		var amid := 0.5 * (ring_a[k4] + ring_a[k4 + 1])
-		# 细颈（IV 度宫底 → 外口的阴道壁蒂）连同宫底过渡段都用阴道黏膜材质（肉粉色），不是子宫的红色。
-		var surf := 0 if (amid < cervix_len or amid > neck_from) else 1
+		# 宫颈略深；宫体和细颈同一黏膜色，避免子宫红 / 阴道粉的硬边。
+		var surf := 0 if amid < cervix_len else 1
 		var V: PackedVector3Array = v0 if surf == 0 else v1
 		var N: PackedVector3Array = n0 if surf == 0 else n1
 		var UV: PackedVector2Array = u0 if surf == 0 else u1

@@ -94,15 +94,18 @@ func _check_spawn() -> void:
 	var mv := int(md.get("vertex_count"))
 	print("PROLAPSE model: %d verts (original uterus %d), surfaces=%d" % [mv, orig_v, md.mesh.get_surface_count() if md.mesh else 0])
 	_ok(mv > 100 and mv < 700 and mv * 4 < orig_v, "the model is a simplified mesh (%d verts vs %d)" % [mv, orig_v])
-	# 复用原材质：宫体 = 原子宫材质，宫颈 = 原阴道（黏膜）材质（同一着色器、同一底色）。
-	var src_u := (ut[0] as MeshInstance3D).material_override as ShaderMaterial if not ut.is_empty() else null
+	# 整段统一用阴道黏膜着色器 / 贴图，再染成更红润的肉色（不再用原子宫红）。
 	var vg: Array = org.call("viscera_meshes", "vagina")
 	var src_v := (vg[0] as MeshInstance3D).material_override as ShaderMaterial if not vg.is_empty() else null
 	var mb := md.mesh.surface_get_material(1) as ShaderMaterial if md.mesh and md.mesh.get_surface_count() > 1 else null
 	var mc := md.mesh.surface_get_material(0) as ShaderMaterial if md.mesh and md.mesh.get_surface_count() > 0 else null
-	var same_u: bool = mb != null and src_u != null and mb.shader == src_u.shader and mb.get_shader_parameter("base_color") == src_u.get_shader_parameter("base_color")
-	var same_v: bool = mc != null and src_v != null and mc.shader == src_v.shader and mc.get_shader_parameter("base_color") == src_v.get_shader_parameter("base_color")
-	_ok(same_u and same_v, "the model reuses the original uterus / cervix materials (body=%s cervix=%s)" % [same_u, same_v])
+	var same_sh: bool = mb != null and mc != null and src_v != null and mb.shader == src_v.shader and mc.shader == src_v.shader
+	var same_tex: bool = mb != null and src_v != null and mb.get_shader_parameter("albedo_tex") == src_v.get_shader_parameter("albedo_tex")
+	var bc: Color = mb.get_shader_parameter("base_color") if mb else Color.BLACK
+	var cc: Color = mc.get_shader_parameter("base_color") if mc else Color.BLACK
+	var close := absf(bc.r - cc.r) < 0.20 and absf(bc.g - cc.g) < 0.20 and absf(bc.b - cc.b) < 0.20
+	var ruddy := bc.r > bc.g and bc.g > 0.35
+	_ok(same_sh and same_tex and close and ruddy, "the model uses a unified ruddy vaginal-mucosa look (shader=%s tex=%s close=%s ruddy=%s body=%s cervix=%s)" % [same_sh, same_tex, close, ruddy, bc, cc])
 	# 刚激活时与原子宫重合：模型宫颈尖（弧长 0 的环心）≈ 原宫颈位置。
 	var cw: PackedVector3Array = md.call("ring_centers_world")
 	var arcs: PackedFloat32Array = md.call("ring_arcs")
@@ -270,20 +273,19 @@ func _check_model(g: int) -> void:
 		var rmax := 0.0
 		for r2 in rr:
 			rmax = maxf(rmax, r2)
-		var vg: Array = org.call("viscera_meshes", "vagina")
-		var vcol = ((vg[0] as MeshInstance3D).material_override as ShaderMaterial).get_shader_parameter("base_color") if not vg.is_empty() else null
-		var m0 := mesh.surface_get_material(0) as ShaderMaterial
-		var pink: bool = m0 != null and vcol != null and m0.get_shader_parameter("base_color") == vcol and (vcol as Color).g > 0.4
-		# 细颈环（弧长 > U）都在黏膜面里：面 0 顶点数应 ≥ 细颈环数 × 13。
+		# 细颈与宫体同一黏膜面（面 1），统一红润肉色，不再用原子宫红。
+		var m1 := mesh.surface_get_material(1) as ShaderMaterial if mesh.get_surface_count() > 1 else mesh.surface_get_material(0) as ShaderMaterial
+		var ncol: Color = m1.get_shader_parameter("base_color") if m1 else Color.BLACK
+		var pink: bool = m1 != null and ncol.r > ncol.g and ncol.g > 0.35
 		var neck_rings := 0
 		var Uu := float(pc.get("_U"))
 		for a2 in arcs:
 			if a2 > Uu:
 				neck_rings += 1
-		var v_s0 := (mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
-		print("PROLAPSE neck: radius %.1f mm (body max %.1f mm), rings %d, mucosa surface verts %d, pink=%s" % [nr * 1000, rmax * 1000, neck_rings, v_s0, pink])
+		var v_s1 := (mesh.surface_get_arrays(1)[Mesh.ARRAY_VERTEX] as PackedVector3Array).size() if mesh.get_surface_count() > 1 else 0
+		print("PROLAPSE neck: radius %.1f mm (body max %.1f mm), rings %d, body+neck verts %d, pink=%s col=%s" % [nr * 1000, rmax * 1000, neck_rings, v_s1, pink, ncol])
 		_ok(nr >= 0.013 and nr >= rmax * 0.55, "grade IV: the introitus→uterus connection is thick (%.1f mm radius vs body %.1f mm)" % [nr * 1000, rmax * 1000])
-		_ok(pink and neck_rings >= 3 and v_s0 >= (neck_rings + 1) * 13, "grade IV: the connection uses the flesh-pink vaginal mucosa material, not the red uterus colour")
+		_ok(pink and neck_rings >= 3 and v_s1 >= (neck_rings + 1) * 13, "grade IV: the connection uses the unified ruddy mucosa colour, not the red uterus colour")
 
 
 func _check_vagina_deform(g: int) -> void:

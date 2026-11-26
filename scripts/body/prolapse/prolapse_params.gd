@@ -19,6 +19,27 @@ class_name ProlapseParams
 @export var neck_r: float = 0.016
 ## 脱垂期间简化子宫链的节点数（宫颈 → 宫底）。
 @export var nodes: int = 5
+
+@export_group("脱垂黏膜配色（统一、红润、湿润）")
+## 参考：阴道鳞状上皮呈湿润粉红（Obgyn Key；Manitoba Pap module）；
+## 外宫颈光滑粉红，宫口周围可略红；脱出块为湿润粉红至粉红偏红的黏膜
+##（Merck Professional / 临床脱垂外观），不是苍白萎缩粉，也不是深暗红。
+## 有贴图时这些颜色乘在阴道黏膜贴图上，保留原有细节，只统一染色。
+@export var mucosa_tex_tint: Color = Color(1.04, 0.78, 0.74, 1.0)
+@export var mucosa_solid: Color = Color(0.80, 0.48, 0.46, 1.0)
+## 宫颈 / 宫口周围略深、更红润，与宫体同色系，避免硬边。
+@export var cervix_tex_tint: Color = Color(0.98, 0.68, 0.65, 1.0)
+@export var cervix_solid: Color = Color(0.74, 0.40, 0.40, 1.0)
+@export var mucosa_wet: float = 0.62
+@export var mucosa_roughness: float = 0.30
+
+@export_group("大腿碰撞")
+## 跟随 L/R_UpperLeg_a → Foreleg_a 的胶囊半径（与 CharacterHitboxes 大腿段一致）。
+@export var thigh_r: float = 0.075
+## 髋关节端内缩，避免胶囊吃到会阴 / 外口。
+@export var thigh_hip_inset: float = 0.048
+## 脱出物表面相对胶囊再留的空隙。
+@export var thigh_margin: float = 0.003
 ## 截面半径按子宫网格分位数测得后再乘这个系数。
 @export var radius_scale: float = 1.0
 ## 截面取网格径向距离的分位数（0.5 = 平均外形，0.9 = 几乎包住整个网格）。
