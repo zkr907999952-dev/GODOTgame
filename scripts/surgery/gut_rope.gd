@@ -125,6 +125,55 @@ func _ready() -> void:
 		m.roughness = 0.32
 		m.cull_mode = BaseMaterial3D.CULL_DISABLED
 		material_override = m
+	add_to_group(HangGrab.GROUP)
+
+
+# ---------------------------------------------------------------- t96u 悬垂器官共享抓取接口（HangGrab）
+## 已扯出体外的肠袢段可被普通互动工具抓住拖动 / 甩；和拿取工具一样不从创口里再多拉（上限 = 已扯出长度）。
+var _hg_on := false
+
+
+func hang_pick(origin: Vector3, dir: Vector3) -> Dictionary:
+	if retracting or not is_visible_in_tree() or _p.size() < 3:
+		return {}
+	var pk: Array = ray_pick(origin, dir)
+	var idx := int(pk[0])
+	if idx <= 0 or idx >= _p.size() - 1 or float(pk[1]) > maxf(radius + 0.006, 0.012):
+		return {}
+	var d := dir.normalized()
+	var t := (_p[idx] - origin).dot(d)
+	return {"t": t, "point": origin + d * t, "anchor": _p[idx], "part": "gut", "idx": idx}
+
+
+func hang_grab(hit: Dictionary, _origin: Vector3, _dir: Vector3) -> bool:
+	var idx := int(hit.get("idx", -1))
+	if idx <= 0 or idx >= _p.size() - 1:
+		return false
+	hold_index = idx
+	hold_pos = _p[idx]
+	_hg_on = true
+	return true
+
+
+func hang_drag(target: Vector3) -> void:
+	if not _hg_on or hold_index <= 0 or hold_index >= _p.size() - 1:
+		return
+	var n := _p.size()
+	var fa := float(hold_index) / float(n - 1)
+	var fb := 1.0 - fa
+	var need := maxf((anchor_a.distance_to(exit_a) + exit_a.distance_to(target)) / maxf(fa, 0.05), (anchor_b.distance_to(exit_b) + exit_b.distance_to(target)) / maxf(fb, 0.05)) * 1.03
+	if need > fed_len:
+		var em := (exit_a + exit_b) * 0.5
+		var reach := maxf(minf(fed_len * fa - anchor_a.distance_to(exit_a), fed_len * fb - anchor_b.distance_to(exit_b)) / 1.03, 0.01)
+		if target.distance_to(em) > reach:
+			target = em + (target - em).normalized() * reach
+	hold_pos = target
+
+
+func hang_release() -> void:
+	if _hg_on:
+		hold_index = -1
+	_hg_on = false
 
 
 func use_organ_material(mat: ShaderMaterial) -> void:

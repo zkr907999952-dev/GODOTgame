@@ -49,6 +49,11 @@ func _ready() -> void:
 		_sn[j] = sin(TAU * float(j) / float(SIDES))
 
 
+## t96u：登记为可被普通互动工具抓取的悬垂器官（HangGrab 接口，解算在父节点 ProlapseController）。
+func _enter_tree() -> void:
+	add_to_group("hang_grab_organs")
+
+
 func set_materials(body: Material, cervix: Material) -> void:
 	_mat_body = body
 	_mat_cervix = cervix if cervix else body

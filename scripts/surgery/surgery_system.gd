@@ -5695,7 +5695,24 @@ func _forceps_outward_tip(origin: Vector3, dir: Vector3, plane_tip: Vector3) -> 
 	var start := wc + _fc_start_rel
 	var ref := _grab_plane_hit(origin, dir, _fc_ray_ref)
 	var disp := ref - _fc_ray_ref
+	if _fc_kind == "soft" and _fc_soft_kind == "uterus":
+		# t91u：子宫不再先被拖到创口中心（肚脐一侧）再出来，而是从原位直接朝离它最近的创口处（下缘）拉出。
+		return forceps_pull_path(start, uterus_exit_center(start, wc, ow), ow, disp)
 	return forceps_pull_path(start, wc, ow, disp)
+
+
+## t91u：子宫出口 = 夹点在创口平面上的投影，限制在创口中心 HANG_MAX 以内（子宫在创口下方时就是创口下缘，
+## 与 bd0187e 的悬挂点一致）。
+const UTERUS_EXIT_MAX := 0.017
+
+
+func uterus_exit_center(start: Vector3, wc: Vector3, ow: Vector3) -> Vector3:
+	var rel := start - wc
+	rel -= ow * rel.dot(ow)
+	var lim := minf(HANG_MAX, UTERUS_EXIT_MAX)
+	if rel.length() > lim:
+		rel = rel.normalized() * lim
+	return wc + rel
 
 
 ## 纯函数：起点 start（体内），创口中心 wc，外向 ow，手势位移 disp → 钳尖目标。

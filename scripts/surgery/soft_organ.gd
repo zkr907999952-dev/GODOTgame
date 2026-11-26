@@ -24,7 +24,7 @@ const LEVELS := 5
 const MAX_BEND := 0.03          # 每个关节最多约 1.7°：宫体是硬的肌性器官，摆动来自系带；线性蒙皮几乎不拉伸
 const MAX_STRETCH := 1.02
 const MAX_SPEED := 6.0
-const TUBE_PTS := 7
+const TUBE_PTS := 9
 const TUBE_RADIUS := 0.0034
 const PHYS_SCALE := 1.0         # 与原网格等大，出生时完全重合
 const TETHER_N := 8             # 系带节点数（含根点）
@@ -42,7 +42,20 @@ const TETHER_R := 0.006
 const IN_SPRING := 0.10
 const TUBE_IN_SPRING := 0.35
 ## T-11：输卵管段最多拉长到静止长度的这个倍数（绳子硬上限，卵巢跟着走，不会被扯成细线）。
-const TUBE_MAX_STRETCH := 1.04
+## t92u：输卵管是弹性管（不再是 1.04 的硬绳）：只抗拉、松弛时自然下垂；被钳子夹住拉远时
+## 整体弹性伸长，最多到 TUBE_MAX_STRETCH（安全上限），松手后按 TUBE_STIFF 回弹到静长。
+const TUBE_MAX_STRETCH := 1.6
+const TUBE_STIFF := 0.9
+## 不夹时的自重下垂上限（迭代次数有限，PBD 链在重力下会被「拉长」，这里兜住）；
+## 松手后上限从当前伸长每帧回落 TUBE_RECOIL → 平滑回弹，而不是一下弹回。
+const TUBE_FREE_STRETCH := 1.06
+const TUBE_RECOIL := 0.035
+## 管长 = 宫角→卵巢直线距离 × TUBE_LEN_MUL（至少 TUBE_LEN_MIN），静止时呈自然弧形。
+const TUBE_LEN_MUL := 1.7
+const TUBE_LEN_MIN := 0.045
+## 管头：p0 嵌在宫角表面内 TUBE_EMBED，p1 沿宫角表面法线伸出 TUBE_STEM —— 管子从表面那一点直接长出来。
+const TUBE_EMBED := 0.0022
+const TUBE_STEM := 0.004
 const BODY_STIFF := 1.0         # 形状匹配比例：宫体整体是刚体（摆动 / 甩动来自系带），蒙皮边长不变
 const BODY_W := 0.35            # 宫体节点相对系带节点的逆质量
 const SKIN_CELL := 0.02
@@ -152,6 +165,101 @@ func _ready() -> void:
 	if _am == null:
 		_am = ArrayMesh.new()
 		mesh = _am
+	add_to_group(HangGrab.GROUP)
+
+
+# ---------------------------------------------------------------- t96u 悬垂器官共享抓取接口（HangGrab）
+## 体外的宫体节点（悬挂 / 甩动中）和已成悬链的输卵管 / 卵巢都能被普通互动工具抓住拖动；
+## 宫体用 T-11 拿取工具同一套「只拖已在体外的部分」限制，不会再扯出更多，也不会被推回。
+var _hg_part := ""
+var _hg_side := -1
+
+
+func hang_pick(origin: Vector3, dir: Vector3) -> Dictionary:
+	if not organ_active or retracting or not visible and not external_drive:
+		return {}
+	var d := dir.normalized()
+	var best := {}
+	var best_t := INF
+	if not external_drive and is_extracted():
+		for bi in _p.size():
+			if not node_outside(bi):
+				continue
+			var w := _p[bi] - origin
+			var t := w.dot(d)
+			if t <= 0.0:
+				continue
+			var pp := (w - d * t).length()
+			if pp < BODY_R + 0.008 and t < best_t:
+				best_t = t
+				best = {"t": t, "point": origin + d * t, "anchor": _p[bi], "part": "body", "idx": bi, "score": pp / (BODY_R + 0.008)}
+	if kind == "uterus":
+		for side in [0, 1]:
+			var rope := _chain_node(side)
+			if rope == null or not rope.is_visible_in_tree():
+				continue
+			if not tube_chain_active(side) and not is_extracted() and not external_drive:
+				continue
+			var pk: Array = rope.call("ray_pick", origin, d)
+			var idx := int(pk[0])
+			if idx < 0 or float(pk[1]) > 0.010:
+				continue
+			var pts: PackedVector3Array = rope.call("points")
+			if idx >= pts.size():
+				continue
+			# 只抓体外那段（还在腹腔里的输卵管不拿）。
+			var tbp: Dictionary = _tubes.get(side, {})
+			if not tbp.is_empty() and idx < (tbp["st"] as PackedByteArray).size() and (tbp["st"] as PackedByteArray)[idx] == 0 and not external_drive:
+				continue
+			var t2 := (pts[idx] - origin).dot(d)
+			# 细管优先：射线明显对准输卵管 / 卵巢（相对容差更准）时选管，而不是旁边粗的宫体。
+			var sc := float(pk[1]) / 0.010
+			if t2 > 0.0 and (best.is_empty() or t2 < best_t + 0.004 or (sc < 0.5 and sc < float(best.get("score", 1.0)) * 0.6)):
+				best_t = t2
+				best = {"t": t2, "point": origin + d * t2, "anchor": pts[idx], "part": "tube", "side": side, "idx": idx, "score": sc}
+	return best
+
+
+func hang_grab(hit: Dictionary, origin: Vector3, dir: Vector3) -> bool:
+	hang_release()
+	match str(hit.get("part", "")):
+		"body":
+			if not hold_particle_swing(int(hit["idx"]), hit["anchor"]):
+				return false
+			_hg_part = "body"
+		"tube":
+			var side := int(hit["side"])
+			if not chain_hold(side, origin, dir):
+				return false
+			_hg_part = "tube"
+			_hg_side = side
+		_:
+			return false
+	return true
+
+
+func hang_drag(target: Vector3) -> void:
+	match _hg_part:
+		"body":
+			if hold_index >= 0:
+				hold_particle(hold_index, target)
+				hold_no_feed = true
+		"tube":
+			chain_drag(_hg_side, target)
+
+
+func hang_release() -> void:
+	match _hg_part:
+		"body":
+			release_hold()
+		"tube":
+			chain_release(_hg_side)
+	_hg_part = ""
+	_hg_side = -1
+
+
+func hang_grab_part() -> String:
+	return _hg_part
 
 
 func level() -> int:
@@ -199,9 +307,89 @@ func fundus_world() -> Vector3:
 
 func horn_world(side: int) -> Vector3:
 	side = clampi(side, 0, 1)
+	var vi := int(_horn_vi[side])
+	if vi >= 0 and vi < _vis_rest.size():
+		return _skin_vertex(vi)
 	if _bone.is_empty() or _rest_bone.is_empty():
 		return _frame * (_horn_ab[side] as Vector3) + _drag_off
 	return _xform_rest(_horn_ab[side] as Vector3)
+
+
+## t92u：宫角附着点 = 宫角处真实可见网格上的一个顶点（随 GPU 蒙皮同样的两骨混合移动），
+## 法线 = 该处表面外法线（同样随骨骼旋转）。输卵管从这一点垂直长出，所以每帧都与子宫表面重合相连。
+var _horn_vi: Array = [-1, -1]
+var _horn_n_ab: Array = [Vector3.RIGHT, Vector3.LEFT]
+var _tube_bulge: Array = [0.0, 0.0]
+## 每个管点在弧上的参数（按等弧长取样，保证各节静长相等）。
+var _tube_tk: Array = [PackedFloat32Array(), PackedFloat32Array()]
+var _tube_lim: Array = [TUBE_FREE_STRETCH, TUBE_FREE_STRETCH]
+
+
+func _bind_horns() -> void:
+	_horn_vi = [-1, -1]
+	if _vis_rest.is_empty():
+		return
+	var cb := _corr.basis
+	for side in 2:
+		var h: Vector3 = _horn_ab[side]
+		var best := -1
+		var bd := 1e9
+		for i in _vis_rest.size():
+			var dd := _vis_rest[i].distance_squared_to(h)
+			if dd < bd:
+				bd = dd
+				best = i
+		if best < 0:
+			continue
+		var c := _vis_rest[best]
+		var nsum := Vector3.ZERO
+		for j in _vis_rest.size():
+			if _vis_rest[j].distance_squared_to(c) < 0.006 * 0.006 and j < _vis_nrm.size():
+				nsum += (cb * _vis_nrm[j]).normalized()
+		# 法线必须朝外（远离子宫轴线）。
+		var t := clampf((c - _cervix_ab).dot(_axis_ab), 0.0, _rest_len)
+		var lat := c - (_cervix_ab + _axis_ab * t)
+		if nsum.length_squared() < 1e-10:
+			nsum = lat
+		nsum = nsum.normalized()
+		if lat.length_squared() > 1e-10 and nsum.dot(lat) < 0.0:
+			nsum = -nsum
+		_horn_vi[side] = best
+		_horn_n_ab[side] = nsum
+
+
+func _skin_vertex(vi: int) -> Vector3:
+	if _bone.is_empty() or _rest_bone.is_empty() or vi >= _bind_seg.size():
+		return _frame * _vis_rest[vi] + _drag_off
+	var sg := _bind_seg[vi]
+	var s1 := mini(sg + 1, SEGS - 1)
+	var tw := _bind_t[vi]
+	var r := _vis_rest[vi]
+	var a: Vector3 = (_bone[sg] as Transform3D) * ((_rest_bone[sg] as Transform3D).affine_inverse() * r)
+	var b: Vector3 = (_bone[s1] as Transform3D) * ((_rest_bone[s1] as Transform3D).affine_inverse() * r)
+	return a.lerp(b, tw)
+
+
+## 宫角表面外法线（世界坐标）。
+func horn_normal_world(side: int) -> Vector3:
+	side = clampi(side, 0, 1)
+	var n_ab: Vector3 = _horn_n_ab[side]
+	var vi := int(_horn_vi[side])
+	if _bone.is_empty() or _rest_bone.is_empty() or vi < 0 or vi >= _bind_seg.size():
+		return (_frame.basis * n_ab).normalized()
+	var sg := _bind_seg[vi]
+	var s1 := mini(sg + 1, SEGS - 1)
+	var na: Vector3 = (_bone[sg] as Transform3D).basis * ((_rest_bone[sg] as Transform3D).basis.inverse() * n_ab)
+	var nb: Vector3 = (_bone[s1] as Transform3D).basis * ((_rest_bone[s1] as Transform3D).basis.inverse() * n_ab)
+	var nn := na.lerp(nb, _bind_t[vi])
+	return nn.normalized() if nn.length_squared() > 1e-12 else Vector3.RIGHT
+
+
+## 管头两个点（嵌入点、表面外第一点），每帧钉死在宫角表面上。
+func _tube_head_pts(side: int) -> Array:
+	var a := horn_world(side)
+	var nn := horn_normal_world(side)
+	return [a - nn * TUBE_EMBED, a + nn * TUBE_STEM]
 
 
 func tube_chain_active(side: int) -> bool:
@@ -370,6 +558,7 @@ func _rebase() -> void:
 	_bind_visual()
 	_build_skinned_mesh()
 	_cache_ovary_rest()
+	_bind_horns()
 
 
 ## 原网格做成 GPU 蒙皮网格（顶点在校正后的腹部坐标，绑定 = 静止骨骼的逆），
@@ -837,14 +1026,38 @@ func tube_head_gap(side: int) -> float:
 	var rope := _chain_node(side)
 	if rope == null or not rope.has_method("head"):
 		return 0.0
-	var horn := horn_world(side)
-	var h: Vector3 = rope.call("head")
-	var d: Vector3 = rope.get("_dir")
-	if d.length_squared() < 1e-10:
-		d = Vector3.RIGHT
-	d = d.normalized()
-	var expect := horn - d * float(rope.get("horn_embed"))
-	return h.distance_to(expect)
+	# t92u：管头（嵌入点）与第一节（表面外点）都要和宫角表面附着点重合。
+	var hp := _tube_head_pts(side)
+	var tb: Dictionary = _tubes.get(side, {})
+	var g := (rope.call("head") as Vector3).distance_to(hp[0])
+	if not tb.is_empty() and (tb["p"] as PackedVector3Array).size() >= 2:
+		g = maxf(g, (tb["p"] as PackedVector3Array)[1].distance_to(hp[1]))
+	return g
+
+
+## 输卵管当前总长 / 静长。
+func tube_stretch(side: int) -> float:
+	var tb: Dictionary = _tubes.get(side, {})
+	if tb.is_empty():
+		return 1.0
+	var p: PackedVector3Array = tb["p"]
+	var rest: PackedFloat32Array = tb["rest"]
+	var L := 0.0
+	var R := 0.0
+	for k in range(1, p.size() - 1):
+		L += p[k].distance_to(p[k + 1])
+		R += rest[k]
+	return L / maxf(R, 1e-6)
+
+
+func tube_rest_length(side: int) -> float:
+	var tb: Dictionary = _tubes.get(side, {})
+	if tb.is_empty():
+		return 0.0
+	var R := 0.0
+	for r in (tb["rest"] as PackedFloat32Array):
+		R += r
+	return R
 
 
 func ovary_tip_gap(side: int) -> float:
@@ -868,14 +1081,36 @@ func _chain_node(side: int) -> Node:
 
 # ---------------------------------------------------------------- 输卵管 / 卵巢小链
 
+## t92u：静止姿态 = 宫角表面点 → 沿法线伸出 → 一段向外鼓的弧到卵巢（弧长 = 管静长，管子不再被拉直）。
 func _tube_rest_world(side: int, k: int, n: int) -> Vector3:
-	var horn := horn_world(side)
+	var hp := _tube_head_pts(side)
+	if k <= 0:
+		return hp[0]
+	if k == 1:
+		return hp[1]
+	var p1: Vector3 = hp[1]
 	var ovp := _xform_rest(_ovary_rest_ab(side))
-	var d := ovp - horn
-	if d.length_squared() < 1e-10:
-		d = Vector3(0.02, 0.0, 0.0)
-	var a := horn - d.normalized() * 0.007
-	return a.lerp(ovp, float(k) / float(n - 1))
+	var tk: PackedFloat32Array = _tube_tk[side]
+	var t := tk[k] if k < tk.size() else float(k - 1) / float(n - 2)
+	return _tube_arc(p1, ovp, horn_normal_world(side), float(_tube_bulge[side]), t)
+
+
+func _tube_arc(a: Vector3, b: Vector3, nn: Vector3, h: float, t: float) -> Vector3:
+	var ax := b - a
+	var bd := nn - (ax.normalized() * nn.dot(ax.normalized()) if ax.length_squared() > 1e-10 else Vector3.ZERO)
+	if bd.length_squared() < 1e-8:
+		bd = Vector3.DOWN
+	return a.lerp(b, t) + bd.normalized() * (h * sin(PI * t))
+
+
+func _arc_len(a: Vector3, b: Vector3, nn: Vector3, h: float, segs: int) -> float:
+	var L := 0.0
+	var prev := a
+	for i in range(1, segs + 1):
+		var c := _tube_arc(a, b, nn, h, float(i) / float(segs))
+		L += prev.distance_to(c)
+		prev = c
+	return L
 
 
 func _ensure_tubes() -> void:
@@ -890,6 +1125,7 @@ func _ensure_tubes() -> void:
 				rope.use_organ_material(_tube_mat)
 			add_child(rope)
 			rope.setup_line(horn_world(side), _xform_rest(_ovary_rest_ab(side)), TUBE_PTS)
+			rope.set("horn_embed", TUBE_EMBED)
 			var ov := _make_ovary_blob(side)
 			add_child(ov)
 			var ch_old: Dictionary = _chains.get(side, {})
@@ -899,6 +1135,39 @@ func _ensure_tubes() -> void:
 			var p := PackedVector3Array()
 			var st := PackedByteArray()
 			var rest := PackedFloat32Array()
+			# t92u：管更长（直线距离 × TUBE_LEN_MUL），弧高二分求出，使弧长正好等于管静长。
+			var hp := _tube_head_pts(side)
+			var ovp := _xform_rest(_ovary_rest_ab(side))
+			var nn := horn_normal_world(side)
+			var straight := (hp[1] as Vector3).distance_to(ovp)
+			var want := maxf(straight * TUBE_LEN_MUL, TUBE_LEN_MIN)
+			var lo := 0.0
+			var hi_h := want
+			for _b in 30:
+				var mid := (lo + hi_h) * 0.5
+				if _arc_len(hp[1], ovp, nn, mid, n - 2) < want:
+					lo = mid
+				else:
+					hi_h = mid
+			_tube_bulge[side] = (lo + hi_h) * 0.5
+			# 等弧长取样：密采样弧线，按累计弧长给每个点分配参数 t。
+			var dense := 96
+			var cum := PackedFloat32Array([0.0])
+			var prev: Vector3 = hp[1]
+			for di in range(1, dense + 1):
+				var c := _tube_arc(hp[1], ovp, nn, float(_tube_bulge[side]), float(di) / float(dense))
+				cum.append(cum[di - 1] + prev.distance_to(c))
+				prev = c
+			var tot := cum[dense]
+			var tk := PackedFloat32Array([0.0, 0.0])
+			var j := 0
+			for k1 in range(2, n):
+				var target := tot * float(k1 - 1) / float(n - 2)
+				while j < dense - 1 and cum[j + 1] < target:
+					j += 1
+				var seg := maxf(cum[j + 1] - cum[j], 1e-9)
+				tk.append((float(j) + clampf((target - cum[j]) / seg, 0.0, 1.0)) / float(dense))
+			_tube_tk[side] = tk
 			for k in n:
 				p.append(_tube_rest_world(side, k, n))
 				st.append(0)
@@ -938,29 +1207,29 @@ func _step_tube(side: int, dt: float, kinematic: bool) -> void:
 		return
 	var rope := _chain_node(side)
 	var hi := int(rope.get("hold_index")) if rope else -1
+	if hi == 1:
+		hi = 2
 	var hp: Vector3 = rope.get("hold_pos") if rope else Vector3.ZERO
-	var horn := horn_world(side)
+	var head := _tube_head_pts(side)
+	var h0: Vector3 = head[0]
+	var h1: Vector3 = head[1]
 	var horn_out := _horn_is_out(side)
 	var spring := 0.0 if (horn_out or hi >= 0 or bool(_early.get(side, false))) else TUBE_IN_SPRING
 	if kinematic:
 		spring = 0.5
 	# T-11：夹点不能离宫角比管长还远——否则两端都钉死，中间被拉成细线。
-	if hi > 0 and hi < n:
-		var hd0 := p[1] - horn
-		if hd0.length_squared() < 1e-10:
-			hd0 = Vector3.RIGHT
-		var head0 := horn - hd0.normalized() * 0.007
+	if hi > 1 and hi < n:
 		var arc0 := 0.0
-		for a0 in mini(hi, rest.size()):
+		for a0 in range(1, mini(hi, rest.size())):
 			arc0 += rest[a0]
 		var reach := arc0 * TUBE_MAX_STRETCH
-		var dh := hp - head0
+		var dh := hp - h1
 		if dh.length() > reach:
-			hp = head0 + dh.normalized() * reach
+			hp = h1 + dh.normalized() * reach
 			if rope:
 				rope.set("hold_pos", hp)
 	var k60 := dt * 60.0
-	for k in range(1, n):
+	for k in range(2, n):
 		if k == hi:
 			q[k] = p[k]
 			p[k] = hp
@@ -976,46 +1245,48 @@ func _step_tube(side: int, dt: float, kinematic: bool) -> void:
 			p[k] = p[k].lerp(_tube_rest_world(side, k, n), spring)
 		if p[k].y < floor_y + 0.006:
 			p[k].y = floor_y + 0.006
-	var head_dir := (p[1] - horn)
-	if head_dir.length_squared() < 1e-10:
-		head_dir = Vector3.RIGHT
-	head_dir = head_dir.normalized()
+	q[1] = p[1]
 	for _it in (TUBE_ITER if (hi >= 0 or hold_index >= 0) else TUBE_ITER_FREE):
-		p[0] = horn - head_dir * 0.007
+		p[0] = h0
+		p[1] = h1
 		if hi > 0 and hi < n:
 			p[hi] = hp
-		for k3 in n - 1:
+		for k3 in range(1, n - 1):
 			var d := p[k3 + 1] - p[k3]
 			var L := d.length()
-			if L < 1e-8:
+			if L < 1e-8 or L <= rest[k3]:
 				continue
-			var corr := (L - rest[k3]) / L
-			var wa := 0.0 if (k3 == 0 or k3 == hi) else 1.0
+			# 软弹簧：只抗拉（松弛时自然下垂），每次只纠正一部分 → 可弹性伸长。
+			var corr := (L - rest[k3]) / L * TUBE_STIFF
+			var wa := 0.0 if (k3 <= 1 or k3 == hi) else 1.0
 			var wb := 0.0 if (k3 + 1 == hi) else 1.0
 			var ws := wa + wb
 			if ws <= 0.0:
 				continue
 			p[k3] += d * corr * (wa / ws)
 			p[k3 + 1] -= d * corr * (wb / ws)
-		for k4 in range(1, n):
+		for k4 in range(2, n):
 			if k4 == hi:
 				continue
 			var r := _wall(p[k4], st[k4], 0.004)
 			p[k4] = r[0]
 			st[k4] = int(r[1])
-		for k5 in n - 1:
-			_cross_fix_arr(p, st, k5, k5 + 1, 0.0 if k5 == 0 else 1.0, 0.0 if k5 + 1 == hi else 1.0)
-	p[0] = horn - head_dir * 0.007
+		for k5 in range(1, n - 1):
+			_cross_fix_arr(p, st, k5, k5 + 1, 0.0 if k5 == 1 else 1.0, 0.0 if k5 + 1 == hi else 1.0)
+	p[0] = h0
+	p[1] = h1
+	st[1] = 1 if (h1 - wound_center).dot(outward) > 0.0 else st[1]
 	if hi > 0 and hi < n:
 		p[hi] = hp
-	_tube_hard_length(p, q, st, rest, hi)
-	# 管头始终嵌在宫角里、朝向第一节（硬长度后方向可能变了，重新对齐两遍）。
-	for _ha in 2:
-		var hd := p[1] - horn
-		if hd.length_squared() < 1e-10:
-			break
-		p[0] = horn - hd.normalized() * 0.007
-		_tube_hard_length(p, q, st, rest, hi)
+	var lim := TUBE_MAX_STRETCH
+	if hi <= 1:
+		# 松手：上限从当前实际伸长开始逐帧回落（弹性回弹）。
+		var cur_s := 1.0
+		for ks in range(1, n - 1):
+			cur_s = maxf(cur_s, p[ks].distance_to(p[ks + 1]) / maxf(rest[ks], 1e-6))
+		lim = clampf(minf(float(_tube_lim[side]), cur_s) - TUBE_RECOIL * dt * 60.0, TUBE_FREE_STRETCH, TUBE_MAX_STRETCH)
+	_tube_lim[side] = lim
+	_tube_hard_length(p, q, st, rest, hi, lim)
 	if hi > 0 and hi < n and rope:
 		rope.set("hold_pos", p[hi])
 	tb["p"] = p
@@ -1028,18 +1299,17 @@ func _step_tube(side: int, dt: float, kinematic: bool) -> void:
 ## T-11：迭代后再做一遍硬长度上限（宫角 → 卵巢的 FABRIK，夹点固定时再从夹点往回收一遍）。
 ## 腹壁 / 洞口修正会把段拉长（体外段被宫角带走、体内段卡在壁后），这里让长度优先：
 ## 被拽到腹壁外侧的点直接记为体外，下一帧不再被推回体内造成反复拉扯。
-func _tube_hard_length(p: PackedVector3Array, q: PackedVector3Array, st: PackedByteArray, rest: PackedFloat32Array, hi: int) -> void:
+func _tube_hard_length(p: PackedVector3Array, q: PackedVector3Array, st: PackedByteArray, rest: PackedFloat32Array, hi: int, lim: float = TUBE_MAX_STRETCH) -> void:
 	var n := p.size()
-	var lim := TUBE_MAX_STRETCH
-	if hi > 0 and hi < n:
+	if hi > 1 and hi < n:
 		var arc := 0.0
-		for a in hi:
+		for a in range(1, hi):
 			arc += rest[a]
-		var dh := p[hi] - p[0]
+		var dh := p[hi] - p[1]
 		if dh.length() > arc * lim * 0.995:
-			p[hi] = p[0] + dh.normalized() * arc * lim * 0.995
+			p[hi] = p[1] + dh.normalized() * arc * lim * 0.995
 			q[hi] = p[hi]
-	for k in range(1, n):
+	for k in range(2, n):
 		if k == hi:
 			continue
 		var d := p[k] - p[k - 1]
@@ -1047,27 +1317,27 @@ func _tube_hard_length(p: PackedVector3Array, q: PackedVector3Array, st: PackedB
 		var mx := rest[k - 1] * lim
 		if L > mx and L > 1e-9:
 			var np := p[k - 1] + d * (mx / L)
-			q[k] += np - p[k]
+			q[k] = np
 			p[k] = np
-	var passes := 4 if (hi > 0 and hi < n) else 0
+	var passes := 4 if (hi > 1 and hi < n) else 0
 	for _pass in passes:
-		for k2 in range(hi - 1, 0, -1):
+		for k2 in range(hi - 1, 1, -1):
 			var d2 := p[k2] - p[k2 + 1]
 			var L2 := d2.length()
 			var mx2 := rest[k2] * lim
 			if L2 > mx2 and L2 > 1e-9:
 				var np2 := p[k2 + 1] + d2 * (mx2 / L2)
-				q[k2] += np2 - p[k2]
+				q[k2] = np2
 				p[k2] = np2
-		for k3 in range(1, hi):
+		for k3 in range(2, hi):
 			var d3 := p[k3] - p[k3 - 1]
 			var L3 := d3.length()
 			var mx3 := rest[k3 - 1] * lim
 			if L3 > mx3 and L3 > 1e-9:
 				var np3 := p[k3 - 1] + d3 * (mx3 / L3)
-				q[k3] += np3 - p[k3]
+				q[k3] = np3
 				p[k3] = np3
-	if hi > 0 and hi < n:
+	if hi > 1 and hi < n:
 		# 仍有余差就让夹点本身让一点（钳子停在管子上，而不是把管子拉长）。
 		var d5 := p[hi] - p[hi - 1]
 		var mx5 := rest[hi - 1] * lim
@@ -1422,8 +1692,9 @@ func _driver_target(ci: int, target: Vector3) -> Vector3:
 			var rel := cross - wound_center
 			var radial := rel - outward * rel.dot(outward)
 			if radial.length() > HOLE_R:
-				# 先朝洞口走（步长不超过钳尖本身的位移）。
-				var hole := wound_center - outward * WALL_MARGIN * 0.5
+				# 先朝洞口走（步长不超过钳尖本身的位移）。t91u：去洞口里离穿出点最近的地方，
+				# 而不是洞口中心——子宫不再先被抬到创口中心（肚脐一侧）再出来。
+				var hole := wound_center + radial.normalized() * (HOLE_R * 0.7) - outward * WALL_MARGIN * 0.5
 				var step := maxf(cur.distance_to(target), 0.004)
 				var to_h := hole - cur
 				if to_h.length() > step:

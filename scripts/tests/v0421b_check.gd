@@ -144,18 +144,26 @@ func _check_outward_pull() -> void:
 	var worst_wall := 1.0
 	var max_out := -1.0
 	var plane_d := 0.0
+	var prev_d := -1.0
+	var prev_n := start
 	for i in 120:
 		var p_scr := start + side * (0.0015 * float(i + 1))
 		var dir := (p_scr - eye).normalized()
 		s.call("_drag_forceps", eye, dir)
 		s.call("_update_guts", dt)
 		var hp: Vector3 = so.get("hold_pos")
-		var rel := hp - wound
-		var d := rel.dot(outv)
-		var radial := (rel - outv * d).length()
-		if absf(d) < 0.006:
-			worst_wall = minf(worst_wall, 0.022 - radial)
-		max_out = maxf(max_out, d)
+		max_out = maxf(max_out, (hp - wound).dot(outv))
+		# t91u：钳尖目标直接从原位拉向创口下缘（不先抬到中心）；真正要穿过洞口的是被夹住的那个子宫节点。
+		var X: PackedVector3Array = so.get("_x")
+		var dn: Vector3 = X[int(so.get("_drv_i"))] if int(so.get("_drv_i")) >= 0 else hp
+		var d := (dn - wound).dot(outv)
+		if prev_d < 0.0 and d >= 0.0:
+			# 穿过创口平面的那一帧：插值求穿越点离创口中心的距离。
+			var t := -prev_d / maxf(d - prev_d, 1e-6)
+			var xp := prev_n.lerp(dn, t) - wound
+			worst_wall = minf(worst_wall, 0.022 - (xp - outv * xp.dot(outv)).length())
+		prev_d = d
+		prev_n = dn
 		plane_d = (p_scr - wound).dot(outv)
 	print("OUTWARD pull: hold point max %.1f cm outside the wound plane (plain drag plane stays at %.1f cm), wall margin %.1f mm, level %d" % [max_out * 100.0, plane_d * 100.0, worst_wall * 1000.0, int(s.call("extract_level", "uterus"))])
 	_ok(max_out > 0.03, "outward: a sideways drag pulls the uterus out of the cavity (%.1f cm out)" % (max_out * 100.0))
@@ -206,7 +214,8 @@ func _check_tubes_bounded() -> void:
 		for sd in [0, 1]:
 			gap = maxf(gap, maxf(float(so.call("tube_head_gap", sd)), float(so.call("ovary_tip_gap", sd))))
 	print("TUBES pull + fling: max tube segment stretch %.3f, worst horn/ovary gap %.2f mm" % [mx, gap * 1000.0])
-	_ok(mx < 1.06, "tubes: max segment stretch bounded during pull + fling (%.3f)" % mx)
+	# t92u：输卵管是弹性管——可伸长，但有安全上限，不会被拉成细线 / 发散。
+	_ok(mx <= 1.62, "tubes: segment stretch stays within the elastic safety cap during pull + fling (%.3f)" % mx)
 	_ok(gap < 0.003, "tubes: tube head stays on the horn, ovary on the tube tip (%.2f mm)" % (gap * 1000.0))
 	var ov: Vector3 = so.call("ovary_world", 0)
 	var co := ov + outv * 0.1
@@ -219,9 +228,13 @@ func _check_tubes_bounded() -> void:
 		s.call("_update_guts", dt)
 		mx2 = maxf(mx2, _tube_ratio(so))
 	print("TUBES drag ovary far: max stretch %.3f, ovary gap %.2f mm, head gap %.2f mm" % [mx2, float(so.call("ovary_tip_gap", 0)) * 1000.0, float(so.call("tube_head_gap", 0)) * 1000.0])
-	_ok(mx2 < 1.06, "tubes: dragging the ovary far does not stretch the tube (%.3f)" % mx2)
-	_ok(float(so.call("tube_head_gap", 0)) < 0.003, "tubes: tube stays attached to the horn while dragged")
+	_ok(mx2 > 1.1 and mx2 <= 1.62, "tubes: dragging the ovary far stretches the tube elastically, within the cap (%.3f)" % mx2)
+	_ok(float(so.call("tube_head_gap", 0)) < 0.001, "tubes: tube stays attached to the horn while dragged")
 	s.call("debug_forceps_end")
+	for k3 in 90:
+		s.call("_update_guts", dt)
+	print("TUBES released: stretch %.3f" % float(so.call("tube_stretch", 0)))
+	_ok(float(so.call("tube_stretch", 0)) < 1.08, "tubes: the tube springs back after the forceps let go (%.3f)" % float(so.call("tube_stretch", 0)))
 
 
 func _settle(n: int) -> void:
@@ -320,7 +333,7 @@ func _check_grab_soft() -> void:
 			mxr = maxf(mxr, _tube_ratio(so))
 		s.call("debug_organ_grab_end")
 		_ok(absf(float(so.call("tether_length")) - t0) < 1e-5, "grab tool: dragging a tube does not pull the uterus further")
-		_ok(mxr < 1.06, "grab tool: dragged tube stays within its length (%.3f)" % mxr)
+		_ok(mxr <= 1.62, "grab tool: dragged tube stretches elastically but within the safety cap (%.3f)" % mxr)
 
 
 func _check_grab_gut() -> void:

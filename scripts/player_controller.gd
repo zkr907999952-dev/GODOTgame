@@ -1052,7 +1052,8 @@ func _try_begin_interact(screen: Vector2) -> bool:
 	var surg := active_surgery()
 	if surg and bool(surg.call("is_active")):
 		if not bool(surg.call("has_tool")):
-			return false
+			# t96u：手术里没拿工具时，用手抓悬垂在体外的器官（取出的子宫、输卵管 / 卵巢、肠袢、脱垂子宫）。
+			return _try_begin_hang_grab(screen)
 		# 触屏走独立路径（多坐标解释 + 像素容差）；鼠标仍用原来的单射线，避免回归。
 		if _touch_surgery:
 			return _try_begin_surgery_touch(screen, surg)
@@ -1064,6 +1065,9 @@ func _try_begin_interact(screen: Vector2) -> bool:
 			_interact_screen = screen
 			return true
 		return false
+	# t96u：任何普通互动工具（拖拽 / 打击 / 拳交 / 刺刀 / 肚脐）点中悬垂在体外的物理器官 → 用手抓住拖动、甩。
+	if _try_begin_hang_grab(screen):
+		return true
 	# t68u：观察 / 普通互动中点中阴道口外悬垂的脱垂子宫 → 用手拖、甩、推回（任何互动工具都可）。
 	if _try_begin_prolapse_hand(screen):
 		return true
@@ -1275,6 +1279,10 @@ func debug_drag_active_surgery(origin: Vector3, dir: Vector3) -> bool:
 
 
 func _update_interact_drag(screen: Vector2) -> void:
+	if _hang_organ:
+		var ray_h: Array = _screen_ray(screen)
+		debug_update_hang_grab(ray_h[0], ray_h[1])
+		return
 	if _prol_hand_rig:
 		_update_prolapse_hand(screen)
 		return
@@ -1302,6 +1310,10 @@ func _update_interact_drag(screen: Vector2) -> void:
 
 
 func _end_interact() -> void:
+	if _hang_organ:
+		debug_end_hang_grab()
+		_interact_held = false
+		return
 	if _prol_hand_rig:
 		_end_prolapse_hand()
 		_interact_held = false
@@ -2245,6 +2257,65 @@ func _end_prolapse_hand() -> void:
 	if pc and str(pc.get("drive_source")) == "hand":
 		pc.call("end_drive")
 	_prol_hand_rig = null
+
+
+# ---------------------------------------------------------------- t96u 悬垂器官（HangGrab 共享接口）
+var _hang_organ: Node = null
+var _hang_plane := Vector3.ZERO
+var _hang_off := Vector3.ZERO
+
+
+func _try_begin_hang_grab(screen: Vector2) -> bool:
+	if not is_inside_tree() or _camera == null:
+		return false
+	var ray: Array = _screen_ray(screen)
+	if debug_begin_hang_grab(ray[0], ray[1]):
+		_interact_screen = screen
+		return true
+	return false
+
+
+## 测试 / 鼠标共用：射线抓住最近的悬垂器官。
+func debug_begin_hang_grab(origin: Vector3, dir: Vector3) -> bool:
+	var pk := HangGrab.pick(get_tree(), origin, dir)
+	if pk.is_empty():
+		return false
+	var organ: Node = pk["organ"]
+	var hit: Dictionary = pk["hit"]
+	if not organ.has_method("hang_pick"):
+		# 脱垂子宫：走原来的手拖状态（t68u，同一 begin_drive("hand") 接口），兼容已有调用方。
+		return debug_begin_prolapse_hand(origin, dir)
+	if not HangGrab.grab(organ, hit, origin, dir):
+		return false
+	_hang_organ = organ
+	_hang_plane = hit["point"]
+	_hang_off = (hit["anchor"] as Vector3) - _hang_plane
+	_interact_held = true
+	return true
+
+
+## 拖动：射线与「过抓取点、法线 = 相机前向」的平面求交（与腹部拖拽同一手感）。
+func debug_update_hang_grab(origin: Vector3, dir: Vector3) -> void:
+	if _hang_organ == null or not is_instance_valid(_hang_organ):
+		_hang_organ = null
+		return
+	var d := dir.normalized()
+	var n := -_camera.global_transform.basis.z if _camera else d
+	var den := d.dot(n)
+	if absf(den) < 1e-5:
+		return
+	var t := clampf((_hang_plane - origin).dot(n) / den, 0.02, 3.0)
+	HangGrab.drag(_hang_organ, origin + d * t + _hang_off)
+
+
+func debug_end_hang_grab() -> void:
+	if _hang_organ and is_instance_valid(_hang_organ):
+		HangGrab.release(_hang_organ)
+	_hang_organ = null
+
+
+func hang_grab_organ() -> Node:
+	return _hang_organ
 
 
 func is_prolapse_hand_dragging() -> bool:

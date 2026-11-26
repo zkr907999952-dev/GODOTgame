@@ -2,6 +2,8 @@ extends "res://scripts/tests/v0411_check.gd"
 ## 未发布（t82u）：手术拉钩方向总是远离创口（两侧唇 / 环切洞缘，选位置时不翻转）；
 ## 取出子宫的悬挂点在创口下缘（靠耻骨侧）、阴道过渡入口随之降低；取出后整颗子宫留在腹腔外不再挤回；
 ## 子宫悬挂 / 摆动每帧开销。
+## 未发布（t91u）：手术取子宫时不再先上升（平移到创口中心）再出来，而是原位沿钳子拉出、从创口下缘出。
+## 未发布（t92u）：输卵管起点每帧与宫角表面重合相连；输卵管更长、有弹性（夹住可拉长、松手回弹）。
 ##   godot --headless --path . -s res://scripts/tests/v0423_surgery_check.gd
 
 
@@ -25,6 +27,8 @@ func _run() -> void:
 	await _check_retractor_straight()
 	await _check_retractor_ring()
 	await _check_uterus_hang()
+	await _check_uterus_trajectory()
+	await _check_tubes()
 	print("v0423_surgery_check: fails=", fails)
 	quit(1 if fails > 0 else 0)
 
@@ -330,3 +334,150 @@ func _min_body_d(so: Node) -> float:
 func _check_transition_ok(so: Node, wound: Vector3) -> void:
 	var tl := float(so.call("transition_length"))
 	_ok(tl > 0.0 and tl <= 0.035, "the short flesh-coloured vaginal transition is kept (%.1f cm)" % (tl * 100))
+
+
+# ---------------------------------------------------------------- 5. t91u 取出轨迹：不先上升
+
+func _check_uterus_trajectory() -> void:
+	await _open_wound()
+	var fr: Transform3D = _organ_rig().call("abdomen_frame")
+	var inv := fr.affine_inverse()
+	var w: Vector3 = s.call("_wound_center_world")
+	var outv: Vector3 = (s.call("_cavity_outward") as Vector3).normalized()
+	var aim_r: Array = _aim_at_kind("uterus")
+	if aim_r.size() < 2 or not bool(s.call("debug_forceps_begin", aim_r[0], aim_r[1])):
+		_ok(false, "trajectory: forceps grab the uterus")
+		return
+	var so: Node = s.call("soft_organ", "uterus")
+	var hang_y := _ab(s.call("uterus_hang_world")).y
+	var ref: Vector3 = s.get("_fc_ray_ref")
+	var down := -fr.basis.y.normalized()
+	var dt := 1.0 / 60.0
+	var maxy_in := -1e9
+	var exit_y := 1e9
+	var hold_max_before_exit := -1e9
+	for i in 150:
+		s.call("_drag_forceps", ref + down * (0.0015 * i) + outv * 0.3, -outv)
+		s.call("_update_guts", dt)
+		var P: PackedVector3Array = so.get("_p")
+		for b in P.size():
+			if (P[b] - w).dot(outv) < -0.004:
+				maxy_in = maxf(maxy_in, (inv * P[b]).y)
+		var hp: Vector3 = so.get("hold_pos")
+		var od := (hp - w).dot(outv)
+		if od < 0.0 and exit_y > 1e8:
+			hold_max_before_exit = maxf(hold_max_before_exit, (inv * hp).y)
+		elif exit_y > 1e8:
+			exit_y = (inv * hp).y
+	s.call("debug_forceps_end")
+	var wy := (inv * w).y
+	print("TRAJ wound centre ab.y %.1f cm, hang %.1f cm, max ab.y of still-inside body nodes %.1f cm, hold max before exit %.1f cm, hold at exit %.1f cm" % [wy * 100, hang_y * 100, maxy_in * 100, hold_max_before_exit * 100, exit_y * 100])
+	_ok(maxy_in <= hang_y + 0.004 and maxy_in < wy - 0.01, "trajectory: the uterus is not lifted toward the wound centre before it comes out (inside max %.1f cm, hang %.1f cm)" % [maxy_in * 100, hang_y * 100])
+	_ok(exit_y < 1e8 and exit_y < wy - 0.01, "trajectory: it exits through the lower part of the wound (%.1f cm below the centre)" % ((wy - exit_y) * 100))
+	_ok(hold_max_before_exit <= hang_y + 0.006 and hold_max_before_exit < wy - 0.01, "trajectory: the grip is never lifted toward the wound centre on the way out (max %.1f cm)" % (hold_max_before_exit * 100))
+	var ec: Vector3 = s.call("uterus_exit_center", so.call("fundus_world"), w, outv)
+	_ok((inv * ec).y <= wy - 0.01, "trajectory: the pull exit centre sits below the wound centre")
+	s.call("restore_body")
+	s.call("enter_surgery")
+	await _frames(2)
+
+
+# ---------------------------------------------------------------- 6. t92u 输卵管附着 / 弹性
+
+func _tri_sd(P: PackedVector3Array, I: PackedInt32Array, q: Vector3) -> float:
+	## 到网格的有符号距离（+ = 在子宫网格内侧）。
+	var best := 1e9
+	var sg := 1.0
+	for f in range(0, I.size() - 2, 3):
+		var a := P[I[f]]
+		var b := P[I[f + 1]]
+		var c := P[I[f + 2]]
+		var n := (b - a).cross(c - a)
+		if n.length_squared() < 1e-14:
+			continue
+		n = n.normalized()
+		var pl := q - n * (q - a).dot(n)
+		var d := 1e9
+		if (b - a).cross(pl - a).dot(n) >= 0 and (c - b).cross(pl - b).dot(n) >= 0 and (a - c).cross(pl - c).dot(n) >= 0:
+			d = absf((q - a).dot(n))
+		else:
+			d = minf(q.distance_to(Geometry3D.get_closest_point_to_segment(q, a, b)), minf(q.distance_to(Geometry3D.get_closest_point_to_segment(q, b, c)), q.distance_to(Geometry3D.get_closest_point_to_segment(q, c, a))))
+		if d < best:
+			best = d
+			sg = 1.0 if (q - a).dot(n) >= 0 else -1.0
+	return best * sg
+
+
+func _check_attach(so: Node, tag: String) -> void:
+	var P: PackedVector3Array = so.call("_skin_all")
+	var I: PackedInt32Array = so.get("_vis_idx")
+	for side in 2:
+		var tb: Dictionary = (so.get("_tubes") as Dictionary).get(side, {})
+		if tb.is_empty():
+			_ok(false, "tubes %s: tube %d exists" % [tag, side])
+			continue
+		var p: PackedVector3Array = tb["p"]
+		var horn: Vector3 = so.call("horn_world", side)
+		var hs := _tri_sd(P, I, horn)
+		var s0 := _tri_sd(P, I, p[0])
+		var s1 := _tri_sd(P, I, p[1])
+		var gap := float(so.call("tube_head_gap", side))
+		print("TUBE %s side %d: horn→mesh %.2f mm, tube head %.1f mm inside, first node %.1f mm outside, head gap %.3f mm" % [tag, side, hs * 1000, s0 * 1000, -s1 * 1000, gap * 1000])
+		_ok(absf(hs) < 0.0005, "tubes %s: the attachment point lies on the uterus surface (side %d, %.2f mm)" % [tag, side, hs * 1000])
+		_ok(s0 > 0.0 and s1 < 0.0, "tubes %s: the tube runs through the horn surface — start embedded, first node outside (side %d)" % [tag, side])
+		_ok(gap < 0.0002, "tubes %s: tube start coincides with the horn every frame (side %d, %.3f mm)" % [tag, side, gap * 1000])
+
+
+func _check_tubes() -> void:
+	await _open_wound()
+	s.call("set_tool", "forceps")
+	s.call("debug_begin_extract", "uterus")
+	s.call("debug_forceps_end")
+	var so: Node = s.call("soft_organ", "uterus")
+	for i in 40:
+		s.call("debug_add_extract_charge", "uterus", 1.0, 1.0 / 30.0)
+		s.call("_update_guts", 1.0 / 60.0)
+	_check_attach(so, "pulled")
+	var worst_gap := 0.0
+	for i2 in 240:
+		s.call("_update_guts", 1.0 / 60.0)
+		for sd in 2:
+			worst_gap = maxf(worst_gap, float(so.call("tube_head_gap", sd)))
+	_check_attach(so, "hanging")
+	_ok(worst_gap < 0.0002, "tubes: no frame with a gap between tube and horn while hanging (%.3f mm)" % (worst_gap * 1000))
+	var rl := float(so.call("tube_rest_length", 0))
+	var straight := (so.call("horn_world", 0) as Vector3).distance_to(so.call("ovary_world", 0))
+	print("TUBE rest length %.1f mm (0.4.14 tubes were ≈ 24 mm), hanging stretch %.3f / %.3f" % [rl * 1000, float(so.call("tube_stretch", 0)), float(so.call("tube_stretch", 1))])
+	_ok(rl >= 0.045, "tubes are longer (%.1f mm ≥ 45 mm)" % (rl * 1000))
+	_ok(float(so.call("tube_stretch", 0)) < 1.08 and float(so.call("tube_stretch", 1)) < 1.08, "tubes hang near their rest length under their own weight")
+	# 夹住卵巢往外拉：弹性伸长（> 1.04 老上限）、仍连在宫角；松手回弹。
+	var outv: Vector3 = (s.call("_cavity_outward") as Vector3).normalized()
+	var sidev: Vector3 = (_organ_rig().call("abdomen_frame") as Transform3D).basis.x.normalized()
+	var ov: Vector3 = so.call("ovary_world", 0)
+	var co := ov + outv * 0.1
+	if not (bool(s.call("debug_forceps_begin", co, (ov - co).normalized())) and str(s.get("_fc_kind")) == "tube"):
+		_ok(false, "tubes: forceps grab the ovary")
+		return
+	var dt := 1.0 / 60.0
+	var t2 := ov
+	var mx := 1.0
+	for k in 90:
+		t2 += (outv - sidev).normalized() * 0.3 * dt
+		s.call("debug_forceps_drag_to", t2)
+		s.call("_update_guts", dt)
+		mx = maxf(mx, float(so.call("tube_stretch", 0)))
+		worst_gap = maxf(worst_gap, float(so.call("tube_head_gap", 0)))
+	s.call("debug_forceps_end")
+	var back := []
+	for k2 in 60:
+		s.call("_update_guts", dt)
+		if k2 % 20 == 19:
+			back.append("%.3f" % float(so.call("tube_stretch", 0)))
+	print("TUBE drag ovary: max stretch %.3f (old cap 1.04), head gap %.3f mm; after release %s" % [mx, worst_gap * 1000, ", ".join(back)])
+	_ok(mx > 1.15 and mx <= 1.62, "tubes stretch elastically when the ovary is pulled (%.3f)" % mx)
+	_ok(worst_gap < 0.0002, "tubes stay attached to the horn while stretched")
+	_ok(float(so.call("tube_stretch", 0)) < 1.08, "tubes spring back after release (%.3f)" % float(so.call("tube_stretch", 0)))
+	_check_attach(so, "released")
+	s.call("restore_body")
+	s.call("enter_surgery")
+	await _frames(2)
