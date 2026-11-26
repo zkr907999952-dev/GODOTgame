@@ -47,6 +47,12 @@ func set_points(pts: PackedVector3Array) -> void:
 
 
 ## 由外部（子宫柔体）算好物理后写入位置与上一帧位置，只重建网格，不清速度。
+## t82u：点位与上次建网格时相差都不到 MESH_EPS 就不重建网格（静挂 / 休眠时省掉每帧的管子重建）。
+const MESH_EPS := 0.00005
+var _mesh_pts: PackedVector3Array = PackedVector3Array()
+var mesh_rebuilds: int = 0
+
+
 func apply_points(pts: PackedVector3Array, prev: PackedVector3Array, dir: Vector3) -> void:
 	_p = pts.duplicate()
 	_q = prev.duplicate() if prev.size() == pts.size() else pts.duplicate()
@@ -54,6 +60,15 @@ func apply_points(pts: PackedVector3Array, prev: PackedVector3Array, dir: Vector
 		_dir = dir.normalized()
 	if not _p.is_empty():
 		_head = _p[0]
+	if _mesh_pts.size() == _p.size() and not _p.is_empty():
+		var same := true
+		var e2 := MESH_EPS * MESH_EPS
+		for i in _p.size():
+			if _p[i].distance_squared_to(_mesh_pts[i]) > e2:
+				same = false
+				break
+		if same:
+			return
 	_rebuild_mesh()
 
 
@@ -217,6 +232,8 @@ func _solve_dist(n: int) -> void:
 
 
 func _rebuild_mesh() -> void:
+	_mesh_pts = _p.duplicate()
+	mesh_rebuilds += 1
 	if _am == null:
 		_am = ArrayMesh.new()
 		mesh = _am
@@ -292,7 +309,7 @@ func _rebuild_mesh() -> void:
 	for k in SIDES:
 		var a := ring0 + k
 		var b := ring0 + k + 1
-		idx.append_array([ia_pole, b, a])
+		idx.append_array([ia_pole, a, b])  # t82u：端帽朝外（与解析法线一致）
 	# 管身
 	for i in n - 1:
 		var ra := ring0 + i * (SIDES + 1)
@@ -306,21 +323,21 @@ func _rebuild_mesh() -> void:
 	for k in SIDES:
 		var a := last + k
 		var b := last + k + 1
-		idx.append_array([a, b, ib_pole])
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	for f in range(0, idx.size() - 2, 3):
-		for k in 3:
-			var vi: int = idx[f + k]
-			if vi < 0 or vi >= verts.size():
-				continue
-			if vi < uvs.size():
-				st.set_uv(uvs[vi])
-			st.add_vertex(verts[vi])
-	st.generate_normals()
-	st.generate_tangents()
+		idx.append_array([b, a, ib_pole])
+	# t82u：直接提交带索引的数组（解析法线 / 切线），不再逐顶点过 SurfaceTool 再 generate_normals / generate_tangents
+	# （后者每次约 0.1 ms，体外悬挂摆动时每帧三根管子）。法线改为圆管的平滑径向法线。
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = nrms
+	arr[Mesh.ARRAY_TANGENT] = tans
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_INDEX] = idx
+	var mat := _am.surface_get_material(0) if _am.get_surface_count() > 0 else null
 	_am.clear_surfaces()
-	st.commit(_am)
+	_am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	if mat:
+		_am.surface_set_material(0, mat)
 
 
 func _push_tan(tans: PackedFloat32Array, t: Vector3) -> void:

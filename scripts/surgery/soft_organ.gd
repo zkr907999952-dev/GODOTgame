@@ -9,6 +9,10 @@ extends MeshInstance3D
 
 const SEGS := 6
 const ITER := 14
+## t82u：没被夹着、自由悬挂 / 摆动时的约束迭代数（宫体最后还有一遍刚性摆直 + FABRIK，少几遍看不出差别）。
+const ITER_FREE := 8
+const TUBE_ITER := 8
+const TUBE_ITER_FREE := 5
 const DAMP := 0.68              # 体内：周围组织托住，速度很快被吃掉
 const AIR_DAMP := 0.988         # 体外：每步（60 Hz 基准）保留的速度，摆动几秒后才停
 const TUBE_AIR_DAMP := 0.97
@@ -57,6 +61,13 @@ var skin_p: PackedVector3Array = PackedVector3Array()
 var skin_n: PackedVector3Array = PackedVector3Array()
 var wound_center: Vector3 = Vector3.ZERO
 var outward: Vector3 = Vector3.UP
+## t82u：悬挂点 = 创口中心 + hang_offset（手术每帧给出：创口下缘、靠耻骨一侧）。宫颈 / 阴道过渡拴在这里，
+## 而不是创口正中（切口在肚脐附近时子宫被挂得太高）。洞口判定仍用 wound_center。
+var hang_offset: Vector3 = Vector3.ZERO
+## t82u：取出后体外的宫体节点保持在体外（不再被系带 / 碰撞拽回创口里），只有「放回」才收回。
+const BODY_CLEAR := 0.016       # 体外宫体节点离创口平面至少这么远（≈ 宫体半厚），网格不陷进腹腔
+const CERVIX_CLEAR := 0.008     # 宫颈节点（接过渡段）
+const CLEAR_FADE := 0.03        # 离洞口远处改由皮肤碰撞接管，这段距离内平滑过渡
 var hold_index: int = -1
 var hold_pos: Vector3 = Vector3.ZERO
 ## T-11：拿取工具「只拖不扯」：系带不再伸长、夹点不回到腹壁内、扯出档位冻结。
@@ -231,11 +242,12 @@ func transition_points() -> PackedVector3Array:
 	if start < 0:
 		return out
 	# 入口固定在创口中心正下方 TRANSITION_IN 处：断端从创口里伸出来，深处的系带不画。
-	var entry := wound_center - outward * TRANSITION_IN
-	# 只取入口 → 宫颈的平滑短段（不跟着系带的松弛节点打折），中点略向创口中心收。
+	var hang := hang_point()
+	var entry := hang - outward * TRANSITION_IN
+	# 只取入口 → 宫颈的平滑短段（不跟着系带的松弛节点打折），中点略向悬挂点收。
 	var cerv := pts[pts.size() - 1]
 	var mid := entry.lerp(cerv, 0.5)
-	var wc_on := wound_center + outward * (mid - wound_center).dot(outward)
+	var wc_on := hang + outward * (mid - hang).dot(outward)
 	mid = mid.lerp(wc_on, 0.35)
 	out.append(entry)
 	out.append(entry.lerp(mid, 0.6))
@@ -262,6 +274,10 @@ func set_transition_color(c: Color) -> void:
 
 
 var _transition_color := TRANSITION_COLOR
+
+
+func hang_point() -> Vector3:
+	return wound_center + hang_offset
 
 
 func tether_max_length() -> float:
@@ -687,7 +703,7 @@ func add_charge(strength: float, dt: float) -> void:
 	var desired := cur
 	var to_move := dist
 	if outd < 0.006:
-		var tgt := wound_center + outward * 0.008
+		var tgt := hang_point() + outward * 0.008
 		var d := tgt - cur
 		var L := d.length()
 		if L > 1e-6:
@@ -964,7 +980,7 @@ func _step_tube(side: int, dt: float, kinematic: bool) -> void:
 	if head_dir.length_squared() < 1e-10:
 		head_dir = Vector3.RIGHT
 	head_dir = head_dir.normalized()
-	for _it in 8:
+	for _it in (TUBE_ITER if (hi >= 0 or hold_index >= 0) else TUBE_ITER_FREE):
 		p[0] = horn - head_dir * 0.007
 		if hi > 0 and hi < n:
 			p[hi] = hp
@@ -1362,7 +1378,7 @@ func _carry_points(xf: Transform3D) -> void:
 # ---------------------------------------------------------------- 物理
 
 func _wound_depth() -> float:
-	return maxf(root_world().distance_to(wound_center), 0.02)
+	return maxf(root_world().distance_to(hang_point()), 0.02)
 
 
 ## 夹点 / 虚拟拉动目标能到的最远处：系带长度用完就拉不动了（钳子停在器官上）。
@@ -1374,9 +1390,10 @@ func _reach_clamp(bi: int, target: Vector3, is_out: bool) -> Vector3:
 	var tmax := sw + OUT_EXTRA
 	if is_out:
 		var maxd := (tmax - sw) + arc
-		var d := target - wound_center
+		var hp := hang_point()
+		var d := target - hp
 		if d.length() > maxd:
-			return wound_center + d.normalized() * maxd
+			return hp + d.normalized() * maxd
 		return target
 	var root := root_world()
 	var maxd2 := tmax + arc
@@ -1413,6 +1430,8 @@ func _driver_target(ci: int, target: Vector3) -> Vector3:
 					to_h = to_h.normalized() * step
 				target = cur + to_h
 		return _reach_clamp(bi, target, false)
+	if bi >= 0 and _body_all_out():
+		return _out_clear(_reach_clamp(bi, target, true), bi)
 	return _reach_clamp(bi, target, true)
 
 
@@ -1448,6 +1467,53 @@ func _wall(p: Vector3, st: int, r_node: float) -> Array:
 		elif d < WALL_MARGIN:
 			p += outward * (WALL_MARGIN - d)
 	return [p, st]
+
+
+func _body_all_out() -> bool:
+	if _st.size() != TETHER_N + SEGS:
+		return false
+	for b in SEGS:
+		if _st[TETHER_N + b] != 1:
+			return false
+	return true
+
+
+## t82u：整颗宫体都在体外时，按最缺的那个节点把整条宫体（刚体）沿创口法线平移出去，
+## 网格不陷进腹腔；整体平移不破坏段长 / 角度，也不和形状匹配打架（不会抖、能正常休眠）。
+func _rigid_out_clear() -> void:
+	# 被钳子夹着拖时不平移（夹点本身已被限制在体外，其余节点由 FABRIK 刚性跟随），避免与夹点错位拉伸网格。
+	if not _body_all_out() or _drv_i >= TETHER_N:
+		return
+	var deficit := 0.0
+	for b in SEGS:
+		var ci := TETHER_N + b
+		if ci == _drv_i:
+			continue
+		var p2 := _out_clear(_x[ci], b)
+		deficit = maxf(deficit, (p2 - _x[ci]).dot(outward))
+	if deficit <= 1e-6:
+		return
+	for b2 in SEGS:
+		var cj := TETHER_N + b2
+		if cj == _drv_i:
+			continue
+		_x[cj] += outward * deficit
+
+
+## t82u：体外宫体节点离创口平面的最小距离（洞口附近），越过洞口一段后渐隐、交给皮肤碰撞。
+func _out_clear(p: Vector3, b: int) -> Vector3:
+	var need := CERVIX_CLEAR if b == 0 else BODY_CLEAR
+	var rel := p - wound_center
+	var d := rel.dot(outward)
+	if d >= need:
+		return p
+	var r := (rel - outward * d).length()
+	var r0 := HOLE_R + BODY_R
+	var k := 1.0 - clampf((r - r0) / CLEAR_FADE, 0.0, 1.0)
+	var want := need * k
+	if d < want:
+		p += outward * (want - d)
+	return p
 
 
 func _cross_fix_arr(arr: PackedVector3Array, st: PackedByteArray, ia: int, ib: int, wa: float, wb: float) -> void:
@@ -1637,7 +1703,8 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 				np = np.lerp(_rest_world(i - TETHER_N), IN_SPRING * (1.0 - loose))
 			else:
 				var s_i := float(i) * _tlen / float(TETHER_N)
-				var on_line := root + (wound_center - root).normalized() * minf(s_i, sw)
+				# 体内系带沿根点 → 悬挂点的直线，停在腹壁内侧（不在洞口平面上来回翻进翻出）。
+				var on_line := root + (hang_point() - root).normalized() * minf(s_i, sw - WALL_MARGIN)
 				np = np.lerp(on_line, 0.2)
 		if np.y < floor_y + 0.008:
 			np.y = floor_y + 0.008
@@ -1652,7 +1719,7 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 			_tlen = minf(need, sw + OUT_EXTRA)
 	# 3) 约束迭代
 	var seg_t := _tlen / float(TETHER_N)
-	for _it in ITER:
+	for _it in (ITER if driven else ITER_FREE):
 		_x[0] = root
 		if _drv_i >= 0:
 			_x[_drv_i] = _drv_pos
@@ -1660,11 +1727,12 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 		for k in TETHER_N:
 			_solve_link(k, k + 1, seg_t, true)
 		# t72u：体外的系带 / 宫颈拴在创口中心附近（短过渡），子宫不会挂得离创口很远。
+		var hang := hang_point()
 		for kt in range(1, TETHER_N + 1):
 			if _st[kt] == 1 and kt != _drv_i:
-				var dw := _x[kt] - wound_center
+				var dw := _x[kt] - hang
 				if dw.length() > CERVIX_OUT_MAX:
-					_x[kt] = wound_center + dw.normalized() * CERVIX_OUT_MAX
+					_x[kt] = hang + dw.normalized() * CERVIX_OUT_MAX
 		# 宫体：硬段长
 		for b in SEGS - 1:
 			_solve_link(TETHER_N + b, TETHER_N + b + 1, float(_seg_rest[b]), false)
@@ -1673,20 +1741,27 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 		for i2 in range(1, nb):
 			if i2 == _drv_i:
 				continue
+			var was_out := _st[i2] == 1
 			var r := _wall(_x[i2], _st[i2], BODY_R if i2 >= TETHER_N else TETHER_R)
 			_x[i2] = r[0]
 			_st[i2] = int(r[1])
+			if i2 >= TETHER_N and (was_out or _st[i2] == 1):
+				_st[i2] = 1
 		for k2 in nb - 1:
 			_cross_fix_arr(_x, _st, k2, k2 + 1, _inv_w(k2), _inv_w(k2 + 1))
 	# 最后：角度 + 从驱动点出发的精确段长（FABRIK 一遍），保证宫体不拉伸、不折。
 	_straighten_body(BODY_STIFF)
 	_fabrik_body()
+	_rigid_out_clear()
 	_x[0] = root
 	if _drv_i >= 0:
 		_x[_drv_i] = _drv_pos
 		# 驱动节点的状态按实际位置更新
+		var was_out_d := _st[_drv_i] == 1
 		var rr := _wall(_x[_drv_i], _st[_drv_i], 0.0)
 		_st[_drv_i] = int(rr[1])
+		if _drv_i >= TETHER_N and was_out_d:
+			_st[_drv_i] = 1
 		if hold_index >= 0:
 			hold_pos = _drv_pos
 	for i3 in nb:
@@ -1800,7 +1875,7 @@ func _step_putback(dt: float) -> void:
 	var nb := TETHER_N + SEGS
 	_drv_i = -1
 	_tlen = maxf(TETHER_MIN, _tlen - stp * 1.5)
-	var hole_in := wound_center - outward * 0.012
+	var hole_in := hang_point() - outward * 0.012
 	for i in nb:
 		var tgt: Vector3
 		if i < TETHER_N:
@@ -2115,6 +2190,7 @@ var adnexa_hide_outside := true
 
 
 func begin_external(frame: Transform3D, portal: Vector3, portal_out: Vector3) -> void:
+	hang_offset = Vector3.ZERO
 	_frame = frame
 	_prev_frame = frame
 	_has_prev_frame = false

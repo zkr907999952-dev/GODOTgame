@@ -6075,6 +6075,56 @@ func _wound_center_world() -> Vector3:
 	return c / float(rim.size())
 
 
+## t82u：柔体子宫每帧用的创口中心 / 悬挂点缓存（腹部局部坐标）。创缘蒙皮采样一次约 0.2 ms，
+## 创口形状没变时每 WC_REFRESH 帧才重算一次，其余帧只随腹部坐标系搬运；拉扯 / 拉钩回弹期间每帧重算。
+const WC_REFRESH := 12
+## 悬挂点：创口中心沿身体向下（耻骨方向）移到创缘下缘附近，最多 HANG_MAX（留在洞口 HOLE_R 内）。
+const HANG_FRAC := 0.8
+const HANG_MAX := 0.017
+var _wc_ab: Vector3 = Vector3.ZERO
+var _hang_ab: Vector3 = Vector3.ZERO
+var _wc_sig: Array = []
+var _wc_age: int = 999
+
+
+func _wound_and_hang(fr: Transform3D) -> Array:
+	var sig := [_outer.get_instance_id() if _outer else 0, _outer.vert_count() if _outer else 0, _outer.idx.size() if _outer else 0, flap_peeled, _hole_loops.size(), _lip_left.size(), _lip_right.size(), _retractors.size()]
+	var busy := _grab_active or not _retr_release.is_empty() or stroke_active
+	if sig != _wc_sig or busy or _wc_age >= WC_REFRESH:
+		_wc_sig = sig
+		_wc_age = 0
+		var rim := _gut_rim_world()
+		var wc := _navel_rest
+		if not rim.is_empty():
+			wc = Vector3.ZERO
+			for q in rim:
+				wc += q
+			wc /= float(rim.size())
+		var hang := wc
+		var outv := _cavity_outward()
+		var y := fr.basis.y.normalized()
+		var yt := y - outv * y.dot(outv)
+		if yt.length_squared() > 1e-8 and not rim.is_empty():
+			yt = yt.normalized()
+			var low := 0.0
+			for q2 in rim:
+				low = minf(low, (q2 - wc).dot(yt))
+			hang = wc - yt * minf(-low * HANG_FRAC, HANG_MAX)
+		var inv := fr.affine_inverse()
+		_wc_ab = inv * wc
+		_hang_ab = inv * hang
+	else:
+		_wc_age += 1
+	return [fr * _wc_ab, fr * _hang_ab]
+
+
+## 子宫悬挂点（世界坐标；测试 / 调试用）。
+func uterus_hang_world() -> Vector3:
+	var fr: Transform3D = _organs.call("abdomen_frame") if _organs else Transform3D.IDENTITY
+	_wc_age = 999
+	return _wound_and_hang(fr)[1]
+
+
 func _cavity_outward() -> Vector3:
 	if _organs:
 		var fr: Transform3D = _organs.call("abdomen_frame")
@@ -6244,6 +6294,10 @@ func _start_soft_extract(kind: String, origin: Vector3, dir: Vector3, early_side
 	if so == null:
 		return false
 	var fr: Transform3D = _organs.call("abdomen_frame") if _organs else Transform3D.IDENTITY
+	if kind == "uterus":
+		_wc_age = 999
+		var wh0 := _wound_and_hang(fr)
+		so.set("hang_offset", (wh0[1] as Vector3) - (wh0[0] as Vector3))
 	so.call("begin_extract", fr, _wound_center_world(), _cavity_outward())
 	if kind == "uterus" and _organs:
 		_organs.set_meta("uterus_extracted", true)
@@ -6326,8 +6380,11 @@ func _update_soft_organs(dt: float) -> void:
 		_tissue_drag_prev = Vector3.ZERO
 		return
 	var fr: Transform3D = _organs.call("abdomen_frame") if _organs else Transform3D.IDENTITY
-	var wound := _wound_center_world()
-	wound += _carry_soft_with_tissue_drag(wound)
+	var wh := _wound_and_hang(fr)
+	var wound: Vector3 = wh[0]
+	var drag := _carry_soft_with_tissue_drag(wound)
+	wound += drag
+	var hang_off: Vector3 = (wh[1] as Vector3) - (wh[0] as Vector3)
 	var out := _cavity_outward()
 	var fy := -1e9
 	var host := get_parent() as Node3D
@@ -6342,6 +6399,8 @@ func _update_soft_organs(dt: float) -> void:
 		if so == null or not is_instance_valid(so):
 			continue
 		so.set("floor_y", fy)
+		if str(k) == "uterus":
+			so.set("hang_offset", hang_off)
 		so.set("capsules", caps)
 		so.set("skin_p", sk[0])
 		so.set("skin_n", sk[1])
@@ -6684,8 +6743,198 @@ func _pick_lip_vertex(origin: Vector3, dir: Vector3) -> int:
 	return best
 
 
-## 唇缘顶点的「向外」方向（绑定空间，贴皮肤切平面）：从切口中心线指向这一侧唇缘。
+## t82u：唇缘顶点的「向外」方向（绑定空间，贴皮肤切平面）：从切口中心线指向这一侧唇缘所在的皮肤。
+## 拉钩只拉开、不推：方向只由切口几何决定——这一刀（或剥离洞缘）的唇缘链在该点附近 ±RETR_WIN 个顶点的
+## 平滑切线 × 平均法线，符号由这一段唇缘相邻面片整体落在哪一侧决定（面片只长在本侧皮肤上），
+## 与镜头 / 光标无关；同一侧相邻顶点方向连续，不会因单个三角形的朝向翻面。切口两端（左右唇共用的顶点）沿切口轴向朝外。
+const RETR_WIN := 4
+var _retr_out_cache: Dictionary = {}
+var _retr_out_sig: Array = []
+var _retr_face_map: Dictionary = {}
+
+
 func _lip_out_bind(vid: int) -> Vector3:
+	if _outer == null or vid < 0 or vid >= _outer.vert_count():
+		return Vector3.UP
+	var sig := _retractor_sig()
+	sig.append(_cuts.size())
+	sig.append(_hole_loops.size())
+	sig.append(_cuts_src.get_instance_id() if _cuts_src else 0)
+	if sig != _retr_out_sig:
+		_retr_out_sig = sig
+		_retr_out_cache.clear()
+		_retr_face_map.clear()
+	if _retr_out_cache.has(vid):
+		return _retr_out_cache[vid]
+	var o := _lip_out_geom(vid)
+	if o.length_squared() < 0.5:
+		o = _lip_out_local(vid)
+	_retr_out_cache[vid] = o
+	return o
+
+
+## vid 所在的唇缘链：[链, 另一侧唇, 是否闭合]；不在任何切口 / 洞缘上时链为空。
+func _lip_chain_of(vid: int) -> Array:
+	if cut_count() > 0:
+		for c in _cuts:
+			var d := c as Dictionary
+			var l: PackedInt32Array = d["left"]
+			var r: PackedInt32Array = d["right"]
+			var in_l := l.has(vid)
+			var in_r := r.has(vid)
+			if in_l and in_r:
+				return [l, r, bool(d["closed"]), true]
+			if in_l:
+				return [l, r, bool(d["closed"]), false]
+			if in_r:
+				return [r, l, bool(d["closed"]), false]
+	for loop in _hole_loops:
+		if loop is PackedInt32Array and (loop as PackedInt32Array).has(vid):
+			return [loop, PackedInt32Array(), true, false]
+	return [PackedInt32Array(), PackedInt32Array(), false, false]
+
+
+func _retr_faces_of(v: int) -> PackedInt32Array:
+	if _retr_face_map.is_empty():
+		var want: Dictionary = {}
+		for c in _cuts:
+			for key in ["left", "right"]:
+				for w in ((c as Dictionary)[key] as PackedInt32Array):
+					want[w] = true
+		for loop in _hole_loops:
+			if loop is PackedInt32Array:
+				for w2 in (loop as PackedInt32Array):
+					want[w2] = true
+		for w3 in _lip_candidates():
+			want[w3] = true
+		for f in _outer.face_count():
+			for k in 3:
+				var vi := _outer.idx[f * 3 + k]
+				if want.has(vi):
+					if _retr_face_map.has(vi):
+						(_retr_face_map[vi] as PackedInt32Array).append(f)
+					else:
+						_retr_face_map[vi] = PackedInt32Array([f])
+		_retr_face_map[-1] = PackedInt32Array()
+	return _retr_face_map.get(v, PackedInt32Array())
+
+
+func _lip_out_geom(vid: int) -> Vector3:
+	var info := _lip_chain_of(vid)
+	var chain: PackedInt32Array = info[0]
+	var closed: bool = info[2]
+	var tip: bool = info[3]
+	var n := chain.size()
+	if n < 3:
+		return Vector3.ZERO
+	var i := chain.find(vid)
+	if i < 0:
+		return Vector3.ZERO
+	var p := _outer.pos[vid]
+	var nv := _outer.vert_count()
+	var win: Array = []
+	for k in range(-RETR_WIN, RETR_WIN + 1):
+		var j := i + k
+		if closed:
+			j = posmod(j, n)
+		elif j < 0 or j >= n:
+			continue
+		if chain[j] >= 0 and chain[j] < nv:
+			win.append(chain[j])
+	if win.size() < 2:
+		return Vector3.ZERO
+	var nrm := Vector3.ZERO
+	for w in win:
+		nrm += _outer.nrm[w]
+	if nrm.length_squared() < 1e-12:
+		nrm = _outer.nrm[vid]
+	nrm = nrm.normalized()
+	if tip and not closed:
+		# 切口端点：沿切口轴向朝外（远离切口中段）。
+		var cen := Vector3.ZERO
+		for w0 in chain:
+			cen += _outer.pos[w0]
+		cen /= float(n)
+		var ax := p - cen
+		ax -= nrm * ax.dot(nrm)
+		return ax.normalized() if ax.length_squared() > 1e-12 else Vector3.ZERO
+	var t: Vector3 = _outer.pos[win[win.size() - 1]] - _outer.pos[win[0]]
+	t -= nrm * t.dot(nrm)
+	if t.length_squared() < 1e-12:
+		return Vector3.ZERO
+	var o := nrm.cross(t.normalized())
+	if o.length_squared() < 1e-10:
+		return Vector3.ZERO
+	o = o.normalized()
+	# 符号由整条唇缘决定（不看单个三角形）：
+	# - 闭合（环切 / 剥离洞缘）：两侧唇按平均半径分内外，外侧唇朝外、内侧（皮瓣）唇朝洞心；只有一圈洞缘时一律朝外。
+	# - 直切口：远离对侧唇上最近的点；两唇还贴在一起时，用整条唇缘相邻面片落在哪一侧。
+	var other: PackedInt32Array = info[1]
+	var ref := Vector3.ZERO
+	if closed:
+		var cen2 := Vector3.ZERO
+		var cnt := 0
+		for w4 in chain:
+			cen2 += _outer.pos[w4]
+			cnt += 1
+		for w5 in other:
+			cen2 += _outer.pos[w5]
+			cnt += 1
+		cen2 /= float(maxi(cnt, 1))
+		var sgn := 1.0
+		if not other.is_empty():
+			var r_self := _mean_radius(chain, cen2)
+			var r_other := _mean_radius(other, cen2)
+			if absf(r_self - r_other) > 0.0003:
+				sgn = 1.0 if r_self > r_other else -1.0
+			else:
+				sgn = 1.0 if _chain_face_side(chain, nrm) >= 0.0 else -1.0
+		ref = (p - cen2) * sgn
+	else:
+		var bd := 1e9
+		var near := Vector3.ZERO
+		for w3 in other:
+			var dd := _outer.pos[w3].distance_squared_to(p)
+			if dd < bd:
+				bd = dd
+				near = _outer.pos[w3]
+		if bd < 1e8 and bd > 0.0005 * 0.0005:
+			ref = p - near
+		else:
+			var ax2: Vector3 = _outer.pos[chain[n - 1]] - _outer.pos[chain[0]]
+			var og := nrm.cross(ax2.normalized()).normalized()
+			ref = og * _chain_face_side(chain, nrm)
+	if o.dot(ref) < 0.0:
+		o = -o
+	return o
+
+
+func _mean_radius(chain: PackedInt32Array, c: Vector3) -> float:
+	var acc := 0.0
+	for w in chain:
+		acc += _outer.pos[w].distance_to(c)
+	return acc / float(maxi(chain.size(), 1))
+
+
+## 整条唇缘相邻面片质心相对切口轴法向（nrm × 轴）的总偏向；正 = 皮肤在 nrm × 轴 那一侧。
+func _chain_face_side(chain: PackedInt32Array, nrm: Vector3) -> float:
+	var n := chain.size()
+	if n < 2:
+		return 0.0
+	var ax: Vector3 = _outer.pos[chain[n - 1]] - _outer.pos[chain[0]]
+	if ax.length_squared() < 1e-12:
+		return 0.0
+	var og := nrm.cross(ax.normalized())
+	var side := 0.0
+	for w in chain:
+		var pw := _outer.pos[w]
+		for f in _retr_faces_of(w):
+			side += (_outer.centroid(f) - pw).dot(og)
+	return side
+
+
+## 旧算法（单顶点）：只在找不到唇缘链时用。
+func _lip_out_local(vid: int) -> Vector3:
 	var p := _outer.pos[vid]
 	var nrm := _outer.nrm[vid].normalized()
 	# 同一边界环上的前后邻点给出切线
