@@ -1,6 +1,7 @@
 extends "res://scripts/tests/v0411_check.gd"
 ## 未发布（t99u）：手术扯出的子宫在角色走动时不闪烁 / 重影（手术系统与 organ_rig 用同一套渲染一致的
 ## 骨架 / 腹部变换），悬挂的阴道过渡管从体内阴道顶端接出（纯视觉，物理不变）。
+## 未发布（t105u）：过渡管末端沿宫颈轴线接在扯出子宫的宫颈上（宫颈口被管口包住），不再旁边露出圆帽和断面。
 ##   godot --headless --path . -s res://scripts/tests/v0426_hang_visual_check.gd
 
 const SS := preload("res://scripts/surgery/surgery_system.gd")
@@ -143,7 +144,33 @@ func _check_transition_visual() -> void:
 		if (tp[i] - tp[i - 1]).length() > 1e-5 and (tp[i + 1] - tp[i]).length() > 1e-5:
 			worst = maxf(worst, rad_to_deg(acos(clampf(a.dot(b), -1.0, 1.0))))
 	_ok(worst <= 60.0, "the tube has no sharp kink (worst %.0f°)" % worst)
-	_ok(st[st.size() - 1].distance_to(so.call("cervix_world")) <= 1e-4, "the tube still ends at the cervix")
+	# t105u：管末端接在宫颈上（宫颈尖沿轴往里一点），沿宫颈轴线插入，宫颈口被管口包住。
+	var tip: Vector3 = so.call("cervix_join_world")
+	var ax: Vector3 = so.call("cervix_axis_world")
+	var cw: Vector3 = so.call("cervix_world")
+	var end := st[st.size() - 1]
+	var last_dir := (end - st[st.size() - 2]).normalized()
+	var cab: Vector3 = so.get("_cervix_ab")
+	var axab: Vector3 = so.get("_axis_ab")
+	var os_w: Vector3 = so.call("_xform_rest", cab - axab * 0.0013)
+	var os_line := (os_w - end) - last_dir * (os_w - end).dot(last_dir)
+	var vr: PackedVector3Array = so.get("_vis_rest")
+	var emb := float(so.get("TRANSITION_CERV_EMBED"))
+	var rr := 0.0
+	var cnt := 0
+	for v in vr:
+		var a := (v - cab).dot(axab)
+		if a >= emb - 0.002 and a < emb + 0.002:
+			rr += ((v - cab) - axab * a).length()
+			cnt += 1
+	var cerv_r := rr / maxf(cnt, 1)
+	var tr := float(so.get("TRANSITION_R"))
+	print("CERVIX JOIN: end→join %.2f mm, end→cervix %.1f mm, last segment·cervix axis %.3f, os off tube axis %.1f mm, cervix radius at join %.1f mm vs tube %.1f mm" % [end.distance_to(tip) * 1000, end.distance_to(cw) * 1000, last_dir.dot(ax), os_line.length() * 1000, cerv_r * 1000, tr * 1000])
+	_ok(end.distance_to(tip) <= 1e-4, "the tube ends exactly at the cervix join point")
+	_ok(end.distance_to(cw) <= emb + 0.0015, "the join point is the cervix (%.1f mm from the cervix node)" % (end.distance_to(cw) * 1000))
+	_ok(last_dir.dot(ax) >= 0.95, "the tube enters the cervix along the cervix axis (cos %.3f)" % last_dir.dot(ax))
+	_ok(os_line.length() <= 0.003 and (os_w - end).dot(last_dir) < 0.0, "the cervical os sits inside the tube mouth (%.1f mm off axis), no separate stub" % (os_line.length() * 1000))
+	_ok(absf(cerv_r - tr) <= tr * 0.4, "tube radius matches the cervix where they join (%.1f vs %.1f mm)" % [cerv_r * 1000, tr * 1000])
 
 
 func _len(a: PackedVector3Array) -> float:

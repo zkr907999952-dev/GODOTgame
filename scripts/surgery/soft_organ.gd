@@ -37,6 +37,8 @@ const TRANSITION_R := 0.0105
 const TRANSITION_INNER_MIN := 0.004   # t99u：体内阴道顶端离入口不足此距离就不画体内段
 const TRANSITION_INNER_N := 6         # 体内段采样数（不含入口）
 const TRANSITION_EMBED := 0.006       # 体内段起点埋进阴道顶端的深度
+const TRANSITION_CERV_EMBED := 0.004  # t105u：管末端插进宫颈尖的深度（此处宫颈外径 ≈ 管径）
+const TRANSITION_STUMP_N := 6         # 外露断端采样段数
 const TRANSITION_COLOR := Color(0.8038, 0.5382, 0.4751)
 const HOLE_R := 0.020           # 创口洞半径（质点中线可偏离的范围）
 const WALL_MARGIN := 0.004
@@ -435,17 +437,35 @@ func transition_stump_points() -> PackedVector3Array:
 	# 入口固定在创口中心正下方 TRANSITION_IN 处：断端从创口里伸出来。
 	var hang := hang_point()
 	var entry := hang - outward * TRANSITION_IN
-	# 只取入口 → 宫颈的平滑短段（不跟着系带的松弛节点打折），中点略向悬挂点收。
-	var cerv := pts[pts.size() - 1]
-	var mid := entry.lerp(cerv, 0.5)
-	var wc_on := hang + outward * (mid - hang).dot(outward)
-	mid = mid.lerp(wc_on, 0.35)
+	# t105u：入口 → 宫颈的平滑三次曲线：从创口垂直出来，沿宫颈轴线（宫颈 → 宫底）插进宫颈，
+	# 末端在宫颈尖往宫体里 TRANSITION_CERV_EMBED 处（管径 ≈ 那里的宫颈外径），宫颈口的开口边被管口包住，
+	# 不再从侧面斜着碰到宫颈、旁边露出一个圆帽和撕裂的宫颈断面。纯视觉，物理点不变。
+	var tip := cervix_join_world()
+	var ax := cervix_axis_world()
+	var span := entry.distance_to(tip)
+	var c1 := entry + outward * (span * 0.4)
+	var c2 := tip - ax * (span * 0.45)
 	out.append(entry)
-	out.append(entry.lerp(mid, 0.6))
-	out.append(mid)
-	out.append(mid.lerp(cerv, 0.5))
-	out.append(cerv)
+	for k in range(1, TRANSITION_STUMP_N):
+		var t := float(k) / float(TRANSITION_STUMP_N)
+		var u := 1.0 - t
+		out.append(entry * (u * u * u) + c1 * (3.0 * u * u * t) + c2 * (3.0 * u * t * t) + tip * (t * t * t))
+	out.append(tip)
 	return out
+
+
+## t105u：宫颈轴线（世界，宫颈 → 宫底方向），取渲染骨骼 0 的轴，与蒙皮网格一致。
+func cervix_axis_world() -> Vector3:
+	if not _bone.is_empty():
+		return ((_bone[0] as Transform3D).basis.z).normalized()
+	if _p.size() >= 2 and _p[0].distance_squared_to(_p[1]) > 1e-12:
+		return (_p[1] - _p[0]).normalized()
+	return (_frame.basis * _axis_ab).normalized()
+
+
+## t105u：阴道过渡管接到宫颈的位置（世界）：宫颈尖沿轴往里 TRANSITION_CERV_EMBED，按蒙皮网格同一变换。
+func cervix_join_world() -> Vector3:
+	return _xform_rest(_cervix_ab + _axis_ab * TRANSITION_CERV_EMBED)
 
 
 ## t99u：体内段（纯视觉）——从体内阴道（canal 着色器拉到的顶端 canal_os_world）沿阴道方向
