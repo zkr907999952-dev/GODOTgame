@@ -183,7 +183,8 @@ func _check_possess() -> void:
 	a.call("apply_damage", 50.0, {})
 	var p_body: Node = player.get("_body")
 	var a_body: Node = a.get("body")
-	# 选中 → 描边
+	# 选中 → 描边（t103u：只在附身切换菜单打开时描边）
+	pz.call("set_menu_open", true)
 	pz.call("select", a)
 	await _frames(2)
 	_ok(int(pz.call("outlined_mesh_count")) > 0, "selecting a clone outlines its model (%d meshes)" % int(pz.call("outlined_mesh_count")))
@@ -192,6 +193,7 @@ func _check_possess() -> void:
 	var a_pos: Vector3 = (a as Node3D).global_position
 	var pl_pos: Vector3 = player.global_position
 	var msg := str(pz.call("possess", a))
+	pz.call("set_menu_open", false)
 	print("v0407: possess -> ", msg)
 	await _frames(2)
 	_ok(player.get("_body") == a_body and a.get("body") == p_body, "bodies swapped between player and clone")
