@@ -571,7 +571,7 @@ func _visual_mesh_stats(mi: MeshInstance3D) -> Dictionary:
 	for i in verts.size():
 		var wp: Vector3
 		if can_skin:
-			wp = _skel.global_transform * _skin_array_vertex(verts[i], i, bones, weights, mi.skin)
+			wp = _skel_xf() * _skin_array_vertex(verts[i], i, bones, weights, mi.skin)
 		elif mi.get_parent() == _skel:
 			wp = _approx_world_bind(verts[i])
 		else:
@@ -720,10 +720,10 @@ func body_marker_world() -> Dictionary:
 	if _skel:
 		var hi := _skel.find_bone("C_Hip_a")
 		if hi >= 0:
-			hip = _skel.global_transform * _skel.get_bone_global_pose(hi).origin
+			hip = _skel_xf() * _skel.get_bone_global_pose(hi).origin
 		var si := _skel.find_bone("C_Spine_a")
 		if si >= 0:
-			spine = _skel.global_transform * _skel.get_bone_global_pose(si).origin
+			spine = _skel_xf() * _skel.get_bone_global_pose(si).origin
 	var body_o := Vector3.ZERO
 	if player and player.has_node("Body"):
 		body_o = (player.get_node("Body") as Node3D).global_position
@@ -2850,7 +2850,7 @@ func debug_cavity_clearance(margin: float = 0.002) -> Dictionary:
 	var cw := Geom.world_positions(cloud, _skel, _skin)
 	var cn := PackedVector3Array()
 	cn.resize(cloud.vert_count())
-	var gb := _skel.global_transform.basis
+	var gb := _skel_xf().basis
 	for i2 in cloud.vert_count():
 		cn[i2] = (gb * (Geom.skin_basis(i2, cloud, _skel, _skin) * cloud.nrm[i2])).normalized()
 	var cell := 0.03
@@ -2905,7 +2905,7 @@ func debug_wrap_outside(which: String = "wrap") -> Dictionary:
 		_append_mesh(body, _outer)
 	var bw := Geom.world_positions(body, _skel, _skin)
 	var ww := Geom.world_positions(tgt, _skel, _skin)
-	var fr: Transform3D = _organs.call("abdomen_frame") if _organs and _organs.has_method("abdomen_frame") else Transform3D.IDENTITY
+	var fr: Transform3D = _ab_frame() if _organs and _organs.has_method("abdomen_frame") else Transform3D.IDENTITY
 	var dir := -fr.basis.z.normalized()
 	var pts := PackedVector3Array()
 	for p in ww:
@@ -2939,7 +2939,7 @@ func debug_wrap_outside(which: String = "wrap") -> Dictionary:
 				ok = false
 		if ok:
 			tris.append(f2)
-	var gb := _skel.global_transform.basis
+	var gb := _skel_xf().basis
 	var dirs := [dir, (dir + fr.basis.x.normalized()).normalized(), (dir - fr.basis.x.normalized()).normalized()]
 	var qi := -1
 	for q2 in pts:
@@ -3401,7 +3401,7 @@ func _approx_world_bind(bind_p: Vector3) -> Vector3:
 	if pose_locked and _posed_frozen.size() > best:
 		return _posed_frozen[best]
 	var posed := Geom.skin_vertex(bind_p, best, _outer, _skel, _skin)
-	return _skel.global_transform * posed
+	return _skel_xf() * posed
 
 
 var _grid: Dictionary = {}
@@ -3666,7 +3666,7 @@ func _spawn_flap(flap_md: Geom.MeshData, flap_outer: Geom.MeshData) -> bool:
 		if flap_md.bones.size() >= (i + 1) * 4 and _skin:
 			wp = Geom.skin_vertex(flap_md.pos[i], i, flap_md, _skel, _skin)
 			if _skel:
-				wp = _skel.global_transform * wp
+				wp = _skel_xf() * wp
 		elif i < flap_outer.vert_count():
 			var posed := Geom.world_positions(flap_outer, _skel, _skin)
 			wp = posed[i] if i < posed.size() else _approx_world_bind(flap_md.pos[i])
@@ -3913,9 +3913,65 @@ func debug_freehand_cut_from_navel() -> bool:
 	return has_cut_preview() and not cut_open
 
 
+## 0.4.15 t99：渲染一致的骨架世界变换。
+## 身体节点关闭物理插值时（玩家，每个渲染帧由 _body_interp_apply 手动摆放），即时变换就是画面上的位置；
+## 真机上 get_global_transform_interpolated() 对这类节点偶发返回旧位置 → 扯出的子宫（世界坐标柔体，
+## 按帧变换差值搬运）会前后跳 = 走动时闪烁 / 重影。开启插值的身体（分身等）用插值变换（过远退回即时值）。
+func _skel_xf() -> Transform3D:
+	if _skel == null:
+		return Transform3D.IDENTITY
+	var live := _skel.global_transform
+	if not _skel.is_physics_interpolated_and_enabled() or Engine.is_in_physics_frame():
+		return live
+	var itp := _skel.get_global_transform_interpolated()
+	if itp.origin.distance_squared_to(live.origin) > 0.25:
+		return live
+	return itp
+
+
+## 腹部坐标系，换算到与 _skel_xf() 一致的骨架变换下（organ_rig 内部总用插值变换，见 _skel_world_xf）。
+func _ab_frame() -> Transform3D:
+	if _organs == null or not _organs.has_method("abdomen_frame"):
+		return Transform3D.IDENTITY
+	var fr: Transform3D = _organs.call("abdomen_frame")
+	return _ab_fix() * fr
+
+
+## organ_rig 帧 → 渲染一致帧的修正量（世界坐标左乘）。布娃娃时 organ_rig 用物理骨，不修正。
+func _ab_fix() -> Transform3D:
+	var osk = _organs.get("_skel") if _organs else null
+	if not (osk is Skeleton3D) or not is_instance_valid(osk):
+		return Transform3D.IDENTITY
+	var sk: Skeleton3D = osk
+	var live := sk.global_transform
+	var itp := sk.get_global_transform_interpolated()
+	var interp := sk.is_physics_interpolated_and_enabled() and not Engine.is_in_physics_frame()
+	var fix := ab_fix_for(live, itp, interp)
+	if fix.is_equal_approx(Transform3D.IDENTITY):
+		return Transform3D.IDENTITY
+	if _organs.has_method("_spine_world_from_ragdoll") and _organs.call("_spine_world_from_ragdoll") is Transform3D:
+		return Transform3D.IDENTITY
+	return fix
+
+
+## 纯函数（便于测试）：organ_rig._skel_world_xf 用的是 itp（相差 > 0.5 m 时退回 live）；
+## 画面上的骨架：开插值 = 同一个值，关插值 = live。返回 want * used⁻¹。
+static func ab_fix_for(live: Transform3D, itp: Transform3D, interpolated: bool) -> Transform3D:
+	var used := live if itp.origin.distance_squared_to(live.origin) > 0.25 else itp
+	var want := used if interpolated else live
+	if want.is_equal_approx(used):
+		return Transform3D.IDENTITY
+	return want * used.affine_inverse()
+
+
+## 世界点 → 传给 organ_rig（其内部按自己的帧换到腹部坐标）时先抵消 _ab_fix，腹部坐标保持一致。
+func _to_organ_world(p: Vector3) -> Vector3:
+	return _ab_fix().affine_inverse() * p
+
+
 func _navel_world() -> Vector3:
 	if _organs and _organs.has_method("abdomen_frame"):
-		return (_organs.call("abdomen_frame") as Transform3D).origin
+		return (_ab_frame() as Transform3D).origin
 	if player:
 		return player.global_position + Vector3(0, 1.06, 0.1)
 	return _navel_rest
@@ -3936,6 +3992,10 @@ func _process(dt: float) -> void:
 	if (active or persist) and not pose_locked:
 		_posed_dirty = true
 	_step_retr_release(dt)
+	# t99：先按本帧（身体已在 -10 优先级摆好）刷新腹部坐标系，再步进悬挂脏器；
+	# 不依赖 organ_rig 与本节点在树里的先后（附身换父节点后顺序会变）。
+	if _organs and _organs.has_method("_update_frame") and (not _soft_organs.is_empty() or not _gut_pulls.is_empty()):
+		_organs.call("_update_frame")
 	var _tg0 := Time.get_ticks_usec()
 	_update_guts(dt)
 	gut_update_usec = Time.get_ticks_usec() - _tg0
@@ -4133,7 +4193,7 @@ func debug_wall_follow_delta() -> Dictionary:
 func _mesh_centroid_with_bone_shift(md: Geom.MeshData, bone_i: int, world_shift: Vector3) -> Vector3:
 	if md == null or md.vert_count() < 1 or _skel == null:
 		return Vector3.ZERO
-	var local_shift: Vector3 = _skel.global_transform.basis.inverse() * world_shift
+	var local_shift: Vector3 = _skel_xf().basis.inverse() * world_shift
 	var acc := Vector3.ZERO
 	for i in md.vert_count():
 		var p: Vector3 = Geom.skin_vertex(md.pos[i], i, md, _skel, _skin)
@@ -4145,7 +4205,7 @@ func _mesh_centroid_with_bone_shift(md: Geom.MeshData, bone_i: int, world_shift:
 					continue
 				if _skin.get_bind_bone(bind_i) == bone_i:
 					w += md.weights[i * 4 + k]
-		acc += _skel.global_transform * (p + local_shift * w)
+		acc += _skel_xf() * (p + local_shift * w)
 	return acc / float(md.vert_count())
 
 
@@ -4164,7 +4224,7 @@ func _mesh_centroid_world(md: Geom.MeshData) -> Vector3:
 func _mesh_centroid_bind(md: Geom.MeshData) -> Vector3:
 	if md == null or md.vert_count() < 1:
 		return Vector3.ZERO
-	var xf := _skel.global_transform if _skel else Transform3D.IDENTITY
+	var xf := _skel_xf() if _skel else Transform3D.IDENTITY
 	var c := Vector3.ZERO
 	for p in md.pos:
 		c += xf * p
@@ -4318,7 +4378,7 @@ func _bake_pull() -> bool:
 	if _organs == null or not _organs.has_method("abdomen_frame"):
 		return false
 	_bake_evert()
-	var fr: Transform3D = _organs.call("abdomen_frame")
+	var fr: Transform3D = _ab_frame()
 	var mds: Array = [_outer]
 	if _inner:
 		mds.append(_inner)
@@ -4504,7 +4564,7 @@ func _gut_rebuild_ids() -> void:
 func _gut_world(i: int, j: int) -> Vector3:
 	if pose_locked and _posed_frozen.size() > maxi(i, j):
 		return (_posed_frozen[i] + _posed_frozen[j]) * 0.5
-	return _skel.global_transform * ((Geom.skin_vertex(_outer.pos[i], i, _outer, _skel, _skin) + Geom.skin_vertex(_outer.pos[j], j, _outer, _skel, _skin)) * 0.5)
+	return _skel_xf() * ((Geom.skin_vertex(_outer.pos[i], i, _outer, _skel, _skin) + Geom.skin_vertex(_outer.pos[j], j, _outer, _skel, _skin)) * 0.5)
 
 
 ## 0.4.03：默认不再自动外露 / 悬挂肠子；只有手术钳从腹腔里扯出来的肠袢（_gut_pulls）。
@@ -4525,7 +4585,7 @@ func _update_guts(dt: float) -> void:
 		_sync_gut_hide()
 		_update_soft_organs(dt)
 		return
-	var fr: Transform3D = _organs.call("abdomen_frame") if _organs and _organs.has_method("abdomen_frame") else Transform3D.IDENTITY
+	var fr: Transform3D = _ab_frame() if _organs and _organs.has_method("abdomen_frame") else Transform3D.IDENTITY
 	var rim := _gut_rim_world()
 	var hole_c := Vector3.ZERO
 	for q in rim:
@@ -4643,7 +4703,7 @@ func _gut_inner_world(i: int, j: int, fr: Transform3D) -> Vector3:
 	elif _skel == null:
 		p = (md.pos[i] + md.pos[j]) * 0.5
 	else:
-		p = _skel.global_transform * ((Geom.skin_vertex(md.pos[i], i, md, _skel, _skin) + Geom.skin_vertex(md.pos[j], j, md, _skel, _skin)) * 0.5)
+		p = _skel_xf() * ((Geom.skin_vertex(md.pos[i], i, md, _skel, _skin) + Geom.skin_vertex(md.pos[j], j, md, _skel, _skin)) * 0.5)
 	if _pull_r > 1e-5:
 		p += fr.basis * _pull_offset_cpu(fr.affine_inverse() * p)
 	return p
@@ -4742,7 +4802,7 @@ func _sync_gut_hide() -> void:
 		if not g.has("along") or not (g["along"] is float):
 			var hit: Vector3 = g.get("hit", Vector3.INF)
 			if hit == Vector3.INF:
-				hit = _gut_pull_anchor(g, _organs.call("abdomen_frame") if _organs.has_method("abdomen_frame") else Transform3D.IDENTITY)
+				hit = _gut_pull_anchor(g, _ab_frame() if _organs.has_method("abdomen_frame") else Transform3D.IDENTITY)
 			g["along"] = float(_organs.call("gut_along_near", k, hit)) if _organs.has_method("gut_along_near") else 0.5
 		var along := float(g["along"])
 		var rate := SI_HIDE_RATE if k == "small_intestine" else 1.0
@@ -5021,11 +5081,11 @@ func forceps_jaw_angle() -> float:
 ## 肠袢锚点 / 创缘 / 皮肤采样一律按当前骨骼实时蒙皮（不用下刀时冻结的姿势），始终跟着身体走。
 func _inner_world(vid: int) -> Vector3:
 	var md: Geom.MeshData = _inner if _inner and _inner.vert_count() == _outer.vert_count() else _outer
-	return _skel.global_transform * Geom.skin_vertex(md.pos[vid], vid, md, _skel, _skin)
+	return _skel_xf() * Geom.skin_vertex(md.pos[vid], vid, md, _skel, _skin)
 
 
 func _outer_live(vid: int) -> Vector3:
-	return _skel.global_transform * Geom.skin_vertex(_outer.pos[vid], vid, _outer, _skel, _skin)
+	return _skel_xf() * Geom.skin_vertex(_outer.pos[vid], vid, _outer, _skel, _skin)
 
 
 func _gut_pull_anchor(g: Dictionary, fr: Transform3D) -> Vector3:
@@ -5119,7 +5179,7 @@ func _gut_skin_samples(hole_c_w: Vector3) -> Array:
 	_gut_skin_p.resize(n)
 	if need_n:
 		_gut_skin_n.resize(n)
-	var gx := _skel.global_transform
+	var gx := _skel_xf()
 	for k in n:
 		var v2: int = _gut_skin_ids[k]
 		var p0 := gx * Geom.skin_vertex(_outer.pos[v2], v2, _outer, _skel, _skin)
@@ -5245,7 +5305,7 @@ func _ray_cavity_hit_cheap(origin: Vector3, dir: Vector3) -> Variant:
 	var er = _organs.get("_ellipsoid_r")
 	if not (ec is Vector3 and er is Vector3):
 		return null
-	var fr: Transform3D = _organs.call("abdomen_frame")
+	var fr: Transform3D = _ab_frame()
 	var inv := fr.affine_inverse()
 	var r3: Vector3 = (er as Vector3) * 0.92
 	var lo := ((inv * origin) - (ec as Vector3)) / r3
@@ -5278,7 +5338,7 @@ func _ray_cavity_hit(origin: Vector3, dir: Vector3) -> Variant:
 	var er = _organs.get("_ellipsoid_r")
 	if not (ec is Vector3 and er is Vector3):
 		return null
-	var fr: Transform3D = _organs.call("abdomen_frame")
+	var fr: Transform3D = _ab_frame()
 	var inv := fr.affine_inverse()
 	var r3: Vector3 = (er as Vector3) * 0.92
 	var lo := ((inv * origin) - (ec as Vector3)) / r3
@@ -5830,7 +5890,7 @@ func _hole_or_lip_ids() -> PackedInt32Array:
 
 
 func _new_gut_pull(hit: Vector3) -> Dictionary:
-	var fr: Transform3D = _organs.call("abdomen_frame")
+	var fr: Transform3D = _ab_frame()
 	# 参考顶点：最近的创缘内壁顶点（twin 同索引），锚点 = 它 + 腹局部偏移，跟着蒙皮 / 软体 / 拿取位移走。
 	var ids := _hole_or_lip_ids()
 	var best := -1
@@ -5846,7 +5906,7 @@ func _new_gut_pull(hit: Vector3) -> Dictionary:
 		return {}
 	var iw := _inner_world(best)
 	# 腹腔内方向（向背）：皮肤外法线取反
-	var nw := (_skel.global_transform * Geom.skin_vertex(_outer.pos[best] + _outer.nrm[best].normalized() * 0.01, best, _outer, _skel, _skin)) - _outer_live(best)
+	var nw := (_skel_xf() * Geom.skin_vertex(_outer.pos[best] + _outer.nrm[best].normalized() * 0.01, best, _outer, _skel, _skin)) - _outer_live(best)
 	var in_w := -nw.normalized()
 	# 锚点至少在内壁以下 1.5cm
 	var anc := hit
@@ -6167,6 +6227,7 @@ func _wound_center_world() -> Vector3:
 ## t82u：柔体子宫每帧用的创口中心 / 悬挂点缓存（腹部局部坐标）。创缘蒙皮采样一次约 0.2 ms，
 ## 创口形状没变时每 WC_REFRESH 帧才重算一次，其余帧只随腹部坐标系搬运；拉扯 / 拉钩回弹期间每帧重算。
 const WC_REFRESH := 12
+var _wc_fr := Transform3D()
 ## 悬挂点：创口中心沿身体向下（耻骨方向）移到创缘下缘附近，最多 HANG_MAX（留在洞口 HOLE_R 内）。
 const HANG_FRAC := 0.8
 const HANG_MAX := 0.017
@@ -6179,7 +6240,11 @@ var _wc_age: int = 999
 func _wound_and_hang(fr: Transform3D) -> Array:
 	var sig := [_outer.get_instance_id() if _outer else 0, _outer.vert_count() if _outer else 0, _outer.idx.size() if _outer else 0, flap_peeled, _hole_loops.size(), _lip_left.size(), _lip_right.size(), _retractors.size()]
 	var busy := _grab_active or not _retr_release.is_empty() or stroke_active
-	if sig != _wc_sig or busy or _wc_age >= WC_REFRESH:
+	# t99u：人物走动 / 动画时皮肤创缘相对腹部坐标系在动；只每 12 帧重算会让悬挂点一跳一跳（子宫闪烁）。
+	# 腹部坐标系本帧有位移 / 转动就每帧重算。
+	var moving := fr.origin.distance_squared_to(_wc_fr.origin) > 1e-10 or not fr.basis.is_equal_approx(_wc_fr.basis)
+	_wc_fr = fr
+	if sig != _wc_sig or busy or moving or _wc_age >= WC_REFRESH:
 		_wc_sig = sig
 		_wc_age = 0
 		var rim := _gut_rim_world()
@@ -6209,14 +6274,14 @@ func _wound_and_hang(fr: Transform3D) -> Array:
 
 ## 子宫悬挂点（世界坐标；测试 / 调试用）。
 func uterus_hang_world() -> Vector3:
-	var fr: Transform3D = _organs.call("abdomen_frame") if _organs else Transform3D.IDENTITY
+	var fr: Transform3D = _ab_frame() if _organs else Transform3D.IDENTITY
 	_wc_age = 999
 	return _wound_and_hang(fr)[1]
 
 
 func _cavity_outward() -> Vector3:
 	if _organs:
-		var fr: Transform3D = _organs.call("abdomen_frame")
+		var fr: Transform3D = _ab_frame()
 		# 腹前方向（创口朝外）
 		var fwd: Vector3 = fr.basis.z.normalized()
 		if fwd.length_squared() > 1e-8:
@@ -6299,7 +6364,7 @@ func _ensure_soft(kind: String) -> Node:
 	so.name = "Soft" + kind.capitalize()
 	so.add_to_group(CAMERA_IGNORE_GROUP)
 	add_child(so)
-	var fr: Transform3D = _organs.call("abdomen_frame")
+	var fr: Transform3D = _ab_frame()
 	var navel: Vector3 = _organs.get("_navel_rest")
 	var main_meshes: Array = []
 	var hide_meshes: Array = []
@@ -6382,7 +6447,7 @@ func _start_soft_extract(kind: String, origin: Vector3, dir: Vector3, early_side
 	var so := _ensure_soft(kind)
 	if so == null:
 		return false
-	var fr: Transform3D = _organs.call("abdomen_frame") if _organs else Transform3D.IDENTITY
+	var fr: Transform3D = _ab_frame() if _organs else Transform3D.IDENTITY
 	if kind == "uterus":
 		_wc_age = 999
 		var wh0 := _wound_and_hang(fr)
@@ -6440,7 +6505,7 @@ func _apply_uterus_phys_cut(so: Node) -> void:
 func _tissue_drag_world_at(world_p: Vector3) -> Vector3:
 	if _organs == null or not _organs.has_method("soft_offset_ab") or not _organs.has_method("abdomen_frame"):
 		return Vector3.ZERO
-	var fr: Transform3D = _organs.call("abdomen_frame")
+	var fr: Transform3D = _ab_frame()
 	var off_ab: Vector3 = _organs.call("soft_offset_ab", fr.affine_inverse() * world_p)
 	return fr.basis * off_ab
 
@@ -6468,7 +6533,7 @@ func _update_soft_organs(dt: float) -> void:
 		_tissue_drag_has = false
 		_tissue_drag_prev = Vector3.ZERO
 		return
-	var fr: Transform3D = _organs.call("abdomen_frame") if _organs else Transform3D.IDENTITY
+	var fr: Transform3D = _ab_frame() if _organs else Transform3D.IDENTITY
 	var wh := _wound_and_hang(fr)
 	var wound: Vector3 = wh[0]
 	var drag := _carry_soft_with_tissue_drag(wound)
@@ -6505,7 +6570,11 @@ func _update_soft_organs(dt: float) -> void:
 			# 0.4.12：阴道顶端只跟系带根部走一小段，伸长部分由系带管子表现（不再把阴道拉成一根怪管跟着子宫走）。
 			if _organs and _organs.has_method("set_canal_stretch"):
 				var cx: Vector3 = so.call("canal_os_world") if so.has_method("canal_os_world") else so.call("cervix_world")
-				_organs.call("set_canal_stretch", cx, 1.0)
+				_organs.call("set_canal_stretch", _to_organ_world(cx), 1.0)
+				var c_os = _organs.get("_canal_os_rest")
+				var c_op = _organs.get("_canal_open_rest")
+				if c_os is Vector3 and c_op is Vector3:
+					so.set("vagina_axis_ab", (c_os - c_op).normalized() if (c_os - c_op).length_squared() > 1e-10 else Vector3.ZERO)
 		elif str(k) == "uterus" and _organs:
 			if _organs.has_method("clear_canal_stretch") and not now_out:
 				_organs.call("clear_canal_stretch")
@@ -6698,9 +6767,9 @@ func debug_add_extract_charge(kind: String, strength: float, dt: float) -> void:
 		so.call("add_charge", strength, dt)
 		# 立即步进一次让位置跟上档位
 		if _organs:
-			so.call("step", minf(dt, 1.0 / 30.0), _organs.call("abdomen_frame"), _wound_center_world(), _cavity_outward())
+			so.call("step", minf(dt, 1.0 / 30.0), _ab_frame(), _wound_center_world(), _cavity_outward())
 			if kind == "uterus" and _organs.has_method("set_canal_stretch") and bool(so.call("is_extracted")):
-				_organs.call("set_canal_stretch", so.call("canal_os_world"), 1.0)
+				_organs.call("set_canal_stretch", _to_organ_world(so.call("canal_os_world")), 1.0)
 
 
 func debug_putback_organ(kind: String) -> bool:
@@ -7059,12 +7128,12 @@ func _vert_world(vid: int) -> Vector3:
 		return _posed_frozen[vid]
 	if _skel == null:
 		return _outer.pos[vid]
-	return _skel.global_transform * Geom.skin_vertex(_outer.pos[vid], vid, _outer, _skel, _skin)
+	return _skel_xf() * Geom.skin_vertex(_outer.pos[vid], vid, _outer, _skel, _skin)
 
 
 func _retractor_xf(vid: int, out_bind: Vector3, extra_off: Vector3 = Vector3.ZERO) -> Transform3D:
 	var p: Vector3 = _vert_world(vid) + extra_off
-	var sb := _skel.global_transform.basis if _skel else Basis.IDENTITY
+	var sb := _skel_xf().basis if _skel else Basis.IDENTITY
 	var bone_b := Basis.IDENTITY
 	if _skel and _skin and _outer.bones.size() >= (vid + 1) * 4:
 		# 主骨骼的姿势旋转（跟随蒙皮）
@@ -7287,7 +7356,7 @@ func _update_retractors() -> void:
 					best = v
 			(r as Dictionary)["vid"] = best
 	var fr_ok := _organs and _organs.has_method("abdomen_frame")
-	var fr: Transform3D = _organs.call("abdomen_frame") if fr_ok else Transform3D.IDENTITY
+	var fr: Transform3D = _ab_frame() if fr_ok else Transform3D.IDENTITY
 	for i in _retractors.size():
 		var r2: Dictionary = _retractors[i]
 		var n: Node3D = r2["node"]
@@ -8366,14 +8435,14 @@ func _skin_split_dir(bind_hint: Vector3) -> Vector3:
 
 func _to_ab_local(world_p: Vector3) -> Vector3:
 	if _organs and _organs.has_method("abdomen_frame"):
-		var fr: Transform3D = _organs.call("abdomen_frame")
+		var fr: Transform3D = _ab_frame()
 		return fr.affine_inverse() * world_p
 	return world_p
 
 
 func _to_ab_delta(world_delta: Vector3) -> Vector3:
 	if _organs and _organs.has_method("abdomen_frame"):
-		var fr: Transform3D = _organs.call("abdomen_frame")
+		var fr: Transform3D = _ab_frame()
 		return fr.basis.inverse() * world_delta
 	return world_delta
 
@@ -8822,7 +8891,7 @@ func _ray_to_preview_plane(origin: Vector3, dir: Vector3) -> Vector3:
 	var c: Vector3 = _navel_world()
 	var n := Vector3(0, 0, 1)
 	if _organs and _organs.has_method("abdomen_frame"):
-		n = (_organs.call("abdomen_frame") as Transform3D).basis.z.normalized()
+		n = (_ab_frame() as Transform3D).basis.z.normalized()
 	var denom := n.dot(d)
 	var world: Vector3
 	if absf(denom) < 1e-6:

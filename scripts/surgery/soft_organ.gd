@@ -34,6 +34,9 @@ const OUT_EXTRA := 0.012        # t72u：宫颈最多伸出创口约 1.2 cm（�
 const TRANSITION_IN := 0.012
 const CERVIX_OUT_MAX := 0.02    # 体外宫颈 / 系带点离创口中心最远 2 cm
 const TRANSITION_R := 0.0105
+const TRANSITION_INNER_MIN := 0.004   # t99u：体内阴道顶端离入口不足此距离就不画体内段
+const TRANSITION_INNER_N := 6         # 体内段采样数（不含入口）
+const TRANSITION_EMBED := 0.006       # 体内段起点埋进阴道顶端的深度
 const TRANSITION_COLOR := Color(0.8038, 0.5382, 0.4751)
 const HOLE_R := 0.020           # 创口洞半径（质点中线可偏离的范围）
 const WALL_MARGIN := 0.004
@@ -415,8 +418,8 @@ func tether_length() -> float:
 	return _tlen
 
 
-## t72u：真正画出来的过渡段（创口内侧 TRANSITION_IN 处 → 宫颈）的点；系带全在深处时为空。
-func transition_points() -> PackedVector3Array:
+## t72u：创口外露的过渡断端（创口内侧 TRANSITION_IN 处 → 宫颈）的点；系带全在深处时为空。
+func transition_stump_points() -> PackedVector3Array:
 	var pts := tether_points()
 	var out := PackedVector3Array()
 	if pts.size() < 2:
@@ -429,7 +432,7 @@ func transition_points() -> PackedVector3Array:
 			break
 	if start < 0:
 		return out
-	# 入口固定在创口中心正下方 TRANSITION_IN 处：断端从创口里伸出来，深处的系带不画。
+	# 入口固定在创口中心正下方 TRANSITION_IN 处：断端从创口里伸出来。
 	var hang := hang_point()
 	var entry := hang - outward * TRANSITION_IN
 	# 只取入口 → 宫颈的平滑短段（不跟着系带的松弛节点打折），中点略向悬挂点收。
@@ -445,8 +448,57 @@ func transition_points() -> PackedVector3Array:
 	return out
 
 
+## t99u：体内段（纯视觉）——从体内阴道（canal 着色器拉到的顶端 canal_os_world）沿阴道方向
+## 平滑弯到创口入口，与外露断端相切连接，悬挂的阴道管看起来接着体内阴道，而不是从腹壁里冒出来。
+## 不改任何物理量：只读系带 / 宫颈 / 创口数据。
+func transition_inner_points() -> PackedVector3Array:
+	var out := PackedVector3Array()
+	var stump := transition_stump_points()
+	if stump.size() < 2 or _x.size() < TETHER_N:
+		return out
+	var entry := stump[0]
+	var apex := canal_os_world()
+	var span := apex.distance_to(entry)
+	if span < TRANSITION_INNER_MIN:
+		return out
+	# 阴道顶端的走向：canal 着色器只平移阴道上端，顶端切向 = 通道轴（外口 → 宫颈，由 surgery_system 给）；
+	# 没给时用静止根点 → 被拉出的顶端；再退化就直接朝入口。
+	var vdir := _frame.basis * vagina_axis_ab
+	if vdir.length_squared() < 1e-8:
+		vdir = apex - (_frame * _raw_cervix + _drag_off)
+	if vdir.length_squared() < 1e-8:
+		vdir = entry - apex
+	vdir = vdir.normalized()
+	var to_e := (entry - apex) / span
+	if vdir.dot(to_e) < 0.0:
+		vdir = (vdir - to_e * 2.0 * vdir.dot(to_e)).normalized()
+	var sdir := stump[1] - stump[0]
+	sdir = sdir.normalized() if sdir.length_squared() > 1e-10 else outward
+	# 起点埋进阴道顶端一点，管口藏在阴道网格里。
+	var p0 := apex - vdir * TRANSITION_EMBED
+	var c1 := apex + vdir * (span * 0.4)
+	var c2 := entry - sdir * (span * 0.35)
+	out.append(p0)
+	for k in TRANSITION_INNER_N:
+		var t := float(k) / float(TRANSITION_INNER_N)
+		var u := 1.0 - t
+		out.append(apex * (u * u * u) + c1 * (3.0 * u * u * t) + c2 * (3.0 * u * t * t) + entry * (t * t * t))
+	return out
+
+
+## 真正画出来的阴道过渡管：体内阴道顶端 → 创口入口 → 宫颈（视觉）。
+func transition_points() -> PackedVector3Array:
+	var stump := transition_stump_points()
+	if stump.is_empty():
+		return stump
+	var out := transition_inner_points()
+	out.append_array(stump)
+	return out
+
+
+## 外露断端长度（创口入口 → 宫颈），体内段不计。
 func transition_length() -> float:
-	var pts := transition_points()
+	var pts := transition_stump_points()
 	var l := 0.0
 	for i in range(1, pts.size()):
 		l += pts[i - 1].distance_to(pts[i])
@@ -462,6 +514,8 @@ func set_transition_color(c: Color) -> void:
 
 
 var _transition_color := TRANSITION_COLOR
+## t99u：体内阴道通道轴（腹部坐标，外口 → 宫颈）；只用于画体内过渡段。
+var vagina_axis_ab := Vector3.ZERO
 
 
 func hang_point() -> Vector3:
@@ -2232,8 +2286,9 @@ func _rebuild_tether() -> void:
 	if _tether_node == null or not is_instance_valid(_tether_node):
 		return
 	var pts := transition_points()
-	# 根点埋在阴道顶端里，只在明显被扯长后才显示；只画创口附近到宫颈的一小段。
-	var show := _tlen > 0.012 and pts.size() >= 2 and pts[0].distance_to(pts[pts.size() - 1]) > 0.002
+	var stump := transition_stump_points()
+	# 根点埋在阴道顶端里，只在明显被扯长后才显示；外露断端 + 体内段接回体内阴道（t99u）。
+	var show := _tlen > 0.012 and stump.size() >= 2 and stump[0].distance_to(stump[stump.size() - 1]) > 0.002
 	(_tether_node as Node3D).visible = show
 	if show:
 		_tether_node.call("apply_points", pts, pts, pts[pts.size() - 1] - pts[0])
