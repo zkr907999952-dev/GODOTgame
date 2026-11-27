@@ -566,6 +566,9 @@ func canal_os_world() -> Vector3:
 				break
 			acc += seg
 			tgt = _x[i]
+	# 0.4.17：钢球沿阴道插入时把阴道捋直——顶端回到静止轴上（不再被系带拉歪）。
+	if rod_vault_k > 1e-4:
+		tgt = tgt.lerp(root, clampf(rod_vault_k, 0.0, 1.0))
 	# canal 着色器的静止宫颈在腹部坐标约定下（未做骨骼校正）。
 	var raw_root := _frame * _raw_cervix + _drag_off
 	return tgt + (raw_root - root)
@@ -882,6 +885,7 @@ func add_hide_meshes(meshes: Array) -> void:
 	for m in meshes:
 		if m != null and m not in _src:
 			_src.append(m)
+			_cavity_src.append(m)
 
 
 func begin_extract(frame: Transform3D, wound: Vector3, out_dir: Vector3) -> void:
@@ -991,6 +995,7 @@ func start_putback() -> void:
 
 
 func force_reset() -> void:
+	rod_clear()
 	extract_charge = 0.0
 	retracting = false
 	organ_active = false
@@ -1964,9 +1969,19 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 		_step_putback(dt)
 		last_step_usec = Time.get_ticks_usec() - t0
 		return
+	if rod_nodes.size() == SEGS:
+		_asleep = false
+		_sleep_vis_ok = false
+		_quiet_frames = 0
+		_step_rod(dt)
+		last_step_usec = Time.get_ticks_usec() - t0
+		return
 	var root := root_world()
 	var nb := TETHER_N + SEGS
 	_drv_i = -1
+	# 0.4.17：杆穿着子宫时，之前「持续拉」留下的虚拟夹点不再拽着宫底。
+	if rod_guide_k > 1e-3 and hold_index < 0:
+		_has_pull_target = false
 	if hold_index >= 0 and hold_index < SEGS:
 		_drv_i = TETHER_N + hold_index
 		_drv_pos = _driver_target(_drv_i, hold_pos)
@@ -1975,6 +1990,7 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 		_drv_pos = _driver_target(_drv_i, _pull_target)
 		_pull_target = _drv_pos
 	var driven := _drv_i >= 0
+	var guided := rod_guide_k > 1e-3 and rod_guide_dir.length_squared() > 0.5
 	var any_out := false
 	for i0 in nb:
 		if _st[i0] == 1:
@@ -1994,7 +2010,12 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 		last_step_usec = Time.get_ticks_usec() - t0
 		return
 	# 已取出但已收敛：跳过约束迭代；骨架随腹部坐标系搬运后只在需要时重画网格。
-	if not driven:
+	# 0.4.17：钢球引导对齐时不休眠（目标在变）。
+	if guided and not driven:
+		_asleep = false
+		_sleep_vis_ok = false
+		_quiet_frames = 0
+	elif not driven:
 		var max_v2 := 0.0
 		for i_s in nb:
 			max_v2 = maxf(max_v2, _x[i_s].distance_squared_to(_xq[i_s]))
@@ -2094,6 +2115,8 @@ func step(dt: float, frame: Transform3D, wound: Vector3, out_dir: Vector3) -> vo
 				_st[i2] = 1
 		for k2 in nb - 1:
 			_cross_fix_arr(_x, _st, k2, k2 + 1, _inv_w(k2), _inv_w(k2 + 1))
+	if guided:
+		_apply_rod_guide(k60)
 	# 最后：角度 + 从驱动点出发的精确段长（FABRIK 一遍），保证宫体不拉伸、不折。
 	_straighten_body(BODY_STIFF)
 	_fabrik_body()
@@ -2305,6 +2328,15 @@ func _ensure_tether_mesh() -> void:
 func _rebuild_tether() -> void:
 	if _tether_node == null or not is_instance_valid(_tether_node):
 		return
+	if rod_tube_pts.size() >= 2:
+		# 0.4.17：钢球捋直后的过渡管沿杆路径画，按球 / 杆撑开半径。
+		var ok_len := rod_tube_pts[0].distance_to(rod_tube_pts[rod_tube_pts.size() - 1]) > 0.004
+		(_tether_node as Node3D).visible = ok_len
+		if ok_len:
+			_tether_node.set("radii", rod_tube_radii if rod_tube_radii.size() == rod_tube_pts.size() else PackedFloat32Array())
+			_tether_node.call("apply_points", rod_tube_pts, rod_tube_pts, rod_tube_pts[rod_tube_pts.size() - 1] - rod_tube_pts[0])
+		return
+	_tether_node.set("radii", PackedFloat32Array())
 	var pts := transition_points()
 	var stump := transition_stump_points()
 	# 根点埋在阴道顶端里，只在明显被扯长后才显示；外露断端 + 体内段接回体内阴道（t99u）。
@@ -2344,6 +2376,8 @@ func _update_bones() -> void:
 		var y := axis.cross(x)
 		up = y
 		_bone.append(Transform3D(Basis(x, y, axis), _p[i]))
+	_apply_rod_straight()
+	_push_rod_ball()
 
 
 func _xform_rest(p_ab: Vector3) -> Vector3:
@@ -2643,3 +2677,250 @@ func skinned_vertices() -> PackedVector3Array:
 ## 静止网格顶点（校正后的腹部坐标）。
 func rest_vertices_ab() -> PackedVector3Array:
 	return _vis_rest
+
+
+# ---------------------------------------------------------------- 0.4.17（t5u）长柄钢球经阴道捋直 / 带回体内
+## 由 ExtractedUterusLink（钢球）写入；全部为 0 / 空时本柔体行为与以前完全一样。
+var rod_guide_k := 0.0                     # 0..1：体外宫体对齐到杆路径（宫颈朝创口，宫底沿杆向外）
+var rod_guide_base := Vector3.ZERO         # 对齐时宫颈节点的目标
+var rod_guide_dir := Vector3.ZERO          # 对齐方向（宫颈 → 宫底）
+var rod_vault_k := 0.0                     # 0..1：阴道顶端回到静止轴（阴道被杆捋直）
+var rod_nodes := PackedVector3Array()      # 非空：宫体节点由钢球直接给出（带回体内阶段，运动学）
+var rod_tube_pts := PackedVector3Array()   # 非空：过渡管按杆路径画
+var rod_tube_radii := PackedFloat32Array()
+var rod_ball_on := false                   # 球在宫腔里：按球径向撑开宫体
+var rod_ball_center := Vector3.ZERO
+var rod_ball_need := 0.0                   # 球心到外膜至少这么远（球半径 + 壁厚）
+var rod_shaft_need := 0.0                  # 杆（宫颈 → 球心）撑开半径
+var rod_shaft_entry := Vector3.ZERO        # 杆进入宫颈处（世界）
+var _rod_ball_pushed := false
+
+
+func rod_clear() -> void:
+	rod_straight_k = 0.0
+	if rod_ball_on:
+		rod_ball_on = false
+		_push_rod_ball()
+	rod_guide_k = 0.0
+	rod_guide_dir = Vector3.ZERO
+	rod_vault_k = 0.0
+	rod_nodes = PackedVector3Array()
+	rod_tube_pts = PackedVector3Array()
+	rod_tube_radii = PackedFloat32Array()
+	rod_ball_on = false
+	if _tether_node and is_instance_valid(_tether_node):
+		_tether_node.set("radii", PackedFloat32Array())
+
+
+func rod_set_ball(on: bool, center: Vector3 = Vector3.ZERO, need: float = 0.0, shaft_entry: Vector3 = Vector3.ZERO, shaft_need: float = 0.0, wall: float = 0.0035) -> void:
+	rod_ball_on = on
+	rod_wall = maxf(wall, 0.002)
+	if on:
+		rod_ball_center = center
+		rod_ball_need = need
+		rod_shaft_entry = shaft_entry
+		rod_shaft_need = shaft_need
+	_push_rod_ball()
+
+
+func rest_node_world(b: int) -> Vector3:
+	return _rest_world(clampi(b, 0, SEGS - 1))
+
+
+func node_world(b: int) -> Vector3:
+	if _p.size() == SEGS:
+		return _p[clampi(b, 0, SEGS - 1)]
+	return rest_node_world(b)
+
+
+func node_arcs() -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(SEGS)
+	var acc := 0.0
+	for i in SEGS:
+		out[i] = acc
+		if i < SEGS - 1:
+			acc += float(_seg_rest[i]) if _seg_rest.size() > i else 0.01
+	return out
+
+
+## 宫体节点向杆路径靠拢（每步一部分，带走速度）；之后照常做刚性摆直 / FABRIK / 离壁。
+func _apply_rod_guide(k60: float) -> void:
+	var kk := clampf(rod_guide_k, 0.0, 1.0)
+	var w := 1.0 - pow(1.0 - 0.22, maxf(k60, 0.05))
+	var dir := rod_guide_dir.normalized()
+	var arcs := node_arcs()
+	for b in SEGS:
+		var ci := TETHER_N + b
+		if ci == _drv_i:
+			continue
+		var tgt := rod_guide_base + dir * arcs[b]
+		# 对齐完成（kk→1）时完全贴到杆线上：杆是硬的，宫腔被它穿着。
+		var f := lerpf(w, 1.0, pow(kk, 4.0)) * kk
+		_x[ci] = _x[ci].lerp(tgt, f)
+		_xq[ci] = _xq[ci].lerp(_x[ci], f)
+		if (tgt - wound_center).dot(outward) > 0.0:
+			_st[ci] = 1
+
+
+## 带回体内：宫体节点由外部给出，系带取根点 → 宫颈的直线，体内 / 体外按创口平面判定。
+func _step_rod(dt: float) -> void:
+	var root := root_world()
+	var nb := TETHER_N + SEGS
+	_drv_i = -1
+	for b in SEGS:
+		var ci := TETHER_N + b
+		_xq[ci] = _x[ci]
+		_x[ci] = rod_nodes[b]
+		_st[ci] = 1 if (rod_nodes[b] - wound_center).dot(outward) > 0.0 else 0
+	for t in TETHER_N:
+		var pt := root.lerp(rod_nodes[0], float(t) / float(TETHER_N))
+		_xq[t] = _x[t]
+		_x[t] = pt
+		_st[t] = 1 if (pt - wound_center).dot(outward) > 0.0 else 0
+	_tlen = maxf(TETHER_MIN, root.distance_to(rod_nodes[0]))
+	for i in nb:
+		if not _x[i].is_finite():
+			_x[i] = _rest_world(i - TETHER_N) if i >= TETHER_N else root
+			_xq[i] = _x[i]
+	_finish_step(dt, false)
+
+
+const ROD_ALPHA := 0.5               # = organ_common soft_ball_alpha
+var rod_wall := 0.0035                # = soft_ball_wall（子宫壁厚）
+
+
+func _rod_need(d: float, R: float) -> float:
+	var W := maxf(rod_wall, 1e-4)
+	return R + ROD_ALPHA * d + (1.0 - ROD_ALPHA) * W * (1.0 - exp(-d / W))
+
+
+## 球在宫腔里：把球 / 杆写进本柔体材质（着色器 soft_ball_push 在蒙皮后的模型空间撑开）。
+func _push_rod_ball() -> void:
+	if _mat == null:
+		return
+	if not rod_ball_on:
+		if _rod_ball_pushed:
+			_mat.set_shader_parameter("soft_ball", Vector4.ZERO)
+			_mat.set_shader_parameter("soft_shaft", Vector4.ZERO)
+			_rod_ball_pushed = false
+		return
+	var inv := global_transform.affine_inverse() if is_inside_tree() else Transform3D.IDENTITY
+	var c := inv * rod_ball_center
+	var a := inv * rod_shaft_entry
+	_mat.set_shader_parameter("soft_ball", Vector4(c.x, c.y, c.z, rod_ball_need))
+	_mat.set_shader_parameter("soft_shaft", Vector4(a.x, a.y, a.z, rod_shaft_need))
+	_mat.set_shader_parameter("soft_ball_alpha", ROD_ALPHA)
+	_mat.set_shader_parameter("soft_ball_wall", rod_wall)
+	_rod_ball_pushed = true
+
+
+static func _smooth_push(r: float, n: float, w: float) -> float:
+	if r >= n + w:
+		return 0.0
+	if r <= n - w:
+		return n - r
+	var t := n + w - r
+	return t * t / (4.0 * w)
+
+
+## 与着色器 soft_ball_push 相同（世界坐标；本节点无缩放）。
+func rod_push_point(p: Vector3) -> Vector3:
+	if not rod_ball_on:
+		return p
+	var B := rod_ball_center
+	var A := rod_shaft_entry if rod_shaft_need > 0.0 else B
+	var ab := B - A
+	var L2 := ab.length_squared()
+	var t := clampf((p - A).dot(ab) / L2, 0.0, 1.0) if L2 > 1e-10 else 1.0
+	var back := (1.0 - t) * sqrt(L2)
+	var R := maxf(rod_shaft_need, sqrt(maxf(rod_ball_need * rod_ball_need - back * back, 0.0)))
+	var dv := p - (A + ab * t)
+	var d := dv.length()
+	if d > 1e-6:
+		p += dv / d * _smooth_push(d, _rod_need(d, R), 0.004)
+	return p
+
+
+## 撑开后的蒙皮顶点（世界）。
+func rod_skinned_vertices() -> PackedVector3Array:
+	var V := _skin_all()
+	if rod_ball_on:
+		for i in V.size():
+			V[i] = rod_push_point(V[i])
+	return V
+
+
+## 测试：撑开后顶点到球心的最近距离减球半径（负 = 穿模）；以及内外壁次序（原来更远的点撑开后仍更远）。
+func rod_ball_clearance(ball_r: float) -> float:
+	if not rod_ball_on:
+		return 1e9
+	var worst := 1e9
+	for v in rod_skinned_vertices():
+		worst = minf(worst, v.distance_to(rod_ball_center) - ball_r)
+	return worst
+
+
+
+## 0.4.17：宫体本身是前倾弯的（宫腔中线不在宫颈→宫底直线上）。被杆穿着时把每节骨骼横向平移
+## 「该处宫腔中线相对直线的偏移」，宫腔被捋成直线、正好套在杆上；rod_straight_k 0..1 平滑过渡。
+var rod_straight_k := 0.0
+var _cavity_src: Array = []
+var _cav_off: Array = []
+
+
+func _ensure_cav_off() -> void:
+	if _cav_off.size() == SEGS or _rest_bone.size() != SEGS:
+		return
+	var sums: Array = []
+	var cnt := PackedInt32Array()
+	cnt.resize(SEGS)
+	for i in SEGS:
+		sums.append(Vector2.ZERO)
+	var inv := _frame.affine_inverse()
+	for mi in _cavity_src:
+		var m := mi as MeshInstance3D
+		if m == null or not is_instance_valid(m) or m.mesh == null or m.mesh.get_surface_count() < 1:
+			continue
+		var gx := m.global_transform
+		var P: PackedVector3Array = m.mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+		var stp := maxi(1, P.size() / 600)
+		for vi in range(0, P.size(), stp):
+			var p_ab: Vector3 = inv * (gx * P[vi]) - inv.basis * _drag_off
+			var u := (p_ab - _cervix_ab).dot(_axis_ab) / maxf(_rest_len, 1e-4)
+			var bi := clampi(int(round(u * float(SEGS - 1))), 0, SEGS - 1)
+			var l: Vector3 = (_rest_bone[bi] as Transform3D).affine_inverse() * p_ab
+			sums[bi] = (sums[bi] as Vector2) + Vector2(l.x, l.y)
+			cnt[bi] += 1
+	_cav_off = []
+	for i2 in SEGS:
+		_cav_off.append((sums[i2] as Vector2) / float(cnt[i2]) if cnt[i2] > 0 else Vector2.INF)
+	# 没有宫腔顶点的节（宫颈端 / 宫底端）：宫颈端取 0，其余沿用最近的有效值。
+	if _cav_off[0] == Vector2.INF:
+		_cav_off[0] = Vector2.ZERO
+	for i3 in range(1, SEGS):
+		if _cav_off[i3] == Vector2.INF:
+			_cav_off[i3] = _cav_off[i3 - 1]
+
+
+func _apply_rod_straight() -> void:
+	if rod_straight_k <= 1e-4 or _bone.size() != SEGS:
+		return
+	_ensure_cav_off()
+	if _cav_off.size() != SEGS:
+		return
+	var k := clampf(rod_straight_k, 0.0, 1.0)
+	for i in SEGS:
+		var bx: Transform3D = _bone[i]
+		var c: Vector2 = _cav_off[i]
+		var sh := bx.basis.x.normalized() * c.x + bx.basis.y.normalized() * c.y
+		_bone[i] = Transform3D(bx.basis, bx.origin - sh * k)
+
+
+## 测试：捋直后宫腔中线离杆线（节点直线）的最大偏差（米）。
+func rod_cavity_offset_max() -> float:
+	_ensure_cav_off()
+	var m := 0.0
+	for c in _cav_off:
+		m = maxf(m, (c as Vector2).length() * (1.0 - clampf(rod_straight_k, 0.0, 1.0)))
+	return m

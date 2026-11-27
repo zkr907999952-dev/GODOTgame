@@ -6317,6 +6317,35 @@ func _clear_soft_organs() -> void:
 	extraction_hint = ""
 
 
+## 0.4.17（t5u）：长柄钢球经阴道把悬挂在体外的子宫带回到体内静止位后调用：
+## 只结束子宫柔体（不动肠 / 膀胱 / 创口），原子宫重新显示，接下来交给普通脱垂。
+func rod_reinsert_uterus() -> bool:
+	var so := _soft_node("uterus")
+	if so == null:
+		return false
+	if _fc_active and _fc_soft_kind == "uterus":
+		debug_forceps_end()
+	so.call("force_reset")
+	so.queue_free()
+	_soft_organs.erase("uterus")
+	if _organs:
+		if _organs.has_method("clear_canal_stretch"):
+			_organs.call("clear_canal_stretch")
+		if _organs.has_method("clear_uterus_phys_cut"):
+			_organs.call("clear_uterus_phys_cut")
+		if _organs.has_method("set_kind_visible"):
+			for k2 in ["uterus", "uterus_cavity", "tube", "ovary"]:
+				_organs.call("set_kind_visible", k2, true)
+		_organs.set_meta("uterus_extracted", false)
+	var pcv := _prolapse_ctl()
+	if pcv:
+		pcv.call("rehide_sources")
+	extraction_hint = ""
+	_set_selected_organ("")
+	_set_hovered_organ("")
+	return true
+
+
 ## 一键收回所有已扯出的体外内脏（肠、子宫、膀胱、输卵管/卵巢），不关闭创口、不整身复原。
 func si_hide_rate() -> float:
 	return SI_HIDE_RATE
@@ -6601,6 +6630,9 @@ func _update_soft_organs(dt: float) -> void:
 					var d3: Vector3 = (hpt - cam2.global_position) if cam2 else out
 					_place_forceps(hpt, d3)
 					break
+		if was_out and not now_out and str(k) == "uterus" and _organs:
+			# 0.4.17：子宫已放回体内，不再挡住脱垂。
+			_organs.set_meta("uterus_extracted", false)
 		if was_out and not now_out and _organs and _organs.has_method("set_kind_visible"):
 			if str(k) == "uterus":
 				_organs.call("set_kind_visible", "uterus", true)

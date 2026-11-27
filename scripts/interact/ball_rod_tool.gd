@@ -5,6 +5,8 @@ class_name BallRodTool
 
 const ChromeScript := preload("res://scripts/surgery/speculum_mesh.gd")
 const InserterScript := preload("res://scripts/body/vulva/sphere_inserter.gd")
+const LinkScript := preload("res://scripts/interact/extracted_uterus_link.gd")
+const AdnexaChain := preload("res://scripts/surgery/adnexa_chain.gd")
 
 const DIAMETER_MIN := 0.012
 const DIAMETER_MAX := 0.032
@@ -61,6 +63,9 @@ var _straighten := 0.0
 var _fundus_lift := 0.0
 const FUNDUS_LIFT_MAX := 0.200
 var _debug_dt := 0.0
+## 0.4.17（t5u）：子宫被手术扯出体外时，杆经阴道 → 过渡管 → 宫颈进到体外子宫，并可把它带回接脱垂。
+var _link: RefCounted = null
+var _bent_shaft: MeshInstance3D = null
 
 
 func setup(p_mode: Node, p_organs: Node, p_player: Node) -> void:
@@ -68,6 +73,7 @@ func setup(p_mode: Node, p_organs: Node, p_player: Node) -> void:
 	organs = p_organs
 	player = p_player
 	_build_mesh()
+	_link = LinkScript.new(self)
 	set_physics_process(true)
 
 
@@ -94,6 +100,12 @@ func activate() -> void:
 func deactivate() -> void:
 	if caught:
 		_release_catch(false)
+	if _link:
+		if bool(_link.get("reeling")):
+			_link.call("cancel_reel")
+		_link.call("clear")
+	if _bent_shaft:
+		_bent_shaft.visible = false
 	dragging = false
 	through_cervix = false
 	cervix_pressure = 0.0
@@ -137,13 +149,43 @@ func tip_world() -> Vector3:
 
 
 func is_in_uterus() -> bool:
-	return through_cervix and depth > _cervix_depth()
+	return through_cervix and depth > _gate_depth()
+
+
+## 0.4.17：杆正走在通往体外子宫的路径上（插入阶段，不含带回）。
+func _link_on() -> bool:
+	return _link != null and not bool(_link.get("reeling")) and (_link.get("path") as PackedVector3Array).size() >= 2 and _link.call("soft") != null
+
+
+func _link_reeling() -> bool:
+	return _link != null and bool(_link.get("reeling"))
+
+
+func link() -> RefCounted:
+	return _link
+
+
+## 宫颈闸门的深度：平时 = 阴道长；子宫在体外时 = 路径上体外宫颈口的位置。
+func _gate_depth() -> float:
+	if _link_on():
+		return float(_link.get("s_cervix"))
+	return _cervix_depth()
+
+
+func _axis_world_canal() -> Vector3:
+	return _axis_world()
 
 
 func set_diameter(d: float) -> void:
 	diameter = clampf(d, DIAMETER_MIN, DIAMETER_MAX)
 	_sync_visual()
 	diameter_changed.emit(diameter)
+	if _link_reeling():
+		var pc0 := _prolapse()
+		var pp0: Resource = pc0.get("params") if pc0 else null
+		var cap0 := float(pp0.get("cervix_capacity_r")) * float(pp0.get("catch_ratio")) if pp0 else 0.0105 * 1.08
+		if radius() < cap0:
+			_link.call("cancel_reel")
 	# 卡住时把球缩到宫颈能放过的大小：球从宫颈滑出，子宫停在当前脱垂等级。
 	if caught:
 		var pc := _prolapse()
@@ -166,6 +208,10 @@ func begin_drag(_screen: Vector2, origin: Vector3, dir: Vector3) -> bool:
 			pc.call("begin_drive", "ball_rod", 0, _caught_pointer(origin, dir), true)
 		_drive_caught(origin, dir)
 		return true
+	if _link_reeling():
+		_link.call("reel_to", float(_link.call("project", origin, dir)), 0.016)
+		_update_bent_shaft()
+		return true
 	_move_from_ray(origin, dir, 1.0)
 	return true
 
@@ -175,6 +221,13 @@ func update_drag(_screen: Vector2, origin: Vector3, dir: Vector3) -> void:
 		return
 	if caught:
 		_drive_caught(origin, dir)
+		return
+	if _link_reeling():
+		var dt0 := 0.016
+		if Engine.get_main_loop() and Engine.get_main_loop().root:
+			dt0 = clampf(float(Engine.get_main_loop().root.get_process_delta_time()), 0.004, 0.05)
+		_link.call("reel_to", float(_link.call("project", origin, dir)), dt0)
+		_update_bent_shaft()
 		return
 	_move_from_ray(origin, dir, 1.0)
 
@@ -221,6 +274,11 @@ func project_pointer(origin: Vector3, dir: Vector3) -> Vector3:
 
 
 func apply_desired_depth(desired: float, dt: float = 0.016) -> void:
+	if _link_reeling():
+		_link.call("reel_to", desired, dt)
+		if _link_reeling():
+			_apply_deform()
+		return
 	_apply_depth_gate(desired, dt)
 	_sync_pose(dt)
 	_apply_deform()
@@ -230,7 +288,9 @@ func debug_set_depth(s: float) -> void:
 	# 测试布置：直接放到该深度，不走宫颈闸门。
 	depth = s
 	lateral = Vector3.ZERO
-	var cerv := _cervix_depth()
+	if _link and not _link_reeling():
+		_link.call("update", 0.0)
+	var cerv := _gate_depth()
 	through_cervix = s > cerv + radius() * 0.4
 	cervix_pressure = 0.0
 	_have_prev_tip = false
@@ -287,6 +347,8 @@ func debug_push_depth(desired: float, dt: float = 0.05) -> void:
 func _fundus_contact_depth() -> float:
 	# 休息网格上的宫底内侧（沿通道轴），球心触壁深度。不含当前顶起。
 	var r := radius()
+	if _link_on():
+		return float(_link.call("fundus_contact_depth", r))
 	var wall := 0.0032
 	if organs and organs.get("meta") is Dictionary and (organs.meta as Dictionary).has("uterus_cavity"):
 		var uc = organs.meta["uterus_cavity"]
@@ -305,6 +367,14 @@ func _fundus_contact_depth() -> float:
 
 func _update_fundus_lift(desired: float, dt: float) -> void:
 	var contact0 := _fundus_contact_depth()
+	if _link_on():
+		# 体外子宫：宫底挡住球，不做体内的整颗顶起。
+		_fundus_lift = 0.0
+		if through_cervix and depth > contact0:
+			depth = contact0
+		if organs and organs.has_method("clear_fundus_lift"):
+			organs.call("clear_fundus_lift")
+		return
 	var want := 0.0
 	if through_cervix and not caught and desired > contact0:
 		want = clampf(desired - contact0, 0.0, FUNDUS_LIFT_MAX)
@@ -540,6 +610,15 @@ func _lateral_slack(along: float) -> float:
 
 
 func _move_from_ray(origin: Vector3, dir: Vector3, _k: float) -> void:
+	if _link_on():
+		var dtl := 0.016
+		if Engine.get_main_loop() and Engine.get_main_loop().root:
+			dtl = clampf(float(Engine.get_main_loop().root.get_process_delta_time()), 0.004, 0.05)
+		lateral = Vector3.ZERO
+		_apply_depth_gate(float(_link.call("project", origin, dir)), dtl)
+		_sync_pose(dtl)
+		_apply_deform()
+		return
 	var p := project_pointer(origin, dir)
 	var opening := _opening_world()
 	var axis := _axis_world()
@@ -565,10 +644,10 @@ func _apply_depth_gate(desired: float, dt: float) -> void:
 		last_pull_speed = 0.0
 	_last_desired = desired
 	last_pull_force = 0.0
-	var cerv := _cervix_depth()
+	var cerv := _gate_depth()
 	var r := radius()
 	var contact0 := _fundus_contact_depth()
-	var max_in := contact0 + FUNDUS_LIFT_MAX + 0.002
+	var max_in := contact0 + (0.002 if _link_on() else FUNDUS_LIFT_MAX + 0.002)
 	var min_out := -0.06 - r
 	desired = clampf(desired, min_out, max_in)
 	var gate_start := cerv - r * 0.85
@@ -599,7 +678,15 @@ func _apply_depth_gate(desired: float, dt: float) -> void:
 			var blocked_out := maxf(gate_end - desired, 0.0)
 			last_pull_force = blocked_out
 			# 0.4.12 触发 #1：球够大 + 扯得够狠 → 宫颈卡住球，子宫被拖出来（不再弹出宫颈）。
-			if _try_prolapse_trigger(desired):
+			# 0.4.17：子宫在体外时同一判据 → 卡住体外宫颈，把子宫沿杆带回体内（之后接脱垂）。
+			if _link_on():
+				if bool(_link.call("try_catch", _trigger_ctx())):
+					cervix_pressure = 0.0
+					cervix_pulse = 1.0
+					jolt_time = 0.0
+					_link.call("reel_to", desired, dt)
+					return
+			elif _try_prolapse_trigger(desired):
 				return
 			cervix_pressure += blocked_out * clampf(dt * 2.8, 0.0, 0.12)
 			depth = _approach(depth, maxf(depth, gate_end), dt, 3.0)
@@ -655,7 +742,14 @@ func _sync_pose(dt: float) -> void:
 	var up := _up_world()
 	if opening.length_squared() < 1e-12 or axis.length_squared() < 1e-12:
 		return
+	if _link_reeling():
+		_update_bent_shaft()
+		return
 	var pos := opening + axis * depth + lateral
+	var z := axis
+	if _link_on():
+		pos = _link.call("point_at", depth)
+		z = _link.call("tangent_at", depth)
 	if jolt_time > 0.0 and dt > 0.0:
 		jolt_time = maxf(jolt_time - dt, 0.0)
 		var w := jolt_time / 0.14
@@ -665,13 +759,13 @@ func _sync_pose(dt: float) -> void:
 		# 镜头微震：只在突破瞬间推一下观察锚点。
 		if mode and w > 0.4 and mode.has_method("fly_to_genitals") == false:
 			pass
-	var z := axis
 	var x := up.cross(z)
 	if x.length_squared() < 1e-8:
 		x = Vector3.RIGHT.cross(z)
 	x = x.normalized()
 	var y := z.cross(x).normalized()
 	_root.global_transform = Transform3D(Basis(x, y, z), pos)
+	_update_bent_shaft()
 	if not pos.is_finite() or not x.is_finite():
 		push_warning("ball_rod: non-finite pose")
 	# 突破时把一小段震动交给模式，让相机跟着晃一下。
@@ -739,6 +833,15 @@ func _apply_deform() -> void:
 			if _inserter.has_method("is_active"):
 				keep = bool(_inserter.call("is_active"))
 			organs.vulva.call("set_inserter", _inserter if keep else null)
+	# 0.4.17：子宫在体外（柔体）：体内子宫网格已隐藏，宫腔撑开由柔体骨骼放大 + 过渡管半径负责。
+	if _link_on() or _link_reeling():
+		for m in ["clear_uterus_ball", "clear_uterus_straighten", "clear_fundus_lift"]:
+			if organs.has_method(m):
+				organs.call(m)
+		uterus_distend = r * mixv if through_cervix else 0.0
+		_straighten = 0.0
+		_fundus_lift = 0.0
+		return
 	# 进入宫腔后撑开子宫和 UterusCavity。
 	uterus_distend = 0.0
 	if through_cervix and depth > cerv_s - r * 0.2 and organs.has_method("set_uterus_ball"):
@@ -893,6 +996,15 @@ func _physics_process(delta: float) -> void:
 	if _root == null or not _root.visible:
 		return
 	var t0 := Time.get_ticks_usec()
+	if _link and not caught:
+		if _link_reeling():
+			_link.call("step_reel", delta)
+			if _link_reeling():
+				_apply_deform()
+				last_step_usec = int(Time.get_ticks_usec() - t0)
+				return
+		else:
+			_link.call("update", delta)
 	if caught:
 		_follow_cervix()
 		last_step_usec = int(Time.get_ticks_usec() - t0)
@@ -946,17 +1058,24 @@ func is_caught() -> bool:
 	return caught
 
 
-func _try_prolapse_trigger(_desired: float) -> bool:
-	var pc := _prolapse()
-	if pc == null:
-		return false
-	var ctx := {
+func _trigger_ctx() -> Dictionary:
+	return {
 		"in_uterus": is_in_uterus(),
 		"ball_radius": radius(),
 		"pull_speed": last_pull_speed,
 		"pull_force": last_pull_force,
 		"target": tip_world(),
 	}
+
+
+func _try_prolapse_trigger(_desired: float) -> bool:
+	return _try_prolapse_trigger_ctx(_trigger_ctx())
+
+
+func _try_prolapse_trigger_ctx(ctx: Dictionary) -> bool:
+	var pc := _prolapse()
+	if pc == null:
+		return false
 	if not bool(pc.call("try_trigger", "ball_rod", ctx)):
 		return false
 	caught = true
@@ -1076,3 +1195,101 @@ func _release_catch(slipped: bool) -> void:
 		breakthrough.emit(false)
 	prolapse_caught.emit(false)
 	_apply_deform()
+
+
+# ------------------------------------------------------------------ 0.4.17（t5u）体外子宫：路径 / 弯杆 / 带回交接
+
+## 带回阶段：球由子宫位姿给出（卡在宫颈里，跟宫颈走）。depth 记为球在阴道轴上的投影（阴道撑开用）。
+func _link_place_ball(ball: Vector3, dir_in: Vector3) -> void:
+	if _root == null:
+		return
+	var z := dir_in.normalized() if dir_in.length_squared() > 1e-10 else _axis_world()
+	var up := _up_world()
+	var x := up.cross(z)
+	if x.length_squared() < 1e-8:
+		x = Vector3.RIGHT.cross(z)
+	x = x.normalized()
+	_root.global_transform = Transform3D(Basis(x, z.cross(x).normalized(), z), ball)
+	through_cervix = true
+	lateral = Vector3.ZERO
+	depth = (ball - _opening_world()).dot(_axis_world())
+	_update_bent_shaft()
+
+
+## 子宫已回到静止位：球此刻就卡在原子宫的宫颈里 → 直接以「已触发」状态接普通脱垂。
+func _link_handoff_to_prolapse() -> void:
+	through_cervix = true
+	depth = maxf(depth, _cervix_depth() + radius() * 0.55)
+	var ctx := {
+		"in_uterus": true,
+		"ball_radius": radius(),
+		"pull_speed": maxf(last_pull_speed, 1.0),
+		"pull_force": 1.0,
+		"target": tip_world(),
+	}
+	var ok := _try_prolapse_trigger_ctx(ctx)
+	if ok:
+		_follow_cervix()
+	_update_bent_shaft()
+
+
+func _ensure_bent_shaft() -> void:
+	if _bent_shaft and is_instance_valid(_bent_shaft):
+		return
+	var t := AdnexaChain.new()
+	t.name = "BallRodBentShaft"
+	t.set("radius", SHAFT_RADIUS)
+	t.set("taper", false)
+	t.material_override = ChromeScript.chrome_material()
+	if _root and _root.get_parent():
+		_root.get_parent().add_child(t)
+	else:
+		add_child(t)
+	_bent_shaft = t
+	t.visible = false
+
+
+## 杆沿路径弯（阴道 → 过渡管 → 宫颈），直杆隐藏；不在体外子宫路径上时恢复直杆。
+func _update_bent_shaft() -> void:
+	var on := _link_on() or _link_reeling()
+	if not on:
+		if _bent_shaft and _bent_shaft.visible:
+			_bent_shaft.visible = false
+		if _shaft_mi:
+			_shaft_mi.visible = true
+		return
+	_ensure_bent_shaft()
+	if _shaft_mi:
+		_shaft_mi.visible = false
+	var r := radius()
+	var pts := PackedVector3Array()
+	if _link_reeling():
+		var o := _opening_world()
+		var a := _axis_world()
+		var V := o + a * _canal_length()
+		var tip := tip_world()
+		var zt: Vector3 = _root.global_transform.basis.z.normalized() if _root else a
+		var t_end := tip - zt * (r * 0.12)
+		var tail := o - a * 0.08
+		pts.append(tail)
+		pts.append(o)
+		if (t_end - V).dot(a) > -0.01 or t_end.distance_to(V) > 0.004:
+			pts.append(V)
+		pts.append(t_end)
+		pts = _resample_pts(pts, 28)
+	else:
+		var s_tip := depth - r * 0.12
+		var length := maxf(SHAFT_LEN, depth + 0.08)
+		for i in 32:
+			var s := s_tip - length * float(31 - i) / 31.0
+			pts.append(_link.call("point_at", s))
+	_bent_shaft.visible = _root != null and _root.visible
+	_bent_shaft.call("apply_points", pts, pts, pts[pts.size() - 1] - pts[0])
+
+
+static func _resample_pts(pts: PackedVector3Array, n: int) -> PackedVector3Array:
+	return LinkScript._resample(pts, n)
+
+
+func debug_bent_shaft() -> MeshInstance3D:
+	return _bent_shaft

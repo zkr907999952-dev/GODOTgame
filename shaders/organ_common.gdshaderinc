@@ -322,6 +322,39 @@ float smooth_push(float r, float n, float w) {
 	return t * t / (4.0 * w);
 }
 
+// 0.4.17（t5u）：手术取出的柔体子宫被钢球 / 杆穿着时的撑开（模型空间，只写给 SoftOrgan 材质）。
+// 单一单调径向映射 d → max(d, n(d))（平滑过渡）：腔内贴近中线的内膜推到 ≥ 球半径，
+// 外膜按原来离中线的距离多推，内外壁次序不变（内膜永远追不上外膜），球处至少保留一层壁厚，也没有台阶。
+uniform vec4 soft_ball = vec4(0.0);      // xyz = 球心，w = 球半径（0 = 关）
+uniform vec4 soft_shaft = vec4(0.0);     // xyz = 杆进入宫颈处，w = 杆余量半径
+uniform float soft_ball_alpha = 0.5;
+uniform float soft_ball_wall = 0.0035;
+
+// 目标半径 n(d) = R + a·d + (1−a)·W·(1−e^(−d/W))：中线附近斜率 1（壁厚原样保留到 W），远处斜率 a。
+float soft_push_amount(float d, float R) {
+	float a = soft_ball_alpha;
+	float W = max(soft_ball_wall, 1e-4);
+	float n = R + a * d + (1.0 - a) * W * (1.0 - exp(-d / W));
+	return smooth_push(d, n, 0.004);
+}
+
+// 杆 + 球合成一根胶囊：离线段最近点 t 处的半径 = max(杆, 球截面)（球心处 = 球半径），
+// 只沿一个方向推一次，映射对 d 单调。
+vec3 soft_ball_push(vec3 p) {
+	if (soft_ball.w <= 0.0) return p;
+	vec3 B = soft_ball.xyz;
+	vec3 A = soft_shaft.w > 0.0 ? soft_shaft.xyz : B;
+	vec3 ab = B - A;
+	float L2 = dot(ab, ab);
+	float t = L2 > 1e-10 ? clamp(dot(p - A, ab) / L2, 0.0, 1.0) : 1.0;
+	float back = (1.0 - t) * sqrt(L2);
+	float R = max(soft_shaft.w, sqrt(max(soft_ball.w * soft_ball.w - back * back, 0.0)));
+	vec3 dv = p - (A + ab * t);
+	float d = length(dv);
+	if (d > 1e-6) p += dv / d * soft_push_amount(d, R);
+	return p;
+}
+
 // 外膜相对内膜的壁厚（只有子宫外膜 > 0，其它网格 0）。撑开时内外壁用同一场、外壁多加这一层。
 uniform float shell_wall = 0.0;
 

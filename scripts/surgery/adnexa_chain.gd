@@ -14,6 +14,9 @@ var radius: float = 0.0034
 var horn_embed: float = 0.007
 var ovary_embed: float = 0.006
 var taper: bool = true          # false：等径（子宫系带用）
+## 0.4.17：非空且与点数相同时按点给半径（过渡管被钢球 / 杆撑开）。
+var radii: PackedFloat32Array = PackedFloat32Array()
+var _mesh_radii: PackedFloat32Array = PackedFloat32Array()
 
 var _p: PackedVector3Array = PackedVector3Array()
 var _q: PackedVector3Array = PackedVector3Array()
@@ -60,7 +63,7 @@ func apply_points(pts: PackedVector3Array, prev: PackedVector3Array, dir: Vector
 		_dir = dir.normalized()
 	if not _p.is_empty():
 		_head = _p[0]
-	if _mesh_pts.size() == _p.size() and not _p.is_empty():
+	if _mesh_pts.size() == _p.size() and not _p.is_empty() and radii == _mesh_radii:
 		var same := true
 		var e2 := MESH_EPS * MESH_EPS
 		for i in _p.size():
@@ -233,6 +236,7 @@ func _solve_dist(n: int) -> void:
 
 func _rebuild_mesh() -> void:
 	_mesh_pts = _p.duplicate()
+	_mesh_radii = radii.duplicate()
 	mesh_rebuilds += 1
 	if _am == null:
 		_am = ArrayMesh.new()
@@ -275,10 +279,12 @@ func _rebuild_mesh() -> void:
 			var s := (u - 0.72) / 0.28
 			rad = radius * (1.0 - s * 0.92)
 		rads[i] = maxf(rad, radius * 0.08)
+		if radii.size() == n:
+			rads[i] = maxf(radii[i], 0.0004)
 	# 极点
 	var t0: Vector3 = frames[0][0]
 	var t1: Vector3 = frames[n - 1][0]
-	var pole_a: Vector3 = _p[0] - t0 * radius * 0.55
+	var pole_a: Vector3 = _p[0] - t0 * rads[0] * 0.55
 	var pole_b: Vector3 = _p[n - 1] + t1 * maxf(rads[n - 1] * 0.4, 0.0004)
 	var ia_pole := 0
 	verts.append(pole_a)

@@ -159,6 +159,7 @@ void vertex() {
 		// 半径收到中线，被扯出的那段从体内模型上消失。
 		VERTEX -= CUSTOM0.yzw * eat;
 	}
+	VERTEX = soft_ball_push(VERTEX);
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 l = to_ab(wp);
 	v_l0 = l;

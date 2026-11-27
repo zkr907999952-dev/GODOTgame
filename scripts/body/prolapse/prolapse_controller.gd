@@ -409,6 +409,18 @@ func end_surgery_reduce() -> void:
 		_set_state(STATE_HANGING)
 
 
+## 0.4.17：静止节点（世界），不激活脱垂（手术带回体内时对准交接位置用）。
+func rest_nodes_world() -> PackedVector3Array:
+	var out := PackedVector3Array()
+	_ensure_geometry()
+	if not _geo_ok:
+		return out
+	_update_frame()
+	for i in _n:
+		out.append(_frame * _rest_ab[i])
+	return out
+
+
 ## 子宫静止时宫底的世界位置（手术从创口点选用）。
 func rest_fundus_world() -> Vector3:
 	if _rest_ab.size() < _n:
