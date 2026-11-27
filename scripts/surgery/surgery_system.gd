@@ -4232,6 +4232,11 @@ func _mesh_centroid_bind(md: Geom.MeshData) -> Vector3:
 
 
 func _begin_grab(origin: Vector3, dir: Vector3) -> bool:
+	# t104u：点中已放好的拉钩 → 拿起拉钩（沿创缘挪位 / 往外拉开），松手留在新位置。
+	if cut_open and _outer != null and not _retractors.is_empty():
+		var ri0 := _ray_hits_retractor(origin, dir)
+		if ri0 >= 0 and _begin_retractor_grab(ri0):
+			return true
 	# T-11：先看是否点中已悬垂在体外的物理内脏（肠袢 / 柔体器官 / 输卵管悬链 / 脱垂子宫）。
 	if _begin_organ_grab(origin, dir):
 		return true
@@ -7262,6 +7267,8 @@ func place_retractor(vid: int, out_b: Vector3 = Vector3.ZERO) -> bool:
 		out_b = _lip_out_bind(vid)
 	_bake_pull()
 	var node := _make_retractor_node(false)
+	if not is_in_group(HangGrab.GROUP):
+		add_to_group(HangGrab.GROUP)   # t104u：普通互动工具（HangGrab）也能抓拉钩
 	var rec := {"node": node, "vid": vid, "bind": _outer.pos[vid], "out_bind": out_b}
 	_retractors.append(rec)
 	_retr_sig = _retractor_sig()
@@ -7330,6 +7337,154 @@ func debug_drag_retractor(ri: int, off_ab: Vector3) -> bool:
 	_apply_pull_uniforms()
 	_end_grab(false)
 	stroke_active = false
+	return true
+
+
+## ---- t104u：拿取工具 / 普通互动工具（HangGrab）拿起已放好的拉钩 ----
+## 指针相对按下点的位移分两部分：沿创缘（拉钩自身 x 轴 = 唇缘切线）的分量让钩头挪到同一条唇缘链上
+## 最近的顶点（这把拉钩原来写进网格的拉开量撤回，在新位置按原拉开量重新拉开）；其余分量照拉钩工具的
+## 规则（_shape_pull：方向由切口几何决定，只沿拉开轴，最多往回收 RETR_CLOSE_MAX）改变拉开程度。松手写进网格。
+const RETR_SLIDE_HYST := 0.0015
+var _retr_slide := false
+var _retr_ref := Vector3.ZERO       # 指针位移的参考点（钩头，挪位后跟着新顶点走）
+var _retr_ref_off := Vector3.ZERO   # 钩头 − 唇缘顶点（按下时）
+var retractor_moved: int = 0
+
+
+func _retr_hook_world(ri: int) -> Vector3:
+	var n: Node3D = (_retractors[ri] as Dictionary)["node"]
+	return n.global_transform * Vector3(0, 0, RETR_HOOK_Z) if n and is_instance_valid(n) else _vert_world(int((_retractors[ri] as Dictionary)["vid"]))
+
+
+func _begin_retractor_grab(ri: int) -> bool:
+	if ri < 0 or ri >= _retractors.size() or _grab_active:
+		return false
+	_update_retractors()
+	select_retractor(ri)
+	if not _begin_retractor_drag(ri):
+		return false
+	_retr_slide = true
+	_retr_ref = _grab_last
+	_retr_ref_off = _retr_ref - _vert_world(int((_retractors[ri] as Dictionary)["vid"]))
+	return true
+
+
+func _retr_slide_drag(target: Vector3) -> void:
+	if _retr_drag < 0 or _retr_drag >= _retractors.size() or not target.is_finite():
+		return
+	var rec: Dictionary = _retractors[_retr_drag]
+	var vid: int = rec["vid"]
+	var n: Node3D = rec["node"]
+	if vid >= 0 and vid < _outer.vert_count() and n and is_instance_valid(n):
+		var tx := n.global_transform.basis.x.normalized()
+		var cur_w := _vert_world(vid)
+		var want := cur_w + tx * (target - _retr_ref).dot(tx)
+		var chain: PackedInt32Array = _lip_chain_of(vid)[0]
+		if chain.is_empty():
+			chain = _lip_candidates()
+		var best := vid
+		var bd := cur_w.distance_to(want) - RETR_SLIDE_HYST
+		for v in chain:
+			if v == vid or v < 0 or v >= _outer.vert_count() or _band_edge.has(_qkey(_outer.pos[v])):
+				continue
+			var dv := _vert_world(v).distance_to(want)
+			if dv < bd:
+				bd = dv
+				best = v
+		if best != vid:
+			_relocate_retractor(_retr_drag, best)
+			_retr_ref = _vert_world(best) + _retr_ref_off
+	_pull_raw = _to_ab_delta(target - _retr_ref) * GRAB_SKIN_GAIN
+	_pull_off = _shape_pull(_pull_raw, true)
+	_grab_vel = Vector3.ZERO
+	_split_drag = _pull_off.length()
+	_apply_pull_uniforms()
+	_update_retractors()
+
+
+## 这把拉钩在它钩住的唇缘顶点上写进网格的拉开量（米）。
+func _retr_hold_amount(rec: Dictionary) -> float:
+	var vid: int = rec["vid"]
+	var acc := Vector3.ZERO
+	for e in rec.get("deltas", []):
+		if e[0] != _outer:
+			continue
+		var ids: PackedInt32Array = e[1]
+		var i := ids.find(vid)
+		if i >= 0:
+			acc += (e[2] as PackedVector3Array)[i]
+	return acc.length()
+
+
+## 把第 ri 把拉钩挪到唇缘顶点 new_vid：撤回它原来写进网格的位移，在新位置按原拉开量重新拉开并记账；
+## 之后继续以新位置为基准拖动。
+func _relocate_retractor(ri: int, new_vid: int) -> void:
+	var rec: Dictionary = _retractors[ri]
+	var hold := maxf(_retr_hold_amount(rec), RETR_OPEN)
+	_pull_off = Vector3.ZERO
+	_pull_raw = Vector3.ZERO
+	_pull_r = 0.0
+	_apply_pull_uniforms()
+	_finish_retr_release()
+	var dl: Array = rec.get("deltas", [])
+	if not dl.is_empty():
+		_apply_retr_deltas(dl, -1.0)
+	rec["deltas"] = []
+	rec["vid"] = new_vid
+	rec["bind"] = _outer.pos[new_vid]
+	rec["out_bind"] = _lip_out_bind(new_vid)
+	_after_retr_delta()
+	if _start_retractor_pull(ri):
+		_pull_off = _pull_axis * hold if _pull_axis.length_squared() > 1e-8 else Vector3.ZERO
+		_apply_pull_uniforms()
+		_bake_pull_tracked(ri)
+		_start_retractor_pull(ri)
+		_apply_pull_uniforms()
+	retractor_moved += 1
+
+
+## HangGrab 接口（普通互动工具 / 手术里没拿工具时的手）：只抓已放好的拉钩。
+func hang_pick(origin: Vector3, dir: Vector3) -> Dictionary:
+	if not (active or persist) or not cut_open or _outer == null or _retractors.is_empty() or _grab_active:
+		return {}
+	var ri := _ray_hits_retractor(origin, dir)
+	if ri < 0:
+		return {}
+	var d := dir.normalized()
+	var hook := _retr_hook_world(ri)
+	var t := (hook - origin).dot(d)
+	if t <= 0.0:
+		return {}
+	return {"t": t, "point": origin + d * t, "anchor": hook, "part": "retractor", "ri": ri}
+
+
+func hang_grab(hit: Dictionary, _origin: Vector3, _dir: Vector3) -> bool:
+	return _begin_retractor_grab(int(hit.get("ri", -1)))
+
+
+func hang_drag(anchor_target: Vector3) -> void:
+	if _grab_active and _grab_kind == "retractor" and _retr_slide:
+		_retr_slide_drag(anchor_target)
+
+
+func hang_release() -> void:
+	if _grab_active and _grab_kind == "retractor":
+		_end_grab(false)
+
+
+func hang_grab_part() -> String:
+	return "retractor" if _grab_active and _grab_kind == "retractor" else ""
+
+
+## 测试：用拿取工具的路径拿起第 ri 把拉钩，把钩头拖到 world_off（世界位移，分 steps 步），松手。
+func debug_grab_tool_drag_retractor(ri: int, world_off: Vector3, steps: int = 12) -> bool:
+	if not _begin_retractor_grab(ri):
+		return false
+	var p0 := _retr_ref
+	for i in steps:
+		var acc := world_off * (float(i + 1) / float(steps))
+		_retr_slide_drag(p0 + acc)
+	_end_grab(false)
 	return true
 
 
@@ -8175,6 +8330,9 @@ func _drag_grab(origin: Vector3, dir: Vector3) -> void:
 		if _grab_anchor:
 			_grab_anchor.global_position = nxt
 		return
+	if _grab_kind == "retractor" and _retr_slide:
+		_retr_slide_drag(_grab_plane_hit(origin, dir, _retr_ref))
+		return
 	if _grab_kind == "retractor":
 		var nxt3 := _grab_plane_hit(origin, dir, _grab_last)
 		_pull_raw = _to_ab_delta(nxt3 - _grab_last) * GRAB_SKIN_GAIN
@@ -8217,6 +8375,7 @@ func _end_grab(do_throw: bool) -> void:
 		# 拉钩固定：松手立即把位移写进网格，不回弹（记下这把拉钩造成的位移，移除时可撤销）。
 		_bake_pull_tracked(_retr_drag)
 		_retr_drag = -1
+		_retr_slide = false
 	_grab_active = false
 	_grab_kind = ""
 	stroke_active = false
