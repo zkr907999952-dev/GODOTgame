@@ -116,6 +116,19 @@ func reset(rig: Node = null) -> void:
 	_rig = null
 
 
+const _STATE_KEYS := ["active_id", "hand_u", "spread_u", "last_tip_err", "last_wrist_clear", "last_hand_world", "last_tip_world", "_rig"]
+
+
+## t99u 附身：动作进度属于身体，与另一份实例互换状态（实例本身不换，别处缓存的引用仍有效）。
+func swap_state_with(other) -> void:
+	if other == null or other == self:
+		return
+	for k in _STATE_KEYS:
+		var a = get(k)
+		set(k, other.get(k))
+		other.set(k, a)
+
+
 func busy() -> bool:
 	return active_id != "" or hand_u > 0.0 or spread_u > 0.0
 

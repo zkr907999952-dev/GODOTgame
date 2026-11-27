@@ -14,9 +14,25 @@ const PRESET_FREE := "free"
 const PRESET_INTROITUS := "introitus"
 const PRESET_ABDOMEN := "abdomen"
 
+## t99u：player = 操作者（镜头 / 输入，永远是受控角色节点）；subject = 被互动的身体宿主
+## （受控角色自己，或检查床上的分身）。organs / surgery 每次都从 subject 现取，不缓存，
+## 附身换身体后不会再作用到旧身体上。会话期间身体变了（附身 / 分身被删 / 离床）会先干净退出。
 var player: Node
-var organs: Node
-var surgery: Node
+var subject: Node = null
+var organs: Node:
+	get:
+		return _subject_part("get_organs", _organs_fallback)
+	set(v):
+		_organs_fallback = v
+var surgery: Node:
+	get:
+		return _subject_part("get_surgery", _surgery_fallback)
+	set(v):
+		_surgery_fallback = v
+var _organs_fallback: Node = null
+var _surgery_fallback: Node = null
+var _session_subject: Node = null
+var _session_organs: Node = null
 var registry = null
 var active := false
 var tool_id := ""
@@ -35,6 +51,7 @@ var _view_jolt := Vector3.ZERO
 
 func setup(p: Node, o: Node, s: Node) -> void:
 	player = p
+	subject = p
 	organs = o
 	surgery = s
 	registry = RegistryScript.new()
@@ -44,6 +61,43 @@ func setup(p: Node, o: Node, s: Node) -> void:
 
 func is_active() -> bool:
 	return active
+
+
+func _host() -> Node:
+	if subject != null and is_instance_valid(subject) and not subject.is_queued_for_deletion():
+		return subject
+	return player
+
+
+func _subject_part(getter: String, fallback: Node) -> Node:
+	var h := _host()
+	if h and h.has_method(getter):
+		var n: Node = h.call(getter)
+		if n:
+			return n
+	return fallback if fallback != null and is_instance_valid(fallback) else null
+
+
+## 互动对象（受控角色自己或检查床上的分身）。会话进行中不换对象。
+func get_subject() -> Node:
+	return _host()
+
+
+func is_subject(host: Node) -> bool:
+	return host != null and _host() == host
+
+
+func set_subject(host: Node) -> bool:
+	if host == null:
+		host = player
+	if active and host != _host():
+		return false
+	subject = host
+	return true
+
+
+func _subject_is_player() -> bool:
+	return _host() == player
 
 
 func current_tool() -> String:
@@ -64,6 +118,8 @@ var standing_session := false
 
 func _standing_ok() -> bool:
 	if player == null or not is_instance_valid(player):
+		return false
+	if not _subject_is_player():
 		return false
 	if str(player.get("occupancy")) != "":
 		return false
@@ -99,12 +155,20 @@ func is_standing() -> bool:
 
 
 func _on_bed() -> bool:
-	if player == null:
+	var h := _host()
+	if h == null:
 		return false
-	if str(player.get("occupancy")) == "exam_bed":
+	if h != player:
+		# 分身：在床上、活着，操作者也活着。
+		if h.has_method("is_dead") and bool(h.call("is_dead")):
+			return false
+		if player and player.has_method("is_dead") and bool(player.call("is_dead")):
+			return false
+		return h.has_method("is_on_exam_bed") and bool(h.call("is_on_exam_bed"))
+	if str(h.get("occupancy")) == "exam_bed":
 		return true
-	if player.has_method("is_on_exam_bed"):
-		return bool(player.call("is_on_exam_bed"))
+	if h.has_method("is_on_exam_bed"):
+		return bool(h.call("is_on_exam_bed"))
 	return false
 
 
@@ -124,6 +188,8 @@ func enter() -> bool:
 	if player and player.has_method("set_play_mode"):
 		player.call("set_play_mode", 0)
 	active = true
+	_session_subject = _host()
+	_session_organs = organs
 	tool_id = ""
 	camera_preset = PRESET_FREE
 	_push_abdomen_xray(false)
@@ -156,8 +222,23 @@ func exit() -> void:
 		if int(player.get("play_mode")) != _resume_play_mode:
 			player.call("set_play_mode", _resume_play_mode)
 	_resume_play_mode = -1
+	_session_subject = null
+	_session_organs = null
+	# 下一次默认回到受控角色自己；分身会话由 GameRoot 在进入前重新指定。
+	subject = player
 	mode_changed.emit(false)
 	tool_changed.emit(tool_id)
+
+
+## 会话绑定的身体是否还在：附身换了身体 / 分身被清除 / 宿主换了 OrganRig 都算失效。
+func _session_valid() -> bool:
+	if _session_subject == null or not is_instance_valid(_session_subject) or _session_subject.is_queued_for_deletion():
+		return false
+	if _session_organs == null or not is_instance_valid(_session_organs):
+		return false
+	if _host() != _session_subject:
+		return false
+	return organs == _session_organs
 
 
 func toggle() -> void:
@@ -552,37 +633,62 @@ func _apply_preset(snap: bool) -> void:
 
 
 func _push_abdomen_xray(on: bool) -> void:
-	if organs == null:
+	var org := organs
+	if org == null:
 		return
 	if on:
 		if not _xray_pushed:
-			_saved_xray = bool(organs.get("xray_enabled")) if "xray_enabled" in organs else false
-			_saved_xray_amount = float(organs.call("effective_xray")) if organs.has_method("effective_xray") else 0.0
+			_saved_xray = bool(org.get("xray_enabled")) if "xray_enabled" in org else false
+			_saved_xray_amount = float(org.call("effective_xray")) if org.has_method("effective_xray") else 0.0
 			_xray_pushed = true
-		if organs.has_method("set_xray_enabled"):
-			organs.call("set_xray_enabled", true)
-		if organs.has_method("set_xray_amount"):
-			organs.call("set_xray_amount", maxf(_saved_xray_amount, 0.42))
-		if organs.has_method("set_xray_sphere_world"):
-			organs.call("set_xray_sphere_world", organ_group_center(), 0.18, 1.0)
+			_xray_org = org
+			# t99u：会话临时透视只属于这具身体。分身的设置同步会读这里的「用户值」，
+			# 不会把临时透视抄到其它角色，也不会把这具分身的临时透视每帧覆盖掉。
+			org.set_meta("xray_session", [_saved_xray, float(org.get("xray_amount")) if "xray_amount" in org else _saved_xray_amount])
+		if org.has_method("set_xray_enabled"):
+			org.call("set_xray_enabled", true)
+		if org.has_method("set_xray_amount"):
+			org.call("set_xray_amount", maxf(_saved_xray_amount, 0.42))
+		if org.has_method("set_xray_sphere_world"):
+			org.call("set_xray_sphere_world", organ_group_center(), 0.18, 1.0)
 	else:
 		_restore_xray()
 
 
+var _xray_org: Node = null
+
+
 func _restore_xray() -> void:
-	if not _xray_pushed or organs == null:
+	if not _xray_pushed:
 		return
-	if organs.has_method("clear_xray_sphere"):
-		organs.call("clear_xray_sphere")
-	if organs.has_method("set_xray_enabled"):
-		organs.call("set_xray_enabled", _saved_xray)
-	if organs.has_method("set_xray_amount"):
-		organs.call("set_xray_amount", _saved_xray_amount)
+	var org := _xray_org if _xray_org != null and is_instance_valid(_xray_org) else organs
+	_restore_xray_on(org)
+
+
+func _restore_xray_on(org: Node) -> void:
 	_xray_pushed = false
+	_xray_org = null
+	if org == null or not is_instance_valid(org):
+		return
+	var sv: Variant = org.get_meta("xray_session") if org.has_meta("xray_session") else null
+	if org.has_meta("xray_session"):
+		org.remove_meta("xray_session")
+	if org.has_method("clear_xray_sphere"):
+		org.call("clear_xray_sphere")
+	if org.has_method("set_xray_enabled"):
+		org.call("set_xray_enabled", bool(sv[0]) if sv is Array else _saved_xray)
+	if org.has_method("set_xray_amount"):
+		org.call("set_xray_amount", float(sv[1]) if sv is Array else _saved_xray_amount)
 
 
 func _process(_delta: float) -> void:
 	if not active or player == null:
+		return
+	if not _session_valid():
+		_exit_stale()
+		return
+	if not _subject_is_player() and not _on_bed():
+		exit()
 		return
 	# 站姿会话：离开观察视角 / 上了载具 / 死亡 → 退出。
 	if standing_session and not _standing_ok():
@@ -601,3 +707,14 @@ func _process(_delta: float) -> void:
 				if _view_jolt.length_squared() < 1e-6:
 					_view_jolt = Vector3.ZERO
 			player.call("set_orbit_anchor_world", a)
+
+
+## 会话的身体已被换走：工具仍拿着旧 OrganRig，先让它在旧身体上收尾（清扩张 / 宫底顶起 / 放开宫颈），
+## 透视恢复写回旧身体，然后正常退出。
+func _exit_stale() -> void:
+	var old_org := _session_organs
+	_teardown_controller()
+	_teardown_section()
+	if _xray_pushed:
+		_restore_xray_on(_xray_org if _xray_org != null and is_instance_valid(_xray_org) else old_org)
+	exit()

@@ -792,6 +792,12 @@ func surgery_subject() -> Node:
 			var cs: Node = c.call("get_surgery")
 			if cs and bool(cs.call("is_active")):
 				return c
+	# t99u：进行中的阴道互动会话的对象其次（会话里切手术 / 工具都作用在同一具身体上）。
+	var pvm := _player_vagina()
+	if pvm and bool(pvm.call("is_active")) and pvm.has_method("get_subject"):
+		var vh: Node = pvm.call("get_subject")
+		if vh and is_instance_valid(vh):
+			return vh
 	# 玩家自己躺在床上时操作本体；否则操作附近床上的分身。
 	if _player and str(_player.get("occupancy")) == "exam_bed":
 		return _player
@@ -834,9 +840,31 @@ func toggle_surgery() -> bool:
 	return bool(surg.call("is_active")) if surg.has_method("is_active") else true
 
 
+func _player_vagina() -> Node:
+	if _player and _player.has_method("get_vagina_mode"):
+		return _player.call("get_vagina_mode")
+	return null
+
+
+## t99u：阴道互动会话控制器只有一个（挂在受控角色上，负责镜头 / 工具栏），
+## 互动对象（subject）可以是受控角色自己或检查床上的分身；身体状态全在各自的 OrganRig / SurgerySystem 里。
+## 控制器正在给别的身体做会话时，对这个 host 返回 null。
 func vagina_mode_of(host: Node = null) -> Node:
 	var h := host if host else surgery_subject()
-	if h and h.has_method("get_vagina_mode"):
+	if h == null:
+		return null
+	var vm := _player_vagina()
+	if h != _player and h.is_in_group("clone_dolls"):
+		if vm == null:
+			return null
+		if bool(vm.call("is_active")) and vm.has_method("is_subject") and not bool(vm.call("is_subject", h)):
+			return null
+		return vm
+	if h == _player:
+		if vm and bool(vm.call("is_active")) and vm.has_method("is_subject") and not bool(vm.call("is_subject", h)):
+			return null
+		return vm
+	if h.has_method("get_vagina_mode"):
 		return h.call("get_vagina_mode")
 	return null
 
@@ -856,12 +884,19 @@ func can_toggle_vagina() -> bool:
 
 
 func toggle_vagina() -> bool:
+	# 进行中的会话（无论对象是谁）再按一次 = 退出。
+	var pvm := _player_vagina()
+	if pvm and bool(pvm.call("is_active")):
+		pvm.call("exit")
+		return false
 	if not can_toggle_vagina() and can_enter_body_mode_from_observe():
 		return enter_mode_from_observe("vagina")
 	var host := surgery_subject()
 	var vm := vagina_mode_of(host)
 	if vm == null:
 		return false
+	if vm.has_method("set_subject"):
+		vm.call("set_subject", host)
 	vm.call("toggle")
 	return bool(vm.call("is_active"))
 
@@ -890,7 +925,7 @@ func can_enter_body_mode_from_observe() -> bool:
 	var ps := surgery_system_of(_player)
 	if ps and bool(ps.call("is_active")):
 		return false
-	var pv := vagina_mode_of(_player)
+	var pv := _player_vagina()
 	if pv and bool(pv.call("is_active")):
 		return false
 	return true
@@ -901,6 +936,8 @@ func enter_mode_from_observe(mode: String) -> bool:
 		return false
 	if mode == "vagina":
 		var vm := vagina_mode_of(_player)
+		if vm and vm.has_method("set_subject"):
+			vm.call("set_subject", _player)
 		return vm != null and vm.has_method("enter_standing") and bool(vm.call("enter_standing"))
 	if mode == "surgery":
 		var surg := surgery_system_of(_player)
@@ -913,7 +950,7 @@ func body_mode_standing() -> bool:
 	var ps := surgery_system_of(_player) if _player else null
 	if ps and bool(ps.call("is_active")) and bool(ps.get("standing_session")):
 		return true
-	var pv := vagina_mode_of(_player) if _player else null
+	var pv := _player_vagina()
 	return pv != null and bool(pv.call("is_active")) and bool(pv.get("standing_session"))
 
 

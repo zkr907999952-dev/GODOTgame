@@ -192,6 +192,13 @@ func possess(c: Node) -> String:
 	if cam_now:
 		_cam_from = cam_now.global_transform
 		_fov_from = cam_now.fov
+	# 0) t99u：先结束手上的拖拽 / 抓取，并退出阴道互动会话（工具在原来那具身体上收尾：
+	#    扩张 / 宫底顶起 / 卡住的宫颈都释放到那具身体自己，脱垂等持久状态留在那具身体上）。
+	if player.has_method("_end_interact"):
+		player.call("_end_interact")
+	var pvm: Node = player.call("get_vagina_mode") if player.has_method("get_vagina_mode") else null
+	if pvm and bool(pvm.call("is_active")):
+		pvm.call("exit")
 	# 1) 进行中的手术先退出（切口保留，persist）
 	for s in [player.call("get_surgery"), c.call("get_surgery")]:
 		if s and bool(s.call("is_active")):
@@ -235,6 +242,11 @@ func possess(c: Node) -> String:
 	_swap_nodes(pr, cr, player, c)
 	player.call("adopt_rig", cr)
 	c.call("adopt_rig", pr)
+	# 「动作」（掰开小穴等）的进度属于身体：随身体一起换。
+	var pa = player.call("get_actions") if player.has_method("get_actions") else null
+	var ca = c.call("get_actions") if c.has_method("get_actions") else null
+	if pa and ca and pa != ca and pa.has_method("swap_state_with"):
+		pa.call("swap_state_with", ca)
 	# 5) 位置 / 朝向
 	(c as Node3D).global_transform = Transform3D(Basis(Vector3.UP, atan2(p_fwd.x, p_fwd.z)), p_feet)
 	(c as Node3D).force_update_transform()

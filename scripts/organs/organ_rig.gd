@@ -2448,8 +2448,7 @@ func _ray_point_dist(o: Vector3, d: Vector3, p: Vector3) -> float:
 func copy_settings_from(o: Node) -> void:
 	if o == null or o == self:
 		return
-	xray_enabled = o.xray_enabled
-	xray_amount = o.xray_amount
+	copy_xray_from(o)
 	if show_organs != o.show_organs:
 		set_show_organs(o.show_organs)
 	strike_force = o.strike_force
@@ -2467,6 +2466,24 @@ func copy_settings_from(o: Node) -> void:
 		tools.set_kind(ot.bayonet_kind)
 	if interact_mode != o.interact_mode:
 		set_interact_mode(o.interact_mode)
+
+
+## t99u：分身跟随受控角色的透视「用户设置」。阴道互动等会话临时推高的透视（meta xray_session）
+## 只属于那具身体：源身体在会话中时读它保存的用户值；自己在会话中时不被覆盖。
+func copy_xray_from(o: Node) -> void:
+	if o == null or o == self or has_meta("xray_session"):
+		return
+	var on: bool = o.xray_enabled
+	var amt: float = o.xray_amount
+	if o.has_meta("xray_session"):
+		var sv: Variant = o.get_meta("xray_session")
+		if sv is Array and (sv as Array).size() >= 2:
+			on = bool(sv[0])
+			amt = float(sv[1])
+	if on != xray_enabled or not is_equal_approx(amt, xray_amount):
+		xray_enabled = on
+		xray_amount = amt
+		_notify_xray_changed()
 
 
 ## 网页 fireStrike：在世界坐标点释放一次击腹冲击

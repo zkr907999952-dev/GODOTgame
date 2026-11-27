@@ -3589,6 +3589,11 @@ func _find_exam_bed() -> Node:
 	# T-15：站姿手术不用任何检查床（不要拿场景里别的空床当托板 / 地面高度）。
 	if not is_on_exam_bed():
 		return null
+	# t99u：分身宿主躺的是它自己的那张床（分身挂在 Clones 下，父节点没有 vehicle_system）。
+	if "on_exam_bed" in player:
+		var own = player.get("on_exam_bed")
+		if own is Node and is_instance_valid(own):
+			return own
 	var g := player.get_parent()
 	var vs: Node = g.get("vehicle_system") if g else null
 	if vs == null:
@@ -3596,6 +3601,8 @@ func _find_exam_bed() -> Node:
 	var occ = vs.get("occupied")
 	if occ and str(vs.call("kind_of", occ)) == "exam_bed":
 		return occ
+	if player.is_in_group("clone_dolls"):
+		return null
 	for v in vs.get("vehicles"):
 		if str(vs.call("kind_of", v)) == "exam_bed":
 			return v
