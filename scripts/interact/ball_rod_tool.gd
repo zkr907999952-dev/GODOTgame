@@ -59,7 +59,7 @@ var _have_prev_tip := false
 var _stir_world: Vector3 = Vector3.ZERO
 var _straighten := 0.0
 var _fundus_lift := 0.0
-const FUNDUS_LIFT_MAX := 0.080
+const FUNDUS_LIFT_MAX := 0.200
 var _debug_dt := 0.0
 
 
@@ -724,7 +724,8 @@ func _apply_deform() -> void:
 	if organs.get("vulva") and organs.vulva.has_method("set_inserter"):
 		if _inserter == null:
 			_inserter = InserterScript.new()
-		_inserter.configure(depth, r, SHAFT_RADIUS, axis_ab, up_ab, mixv, lat_ab)
+		# 外口阴唇按杆的撑开半径（杆 + 余量）推开，不要只用金属杆的几何半径。
+		_inserter.configure(depth, r, SHAFT_CLEARANCE, axis_ab, up_ab, mixv, lat_ab)
 		# debug_set_depth 用 0.5 s 布置姿态，不把这段时间算进外口回缩。
 		var tick_dt := 0.0
 		if _debug_dt > 1e-5 and _debug_dt <= 0.05:
@@ -743,12 +744,13 @@ func _apply_deform() -> void:
 	if through_cervix and depth > cerv_s - r * 0.2 and organs.has_method("set_uterus_ball"):
 		var xf2: Transform3D = organs.get("_frame") if organs.get("_frame") != null else Transform3D.IDENTITY
 		var center_ab: Vector3 = xf2.affine_inverse() * tip_world() if _root else (opening_ab + axis_ab * depth)
-		var wall := 0.0028
+		var wall := 0.0035
 		if organs.get("meta") is Dictionary and (organs.meta as Dictionary).has("uterus_cavity"):
 			var uc = organs.meta["uterus_cavity"]
 			if uc is Dictionary:
-				wall = float(uc.get("wall_m", wall))
-		# 不设 28 mm 半径上限（否则球加壁厚会顶穿宫壁）；杆段用胶囊包住。
+				wall = maxf(float(uc.get("wall_m", wall)), 0.003)
+		wall = maxf(wall, 0.0035)
+		# 不设半径上限（否则球加壁厚会顶穿宫壁）；外膜至少再厚 3.5 mm，避免内膜先膨胀穿出。
 		organs.call("set_uterus_ball", center_ab, r, mixv, wall, 0.0, SHAFT_CLEARANCE, axis_ab)
 		uterus_distend = r * mixv
 	elif organs.has_method("clear_uterus_ball"):

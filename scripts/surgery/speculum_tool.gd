@@ -292,19 +292,10 @@ func _push_deform() -> void:
 		labia_mix = maxf(mixv, 0.75)
 	elif state == "inserted" or state == "closing":
 		labia_mix = 1.0
-	_spread_drive = LABIA_SPREAD * labia_mix
+	# 阴唇只走叶片截面的动态撑开；「掰开小穴」仍由动作系统驱动铰链，扩张器不再左右机械拨开。
+	_spread_drive = 0.0
 	if organs.has_method("set_speculum_labia"):
 		organs.call("set_speculum_labia", labia_mix, hx, hy, _axis_ab, _up_ab, angle, blade_sep)
-	if organs.has_method("set_vulva_spread"):
-		var want := _spread_drive
-		var p = organs.get("player") if organs != null else null
-		if p == null and host:
-			p = host.get("player")
-		if p and p.has_method("get_actions"):
-			var acts = p.call("get_actions")
-			if acts and str(acts.get("active_id")) == "spread_vulva":
-				want = maxf(want, 1.0)
-		organs.call("set_vulva_spread", want)
 
 
 func _clear_deform() -> void:

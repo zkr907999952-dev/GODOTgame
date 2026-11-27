@@ -236,7 +236,7 @@ func _check_insert_labia_and_walls() -> void:
 	_ok(miss < 8.0, "blade shaft goes through the visible introitus (miss=%.1f mm)" % miss)
 	_ok(absf(float(s.call("speculum_max_angle")) if s.has_method("speculum_max_angle") else 24.0) <= 25.0, "max opening is reduced so the blades cannot over-clip")
 	var spread0 := float(rig.call("vulva_spread"))
-	_ok(spread0 > 0.7, "labia spread on closed insertion (%.2f)" % spread0)
+	_ok(spread0 < 0.15, "speculum does not use a mechanical left/right labia hinge (spread=%.2f)" % spread0)
 	var ext0 := Vector2.ZERO
 	if rig.vulva and rig.vulva.has_method("introitus_half_extents"):
 		ext0 = rig.vulva.call("introitus_half_extents")
@@ -245,7 +245,7 @@ func _check_insert_labia_and_walls() -> void:
 	s.call("set_speculum_angle", 24.0)
 	await _frames(3)
 	var spread1 := float(rig.call("vulva_spread"))
-	_ok(absf(spread1 - spread0) < 0.08, "slider does not change labia spread (%.2f -> %.2f)" % [spread0, spread1])
+	_ok(spread1 < 0.15, "opening the blades still does not use a hinge spread (%.2f)" % spread1)
 	if rig.vulva and rig.vulva.has_method("introitus_half_extents"):
 		var ext1: Vector2 = rig.vulva.call("introitus_half_extents")
 		_ok(ext1.y > ext0.y + 0.004, "introitus height follows the blade opening (hy %.1f -> %.1f mm)" % [ext0.y * 1000.0, ext1.y * 1000.0])

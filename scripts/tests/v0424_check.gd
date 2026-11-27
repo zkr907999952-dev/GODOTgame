@@ -188,7 +188,7 @@ func _run() -> void:
 			print("ENCLOSURE stir worst=%.2f mm n=%s" % [float(encs.get("worst", -1.0)) * 1000.0, encs.get("n", 0)])
 		# 外口变形每帧跟随插入物在开口平面上的真实截面（中心偏移 + 球/杆半径 + 延迟回缩）。
 		if org and org.get("vulva") and org.vulva.has_method("introitus_opening"):
-			var shaft_r := 0.004
+			var shaft_r := 0.0065
 			var ball_r: float = float(ctl.call("radius"))
 			ctl.call("debug_set_depth", 0.0)
 			if org.has_method("step"):
@@ -204,14 +204,14 @@ func _run() -> void:
 			if ins0 and ins0.has_method("instant_slice_radius"):
 				inst_sh = float(ins0.call("instant_slice_radius"))
 			print("INTROITUS shaft depth instant=%.2f shown=%.2f mm" % [inst_sh * 1000.0, float(org.vulva.call("introitus_opening").get("radius", 0.0)) * 1000.0])
-			_ok(absf(inst_sh - shaft_r) < 0.0018, "introitus instant radius is the shaft after the ball has passed (%.2f vs 4.00 mm)" % (inst_sh * 1000.0))
+			_ok(absf(inst_sh - shaft_r) < 0.0018, "introitus instant radius is the shaft after the ball has passed (%.2f vs 6.50 mm)" % (inst_sh * 1000.0))
 			if ins0 and ins0.has_method("tick"):
 				ins0.call("tick", 2.40)
 				if org.vulva.has_method("set_inserter"):
 					org.vulva.call("set_inserter", ins0)
 			var op_sh: Dictionary = org.vulva.call("introitus_opening")
 			print("INTROITUS shaft after recoil shown=%.2f mm" % (float(op_sh.get("radius", 0.0)) * 1000.0))
-			_ok(absf(float(op_sh.get("radius", 0.0)) - shaft_r) < 0.0018, "opening radius settles to the shaft (%.2f vs 4.00 mm)" % (float(op_sh.get("radius", 0.0)) * 1000.0))
+			_ok(absf(float(op_sh.get("radius", 0.0)) - shaft_r) < 0.0018, "opening radius settles to the shaft (%.2f vs 6.50 mm)" % (float(op_sh.get("radius", 0.0)) * 1000.0))
 			var stir := side.normalized() * 0.003 if side.length_squared() > 1e-8 else Vector3(0.003, 0, 0)
 			if ctl.has_method("debug_step_lateral"):
 				ctl.call("debug_step_lateral", stir, 0.016)
