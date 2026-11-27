@@ -344,7 +344,8 @@ func _check_enter_exit_and_t_key() -> void:
 	if hud and hud.has_method("is_surgery_active"):
 		_ok(bool(hud.call("is_surgery_active")), "HUD reports surgery active")
 	_assert_pose_stable(pose_on_bed, _pose_snapshot(), "after re-enter")
-	# 0.3.2：进入手术默认不选工具，可控制视角；选工具后锁定视角。
+	# 进入手术默认不选工具，可控制视角；选工具后 surgery.look_locked 为真。
+	# 观察模式下玩家镜头保持自由（右键环绕 / 中键平移），surgery_look_locked() 仍为假。
 	_ok(str(surgery.call("current_tool")) == "", "default tool is none so the player can look")
 	# 0.3.4：拿取不必先切开，可从无工具或手术刀直接切换。
 	surgery.call("set_tool", "grab")
@@ -373,7 +374,10 @@ func _check_enter_exit_and_t_key() -> void:
 	_ok(not bool(surgery.call("look_enabled")), "look is disabled while a tool is selected")
 	_ok(bool(surgery.call("tool_interaction_enabled")), "tool interaction is on after selecting the scalpel")
 	if player.has_method("surgery_look_locked"):
-		_ok(bool(player.call("surgery_look_locked")), "player reports look locked after selecting a tool")
+		if player.has_method("is_display_mode") and bool(player.call("is_display_mode")):
+			_ok(not bool(player.call("surgery_look_locked")), "observe camera stays free after selecting a tool")
+		else:
+			_ok(bool(player.call("surgery_look_locked")), "player reports look locked after selecting a tool")
 
 	# 再点一次已选工具：取消选择，恢复视角。
 	surgery.call("set_tool", "scalpel")

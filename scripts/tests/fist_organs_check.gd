@@ -35,12 +35,12 @@ func _run() -> void:
 	var organs: Node = player.get_organs()
 	var tools: RefCounted = organs.get("tools")
 	_ok(tools != null and organs.get("ready_ok"), "organs + tools ready")
-	# 子宫网格已标记
+	# 子宫外壁与宫腔内膜都打了 is_uterus（0.4.10 起宫腔共用同一套形变）。
 	var uter_n := 0
 	for mi in organs.organ_meshes:
 		if bool(mi.get_meta("is_uterus", false)):
 			uter_n += 1
-	_ok(uter_n == 1, "uterus mesh tagged (n=%d)" % uter_n)
+	_ok(uter_n >= 1, "uterus mesh tagged (n=%d)" % uter_n)
 
 	organs.call("set_interact_mode", "fist")
 	organs.call("set_xray_enabled", true)

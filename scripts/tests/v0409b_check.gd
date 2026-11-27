@@ -122,8 +122,9 @@ func _check_insert_open() -> void:
 		var h_mm := hinge.distance_to(opening) * 1000.0
 		_ok(h_mm > 30.0 and h_mm < 90.0, "hinge stays outside the introitus (%.1f mm)" % h_mm)
 	if rig:
+		# 扩张器只按叶片截面撑开外口，不再驱动左右铰链（vulva_spread）。
 		spread_closed = float(rig.call("vulva_spread"))
-		_ok(spread_closed > 0.7, "labia already spread when the closed speculum is inserted (%.2f)" % spread_closed)
+		_ok(spread_closed < 0.15, "inserted closed speculum does not mechanically hinge the labia (spread=%.2f)" % spread_closed)
 		var so0: Vector4 = rig.get("_spec_o")
 		gap_closed = float(rig.get("_spec_d").w)
 		_ok(so0.w > 0.03 and so0.is_finite(), "wall deform is already on after closed insertion (depth=%.1f cm)" % (so0.w * 100.0))
