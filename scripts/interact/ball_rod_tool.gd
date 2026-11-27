@@ -1026,16 +1026,13 @@ func _follow_cervix() -> void:
 	var din := (nodes[1] - nodes[0]).normalized()
 	if not din.is_finite() or din.length_squared() < 0.5:
 		din = _axis_world()
-	# 球仍卡在宫颈，但往腹腔内侧（通道轴、远离正在下垂的宫体）挪开约一个半径，避免穿出宫壁。
-	var inward := _axis_world()
-	if inward.length_squared() < 1e-8:
-		inward = -din
-	inward = inward.normalized()
-	if organs and organs.get("_frame") != null:
-		var navel: Vector3 = (organs.get("_frame") as Transform3D).origin
-		if (navel - c).dot(inward) < 0.0:
-			inward = -inward
-	var pos := c + inward * (radius() + 0.003)
+	# 球卡在宫颈时，沿宫体链向宫底（宫腔里面）再偏一个半径，不要沿通道轴往肚脐/体外走。
+	# 上次用通道轴指向肚脐，脱垂时宫体朝外下垂，球反而被放到子宫外面。
+	var along := din
+	if along.length_squared() < 1e-8:
+		along = _axis_world()
+	along = along.normalized()
+	var pos := c + along * (radius() + 0.003)
 	var z := din
 	var up := _up_world()
 	var x := up.cross(z)

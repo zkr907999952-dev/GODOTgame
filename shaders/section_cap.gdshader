@@ -1,7 +1,7 @@
 // 断面图切割填充：真正的几何裁剪后，只把跨越剖切面的那一层压平，形成组织色平切面。
 // 不是把整个背面投影到平面上（空腔 / 开口子宫 / 离面的金属棒会被投影撕碎并涂黑）。
 shader_type spatial;
-render_mode blend_mix, depth_draw_opaque, cull_disabled, unshaded, shadows_disabled;
+render_mode blend_mix, depth_draw_opaque, depth_test_disabled, cull_disabled, unshaded, shadows_disabled;
 
 #include "res://shaders/organ_common.gdshaderinc"
 
@@ -43,10 +43,10 @@ void vertex() {
 			n /= nl;
 			float s = dot(wp - section_point, n);
 			v_s = s;
-			// 只把被裁掉一侧、落在切面厚度内的顶点移到切面上（略偏保留侧，避免与裁剪 pass 深度冲突）。
+			// 只把跨越切面的薄层压到平面上，略向两侧各扩一点，与腹膜背景重叠，避免黑缝。
 			// 远离切面的顶点不动：不会把整面后壁或离面的棒身摊到切面上。
-			if (s < 0.0 && s > -cap_thickness) {
-				vec3 dw = n * (-s + 0.0003);
+			if (s < 0.0008 && s > -cap_thickness) {
+				vec3 dw = n * (-s + 0.0002);
 				wp += dw;
 				VERTEX += inverse(mat3(MODEL_MATRIX)) * dw;
 			}
@@ -87,7 +87,7 @@ void fragment() {
 	if (section_on > 0.5) {
 		// 只画原来就在被裁侧、且贴近切面的片段 = 真实交线处的平切填充。
 		// 保留侧由 cut pass 绘制；远离切面的几何不投影、不填充。
-		if (v_s > 0.0002) {
+		if (v_s > 0.0008) {
 			discard;
 		}
 		if (v_s < -cap_thickness) {
@@ -95,6 +95,10 @@ void fragment() {
 		}
 	}
 	if (in_excluded_limb(v_world)) {
+		discard;
+	}
+	// 宫壁/内膜切面不要盖住钢球体（大三角弦会切出粉色穿模面）。
+	if ((tissue == 4 || tissue == 5) && inside_uter_insert(v_ab, 0.0004)) {
 		discard;
 	}
 	int id = tissue;
@@ -112,11 +116,6 @@ void fragment() {
 		}
 	}
 	vec3 col = tissue_color(id);
-	if (section_on > 0.5) {
-		// 切面边缘一线深色，切面本体保持组织色（不再把整个切面混成近黑）。
-		float edge = 1.0 - smoothstep(-0.0008, 0.0002, v_s);
-		col = mix(col, vec3(0.22, 0.12, 0.13), edge * 0.28);
-	}
 	ALBEDO = col;
 	ROUGHNESS = 1.0;
 	if (tissue == 6) {

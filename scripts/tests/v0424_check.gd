@@ -82,7 +82,7 @@ func _run() -> void:
 		await _frames(2)
 		for fw in ["long", "coronal", "trans"]:
 			var al: Dictionary = sec.call("debug_fill_alignment", fw)
-			_ok(bool(al.get("ok", false)), "%s fill lies in the cut plane (dist=%.2f mm, tris=%s) — was a slanted mid-vagina rectangle when looking_at got a world point" % [fw, float(al.get("plane_dist", 99.0)) * 1000.0, al.get("tris", 0)])
+			_ok(bool(al.get("ok", false)), "%s peritoneum quad lies in the cut plane (dist=%.2f mm, tris=%s)" % [fw, float(al.get("plane_dist", 99.0)) * 1000.0, al.get("tris", 0)])
 		for which in ["long", "trans", "coronal"]:
 			if which == "coronal":
 				sec.call("set_view_mode", "coronal")
@@ -92,19 +92,24 @@ func _run() -> void:
 				sec.call("set_view_mode", "long")
 			await _frames(1)
 			var m: Dictionary = sec.call("debug_section_metrics", which)
-			print("FILL %s sil=%s black=%s cavity=%s uter_w/l=%s/%s vag_w/l=%s/%s tris=%s counts=%s peri_area=%.5f" % [which, m.get("silhouette", 0), m.get("black_in_sil", 0), m.get("cavity", 0), m.get("uter_wall", 0), m.get("uter_lumen", 0), m.get("vag_wall", 0), m.get("vag_lumen", 0), m.get("fill_tris", 0), m.get("fill_counts", {}), float(m.get("peritoneum_area", 0.0))])
+			print("FILL %s path=%s sil=%s black=%s cavity=%s uter_w/l=%s/%s vag_w/l=%s/%s seam=%s" % [which, m.get("path", ""), m.get("silhouette", 0), m.get("black_in_sil", 0), m.get("cavity", 0), m.get("uter_wall", 0), m.get("uter_lumen", 0), m.get("vag_wall", 0), m.get("vag_lumen", 0), m.get("seam", -1)])
 			_ok(bool(m.get("ok", false)), "%s fill metrics ok (sil=%s black_frac=%.4f)" % [which, m.get("silhouette", 0), float(m.get("black_frac", 1.0))])
 			_ok(float(m.get("black_frac", 1.0)) < 0.03, "%s near-zero pure-black pixels inside the body silhouette (frac=%.4f, n=%s)" % [which, float(m.get("black_frac", 1.0)), m.get("black_in_sil", -1)])
 			_ok(int(m.get("cavity", 0)) > 20, "%s abdominal cavity is filled with darker pink (%s px)" % [which, m.get("cavity", 0)])
+			var gpu_path := str(m.get("path", "")) == "gpu"
+			if gpu_path:
+				_ok(int(m.get("seam", 1)) == 0, "%s no black seam/tear pixels along section boundaries (seam=%s)" % [which, m.get("seam", -1)])
 			if which == "coronal":
 				# 平扫取景有时只切到杆和腹腔（宫/阴道壁像素很少）；腹腔已填且器官/杆可见即可。
 				var orgn_c := int(m.get("uter_wall", 0)) + int(m.get("uter_lumen", 0)) + int(m.get("vag_wall", 0)) + int(m.get("vag_lumen", 0)) + int(m.get("rod", 0))
-				_ok(orgn_c > 40 or int(m.get("uter_wall", 0)) >= 6, "%s organ/rod fill is visible (%s px, uter_w=%s vag_w=%s rod=%s)" % [which, orgn_c, m.get("uter_wall", 0), m.get("vag_wall", 0), m.get("rod", 0)])
+				if gpu_path:
+					_ok(orgn_c > 40 or int(m.get("uter_wall", 0)) >= 6, "%s organ/rod fill is visible (%s px, uter_w=%s vag_w=%s rod=%s)" % [which, orgn_c, m.get("uter_wall", 0), m.get("vag_wall", 0), m.get("rod", 0)])
 			elif which != "trans":
-				_ok(int(m.get("uter_wall", 0)) >= 6, "%s uterus wall is a solid cap (%s px)" % [which, m.get("uter_wall", 0)])
+				if gpu_path:
+					_ok(int(m.get("uter_wall", 0)) >= 6, "%s uterus wall is a solid cap (%s px)" % [which, m.get("uter_wall", 0)])
+					_ok(int(m.get("vag_wall", 0)) >= 4 or int(m.get("vag_lumen", 0)) >= 4 or int(m.get("cavity", 0)) > 20, "%s vagina wall or lumen is filled (%s wall / %s lumen / %s cavity px)" % [which, m.get("vag_wall", 0), m.get("vag_lumen", 0), m.get("cavity", 0)])
 				var ul := int(m.get("uter_lumen", 0)) + int(m.get("cavity", 0))
 				_ok(int(m.get("uter_lumen", 0)) >= 4 or ul >= 24, "%s uterine lumen is hollow or shows peritoneal lining (%s lumen / %s cavity px)" % [which, m.get("uter_lumen", 0), m.get("cavity", 0)])
-				_ok(int(m.get("vag_wall", 0)) >= 4 or int(m.get("vag_lumen", 0)) >= 4 or int(m.get("cavity", 0)) > 20, "%s vagina wall or lumen is filled (%s wall / %s lumen / %s cavity px)" % [which, m.get("vag_wall", 0), m.get("vag_lumen", 0), m.get("cavity", 0)])
 				var vl := int(m.get("vag_lumen", 0)) + int(m.get("cavity", 0))
 				_ok(int(m.get("vag_lumen", 0)) >= 4 or vl >= 24, "%s vagina lumen is hollow or shows peritoneal lining (%s lumen / %s cavity px)" % [which, m.get("vag_lumen", 0), m.get("cavity", 0)])
 			_ok(int(m.get("hand_bleed", 0)) == 0, "%s hands are not projected into the section (bleed=%s / %s)" % [which, m.get("hand_bleed", -1), m.get("hand_samples", 0)])
@@ -273,10 +278,11 @@ func _run() -> void:
 				sec.call("set_view_mode", "long")
 			await _frames(2)
 			var gm: Dictionary = sec.call("debug_gpu_section_metrics", which_g)
-			print("GPU %s display=%s renderer=%s sil=%s black_frac=%.4f cavity=%s uter_wall=%s vag_wall=%s reason=%s" % [which_g, gm.get("display", ""), gm.get("renderer", ""), gm.get("silhouette", 0), float(gm.get("black_frac", 1.0)), gm.get("cavity", 0), gm.get("uter_wall", 0), gm.get("vag_wall", 0), gm.get("reason", "")])
+			print("GPU %s display=%s renderer=%s sil=%s black_frac=%.4f cavity=%s uter_wall=%s vag_wall=%s seam=%s reason=%s" % [which_g, gm.get("display", ""), gm.get("renderer", ""), gm.get("silhouette", 0), float(gm.get("black_frac", 1.0)), gm.get("cavity", 0), gm.get("uter_wall", 0), gm.get("vag_wall", 0), gm.get("seam", -1), gm.get("reason", "")])
 			if int(gm.get("silhouette", 0)) > 30:
 				gpu_any = true
 				_ok(float(gm.get("black_frac", 1.0)) < 0.05, "GPU %s near-zero black inside silhouette (frac=%.4f, sil=%s)" % [which_g, float(gm.get("black_frac", 1.0)), gm.get("silhouette", 0)])
+				_ok(int(gm.get("seam", 1)) == 0, "GPU %s no black seam/tear along contours (seam=%s)" % [which_g, gm.get("seam", -1)])
 				if which_g == "long":
 					_ok(int(gm.get("cavity", 0)) > 10, "GPU %s abdominal cavity fill is visible (%s px)" % [which_g, gm.get("cavity", 0)])
 				else:

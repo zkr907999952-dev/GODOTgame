@@ -543,6 +543,16 @@ func _check_trigger() -> void:
 	print("PROLAPSE trigger pull: grades passed %s, amount %.2f, ball↔cervix %.1f mm" % [str(grades), float(pc.call("amount")), ball_off * 1000])
 	_ok(grade_mono and last_g >= 3, "pulling the caught ball progresses the grades with distance (%s)" % str(grades))
 	_ok(ball_off < float(ctl.call("radius")) + 0.004, "the ball stays caught at the cervix (%.1f mm)" % (ball_off * 1000))
+	var inside: Dictionary = pc.call("point_in_prolapse_cavity", ctl.call("tip_world"))
+	var cerv_b: Vector3 = pc.call("cervix_world")
+	var fund_b: Vector3 = pc.call("fundus_world")
+	var din_b := fund_b - cerv_b
+	var side_b := 0.0
+	if din_b.length_squared() > 1e-10:
+		side_b = ((ctl.call("tip_world") as Vector3) - cerv_b).dot(din_b.normalized())
+	print("PROLAPSE ball inside uterus: inside=%s toward_fundus=%s along=%.1f mm radial=%.1f mm radius=%.1f mm side=%.1f mm" % [inside.get("inside"), inside.get("toward_fundus"), float(inside.get("along", 0.0)) * 1000.0, float(inside.get("radial", 0.0)) * 1000.0, float(inside.get("radius", 0.0)) * 1000.0, side_b * 1000.0])
+	_ok(bool(inside.get("toward_fundus", false)) and side_b > 0.0, "caught ball sits on the fundus side of the cervix (inside the cavity), not toward the navel (side=%.1f mm)" % (side_b * 1000.0))
+	_ok(bool(inside.get("inside", false)), "caught ball center stays inside the prolapsed uterus (radial %.1f mm < radius %.1f mm + 1.5 mm)" % [float(inside.get("radial", 99.0)) * 1000.0, float(inside.get("radius", 0.0)) * 1000.0])
 	# 松手：停在已达到的等级挂着。
 	var d_rel := float(pc.get("descent"))
 	ctl.call("end_drag")

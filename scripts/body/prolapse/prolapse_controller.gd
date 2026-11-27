@@ -240,6 +240,38 @@ func mass_radius_at(a: float) -> float:
 	return lerpf(float(_prof[i]), float(_prof[i + 1]), clampf(f - float(i), 0.0, 1.0))
 
 
+
+## 点是否落在脱垂宫体内部（沿中线的截面半径内，且在宫颈→宫底这一侧）。
+func point_in_prolapse_cavity(p: Vector3) -> Dictionary:
+	var out := {"inside": false, "along": -1.0, "radial": 99.0, "radius": 0.0, "toward_fundus": false}
+	if _x.size() < 2:
+		return out
+	var best_d := 1e9
+	var best_a := 0.0
+	var acc := 0.0
+	for i in _x.size() - 1:
+		var a: Vector3 = _x[i]
+		var b: Vector3 = _x[i + 1]
+		var ab := b - a
+		var L := ab.length()
+		if L < 1e-8:
+			continue
+		var tt := clampf((p - a).dot(ab) / (L * L), 0.0, 1.0)
+		var q := a + ab * tt
+		var d := p.distance_to(q)
+		if d < best_d:
+			best_d = d
+			best_a = acc + L * tt
+		acc += L
+	var r := mass_radius_at(best_a)
+	out["along"] = best_a
+	out["radial"] = best_d
+	out["radius"] = r
+	out["toward_fundus"] = best_a > 0.001
+	out["inside"] = best_a > 0.001 and best_a < maxf(_U, 0.002) and best_d < r + 0.0015
+	return out
+
+
 ## 外口处（路径坐标 0）当前穿过的截面半径：宫颈 / 宫体截面 + 阴道壁；IV 度后为细颈。
 func portal_radius() -> float:
 	if _sigma.is_empty() or descent <= 0.0:
