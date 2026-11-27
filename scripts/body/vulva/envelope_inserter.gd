@@ -13,11 +13,16 @@ var _along := 0.028
 var _along_out := 0.008
 
 
+const RECOIL_TAU := 0.9
+var _tgt_hx := 0.0
+var _tgt_hy := 0.0
+var _tgt_sep := 0.0
+
 func configure(half_x: float, half_y: float, mixv: float, axis: Vector3, up: Vector3, blade_sep: float = 0.0, along_range: float = 0.028) -> void:
-	_hx = maxf(half_x, 0.0)
-	_hy = maxf(half_y, 0.0)
+	_tgt_hx = maxf(half_x, 0.0)
+	_tgt_hy = maxf(half_y, 0.0)
+	_tgt_sep = maxf(blade_sep, 0.0)
 	_mix = clampf(mixv, 0.0, 1.0)
-	_sep = maxf(blade_sep, 0.0)
 	_along = maxf(along_range, 0.008)
 	_along_out = minf(_along, 0.008)
 	if axis.length_squared() > 1e-8:
@@ -27,6 +32,37 @@ func configure(half_x: float, half_y: float, mixv: float, axis: Vector3, up: Vec
 		u = (u - _axis * u.dot(_axis))
 		if u.length_squared() > 1e-8:
 			_up = u.normalized()
+	# 扩张立刻跟上叶片，回缩留给 tick。
+	if _tgt_hx >= _hx - 1e-7:
+		_hx = _tgt_hx
+	if _tgt_hy >= _hy - 1e-7:
+		_hy = _tgt_hy
+	if _tgt_sep >= _sep - 1e-7:
+		_sep = _tgt_sep
+
+
+func tick(dt: float) -> void:
+	var k := 1.0 - exp(-maxf(dt, 0.0) / RECOIL_TAU)
+	if _tgt_hx < _hx - 1e-7:
+		_hx = lerpf(_hx, _tgt_hx, k)
+	else:
+		_hx = _tgt_hx
+	if _tgt_hy < _hy - 1e-7:
+		_hy = lerpf(_hy, _tgt_hy, k)
+	else:
+		_hy = _tgt_hy
+	if _tgt_sep < _sep - 1e-7:
+		_sep = lerpf(_sep, _tgt_sep, k)
+	else:
+		_sep = _tgt_sep
+	if _hx < 1e-5 and _hy < 1e-5:
+		_hx = 0.0
+		_hy = 0.0
+		_sep = 0.0
+
+
+func is_active() -> bool:
+	return _mix > 1e-4 or _hx > 1e-5 or _hy > 1e-5
 
 
 func uses_envelope_configure() -> bool:

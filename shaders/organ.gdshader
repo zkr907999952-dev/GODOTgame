@@ -224,10 +224,7 @@ void fragment() {
 	if (v_phys_hide > 0.62) {
 		discard;
 	}
-	// t89u：丢掉钢球体/杆体积内的宫壁/内膜片段，避免大三角弦切过球体形成穿模粉色面。
-	if (is_uterus && inside_uter_insert(v_ab, 0.0004)) {
-		discard;
-	}
+	// 断面切片着色器会丢掉插入物占用的宫壁像素；主视图（含透视）必须保留包住球体的宫壁，否则会破面。
 	vec3 c = base_color.rgb;
 	if (use_tex) {
 		c = texture(albedo_tex, UV).rgb * base_color.rgb;

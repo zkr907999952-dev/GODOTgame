@@ -696,12 +696,15 @@ vec3 fundus_lift_offset(vec3 p) {
 		float u = s / L;
 		t = u * u * (3.0 - 2.0 * u);
 	}
-	vec3 mid = openp + ax * clamp(s, 0.0, L + 0.08);
-	float rad = length(p - mid);
-	float rw = 1.0 - smoothstep(0.038, 0.070, rad);
-	if (s > L) {
-		rw = max(rw, 1.0 - smoothstep(0.045, 0.080, rad));
+	// 宫颈及以远（宫体、输卵管、卵巢）：整块刚体平移，不做径向衰减。
+	// 以前 38–80 mm 衰减会让靠近轴的内膜比外膜走得更远，球从宫底穿出去。
+	if (s >= L - 0.008) {
+		return ax * fundus_lift * t;
 	}
+	// 阴道段：内外壁一起拉长，径向范围要盖住整圈管壁。
+	vec3 mid = openp + ax * clamp(s, 0.0, L);
+	float rad = length(p - mid);
+	float rw = 1.0 - smoothstep(0.055, 0.110, rad);
 	if (rw <= 1e-5) return vec3(0.0);
 	return ax * fundus_lift * t * rw;
 }

@@ -73,6 +73,8 @@ var _chk_ads_toggle: CheckButton
 var _chk_infinite_reserve: CheckButton
 var _chk_no_reload: CheckButton
 var _res_option: OptionButton
+var _ui_scale_slider: HSlider
+var _ui_scale_value: Label
 var _cam_sens_slider: HSlider
 var _btn_fp: Button
 var _btn_play_mode: Button
@@ -211,6 +213,8 @@ func setup(player: Node) -> void:
 	_sync_hit_force_ui()
 	_sync_pull_force_ui()
 	_sync_render_scale_ui()
+	_sync_ui_scale_ui()
+	_bind_settings_changed()
 	if _touch:
 		_touch.call("setup", player, self, get_parent())
 		set_touch_ui(is_touch_device())
@@ -1705,6 +1709,26 @@ func _build_settings_panel() -> PanelContainer:
 	_res_option.item_selected.connect(_on_render_scale_selected)
 	v.add_child(_res_option)
 
+	var us_row := HBoxContainer.new()
+	var us_l := Label.new()
+	us_l.text = "UI缩放"
+	us_l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	us_l.add_theme_color_override("font_color", Color(0.85, 0.88, 0.92))
+	us_row.add_child(us_l)
+	_ui_scale_value = Label.new()
+	_ui_scale_value.text = "100%"
+	_ui_scale_value.add_theme_color_override("font_color", Color(0.95, 0.96, 0.98))
+	us_row.add_child(_ui_scale_value)
+	v.add_child(us_row)
+	_ui_scale_slider = HSlider.new()
+	_ui_scale_slider.min_value = 50.0
+	_ui_scale_slider.max_value = 150.0
+	_ui_scale_slider.step = 5.0
+	_ui_scale_slider.value = 100.0
+	_ui_scale_slider.custom_minimum_size = Vector2(220, 18)
+	_ui_scale_slider.value_changed.connect(_on_ui_scale_changed)
+	v.add_child(_ui_scale_slider)
+
 	_chk_bullet_cam = CheckButton.new()
 	_chk_bullet_cam.text = "弹道特写"
 	_chk_bullet_cam.button_pressed = true
@@ -1805,7 +1829,7 @@ func _build_settings_panel() -> PanelContainer:
 	v.add_child(help_chk)
 
 	_help_label = Label.new()
-	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。「弹孔贯穿」默认关闭：只有开启且这发确实触发了特写时，才会在腹网上冲压去掉圆心皮瓣的柱状弹孔通道；关闭时即使特写也只保留原来的伤口贴花。受击力度调节子弹对布娃娃的撞击强弱。拉扯力度调节拖拽尸体时的拉力。「武器无需换弹」开启后开火不必换弹，与「无限备弹」独立。电脑瞄准为按住，手机为切换。手机可在设置里把飞机控制切成滑块（默认：右侧加速键、长条偏航滑块、减速键）、摇杆（一个摇杆管偏航和加减速）或按键。飞行时右侧显示当前推力百分比（0% 怠速，80% 军用推力，100% 加力）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
+	_help_label.text = "开关次级动画（呼吸 B / 眨眼 / 头发 / 乳摇）、鼠标与触屏灵敏度、举枪瞄准（切换/长按），画面分辨率（只缩放 3D，不影响按钮点击；手机默认 75%），UI缩放（50%–150%，同时调整按钮、菜单和断面图窗口大小，不影响 3D 分辨率；手机默认 80%，电脑默认 100%），以及弹道特写（默认开，判定将命中肠道/子宫时按概率进入狙击精英式慢动作：从枪口跟随，入体后停在伤口旁环绕，局部球形透视，连发不会叠特写）。「弹孔贯穿」默认关闭：只有开启且这发确实触发了特写时，才会在腹网上冲压去掉圆心皮瓣的柱状弹孔通道；关闭时即使特写也只保留原来的伤口贴花。受击力度调节子弹对布娃娃的撞击强弱。拉扯力度调节拖拽尸体时的拉力。「武器无需换弹」开启后开火不必换弹，与「无限备弹」独立。电脑瞄准为按住，手机为切换。手机可在设置里把飞机控制切成滑块（默认：右侧加速键、长条偏航滑块、减速键）、摇杆（一个摇杆管偏航和加减速）或按键。飞行时右侧显示当前推力百分比（0% 怠速，80% 军用推力，100% 加力）。Esc 关闭面板，H 隐藏界面。点击或触摸可跳过特写。"
 	_help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_help_label.custom_minimum_size = Vector2(230, 0)
 	_help_label.add_theme_font_size_override("font_size", 12)
@@ -2094,6 +2118,8 @@ func _refresh_clone_list(force: bool = false) -> void:
 			b.clip_text = true
 			var cref: Node = c
 			b.pressed.connect(func(): _on_clone_row_pressed(cref))
+			b.mouse_entered.connect(func(): _on_clone_row_hover(cref, true))
+			b.mouse_exited.connect(func(): _on_clone_row_hover(cref, false))
 			_clone_list.add_child(b)
 			_clone_rows[c.get_instance_id()] = b
 	var sel: Node = pz.get("selected")
@@ -2120,6 +2146,16 @@ func _on_clone_row_pressed(c: Node) -> void:
 	var sel: Node = pz.get("selected")
 	if sel:
 		set_clone_message("已选中 %s（%s）" % [str(pz.call("clone_label", sel)), str(pz.call("clone_status", sel))])
+
+
+func _on_clone_row_hover(c: Node, inside: bool) -> void:
+	var pz := _possession()
+	if pz == null or not pz.has_method("set_hovered"):
+		return
+	if inside:
+		pz.call("set_hovered", c)
+	elif pz.get("hovered") == c:
+		pz.call("set_hovered", null)
 
 
 func _on_possess_selected() -> void:
@@ -2403,6 +2439,7 @@ func _toggle_panel(id: PanelId) -> void:
 		_touchify(_panel_vehicle, touch_ui)
 	if id == PanelId.INTERACT:
 		_refresh_clone_list(true)
+	_sync_possess_menu()
 	_set_mouse_for_ui(true)
 	_apply_layout()
 	_sync_from_systems()
@@ -2424,7 +2461,15 @@ func _close_all_panels() -> void:
 		_panel_vehicle.visible = false
 	if _btn_sheet_close:
 		_btn_sheet_close.visible = false
+	_sync_possess_menu()
 	_set_mouse_for_ui(false)
+
+
+## t103u：分身描边只在附身切换菜单（互动面板的分身清单）打开时显示，关闭即清除。
+func _sync_possess_menu() -> void:
+	var pz := _possession()
+	if pz and pz.has_method("set_menu_open"):
+		pz.call("set_menu_open", _open == PanelId.INTERACT and _panel_interact != null and _panel_interact.visible)
 
 
 func _set_mouse_for_ui(open: bool) -> void:
@@ -2512,6 +2557,7 @@ func _sync_from_systems() -> void:
 		_chk_infinite_reserve.set_pressed_no_signal(bool(st.get("infinite_reserve")))
 	if st and _chk_no_reload:
 		_chk_no_reload.set_pressed_no_signal(bool(st.get("no_reload")))
+	_sync_ui_scale_ui()
 	_sync_flight_mode_ui()
 	if "first_person" in _player and _btn_fp:
 		_btn_fp.text = "第一人称" if bool(_player.first_person) else "第三人称"
@@ -2876,6 +2922,45 @@ func _on_render_scale_selected(idx: int) -> void:
 	s.call("set_render_scale", v)
 
 
+func _bind_settings_changed() -> void:
+	var s := _settings()
+	if s and s.has_signal("changed") and not s.changed.is_connected(_on_settings_changed):
+		s.changed.connect(_on_settings_changed)
+
+
+func _on_settings_changed() -> void:
+	_sync_ui_scale_ui()
+	# 其它设置改动也可以顺带重排；UI 缩放变化时必须重排，否则逻辑可见区域已经变了。
+	if _root_ui:
+		_apply_layout()
+
+
+func _sync_ui_scale_ui() -> void:
+	var s := _settings()
+	if s == null or _ui_scale_slider == null:
+		return
+	var sc := 1.0
+	if s.has_method("effective_ui_scale"):
+		sc = float(s.call("effective_ui_scale"))
+	var pct := int(round(sc * 100.0))
+	_ui_scale_slider.set_block_signals(true)
+	_ui_scale_slider.value = float(pct)
+	_ui_scale_slider.set_block_signals(false)
+	if _ui_scale_value:
+		_ui_scale_value.text = "%d%%" % pct
+
+
+func _on_ui_scale_changed(v: float) -> void:
+	var pct := int(round(v))
+	if _ui_scale_value:
+		_ui_scale_value.text = "%d%%" % pct
+	var s := _settings()
+	if s and s.has_method("set_ui_scale"):
+		s.call("set_ui_scale", float(pct) / 100.0)
+	# content_scale_factor 变化会改逻辑可见区域，立刻重排以免按钮和断面图错位。
+	_apply_layout()
+
+
 func camera_panel_open() -> bool:
 	return _panel_camera != null and _panel_camera.visible
 
@@ -3022,10 +3107,25 @@ func _apply_ui_scale() -> void:
 		var base := Vector2i(int(ProjectSettings.get_setting("display/window/size/viewport_width", 1280)), int(ProjectSettings.get_setting("display/window/size/viewport_height", 720)))
 		if win.content_scale_size != base:
 			win.content_scale_size = base
+		_apply_ui_scale_factor(win)
 		return
 	var want := Vector2i(maxi(320, int(win.size.x / s)), maxi(320, int(win.size.y / s)))
 	if win.content_scale_size != want:
 		win.content_scale_size = want
+	_apply_ui_scale_factor(win)
+
+
+func _apply_ui_scale_factor(win: Window = null) -> void:
+	if win == null:
+		win = get_window()
+	if win == null:
+		return
+	var factor := 1.0
+	var s := _settings()
+	if s and s.has_method("effective_ui_scale"):
+		factor = float(s.call("effective_ui_scale"))
+	if not is_equal_approx(win.content_scale_factor, factor):
+		win.content_scale_factor = factor
 
 
 func _compute_safe() -> Vector4:

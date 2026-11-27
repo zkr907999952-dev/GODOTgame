@@ -86,6 +86,7 @@ var _spec_d: Vector4 = Vector4.ZERO
 var _spec_u: Vector4 = Vector4.ZERO
 var _spec_m: Vector4 = Vector4.ZERO
 var _spec_spread: float = 0.0
+var _spec_labia_ins: RefCounted = null
 ## 通道扩张环 / 子宫被球撑开（ab-local；dilate_p.x<=0 或 uter_ball.w<=0 关闭）
 var _dilate_o: Vector4 = Vector4.ZERO
 var _dilate_d: Vector4 = Vector4.ZERO
@@ -337,12 +338,23 @@ func set_speculum_deform(origin_ab: Vector3, axis_ab: Vector3, up_ab: Vector3, d
 
 
 func set_speculum_labia(mixv: float, half_x: float, half_y: float, axis_ab: Vector3, up_ab: Vector3, angle_deg: float = 0.0, blade_sep: float = 0.0) -> void:
-	_spec_spread = clampf(SPEC_LABIA_SPREAD * clampf(mixv, 0.0, 1.0), 0.0, 1.0)
+	# 阴唇只按叶片真实截面做动态撑开（与球/杆同一套插入物变形），不再叠加左右铰链拨开。
+	_spec_spread = 0.0
 	if vulva == null:
+		return
+	if vulva.has_method("set_inserter"):
+		if _spec_labia_ins == null:
+			_spec_labia_ins = preload("res://scripts/body/vulva/envelope_inserter.gd").new()
+		_spec_labia_ins.configure(half_x, half_y, clampf(mixv, 0.0, 1.0), axis_ab, up_ab, blade_sep, 0.028)
+		if _spec_labia_ins.has_method("tick"):
+			var dt := 0.016
+			if is_inside_tree():
+				dt = get_process_delta_time() if Engine.get_main_loop() else 0.016
+			_spec_labia_ins.call("tick", dt)
+		vulva.call("set_inserter", _spec_labia_ins if mixv > 1e-4 or bool(_spec_labia_ins.call("is_active")) else null)
 		return
 	if vulva.has_method("set_introitus_open"):
 		vulva.call("set_introitus_open", half_x, half_y, clampf(mixv, 0.0, 1.0), axis_ab, up_ab, angle_deg, blade_sep)
-	vulva.set_spread(maxf(vulva.spread(), _spec_spread))
 
 
 func clear_speculum_deform() -> void:
@@ -352,11 +364,16 @@ func clear_speculum_deform() -> void:
 	_spec_m = Vector4.ZERO
 	var keep := _spec_spread
 	_spec_spread = 0.0
+	_spec_labia_ins = null
 	if vulva:
-		if vulva.has_method("set_introitus_open"):
+		if vulva.has_method("set_inserter"):
+			vulva.call("set_inserter", null)
+		elif vulva.has_method("set_introitus_open"):
 			vulva.call("set_introitus_open", 0.0, 0.0, 0.0, Vector3(0, 1, 0), Vector3(0, 0, 1))
 		if absf(vulva.spread() - keep) < 0.03 or vulva.spread() <= keep + 0.02:
-			vulva.set_spread(0.0)
+			# 只清掉扩张器留下的铰链残留；「掰开小穴」进行中由动作系统继续驱动。
+			if vulva.spread() > 0.0 and vulva.spread() <= maxf(keep, 0.02) + 0.02:
+				vulva.set_spread(0.0)
 
 
 ## 通道扩张环：origin/axis 为腹部局部，depth 是球心沿轴距外口的距离，radius 是球半径。
@@ -522,13 +539,15 @@ func clear_uterus_ball() -> void:
 	_push_dilate_uniforms()
 
 
-func uterus_ball_offset_at(p: Vector3) -> Vector3:
-	# 与 shader uterus_ball_offset 同一公式。
+func uterus_ball_offset_at(p: Vector3, wall_override: float = -1.0) -> Vector3:
+	# 与 shader uterus_ball_offset 同一公式。wall_override>=0 时覆盖外膜厚度（宫腔传 0）。
 	var R := _uter_ball.w
 	var mixv := _uter_ball_p.x
 	if R <= 1e-6 or mixv <= 0.001:
 		return Vector3.ZERO
 	var wall := maxf(_uter_ball_p.y, 0.0)
+	if wall_override >= 0.0:
+		wall = wall_override
 	var cap := _uter_ball_p.z
 	var shaft := maxf(_uter_ball_p.w, 0.0)
 	var c := Vector3(_uter_ball.x, _uter_ball.y, _uter_ball.z)
@@ -724,6 +743,114 @@ func fundus_lift() -> float:
 	return _fundus_lift
 
 
+## 将休息网格点变到当前插入变形后的腹部坐标（拉直 + 球撑开 + 宫底顶起）。
+func _deformed_uterus_ab(p_ab: Vector3, cavity: bool) -> Vector3:
+	var q := p_ab
+	q += uterus_straighten_offset_at(q) if has_method("uterus_straighten_offset_at") else Vector3.ZERO
+	q += uterus_ball_offset_at(q, 0.0 if cavity else -1.0)
+	q += fundus_lift_offset_at(q)
+	return q
+
+
+## 球心是否还在宫腔内、是否低于外膜宫底，以及内外膜最小壁厚。
+func debug_insert_enclosure(tip_world: Vector3, radius: float) -> Dictionary:
+	var out := {
+		"ok": false,
+		"inside_cavity": false,
+		"below_outer": false,
+		"wall_min": 99.0,
+		"tip_along": 0.0,
+		"cavity_along": 0.0,
+		"outer_along": 0.0,
+		"cavity_n": 0,
+		"outer_n": 0,
+	}
+	if _frame == null:
+		return out
+	var xf: Transform3D = _frame
+	var tip_ab: Vector3 = xf.affine_inverse() * tip_world
+	var canal: Dictionary = vagina_canal() if has_method("vagina_canal") else {}
+	var ax: Vector3 = canal.get("axis_ab", _fundus_axis_ab)
+	if ax.length_squared() < 1e-10:
+		ax = Vector3(0, 1, 0)
+	else:
+		ax = ax.normalized()
+	var open_ab: Vector3 = canal.get("opening_ab", _fundus_open_ab)
+	out["tip_along"] = (tip_ab - open_ab).dot(ax)
+	var cav_along := -1e9
+	var out_along := -1e9
+	var cav_pts: Array = []
+	var out_pts: Array = []
+	for rec in [[true, "uterus_cavity"], [false, "uterus"]]:
+		var cavity: bool = rec[0]
+		var kind := str(rec[1])
+		var arr: Array = viscera_meshes(kind) if has_method("viscera_meshes") else []
+		for mi in arr:
+			if not (mi is MeshInstance3D) or (mi as MeshInstance3D).mesh == null:
+				continue
+			var mesh: Mesh = (mi as MeshInstance3D).mesh
+			if mesh.get_surface_count() < 1:
+				continue
+			var a: Array = mesh.surface_get_arrays(0)
+			if a.is_empty() or a[Mesh.ARRAY_VERTEX] == null:
+				continue
+			var P: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+			var step := maxi(1, P.size() / 120)
+			var gxf: Transform3D = (mi as MeshInstance3D).global_transform
+			for i in range(0, P.size(), step):
+				var p_ab: Vector3 = xf.affine_inverse() * (gxf * P[i])
+				var d: Vector3 = _deformed_uterus_ab(p_ab, cavity)
+				var along := (d - open_ab).dot(ax)
+				if cavity:
+					cav_along = maxf(cav_along, along)
+					cav_pts.append(d)
+				else:
+					out_along = maxf(out_along, along)
+					out_pts.append(d)
+	out["cavity_along"] = cav_along
+	out["outer_along"] = out_along
+	out["cavity_n"] = cav_pts.size()
+	out["outer_n"] = out_pts.size()
+	# 球心沿轴不超过外膜最远点，并留出半径余量，这样球不会顶出宫底。
+	out["below_outer"] = out_along > -1e8 and out["tip_along"] + radius < out_along + 0.001
+	out["inside_cavity"] = cav_along > -1e8 and out["tip_along"] + 0.001 < cav_along + maxf(radius * 0.15, 0.002)
+	out["fundus_wall"] = out_along - cav_along if (out_along > -1e8 and cav_along > -1e8) else 0.0
+	var wall_min := 99.0
+	var wn := 0
+	# 子宫网格常含内外两层。只测宫底/侧壁（朝向开口的锥会落到宫颈口），沿同一射线取外膜最远点。
+	for pc0 in cav_pts:
+		var pc: Vector3 = pc0
+		var dc: Vector3 = pc - tip_ab
+		var lc: float = dc.length()
+		if lc > radius + 0.012 or lc < radius * 0.6:
+			continue
+		# 朝向宫口的方向没有闭合外膜，不算穿模。
+		if dc.dot(ax) < -radius * 0.2:
+			continue
+		var dir: Vector3 = dc / lc
+		var far_lo := -1.0
+		for po0 in out_pts:
+			var po: Vector3 = po0
+			var d2: Vector3 = po - tip_ab
+			var lo := d2.length()
+			if lo < 1e-5:
+				continue
+			if d2.dot(dir) / lo < 0.85:
+				continue
+			far_lo = lo if far_lo < 0.0 else maxf(far_lo, lo)
+		if far_lo >= 0.0:
+			var th := far_lo - lc
+			wall_min = minf(wall_min, th)
+			wn += 1
+			if th < 0.0:
+				out["wall_neg"] = int(out.get("wall_neg", 0)) + 1
+	out["wall_samples"] = wn
+	out["wall_min"] = wall_min if wn > 0 else 99.0
+	var thick_ok: bool = float(out["fundus_wall"]) >= 0.002 and (wn == 0 or wall_min >= 0.002)
+	out["ok"] = bool(out["below_outer"]) and bool(out["inside_cavity"]) and thick_ok
+	return out
+
+
 func fundus_lift_offset_at(p_ab: Vector3) -> Vector3:
 	if _fundus_lift <= 1e-6:
 		return Vector3.ZERO
@@ -741,11 +868,11 @@ func fundus_lift_offset_at(p_ab: Vector3) -> Vector3:
 	else:
 		var u := s / L
 		tt = u * u * (3.0 - 2.0 * u)
-	var mid := _fundus_open_ab + ax * clampf(s, 0.0, L + 0.08)
+	if s >= L - 0.008:
+		return ax * _fundus_lift * tt
+	var mid := _fundus_open_ab + ax * clampf(s, 0.0, L)
 	var rad := p_ab.distance_to(mid)
-	var rw := 1.0 - smoothstep(0.038, 0.070, rad)
-	if s > L:
-		rw = maxf(rw, 1.0 - smoothstep(0.045, 0.080, rad))
+	var rw := 1.0 - smoothstep(0.055, 0.110, rad)
 	if rw <= 1e-5:
 		return Vector3.ZERO
 	return ax * _fundus_lift * tt * rw

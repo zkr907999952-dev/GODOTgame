@@ -27,6 +27,12 @@ var aimed: Node = null
 var last_message: String = ""
 var possess_count: int = 0
 
+## t103u：描边只在「附身切换」菜单打开时显示（高亮悬停 / 选中的候选分身）；
+## 菜单关闭或附身之后一律清掉，离开的身体不会留着高亮。
+var menu_open: bool = false
+var hovered: Node = null
+var _outline_target: Node = null
+
 var _outline_mat: StandardMaterial3D
 var _outlined: Array[MeshInstance3D] = []
 var _cam: Camera3D = null
@@ -125,8 +131,38 @@ func select(c: Node) -> void:
 	selection_changed.emit(selected)
 
 
+## HUD 在打开 / 关闭附身切换菜单（互动面板里的分身清单）时调用。
+func set_menu_open(on: bool) -> void:
+	if menu_open == on:
+		return
+	menu_open = on
+	if not on:
+		hovered = null
+	_refresh_outline()
+
+
+## 菜单里鼠标悬停的候选分身（null = 没有悬停，回到选中项）。
+func set_hovered(c: Node) -> void:
+	if c != null and not is_instance_valid(c):
+		c = null
+	if c == hovered:
+		return
+	hovered = c
+	_refresh_outline()
+
+
+func outline_target() -> Node:
+	if not menu_open:
+		return null
+	if hovered != null and is_instance_valid(hovered) and not hovered.is_queued_for_deletion():
+		return hovered
+	if selected != null and is_instance_valid(selected) and not selected.is_queued_for_deletion():
+		return selected
+	return null
+
+
 func is_outlined(c: Node) -> bool:
-	return c != null and c == selected and not _outlined.is_empty()
+	return c != null and c == _outline_target and not _outlined.is_empty()
 
 
 func outlined_mesh_count() -> int:
@@ -146,9 +182,10 @@ func _clear_outline() -> void:
 
 func _refresh_outline() -> void:
 	_clear_outline()
-	if selected == null or not is_instance_valid(selected):
+	_outline_target = outline_target()
+	if _outline_target == null:
 		return
-	var b: Node = selected.get("body")
+	var b: Node = _outline_target.get("body")
 	if b == null:
 		return
 	for n in b.find_children("*", "MeshInstance3D", true, false):
@@ -286,7 +323,10 @@ func possess(c: Node) -> String:
 	if vs and vs.has_method("_update_nearest"):
 		vs.call("_update_nearest")
 	possess_count += 1
-	select(c)
+	# t103u：附身后不再选中 / 高亮刚离开的身体。
+	hovered = null
+	select(null)
+	_refresh_outline()
 	_begin_transition()
 	last_message = "已附身，原来的身体成为 %s" % clone_label(c)
 	possessed.emit(c)
@@ -351,6 +391,9 @@ func _process(delta: float) -> void:
 	_update_aim()
 	if selected != null and not is_instance_valid(selected):
 		select(null)
+	if hovered != null and not is_instance_valid(hovered):
+		hovered = null
+		_refresh_outline()
 	if _cam == null:
 		return
 	var pc: Camera3D = player.call("get_camera")
