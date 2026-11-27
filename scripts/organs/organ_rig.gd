@@ -484,7 +484,26 @@ func _tick_dilate_recoil(dt: float) -> void:
 		_push_dilate_uniforms()
 
 
-func dilate_offset_at(p: Vector3) -> Vector3:
+## 平滑下限（与 shader smooth_push 同一公式）：把半径 r 推到不小于 n，在 n±w 内二次过渡（C1、单调）。
+## 返回需要增加的径向位移（>= 0）。内外壁共用，只差 n，所以外壁永远不会被内壁追上。
+static func smooth_push(r: float, n: float, w: float) -> float:
+	if r >= n + w:
+		return 0.0
+	if r <= n - w:
+		return n - r
+	var t := n + w - r
+	return t * t / (4.0 * w)
+
+
+## 子宫外膜相对内膜的壁厚（撑开时内外壁同一个场，外壁多加这一层）。
+func uterus_shell_wall() -> float:
+	var wall := 0.0035
+	if meta.get("uterus_cavity") is Dictionary:
+		wall = maxf(float((meta["uterus_cavity"] as Dictionary).get("wall_m", wall)), 0.003)
+	return maxf(wall, 0.0035)
+
+
+func dilate_offset_at(p: Vector3, shell_wall: float = 0.0) -> Vector3:
 	# 与 shader dilate_offset 同一公式，给穿模检测用。
 	var mixv := maxf(_dilate_p.x, 0.0)
 	var R := _dilate_d.w
@@ -511,15 +530,14 @@ func dilate_offset_at(p: Vector3) -> Vector3:
 	var pr := radial.length()
 	var rdir := radial / pr if pr > 1e-6 else ax.cross(Vector3.RIGHT if absf(ax.x) < 0.9 else Vector3.UP).normalized()
 	var target := canal_dilate_radius_at(s)
-	if target <= pr:
+	if target <= 1e-6:
 		return Vector3.ZERO
-	var band := target + 0.040
-	if pr > band:
+	target += shell_wall
+	var push := smooth_push(pr, target, 0.004)
+	if push <= 0.0:
 		return Vector3.ZERO
-	var near := 1.0 - smoothstep(target, band, pr)
-	near = near * near * (3.0 - 2.0 * near)
 	var mix_eff := mixv if mixv > 0.001 else 1.0
-	return rdir * (target - pr) * mix_eff * along_w * near
+	return rdir * push * mix_eff * along_w
 
 
 func set_uterus_ball(center_ab: Vector3, radius: float, mixv: float, wall: float = 0.0028, max_r: float = 0.0, shaft_r: float = 0.0, axis_ab: Vector3 = Vector3.ZERO) -> void:
@@ -564,24 +582,22 @@ func uterus_ball_offset_at(p: Vector3, wall_override: float = -1.0) -> Vector3:
 		var q := a + ab * tt
 		d = p - q
 		var kball := 1.0 - smoothstep(0.0, maxf(R, 0.004), tt * slen)
-		need = lerpf(shaft, R, kball) + wall
+		need = lerpf(shaft, R, kball)
 	else:
 		d = p - c
-		need = R + wall
+		need = R
+	# 先对内膜半径限幅，再加壁厚：内外壁同一个场，外壁 = 内壁 + wall。
 	if cap > 1e-5:
 		need = minf(need, cap)
+	need += wall
 	var dist := d.length()
 	if dist < 1e-6:
 		var fb := ax * need * 0.25 if ax.length_squared() > 1e-10 else Vector3(0, need * 0.25, 0)
 		return fb * mixv
-	if dist < need:
-		return (d / dist) * (need - dist) * mixv
-	var soft := 0.016
-	if dist < need + soft:
-		var k := 1.0 - smoothstep(need, need + soft, dist)
-		k = k * k * (3.0 - 2.0 * k)
-		return (d / dist) * (soft * 0.40 * k) * mixv
-	return Vector3.ZERO
+	var push := smooth_push(dist, need, 0.008)
+	if push <= 0.0:
+		return Vector3.ZERO
+	return (d / dist) * push * mixv
 
 
 func uterus_ball_distend() -> float:
@@ -1057,6 +1073,8 @@ func _push_dilate_uniforms() -> void:
 		var kind := str(mi.get_meta("organ_kind", ""))
 		var is_cavity := kind == "uterus_cavity" or bool(mi.get_meta("is_cavity", false))
 		var is_ut := kind == "uterus" or is_cavity or bool(mi.get_meta("is_uterus", false))
+		# 通道扩张（dilate）也要分内外壁：外膜 = 内膜半径 + 壁厚，内壁不会膨胀超过外壁。
+		mat.set_shader_parameter("shell_wall", uterus_shell_wall() if (kind == "uterus" and not is_cavity) else 0.0)
 		if not is_ut or _uter_ball.w <= 1e-6:
 			mat.set_shader_parameter("uter_ball", Vector4.ZERO)
 			mat.set_shader_parameter("uter_ball_p", Vector4.ZERO)
@@ -1349,7 +1367,7 @@ func deform_offset_world(p_world: Vector3, kind: String) -> Vector3:
 		return Vector3.ZERO
 	# 与 organ.gdshader 顺序接近：搅动 → 扩张 → 宫体胶囊 → 宫底顶起 → 脱垂撑开。
 	off += canal_stir_offset_at(l)
-	off += dilate_offset_at(l + off)
+	off += dilate_offset_at(l + off, uterus_shell_wall() if kind == "uterus" else 0.0)
 	if kind == "uterus" or kind == "uterus_cavity":
 		off += uterus_ball_offset_at(l + off)
 	off += fundus_lift_offset_at(l + off)

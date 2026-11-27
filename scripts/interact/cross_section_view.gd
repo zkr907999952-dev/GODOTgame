@@ -11,6 +11,13 @@ const CUT_SHADER := preload("res://shaders/section_cut.gdshader")
 const CAP_SHADER := preload("res://shaders/section_cap.gdshader")
 const FILL_SHADER := preload("res://shaders/section_fill.gdshader")
 const CAVITY_SHADER := preload("res://shaders/section_cavity.gdshader")
+const BODY_SHADER := preload("res://shaders/section_body.gdshader")
+## 体外（断面里没有身体的地方）一律纯黑；体腔暗红。
+const OUTSIDE_COLOR := Color(0.0, 0.0, 0.0, 1.0)
+const CAVITY_COLOR := Color(0.48, 0.20, 0.26, 1.0)
+## 体外现在是纯黑，肚脐凹陷、阴道口这类真正的空气腔会形成被围住的黑点（合法）。
+## 撕裂检测按轮廓面积的比例容忍这些，而不是要求 0。
+const SEAM_TOLERANCE := 0.01
 # 15 / 16 未被角色补光、第一人称头、脏器补光占用。18 是 FP_HEAD_LAYER。
 # 13 同样空闲（14 是皮肤贴花，17 是角色补光）。
 # 主相机第三人称看得到，所以以前的断面拷贝白面会漏进主视图。
@@ -113,7 +120,7 @@ func _ensure_ui() -> void:
 	_built = true
 	_env = Environment.new()
 	_env.background_mode = Environment.BG_COLOR
-	_env.background_color = Color(0.12, 0.09, 0.10, 1.0)
+	_env.background_color = OUTSIDE_COLOR
 	_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	_env.ambient_light_color = Color(0.9, 0.88, 0.85)
 	_env.ambient_light_energy = 1.0
@@ -317,6 +324,7 @@ func _rebuild_copies() -> void:
 		for mi in organs.skin_meshes:
 			if mi is MeshInstance3D and not _is_excluded_skin(mi):
 				_add_copy(mi, 0, "skin")
+				_copies.append(_make_fill_copy(mi, SECTION_LAYER_LONG, "long", "SectionFill_"))
 	_ensure_fills()
 	if organs.has_method("viscera_meshes"):
 		for kind in ["vagina", "uterus", "uterus_cavity"]:
@@ -599,6 +607,30 @@ func _add_copy(src: MeshInstance3D, tissue: int, kind: String = "") -> void:
 	_copies.append(rec_new)
 
 
+func _make_fill_copy(src: MeshInstance3D, layer_bit: int, which: String, prefix: String) -> Dictionary:
+	# 体表网格的「最近一层」着色拷贝：背面 = 体内（暗红），正面 / 无 = 体外（黑）。
+	var copy := MeshInstance3D.new()
+	copy.name = prefix + src.name
+	copy.mesh = src.mesh
+	copy.skin = src.skin
+	copy.skeleton = src.skeleton
+	copy.layers = layer_bit
+	copy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	copy.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	var mat := ShaderMaterial.new()
+	mat.shader = BODY_SHADER
+	mat.render_priority = -3
+	mat.set_shader_parameter("inside_color", CAVITY_COLOR)
+	mat.set_shader_parameter("outside_color", OUTSIDE_COLOR)
+	copy.material_override = mat
+	src.add_child(copy)
+	if src.skeleton != NodePath():
+		var sk := src.get_node_or_null(src.skeleton)
+		if sk:
+			copy.skeleton = copy.get_path_to(sk)
+	return {"copy": copy, "src": src, "cut": mat, "cap": mat, "tissue": 0, "which": which, "kind": "skinfill", "no_deform": false}
+
+
 func _clear_copies() -> void:
 	for rec in _copies:
 		var c = rec["copy"]
@@ -622,7 +654,7 @@ func _set_copies_visible(on: bool) -> void:
 		var recf: Dictionary = _fills[k]
 		var mi = recf.get("mi")
 		if is_instance_valid(mi):
-			mi.visible = on
+			mi.visible = false
 
 
 func _ball_world() -> Vector3:
@@ -830,13 +862,13 @@ func _deform_keys(rec: Dictionary) -> Array:
 	var keys: Array = ["ab_navel", "ab_right", "ab_up", "ab_fwd"]
 	if bool(rec.get("no_deform", false)):
 		return keys
-	if str(rec.get("kind", "")) == "skin":
+	if str(rec.get("kind", "")) == "skin" or str(rec.get("kind", "")) == "skinfill":
 		# 体表与皮肤着色器一致：骨骼蒙皮已随源网格，这里只补打击/拖拽/按压，不套通道扩张。
 		return ["drag_grab", "drag_off", "drag_radius", "dent", "dent_off", "ab_navel", "ab_right", "ab_up", "ab_fwd"]
 	return [
 		"spec_o", "spec_d", "spec_u", "spec_m",
 		"dilate_o", "dilate_d", "dilate_p", "dilate_lat",
-		"uter_ball", "uter_ball_p", "uterus_ball_axis",
+		"uter_ball", "uter_ball_p", "uterus_ball_axis", "shell_wall",
 		"dilate_s01", "dilate_sh",
 		"stir_off", "stir_p",
 		"uter_str", "uter_str_pivot", "uter_str_from", "uter_str_to", "uter_str_len",
@@ -856,6 +888,16 @@ func _apply_shared_deform(cut: ShaderMaterial, cap: ShaderMaterial, src: ShaderM
 			var v = src.get_shader_parameter(key)
 			cut.set_shader_parameter(key, v)
 			cap.set_shader_parameter(key, v)
+	# 子宫撑开参数是按网格写的（宫腔不加壁厚、外膜加壁厚）；断面拷贝要用自己源网格的那份，
+	# 否则内外壁用同一个壁厚，切面里内膜会和外膜叠到一起。
+	var srcn = rec.get("src")
+	if is_instance_valid(srcn) and srcn is MeshInstance3D and (srcn as MeshInstance3D).material_override is ShaderMaterial:
+		var own := (srcn as MeshInstance3D).material_override as ShaderMaterial
+		for key2 in ["uter_ball", "uter_ball_p", "uterus_ball_axis", "shell_wall"]:
+			var v2 = own.get_shader_parameter(key2)
+			if v2 != null:
+				cut.set_shader_parameter(key2, v2)
+				cap.set_shader_parameter(key2, v2)
 
 
 func _ensure_trans_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab: Vector3, axis_ab: Vector3) -> void:
@@ -877,6 +919,11 @@ func _ensure_trans_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab: V
 		if not is_instance_valid(srcv):
 			continue
 		var src: MeshInstance3D = srcv
+		if str(rec.get("kind", "")) == "skinfill":
+			var frec := _make_fill_copy(src, SECTION_LAYER_TRANS, "trans", "SectionTF_")
+			extras.append(frec)
+			_write_plane(frec, pl["trans"], pl["trans_p"], src_params, open_ab, axis_ab)
+			continue
 		var copy := MeshInstance3D.new()
 		copy.name = "SectionT_" + src.name
 		copy.mesh = src.mesh
@@ -935,6 +982,11 @@ func _ensure_coronal_copies(pl: Dictionary, src_params: ShaderMaterial, open_ab:
 		if not is_instance_valid(srcv):
 			continue
 		var src: MeshInstance3D = srcv
+		if str(rec.get("kind", "")) == "skinfill":
+			var frec := _make_fill_copy(src, SECTION_LAYER_CORONAL, "coronal", "SectionCF_")
+			extras.append(frec)
+			_write_plane(frec, pl["coronal"], pl["coronal_p"], src_params, open_ab, axis_ab)
+			continue
 		var copy := MeshInstance3D.new()
 		copy.name = "SectionC_" + src.name
 		copy.mesh = src.mesh
@@ -1091,7 +1143,7 @@ func _is_excluded_skin(mi: MeshInstance3D) -> bool:
 
 
 func _write_limb_exclusion(cut: ShaderMaterial, cap: ShaderMaterial, rec: Dictionary) -> void:
-	if str(rec.get("kind", "")) != "skin":
+	if str(rec.get("kind", "")) != "skin" and str(rec.get("kind", "")) != "skinfill":
 		return
 	var caps: Array = organs.call("limb_exclusion_capsules_world") if organs and organs.has_method("limb_exclusion_capsules_world") else []
 	var n := mini(caps.size(), 8)
@@ -1210,7 +1262,8 @@ func _sync_cavity(pl: Dictionary) -> void:
 		var vis: bool = (w == "long" and (view_mode == MODE_LONG or view_mode == MODE_BOTH))
 		vis = vis or (w == "trans" and (view_mode == MODE_TRANS or view_mode == MODE_BOTH))
 		vis = vis or (w == "coronal" and (view_mode == MODE_CORONAL or view_mode == MODE_BOTH))
-		mi.visible = visible_on and vis
+		# 腹膜四边形不再画（体腔改由体表网格的最近层判定），节点保留给对齐自检。
+		mi.visible = false
 		var half_h := 0.14
 		var half_w := 0.14
 		if cam:
@@ -1780,7 +1833,7 @@ func debug_gpu_section_metrics(which: String) -> Dictionary:
 		return out
 	var organ_fill := cavity + uw + ul + vw + vl
 	# 平扫小窗有时几乎只切到阴道/子宫，腹腔像素很少；无纯黑、无交界黑缝且有器官填充即视为成功。
-	out["ok"] = out["black_frac"] < 0.05 and organ_fill > 40 and seam <= 0
+	out["ok"] = out["black_frac"] < 0.05 and organ_fill > 40 and float(seam) <= SEAM_TOLERANCE * float(maxi(sil, 1))
 	if not out["ok"]:
 		out["reason"] = "black_frac=%.4f cavity=%s organ_fill=%s seam=%s" % [out["black_frac"], cavity, organ_fill, seam]
 	return out
@@ -1821,7 +1874,7 @@ func _raster_fill(which: String, pl: Dictionary, cam: Camera3D, w: int, h: int) 
 	# 器官壁的真实像素以 GPU 回读为准。
 	var out: Array = []
 	out.resize(w * h)
-	var bg := Color(0.12, 0.09, 0.10, 1)
+	var bg := OUTSIDE_COLOR
 	var peri := Color(0.48, 0.20, 0.26, 1)
 	var rodc := Color(0.78, 0.82, 0.86, 1)
 	if not _fills.has(which):
@@ -1909,7 +1962,7 @@ func _fill_color_at(l: Vector3, open_ab: Vector3, ax: Vector3, cerv: Vector3, ca
 		return Color(0.48, 0.20, 0.26)
 	if _torso_contains_ab(l, 0.0):
 		return Color(0.91, 0.75, 0.66)
-	return Color(0.12, 0.09, 0.10)
+	return OUTSIDE_COLOR
 
 
 func _torso_contains_ab(l: Vector3, inset: float) -> bool:

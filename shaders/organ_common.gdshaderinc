@@ -312,6 +312,19 @@ float dilate_target_radius(float along) {
 	return max(dilate_instant_radius(along), dilate_shown_at(along));
 }
 
+// 平滑下限：把半径 r 推到不小于 n，但在 n 附近用二次过渡（C1 连续、单调），
+// 返回需要增加的径向位移（>=0）。内外壁共用同一函数，只差 n（外壁 = 内壁 + 壁厚），
+// 因此外壁永远不会被内壁追上，也没有 0→常数 的跳变（旧版软区在 need 处有 6.4 mm 台阶，导致撕面）。
+float smooth_push(float r, float n, float w) {
+	if (r >= n + w) return 0.0;
+	if (r <= n - w) return n - r;
+	float t = n + w - r;
+	return t * t / (4.0 * w);
+}
+
+// 外膜相对内膜的壁厚（只有子宫外膜 > 0，其它网格 0）。撑开时内外壁用同一场、外壁多加这一层。
+uniform float shell_wall = 0.0;
+
 vec3 dilate_offset(vec3 p) {
 	float mixv = max(dilate_p.x, 0.0);
 	float R = dilate_d.w;
@@ -340,14 +353,12 @@ vec3 dilate_offset(vec3 p) {
 		rdir = radial / pr;
 	}
 	float target = dilate_target_radius(s);
-	if (target <= pr) return vec3(0.0);
-	// 更宽、更平滑的径向衰减，避免宫颈/管壁交接处撕面。
-	float band = target + 0.040;
-	if (pr > band) return vec3(0.0);
-	float near = 1.0 - smoothstep(target, band, pr);
-	near = near * near * (3.0 - 2.0 * near);
+	if (target <= 1e-6) return vec3(0.0);
+	target += shell_wall;
+	float push = smooth_push(pr, target, 0.004);
+	if (push <= 0.0) return vec3(0.0);
 	float mix_eff = mixv > 0.001 ? mixv : 1.0;
-	return rdir * (target - pr) * mix_eff * along_w * near;
+	return rdir * push * mix_eff * along_w;
 }
 
 // 子宫 / 宫腔被球撑开。uter_ball.xyz = 球心(ab)，w = 球半径（<=0 关闭）
@@ -381,27 +392,22 @@ vec3 uterus_ball_offset(vec3 p) {
 		d = p - q;
 		// 近球端用球半径，杆段用杆半径，交接处平滑。
 		float kball = 1.0 - smoothstep(0.0, max(R, 0.004), t * slen);
-		need = mix(shaft, R, kball) + wall;
+		need = mix(shaft, R, kball);
 	} else {
 		d = p - c;
-		need = R + wall;
+		need = R;
 	}
+	// 先对内膜半径限幅，再加壁厚：内外壁同一个场，外壁 = 内壁 + wall。
 	if (cap > 1e-5) need = min(need, cap);
+	need += wall;
 	float dist = length(d);
 	if (dist < 1e-6) {
 		vec3 fb = al > 1e-5 ? ax * need * 0.25 : vec3(0.0, need * 0.25, 0.0);
 		return fb * mixv;
 	}
-	if (dist < need) {
-		return (d / dist) * (need - dist) * mixv;
-	}
-	float soft = 0.016;
-	if (dist < need + soft) {
-		float k = 1.0 - smoothstep(need, need + soft, dist);
-		k = k * k * (3.0 - 2.0 * k);
-		return (d / dist) * (soft * 0.40 * k) * mixv;
-	}
-	return vec3(0.0);
+	float push = smooth_push(dist, need, 0.008);
+	if (push <= 0.0) return vec3(0.0);
+	return (d / dist) * push * mixv;
 }
 
 // t89u：片段是否落在钢球/杆的撑开体积内（不含宫壁额外厚度）。
